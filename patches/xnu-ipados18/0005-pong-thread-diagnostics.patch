@@ -2,7 +2,7 @@
 # 1 ms thread-state sampler pong_thread_sampler_start (formerly 0007; one patch, as both append to the file end).
 # Also the gesture sampler pong_gesture_sample (gs=<ms>, 2026-11-01: SpringBoard main thread after each touch down).
 diff --git a/osfmk/kern/thread.c b/osfmk/kern/thread.c
-index 0bfcb98..14a5739 100644
+index 0bfcb98..2821246 100644
 --- a/osfmk/kern/thread.c
 +++ b/osfmk/kern/thread.c
 @@ -4419,3 +4419,791 @@ dtrace_thread_didexec(thread_t thread)
@@ -371,7 +371,7 @@ index 0bfcb98..14a5739 100644
 + * tools/mac/gsample.py: timelines with one character per ms, a process-name table, and one line per distinct backtrace.
 + * gs_all=1 also records every running or queued thread of the process (g162: SpringBoard's main thread idles in its run
 + * loop during the stall while backboardd is busier), from gs_from ms after the down on, summed over the gestures and
-+ * printed after every 4th; gs_sum=1 sums the main thread's samples from gs_from ms on over the gs_n gestures and prints them once,
++ * printed after every 4th (gs_all=2: waiting threads too, the first 12 -- who a blocked main thread waits for, 11-01 g210); gs_sum=1 sums the main thread's samples from gs_from ms on over the gs_n gestures and prints them once,
 + * after the last (the log of a whole round otherwise overflows the ramoops ring). MaliMetal's notes section 7 asked for the same
 + * ("a gesture-triggered sample of SpringBoard's user stacks").
 + */
@@ -675,7 +675,7 @@ index 0bfcb98..14a5739 100644
 +				thread_reference(main);
 +				kind = pong_gs_classify(main, &cpu, &hint, site);
 +				pong_ts_name(main, thread_tid(main));
-+			} else if ((thread->state & TH_RUN) || !(thread->state & TH_WAIT)) {
++			} else if ((thread->state & TH_RUN) || !(thread->state & TH_WAIT) || pong_gs_all == 2) {
 +				others++;
 +				if (pong_gs_all && ms >= pong_gs_from && nbusy < 12) {
 +					uintptr_t unused[4] = {0, 0, 0, 0};

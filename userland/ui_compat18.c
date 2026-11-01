@@ -1250,6 +1250,8 @@ static void open_pane(void *unused)
     (void)unused;
     char pane[64]="BATTERY_USAGE",url[96];
     (void)boot_value("pong_pane=",pane,sizeof(pane));
+    // One-letter aliases: the kernel command line has a few bytes left (11-01 v10: Battery Health kept spinning).
+    if(!strcmp(pane,"H"))snprintf(pane,sizeof(pane),"BATTERY_USAGE&path=BATTERY_HEALTH");
     snprintf(url,sizeof(url),"prefs:root=%s",pane);
     Class workspace=objc_lookUpClass("LSApplicationWorkspace");
     SEL open=sel_registerName("openSensitiveURL:withOptions:");

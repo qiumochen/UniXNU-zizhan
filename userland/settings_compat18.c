@@ -325,8 +325,162 @@ static void load_icons(void *unused)
             added(_dyld_get_image_header(i),_dyld_get_image_vmaddr_slide(i));
     }
 }
+/* Unattended rounds that open a pane (boot-arg pong_url, ui_compat18.c open_pane) print what Settings shows, so a round can be judged
+ * without a person: "Pong Settings18 ui <n>: <depth> <class> [text] [spinning]" for every visible label, button, text, spinner and
+ * table (row count). 11-01: Settings > Battery Health kept spinning; the kernel screenshots only show the left of the canvas. */
+static unsigned ui_lines;
+static const char *ui_text(id object,const char *selector)
+{
+    SEL sel=sel_registerName(selector);
+    if(!((BOOL(*)(id,SEL,SEL))objc_msgSend)(object,sel_registerName("respondsToSelector:"),sel))return NULL;
+    id text=((id(*)(id,SEL))objc_msgSend)(object,sel);
+    if(!text || !((BOOL(*)(id,SEL,Class))objc_msgSend)(text,sel_registerName("isKindOfClass:"),objc_lookUpClass("NSString")))return NULL;
+    return ((const char *(*)(id,SEL))objc_msgSend)(text,sel_registerName("UTF8String"));
+}
+/* The console path drops the top bit of every byte: non-ASCII UTF-8 goes out as \xHH (tools/zizhan/mac/settings-ui.py decodes it). */
+static const char *ui_escape(const char *text,char *out,size_t size)
+{
+    size_t k=0;
+    for(const unsigned char *p=(const unsigned char *)text;*p && k+5<size;p++) {
+        if(*p>=0x20 && *p<0x7f && *p!='\\')out[k++]=(char)*p;
+        else k+=(size_t)snprintf(out+k,size-k,"\\x%02x",*p);
+    }
+    out[k]='\0';return out;
+}
+/* SwiftUI content (the iOS 18 Battery Health pane) has no UILabel/UIActivityIndicatorView: its accessibility elements carry the text,
+ * so every element with a label or value is printed with its traits (raw, to tell a ProgressView from text). */
+static void ui_accessibility(id element,unsigned depth,unsigned pass)
+{
+    if(!element || depth>30 || ui_lines>400)return;
+    char a[384],b[384];
+    const char *label=ui_text(element,"accessibilityLabel"),*value=ui_text(element,"accessibilityValue");
+    SEL traits=sel_registerName("accessibilityTraits");
+    const unsigned long long t=((BOOL(*)(id,SEL,SEL))objc_msgSend)(element,sel_registerName("respondsToSelector:"),traits)?
+        ((unsigned long long(*)(id,SEL))objc_msgSend)(element,traits):0;
+    if((label && *label) || (value && *value)) {
+        fprintf(stderr,"Pong Settings18 ui %u: %u ax %s \"%s\" value \"%s\" traits 0x%llx\n",pass,depth,object_getClassName(element),
+            ui_escape(label?label:"",a,sizeof(a)),ui_escape(value?value:"",b,sizeof(b)),t);
+        ++ui_lines;
+    }
+    SEL elements=sel_registerName("accessibilityElements");
+    if(!((BOOL(*)(id,SEL,SEL))objc_msgSend)(element,sel_registerName("respondsToSelector:"),elements))return;
+    id children=((id(*)(id,SEL))objc_msgSend)(element,elements);
+    if(!children || !((BOOL(*)(id,SEL,Class))objc_msgSend)(children,sel_registerName("isKindOfClass:"),objc_lookUpClass("NSArray")))return;
+    const unsigned long count=((unsigned long(*)(id,SEL))objc_msgSend)(children,sel_registerName("count"));
+    for(unsigned long i=0;i<count && i<200;i++)
+        ui_accessibility(((id(*)(id,SEL,unsigned long))objc_msgSend)(children,sel_registerName("objectAtIndex:"),i),depth+1,pass);
+}
+/* pong_pane=H: iOS 18 ignores the URL's path=BATTERY_HEALTH, so the second dump (the first still shows Settings' root) selects the
+ * Battery pane's health row itself (the cell whose specifier identifier or title names the health page), the way a tap would. */
+static id health_cell;
+static bool want_health;
+static void ui_walk(id view,unsigned depth,unsigned pass)
+{
+    if(!view || depth>40 || ui_lines>400)return;
+    if(((BOOL(*)(id,SEL))objc_msgSend)(view,sel_registerName("isHidden")))return;
+    const char *name=object_getClassName(view);
+    Class label=objc_lookUpClass("UILabel"),spinner=objc_lookUpClass("UIActivityIndicatorView"),table=objc_lookUpClass("UITableView"),
+          collection=objc_lookUpClass("UICollectionView"),field=objc_lookUpClass("UITextView");
+    BOOL (*is)(id,SEL,Class)=(BOOL(*)(id,SEL,Class))objc_msgSend;SEL kind=sel_registerName("isKindOfClass:");
+    char line[512],escaped[400];line[0]='\0';
+    if(strstr(name,"Hosting"))ui_accessibility(view,depth,pass);
+    if(label && is(view,kind,label)) {
+        const char *text=ui_text(view,"text");
+        if(text && *text)snprintf(line,sizeof(line),"\"%s\"",ui_escape(text,escaped,sizeof(escaped)));
+    } else if(field && is(view,kind,field)) {
+        const char *text=ui_text(view,"text");
+        if(text && *text)snprintf(line,sizeof(line),"\"%s\"",ui_escape(text,escaped,sizeof(escaped)));
+    } else if(spinner && is(view,kind,spinner)) {
+        snprintf(line,sizeof(line),"spinner %s",((BOOL(*)(id,SEL))objc_msgSend)(view,sel_registerName("isAnimating"))?"SPINNING":"stopped");
+    } else if((table && is(view,kind,table)) || (collection && is(view,kind,collection))) {
+        id cells=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("visibleCells"));
+        snprintf(line,sizeof(line),"%lu visible cells",cells?(unsigned long)((unsigned long(*)(id,SEL))objc_msgSend)(cells,sel_registerName("count")):0ul);
+    } else if(objc_lookUpClass("UITableViewCell") && is(view,kind,objc_lookUpClass("UITableViewCell"))) {
+        id specifier=((BOOL(*)(id,SEL,SEL))objc_msgSend)(view,sel_registerName("respondsToSelector:"),sel_registerName("specifier"))?
+            ((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("specifier")):nil;
+        const char *identifier=specifier?ui_text(specifier,"identifier"):NULL,*title=specifier?ui_text(specifier,"name"):NULL;
+        if(identifier)snprintf(line,sizeof(line),"cell id \"%s\"",ui_escape(identifier,escaped,sizeof(escaped)));
+        if(want_health && pass==2 && !health_cell &&
+           ((identifier && (strstr(identifier,"HEALTH") || strstr(identifier,"Health"))) ||
+            (title && (strstr(title,"\xe5\x81\xa5\xe5\xba\xb7") || strstr(title,"Health")))))   /* 健康 */
+            health_cell=view;
+    } else if(strstr(name,"Chart") || strstr(name,"Graph")) {
+        CGRect frame=((CGRect(*)(id,SEL))objc_msgSend)(view,sel_registerName("frame"));
+        snprintf(line,sizeof(line),"%.0fx%.0f",frame.size.width,frame.size.height);
+    }
+    if(line[0]) {
+        fprintf(stderr,"Pong Settings18 ui %u: %u %s %s\n",pass,depth,name,line);
+        ++ui_lines;
+    }
+    id children=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
+    const unsigned long count=children?((unsigned long(*)(id,SEL))objc_msgSend)(children,sel_registerName("count")):0;
+    for(unsigned long i=0;i<count;i++)
+        ui_walk(((id(*)(id,SEL,unsigned long))objc_msgSend)(children,sel_registerName("objectAtIndex:"),i),depth+1,pass);
+}
+/* Battery Health shows its spinner while +[BatteryUIResourceClass batteryDataUnavailable] is true (BatteryUsageUI, 22H374); print
+ * each input it checks, from the class itself, so a round shows which one holds it (11-01 g231). */
+static void ui_battery_inputs(unsigned pass)
+{
+    Class c=objc_lookUpClass("BatteryUIResourceClass");
+    if(!c)return;
+    const char *ints[]={"getManagementState","getBatteryHealthServiceState","getBatteryHealthServiceFlags","isQMaxUnknown",
+                        "genuineBatteryStatus","batteryDataUnavailable","deviceSupportsCPMS"};
+    char out[400];size_t k=0;
+    for(unsigned i=0;i<sizeof(ints)/sizeof(ints[0]);i++) {
+        SEL sel=sel_registerName(ints[i]);
+        if(!class_getClassMethod(c,sel))continue;
+        const bool boolean=!strncmp(ints[i],"is",2) || !strncmp(ints[i],"device",6) || !strncmp(ints[i],"battery",7);
+        const long value=boolean?(long)((BOOL(*)(id,SEL))objc_msgSend)((id)c,sel):(long)((int(*)(id,SEL))objc_msgSend)((id)c,sel);
+        k+=(size_t)snprintf(out+k,sizeof(out)-k,"%s=%ld ",ints[i],value);
+        if(k>=sizeof(out))break;
+    }
+    SEL percent=sel_registerName("getBatteryMaximumCapacityPercentWithError:");
+    if(class_getClassMethod(c,percent)) {
+        id error=nil;
+        const long value=(long)((int(*)(id,SEL,id *))objc_msgSend)((id)c,percent,&error);
+        const char *text=error?ui_text(error,"description"):NULL;char e[200];
+        fprintf(stderr,"Pong Settings18 ui %u: battery %smaxCapacityPercent=%ld error \"%s\"\n",pass,out,value,
+            ui_escape(text?text:"",e,sizeof(e)));
+    }
+}
+static void ui_dump(void *context)
+{
+    const unsigned pass=(unsigned)(uintptr_t)context;
+    if(pass>=3)ui_battery_inputs(pass);
+    id app=((id(*)(id,SEL))objc_msgSend)((id)objc_lookUpClass("UIApplication"),sel_registerName("sharedApplication"));
+    id windows=app?((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("windows")):nil;
+    const unsigned long count=windows?((unsigned long(*)(id,SEL))objc_msgSend)(windows,sel_registerName("count")):0;
+    fprintf(stderr,"Pong Settings18 ui %u: begin, %lu windows\n",pass,(unsigned long)count);
+    ui_lines=0;
+    for(unsigned long i=0;i<count;i++)ui_walk(((id(*)(id,SEL,unsigned long))objc_msgSend)(windows,sel_registerName("objectAtIndex:"),i),0,pass);
+    fprintf(stderr,"Pong Settings18 ui %u: end, %u lines\n",pass,ui_lines);
+    if(!health_cell || pass!=2)return;
+    id table=((id(*)(id,SEL))objc_msgSend)(health_cell,sel_registerName("superview"));
+    Class tables=objc_lookUpClass("UITableView");
+    while(table && !((BOOL(*)(id,SEL,Class))objc_msgSend)(table,sel_registerName("isKindOfClass:"),tables))
+        table=((id(*)(id,SEL))objc_msgSend)(table,sel_registerName("superview"));
+    id path=table?((id(*)(id,SEL,id))objc_msgSend)(table,sel_registerName("indexPathForCell:"),health_cell):nil;
+    id delegate=table?((id(*)(id,SEL))objc_msgSend)(table,sel_registerName("delegate")):nil;
+    SEL select=sel_registerName("tableView:didSelectRowAtIndexPath:");
+    const bool can=path && delegate && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(delegate,sel_registerName("respondsToSelector:"),select);
+    if(can)((void(*)(id,SEL,id,id))objc_msgSend)(delegate,select,table,path);
+    fprintf(stderr,"Pong Settings18 ui %u: selected the health row %d\n",pass,can);
+}
+static bool opened_by_round(void)
+{
+    char args[2048];size_t size=sizeof(args)-1;
+    if(sysctlbyname("kern.bootargs",args,&size,NULL,0))return false;
+    args[size<sizeof(args)?size:sizeof(args)-1]='\0';
+    want_health=strstr(args," pong_pane=H")!=NULL;
+    return strstr(args," pong_url=")!=NULL;
+}
 void pong_settings18_start(void)
 {
+    if(opened_by_round()) {
+        static const unsigned at[]={6,12,20,30};
+        for(unsigned i=0;i<4;i++)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)at[i]*NSEC_PER_SEC),dispatch_get_main_queue(),
+            (void *)(uintptr_t)(i+1),ui_dump);
+    }
     char product[64]={0};size_t size=sizeof(product);
     phone_identity=sysctlbyname("hw.product",product,&size,NULL,0)==0 && !strcmp(product,"iPhone17,1");
     void (*set)(void(*)(id))=dlsym(RTLD_DEFAULT,"NSSetUncaughtExceptionHandler");

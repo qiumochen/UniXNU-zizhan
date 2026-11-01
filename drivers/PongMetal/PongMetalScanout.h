@@ -19,11 +19,19 @@ static void *serve(void *opaque)
             PongScanoutWaitInfo wait{500};PongScanoutFrame frame{};size_t bytes=sizeof(frame);
             auto status=context->call(context->connection,PongScanoutWait,&wait,sizeof(wait),&frame,&bytes);
             if(unsigned(status)==0xe00002d6)continue;
-            if(status || bytes!=sizeof(frame) || frame.reserved || frame.format!=PongScanoutBgra) {
+            if(status || bytes!=sizeof(frame) || frame.format!=PongScanoutBgra) {
                 report("scanout frame wait stopped",status?:-1);return nullptr;
             }
             auto result=context->presenter->present({reinterpret_cast<void *>(frame.address),size_t(frame.bytes),
-                size_t(frame.stride),frame.width,frame.height});
+                size_t(frame.stride),frame.width,frame.height,frame.token,frame.evict,size_t(frame.target)});
+            auto &t=context->presenter->timing;
+            if(t.frames==64) {
+                mach_timebase_info_data_t tb;mach_timebase_info(&tb);
+                auto us=[&](uint64_t v){return (unsigned long long)(v*tb.numer/tb.denom/1000/t.frames);};
+                char line[200];snprintf(line,sizeof(line),"scanout timing 64 frames avg us import=%llu encode=%llu wait=%llu reused=%llu",
+                    us(t.import),us(t.encode),us(t.wait),(unsigned long long)t.reused);
+                report(line,0);t={};
+            }
             // Presenter returns kOk only after waitUntilCompleted reports the
             // real command buffer completed. Errors never retire as success.
             const bool notSubmitted=result!=gpupresent::kOk && result!=gpupresent::kGpuFailed;

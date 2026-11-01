@@ -1524,6 +1524,20 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  return [(id<MTLDevice>)self newLibraryWithURL:url error:error];
 }
 - (id<MTLLibrary>)newDefaultLibrary {return [(id<MTLDevice>)self newDefaultLibraryWithBundle:[NSBundle mainBundle] error:nil];}
+// The runtime takes metallibs and AIR, not Metal source (metal2vulkan's LibrarySource refusal). The base class's own versions ask the device
+// for an Apple hardware profile (`featureProfile`) to pick a compiler: Core Image's runtime kernels (CI::MetalMainProgram, after its
+// ci_stdlib, a file_type 1 Core Image library, was refused) made SBRendererService abort on that missing selector once per boot.
+// Refused here with an error instead, as every other library the runtime cannot take.
+- (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error {
+ (void)source;(void)options;noteProblem(@"Metal source library refused");
+ if(error)*error=nbError(@"Metal source is not compiled on this device");return nil;
+}
+- (void)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options completionHandler:(MTLNewLibraryCompletionHandler)handler {
+ (void)source;(void)options;noteProblem(@"Metal source library refused");
+ if(!handler)return;
+ NSError *error=nbError(@"Metal source is not compiled on this device");
+ dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{handler(nil,error);});
+}
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)function error:(NSError **)error {
  return [(id<MTLDevice>)self newComputePipelineStateWithFunction:function options:MTLPipelineOptionNone reflection:nil error:error];
 }
@@ -1624,14 +1638,22 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 @end
 
 // The device queries the runtime answers (nmb_device_answer_selector), as methods of the device class. One without an argument is read once
-// and installed only where the device has an answer of its own; one with an argument asks the runtime each call, and a refusal answers 0/NO
-// with the reason logged.
+// and installed only where the device has an answer of its own; one with an argument asks the runtime once per argument and keeps the answer
+// (every answer is a fixed property of the device; QuartzCore asks thousands a second while the screen moves: AdrenoMetal 31867dc), and a
+// refusal answers 0/NO with the reason logged once.
 static std::unordered_map<SEL,uint64_t> gAnswers;
 static NSUInteger countAnswer(id,SEL cmd) {return (NSUInteger)gAnswers.at(cmd);}
 static BOOL flagAnswer(id,SEL cmd) {return gAnswers.at(cmd)!=0;}
 static uint64_t askAnswer(SEL cmd,NSUInteger arg) {
+ static std::mutex lock;
+ static std::unordered_map<SEL,std::unordered_map<NSUInteger,uint64_t>> kept;
+ {std::lock_guard<std::mutex> hold(lock);
+  auto answers=kept.find(cmd);
+  if(answers!=kept.end()){auto answer=answers->second.find(arg);if(answer!=answers->second.end())return answer->second;}}
  uint64_t value=0;
- if(!nmb_device_answer(gDevice,sel_getName(cmd),arg,&value)){NBLOG(@"native-metal: %s(%lu): %@",sel_getName(cmd),(unsigned long)arg,lastError());return 0;}
+ if(!nmb_device_answer(gDevice,sel_getName(cmd),arg,&value)){NBLOG(@"native-metal: %s(%lu): %@",sel_getName(cmd),(unsigned long)arg,lastError());value=0;}
+ std::lock_guard<std::mutex> hold(lock);
+ kept[cmd][arg]=value;
  return value;
 }
 static NSUInteger countArgAnswer(id,SEL cmd,NSUInteger arg) {return (NSUInteger)askAnswer(cmd,arg);}

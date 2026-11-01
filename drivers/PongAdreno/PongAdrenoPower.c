@@ -103,6 +103,11 @@ static int bcm(const PongPowerResource *r,uint32_t kbps,unsigned width,unsigned 
     }
     *out=word;return 0;
 }
+/* 900 MHz, DDR level 11. Without GPU DCVS the start vote is the only one. g48/g50 (swipe every 2 s): level 9 (710 MHz)
+ * composited moving frames at 31 fps, mostly 25-34 ms apart; level 13 at 49-73 fps, mostly under 17 ms. The frame time
+ * crosses the pacing threshold between them. Costs power and heat until a DCVS exists; pong_gpu_level selects another. */
+unsigned pong_adreno_start_level=9;   /* back to 710 MHz (g67): level 13 is unconfirmed, and with no thermal management the phone
+                                        * ran hot enough to corrupt ramoops; pong_gpu_level=13 opts in */
 PongPowerStatus PongAdrenoBuildPowerTables(const PongPowerInputs *in,PongPowerTables *out)
 {
     if (!in || !out || in->chip_id!=0x07030002 || !in->db_version) return PongPowerArgument;
@@ -148,5 +153,11 @@ PongPowerStatus PongAdrenoBuildPowerTables(const PongPowerInputs *in,PongPowerTa
     }
     table.default_gpu_index=2; /* DT initial-pwrlevel11 -> ascending wire index2 */
     table.default_bus_index=PongAdrenoPowerLevels[11].bus;
+    /* Without GPU DCVS the start vote is the only vote: index 2 (285 MHz, ~1.8 GB/s DDR)
+     * held a 16 MiB scanout copy near 20 ms. A chosen wire index also takes its DDR level. */
+    if (pong_adreno_start_level>=1 && pong_adreno_start_level<=13) {
+        table.default_gpu_index=pong_adreno_start_level;
+        table.default_bus_index=PongAdrenoPowerLevels[13-pong_adreno_start_level].bus;
+    }
     *out=table;return PongPowerSuccess;
 }

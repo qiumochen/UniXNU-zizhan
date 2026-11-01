@@ -40,6 +40,7 @@ optimizations=[
  ('0017-data-a-live-refuse-rebinds.patch','device/create.rs','pub refuse_rebinds: bool'),
  ('0018-data-a-live-tracker-key-map.patch','tracker.rs','inside: KeyMap<Class<K>, Vec<Entry>>'),
  ('0019-data-a-live-two-plane-shadow-as-it-lies.patch','texture/surface_two_planes.rs','Device::runtime_owner'),
+ ('0021-zizhan-keep-two-empty-blocks.patch','memory.rs','KEPT_EMPTY_BLOCKS'),
 ]
 for patch,source,marker in optimizations:
     text=(a.translator/'crates/metal2vulkan-runtime/src'/source).read_text()
@@ -52,7 +53,7 @@ sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=e
 frontend=out/'PongMetalFrontend.o'
 cmd=['xcrun','clang++','-target',target,'-isysroot',sdk,
     *(['-DPONG_GUEST_22H374=1'] if a.guest_build=='22H374' else []),
-    '-std=c++17','-fobjc-arc','-fblocks','-Os','-Wall','-Wextra','-Werror',
+    '-std=c++17','-fobjc-arc','-fblocks','-Os','-Wall','-Wextra','-Werror', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier',
     '-Wno-deprecated-declarations','-I'+str(ROOT/'drivers/PongMetal'),
     '-c',str(ROOT/'drivers/PongMetal/NativeBridgeMetalFrontend.mm'),'-o',str(frontend)]
 subprocess.run(cmd,env=env,check=True)

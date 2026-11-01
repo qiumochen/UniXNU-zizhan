@@ -1,0 +1,116 @@
+zizhan: backboardd's panel-sized BGRA canvases live in the loader's panel pool (pong_zc=1), step 3.1 of
+docs/plan/2026-10-31-zero-copy-step3.md. The pool slots are handed out by drivers/PongAdreno/PongAdrenoScanout.cpp
+(pong_panel_slot_take/give); the DPU can scan them directly (step 3.2). Stacks on 0001 (MiniIOSurface.cpp/.h); like 0002+ it is
+reversed and re-applied by every build.
+
+diff -ruN a/iokit/Kernel/MiniIOSurface.cpp b/iokit/Kernel/MiniIOSurface.cpp
+--- a/iokit/Kernel/MiniIOSurface.cpp
++++ b/iokit/Kernel/MiniIOSurface.cpp
+@@ -34,6 +34,14 @@
+ #include <sys/proc.h>
+ 
+ #include "MiniIOSurface.h"
++#if XNU_PONG_ADRENO_PLATFORM
++/* zizhan panel pool (drivers/PongAdreno/PongAdrenoScanout.cpp, boot-arg pong_zc=1): backboardd's panel-sized BGRA canvases are
++ * placed in loader-reserved RAM below 4 GiB that the DPU can scan out directly (docs/plan/2026-10-31-zero-copy-step3.md, 3.1). */
++extern "C" int pong_panel_slot_take(uint32_t width, uint32_t height, uint32_t bytesPerRow, uint32_t bytes, uint64_t * phys);
++extern "C" void pong_panel_slot_give(uint64_t phys);
++extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
++static unsigned gSlotMisses;
++#endif
+ 
+ static_assert(sizeof(struct minisurf_plane) == 0x80, "plane layout");
+ static_assert(sizeof(struct minisurf_result) == 0x68, "result layout");
+@@ -341,6 +349,12 @@
+ 		client->release();
+ 		client = NULL;
+ 	}
++#if XNU_PONG_ADRENO_PLATFORM
++	if (slotPhys != 0) {
++		pong_panel_slot_give(slotPhys);
++		slotPhys = 0;
++	}
++#endif
+ 	if (clientTask != TASK_NULL) {
+ 		task_deallocate(clientTask);
+ 		clientTask = TASK_NULL;
+@@ -734,7 +748,27 @@
+ 		}
+ 	}
+ 
+-	s->memory = surfaceMemory((vm_size_t) PAGE_SIZE + (wrapped ? 0 : alloc));
++	uint64_t slotPhys = 0;
++#if XNU_PONG_ADRENO_PLATFORM
++	/* zizhan pong_zc: a panel-sized BGRA canvas of backboardd's goes into a panel pool slot (returned by free()). */
++	if (wrapped == NULL && planeCount == 0 && offset == 0 && format == 'BGRA' && bpe == 4) {
++		/* CoreAnimation's own canvas (8704-byte rows) and the framebuffer's kernel-made surface (8640, swap partner 18 in g152s) */
++		char who[32] = {};
++		proc_selfname(who, sizeof(who));
++		if ((strcmp(who, "backboardd") == 0 || strcmp(who, "kernel_task") == 0) && pong_panel_slot_take(width, height, bpr, alloc, &slotPhys) == 1) {
++			s->slotPhys = slotPhys;
++		} else {
++			slotPhys = 0;
++		}
++	}
++	if (slotPhys == 0 && width >= 2000 && height >= 1900 && gSlotMisses++ < 8) {   /* why a panel-sized surface did not take a slot (g152r: canvas 18) */
++		char who[32] = {};
++		proc_selfname(who, sizeof(who));
++		IOLog("MiniIOSurface: %s surface %ux%u '%.4s' bpe %u bpr %u offset %u planes %u alloc %u%s: no panel slot\n", who, width, height,
++		    (const char *) &format, bpe, bpr, offset, planeCount, alloc, wrapped != NULL ? " (wrapped client memory)" : "");
++	}
++#endif
++	s->memory = surfaceMemory((vm_size_t) PAGE_SIZE + ((wrapped != NULL || slotPhys != 0) ? 0 : alloc));
+ 	if (s->memory == NULL) {
+ 		IOLog("MiniIOSurface: no memory for %u bytes (%u surfaces, %llu MB in use)\n", alloc, gSurfaceCount,
+ 		    gSurfaceBytes >> 20);
+@@ -750,6 +784,27 @@
+ 		return NULL;
+ 	}
+ 	s->kpixels = s->kbase + PAGE_SIZE;
++#if XNU_PONG_ADRENO_PLATFORM
++	if (slotPhys != 0) {
++		s->client = IOMemoryDescriptor::withPhysicalAddress(slotPhys, alloc, kIODirectionInOut);
++		IOReturn held = s->client != NULL ? s->client->prepare() : kIOReturnNoMemory;
++		if (held == kIOReturnSuccess) {
++			s->clientMap = s->client->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapCopybackCache);
++		} else {
++			OSSafeReleaseNULL(s->client);
++		}
++		if (s->clientMap == NULL) {
++			IOLog("MiniIOSurface: panel slot %#llx cannot be mapped (%#x)\n", slotPhys, held);
++			s->release();
++			*error = kIOReturnVMError;
++			return NULL;
++		}
++		s->kpixels = (uint8_t *) s->clientMap->getVirtualAddress();
++		/* (the loader zeroed the pool; a reused slot shows its previous canvas for a frame. Not bzero: a default mapping of
++		 * memory outside the kernel's RAM is device-like, and large stores into it (dc zva) are what froze g152l/o/p/q.) */
++		IOLog("MiniIOSurface: backboardd canvas %ux%u bpr %u (%u bytes) in panel slot %#llx\n", width, height, bpr, alloc, slotPhys);
++	}
++#endif
+ 	if (wrapped != NULL) {
+ 		s->clientTask = current_task();
+ 		task_reference(s->clientTask);
+@@ -1191,6 +1246,11 @@
+ 	}
+ 	if (surface->client != NULL && surface->clientTask != fTask) {
+ 		IOOptionBits pixelOptions = kIOMapAnywhere;
++#if XNU_PONG_ADRENO_PLATFORM
++		if (surface->slotPhys != 0) {
++			pixelOptions |= kIOMapCopybackCache;   /* panel pool memory is not kernel RAM: ask for the cache mode kernel RAM gets */
++		}
++#endif
+ 		if (surface->client->getDirection() == kIODirectionOut) {
+ 			/* A read-only image can be shared for reading. Darwin24 must
+ 			 * not be asked to create a writable foreign mapping for it. */
+diff -ruN a/iokit/Kernel/MiniIOSurface.h b/iokit/Kernel/MiniIOSurface.h
+--- a/iokit/Kernel/MiniIOSurface.h
++++ b/iokit/Kernel/MiniIOSurface.h
+@@ -118,6 +118,7 @@
+ 	IOMemoryMap *                   clientMap;
+ 	task_t                          clientTask;     /* retained owner of wrapped pixel memory */
+ 	mach_vm_address_t               clientAddress;  /* ... and where it is there */
++	uint64_t                        slotPhys;       /* zizhan pong_zc: pixels in a loader-reserved panel pool slot (client = that physical range) */
+ 	uint8_t *                       kpixels;        /* where the pixel memory starts in the kernel, either way */
+ 	uint32_t                        drawn;          /* nonzero means a submitted GPU fence; CPU surfaces use zero */
+ 	struct minisurf_result          info;           /* addresses not filled in */

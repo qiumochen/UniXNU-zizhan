@@ -142,9 +142,28 @@ static id openDevice(unsigned port)
     }
     NSString *base=[NSSearchPathForDirectoriesInDomains(NSCachesDirectory,NSUserDomainMask,YES) firstObject];
     if(base)[candidates addObject:[[base stringByAppendingPathComponent:@"PongMetal"] stringByAppendingPathComponent:process]];
-    // A7xx sysmem/no concurrent binning until Pong's BV/BR scheduling is ready.
-    // Plain IOSurface rows match Pong's current framebuffer/scanout contract.
-    setenv("TU_DEBUG","sysmem,nocb",0);
+    // A7xx: no concurrent binning (with it BV ran ahead of BR and the two stopped waiting on each other: AdrenoMetal int-261p/262/265).
+    // System memory for every pass was forced as well; AdrenoMetal 461a842 lets Turnip's autotune choose tile memory (GMEM) or system
+    // memory per pass (forced sysmem: GPU 19 % busy; 70 fps p50 after). zizhan g136 (tools/mac/gtrace.py): the home screen's render
+    // takes the GPU 4.6 ms a frame in sysmem and CoreAnimation waits for it before the next frame. Boot-arg pong_tu_debug=<flags>
+    // replaces the default for an A/B round without a new OS image.
+    {
+        char flags[64]="sysmem,nocb";bool fromBootArgs=false;
+        char args[4096];size_t length=sizeof(args)-1;
+        if(!sysctlbyname("kern.bootargs",args,&length,nullptr,0)) {
+            args[length<sizeof(args)?length:sizeof(args)-1]=0;
+            const char key[]="pong_tu_debug=";
+            for(const char *option=args;(option=strstr(option,key));option+=sizeof(key)-1) {
+                if(option!=args && option[-1]!=' ' && option[-1]!='\t')continue;
+                const char *value=option+sizeof(key)-1;size_t n=strcspn(value," \t");
+                if(n>=sizeof(flags))n=sizeof(flags)-1;
+                memcpy(flags,value,n);flags[n]=0;fromBootArgs=true;break;
+            }
+        }
+        setenv("TU_DEBUG",flags,fromBootArgs?1:0);
+        char line[96];snprintf(line,sizeof(line),"TU_DEBUG=%s%s",getenv("TU_DEBUG")?:"",fromBootArgs?" (boot-arg)":"");
+        report(line,0);
+    }
     // Pong implements NativeAdreno directly, not Sheng's AGX selector tunnel.
     setenv("TU_DARWIN_SERVICE","NativeAdrenoGpuPublished",1);
     setenv("TU_DARWIN_OPEN_TYPE","0x4147",1);
@@ -165,6 +184,17 @@ static id openDevice(unsigned port)
         if(result)break;
     }
     report(result?"real Vulkan-backed device created":"runtime refused device",result?0:-1);
+    // CoreAnimation hands ASTC images to the GPU compressed only when CADeviceSupportsASTC (MGGetBoolAnswer "DeviceSupportsASTC",
+    // the key ji56BO1mUeT7Qg9RO7Er9w in QuartzCore 22H374) is true; otherwise ImageIO's ATXReadPlugin decodes them on the CPU, as the
+    // g168-g170 SpringBoard profiles showed during app-open zooms. Reported once per process.
+    if(result) {
+        void *gestalt=dlopen("/usr/lib/libMobileGestalt.dylib",RTLD_LAZY);
+        auto answer=gestalt?(bool(*)(CFStringRef))dlsym(gestalt,"MGGetBoolAnswer"):nullptr;
+        if(answer) {
+            char text[96];snprintf(text,sizeof(text),"MobileGestalt DeviceSupportsASTC %d in %.40s",answer(CFSTR("DeviceSupportsASTC")),getprogname());
+            report(text,0);
+        }
+    }
     return result;
 }
 

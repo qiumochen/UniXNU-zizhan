@@ -1,0 +1,160 @@
+zizhan: IOMobileFramebuffer SwapWait answers for real (boot-arg fb_swapwait=1, 2 = Busy instead of NotReady): CoreAnimation
+queries after every SwapEnd whether the swap is on the panel / replaced; with zero-copy flipping (pong_zc=2) this is how it learns
+when it may draw into a canvas again (docs/plan/2026-10-31-triple-buffer-swapwait.md). Stacks on 0001 and 0009
+(MiniIOMobileFramebuffer.cpp); like 0002+ it is reversed and re-applied by every build.
+
+diff -ruN a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -140,6 +140,8 @@
+ static TUNABLE(uint32_t, gFilter, "fb_filter", 1);
+ static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
+ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
++/* zizhan 0012: 1 (default since 10-31) = SwapWait answers for real (NotReady on a query, blocks otherwise), 2 = Busy instead of NotReady, 0 = always yes */
++static TUNABLE(uint32_t, gSwapWait, "fb_swapwait", 1);
+ /*
+  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
+  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
+@@ -258,6 +260,8 @@
+ 	uint32_t        fStatSurfaces[8];       /* the first different surfaces the bottom layer was given */
+ 	uint32_t        fStatHeld, fStatLost;   /* swaps that waited for the one before; that gave up waiting */
+ 	uint64_t        fSwapTime;              /* when the last swap was handed over */
++	uint32_t        fEndedID, fPresentedID, fRetiredID;     /* zizhan 0012: SwapEnd seen / on the panel / replaced on the panel */
++	uint32_t        fStatSwapWaitNotReady, fStatSwapWaitTimeouts;
+ 	uint32_t        fStatSwapsLate;         /* swaps that came more than a refresh and a quarter after the one before (and no pause) */
+ 	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
+ 	/* how the display is doing: frames and time spent drawing them here since fStatSince */
+@@ -283,6 +287,9 @@
+ 	MiniIOSurface * defaultSurface(void);
+ 	void present(const uint8_t * swap);
+ 	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
++	IOReturn swapWait(uint32_t id, uint32_t flags);
++	void swapPresented(uint32_t id);
++	void swapPresentedLocked(uint32_t id);
+ 	void presenter(void);
+ 	static void presenterMain(void * self, wait_result_t result);
+ 	void reportFrameTimes(void);
+@@ -883,11 +890,13 @@
+ 	IOLockLock(fSwapLock);
+ 	fStatSwapsLate += fSwapTime != 0 && now - fSwapTime > period && now - fSwapTime < pause;
+ 	fSwapTime = now;
++	fEndedID = swapWord(swap, SWAP_ID);
+ 	fStatHeld += fSwapsWaiting >= swapQueue();
+ 	while (fSwapsWaiting >= swapQueue()) {
+ 		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
+ 		    fSwapsWaiting >= swapQueue()) {
+ 			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
++			swapPresentedLocked(swapWord(swap, SWAP_ID));   /* zizhan 0012: dropped, so nobody waits for it */
+ 			IOLockUnlock(fSwapLock);
+ 			return;
+ 		}
+@@ -979,8 +988,10 @@
+ 		}
+ 	}
+ 	shown = began;
++	const uint32_t swapID = swapWord(swap, SWAP_ID);
+ 	/* its turn has come: the swap after it may be handed over */
+ 	IOLockLock(fSwapLock);
++	swapPresentedLocked(swapID - 1);        /* zizhan 0012: everything before this swap has at least been handed over */
+ 	fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
+ 	fSwapsWaiting--;
+ 	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
+@@ -1129,6 +1140,11 @@
+ 		}
+ 		bzero(fStatSurfaces, sizeof(fStatSurfaces));
+ 		fStatHeld = fStatLost = fStatOnBeat = 0;
++		if (gSwapWait) {
++			IOLog("MiniIOMobileFramebuffer: SwapWait: %u not ready, %u timeouts; ended %u presented %u retired %u\n",
++			    fStatSwapWaitNotReady, fStatSwapWaitTimeouts, fEndedID, fPresentedID, fRetiredID);
++			fStatSwapWaitNotReady = fStatSwapWaitTimeouts = 0;
++		}
+ 		fStatWaiting = fStatBeatWait = 0;
+ 		reportFrameTimes();
+ 		if (fDiff) {
+@@ -1143,8 +1159,64 @@
+ 		fStatSince = 0;
+ 	}
+ 	IOLockUnlock(fLock);
++	swapPresented(swapID);                  /* zizhan 0012: on the panel (a GPU frame returns from pong_scanout_frame once its flip latched) */
+ }
+ 
++/* zizhan 0012 (docs/plan/2026-10-31-triple-buffer-swapwait.md): after every SwapEnd N CoreAnimation asks whether N is on the panel
++ * (flags 0x80000001: a nonblocking query) and, before SwapEnd N+1, whether N has been replaced (0x80000000). Until now both always
++ * said yes, so with two canvases it draws into the other one while the panel may still be fetching it. fb_swapwait=1 answers for
++ * real: a query gets kIOReturnNotReady (2: kIOReturnBusy) while not yet, a blocking call sleeps up to 50 ms. */
++void
++IOMobileFramebuffer::swapPresentedLocked(uint32_t id)
++{
++	if (id != 0 && (int32_t) (id - fPresentedID) > 0) {
++		fRetiredID = fPresentedID;
++		fPresentedID = id;
++		IOLockWakeup(fSwapLock, &fPresentedID, false);
++	}
++}
++
++void
++IOMobileFramebuffer::swapPresented(uint32_t id)
++{
++	IOLockLock(fSwapLock);
++	swapPresentedLocked(id);
++	IOLockUnlock(fSwapLock);
++}
++
++IOReturn
++IOMobileFramebuffer::swapWait(uint32_t id, uint32_t flags)
++{
++	const bool query = (flags & 0x80000000u) != 0, presentedIsEnough = (flags & 1) != 0;
++	IOReturn ret = kIOReturnSuccess;
++	uint64_t deadline;
++
++	if (gSwapWait == 0 || id == 0) {
++		return kIOReturnSuccess;
++	}
++	clock_interval_to_deadline(50, kMillisecondScale, &deadline);
++	IOLockLock(fSwapLock);
++	for (;;) {
++		const uint32_t mark = presentedIsEnough ? fPresentedID : fRetiredID;
++
++		if ((int32_t) (id - fEndedID) > 0 || (int32_t) (mark - id) >= 0) {
++			break;                          /* never handed in, or already where CoreAnimation wants it */
++		}
++		if (query) {
++			ret = gSwapWait == 2 ? kIOReturnBusy : kIOReturnNotReady;
++			fStatSwapWaitNotReady++;
++			break;
++		}
++		if (IOLockSleepDeadline(fSwapLock, &fPresentedID, deadline, THREAD_ABORTSAFE) != THREAD_AWAKENED) {
++			fStatSwapWaitTimeouts++;
++			ret = kIOReturnTimeout;
++			break;
++		}
++	}
++	IOLockUnlock(fSwapLock);
++	return ret;
++}
++
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient
+@@ -1442,12 +1514,17 @@
+ 		fOwner->present((const uint8_t *) args->structureInput);
+ 		return kIOReturnSuccess;
+ 
+-	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
++	case kFBMethodSwapWait: {                       /* zizhan 0012: real answers with fb_swapwait; else on the screen as soon as made */
++		const uint32_t id = args->scalarInputCount > 0 ? (uint32_t) in[0] : 0;
++		const uint32_t flags = args->scalarInputCount > 1 ? (uint32_t) in[1] : 0;
++		const IOReturn ret = fOwner->swapWait(id, flags);
++
+ 		if (gTouchLat) {
+-			IOLog("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
+-			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
++			IOLog("tl: w %u %#x %#llx at %llu -> %#x\n", id, flags, args->scalarInputCount > 2 ? in[2] : 0,
++			    micros(mach_absolute_time()), ret);
+ 		}
+-		return kIOReturnSuccess;
++		return ret;
++	}
+ 	case kFBMethodSwapSignal:
+ 	case kFBMethodSwapCancel:
+ 	case kFBMethodSwapCancelAll:

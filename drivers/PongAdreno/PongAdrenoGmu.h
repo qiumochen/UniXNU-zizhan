@@ -86,6 +86,12 @@ PongGpuStatus PongAdrenoGmuStartPower(PongGpuGmuDevice *,const PongPowerInputs *
 /* Vendor gen7_gpu_boot: fresh OOB_GPU acknowledgement followed by START10.
  * Keep OOB held while this port has no idle/slumber/resume owner. */
 PongGpuStatus PongAdrenoGmuHoldGpu(PongGpuGmuDevice *,PongGpuPowerResult *);
+/* GPU DCVS, after the power handshake: the CX GMU busy counter (19.2 MHz ticks while the GPU is busy) and the
+ * HFI GX_BW_PERF_VOTE (id 30) the start vote already uses, here sent again at run time. Only the DCVS thread calls these. */
+PongGpuStatus PongAdrenoGmuEnableBusyCounter(PongGpuGmuDevice *);
+PongGpuStatus PongAdrenoGmuBusyTicks(PongGpuGmuDevice *,uint64_t *ticks);
+int PongAdrenoGmuReadWord(PongGpuGmuDevice *,uint32_t reg,uint32_t *value);
+PongGpuStatus PongAdrenoGmuSetLevel(PongGpuGmuDevice *,unsigned gpu_index,unsigned bus_index,uint32_t *firmware_error);
 #ifdef __cplusplus
 }
 #endif

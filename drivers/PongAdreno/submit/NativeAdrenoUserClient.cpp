@@ -19,7 +19,7 @@ static void noteImportState(uint64_t handle,uint64_t state)
 }
 extern "C" volatile uint32_t native_adreno_io_coherent;
 /* Per kernel method: [method][0] calls, [1] calls that returned non-zero, [2] last status, [3] total time (us, 32-bit). Method numbers are the ABI's (1..16). */
-extern "C" {extern uint64_t (*native_adreno_vm_now_us)(void);volatile uint32_t native_adreno_method_stats[20][4];volatile uint32_t native_adreno_map_fail[7][2];}
+extern "C" {extern uint64_t (*native_adreno_vm_now_us)(void);volatile uint32_t native_adreno_method_stats[20][4];volatile uint32_t native_adreno_method_max_us[20];volatile uint32_t native_adreno_map_fail[7][2];}
 static void noteImport(IOReturn status,uint32_t stage,uint64_t bytes,uint64_t address)
 {
     if(!status)return;
@@ -454,6 +454,7 @@ IOReturn NativeAdrenoUserClient::dispatch(uint32_t method,const void *input,
             if(*result)native_adreno_method_stats[method][1]=native_adreno_method_stats[method][1]+1;
             native_adreno_method_stats[method][2]=(uint32_t)*result;
             native_adreno_method_stats[method][3]=native_adreno_method_stats[method][3]+(uint32_t)(now-began);
+            if((uint32_t)(now-began)>native_adreno_method_max_us[method])native_adreno_method_max_us[method]=(uint32_t)(now-began);
         }
     };
     /* The same clock times the VM's table transactions (the board service's probe never ran on this path, so nothing else installed it). */

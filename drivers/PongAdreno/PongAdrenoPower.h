@@ -40,6 +40,8 @@ PongPowerStatus PongAdrenoReadPowerInputs(const uint8_t *,size_t,uint32_t chip_i
  * Success is not a regulator vote, clock change, HFI ACK or ready GPU.
  */
 PongPowerStatus PongAdrenoBuildPowerTables(const PongPowerInputs *,PongPowerTables *);
+/* GMU start vote as an ascending wire index (1..13); other values keep the DT default 2. */
+extern unsigned pong_adreno_start_level;
 #ifdef __cplusplus
 }
 #endif

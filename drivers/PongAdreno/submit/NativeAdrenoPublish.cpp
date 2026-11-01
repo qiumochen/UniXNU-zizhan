@@ -16,6 +16,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOUserClient.h>
+#include <pexpert/pexpert.h>
 #include <string.h>
 #include <kern/thread.h>
 #include "NativeAdrenoUserClient.h"
@@ -229,9 +230,30 @@ static NativeAdrenoClientRecord *clientRecord(const char *name)
     }
     return nullptr;
 }
+/* zizhan: boot-arg pong_gpu_deny=<name>[,<name>...] refuses those processes a GPU connection (names as proc_selfname gives them,
+ * at most 15 characters; "-" refuses nobody). Default: the wallpaper extension. Every GPU loss (g116, g119, g120, g124, g127:
+ * 5 of 13 rounds) came while MercuryPosterExtension was starting to render, with its submissions right behind the fence the
+ * ring stopped on, and one failed scanout copy freezes the screen for good; refused, g128-g133 lost nothing and swiped at
+ * 53-56 fps instead of 48-50. */
+static bool deniedClient(const char *name)
+{
+    char list[128]="MercuryPosterEx";
+    (void)PE_parse_boot_arg_str("pong_gpu_deny",list,sizeof list);
+    for(char *item=list;item && *item;) {
+        char *comma=strchr(item,',');
+        if(comma)*comma=0;
+        if(*item && !strncmp(item,name,15))return true;
+        item=comma?comma+1:nullptr;
+    }
+    return false;
+}
 bool AGXDeviceUserClient::mount(bool kernel)
 {
     proc_selfname(name_,sizeof name_);
+    if(!kernel && deniedClient(name_)) {
+        IOLog("PONG ADRENO: GPU connection refused to %s (pong_gpu_deny)\n",name_);
+        return false;
+    }
     NativeAdrenoUserClient *core=new NativeAdrenoUserClient;
     if(!core)return false;
     IOLockLock(g.lock);

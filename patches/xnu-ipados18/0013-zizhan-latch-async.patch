@@ -1,0 +1,105 @@
+zizhan: IOMobileFramebuffer show() does not wait for the panel to take a zero-copy flip (kernel boot-arg pong_zc_async=1:
+pong_scanout_frame returns 3 = flipped, latch pending). Each frame is tagged with its swap id; SwapWait asks the scanout driver which
+tag has latched (a CTL_FLUSH read), so "presented"/"replaced" stay true to the panel while the presenter thread moves on to the next
+frame (docs/progress/2026-11-01-zero-copy-and-return-paths.md section 7 step 1). Stacks on 0012.
+
+diff -ruN a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -48,6 +48,8 @@
+ extern "C" int pong_scanout_frame(IOMemoryDescriptor *,size_t,uint32_t,uint32_t,uint32_t);
+ extern "C" bool pong_scanout_quarantined(void);
+ extern "C" void pong_scanout_cpu_frame(void);
++extern "C" void pong_scanout_set_tag(uint32_t);         /* zizhan 0013: the swap id of the next pong_scanout_frame */
++extern "C" uint32_t pong_scanout_latch_poll(void);      /* zizhan 0013: the newest swap id whose flip has latched */
+ #endif
+ #if XNU_PONG_BACKLIGHT
+ extern "C" void pong_backlight_start(IOService *display);
+@@ -262,6 +264,7 @@
+ 	uint64_t        fSwapTime;              /* when the last swap was handed over */
+ 	uint32_t        fEndedID, fPresentedID, fRetiredID;     /* zizhan 0012: SwapEnd seen / on the panel / replaced on the panel */
+ 	uint32_t        fStatSwapWaitNotReady, fStatSwapWaitTimeouts;
++	bool            fLatchAsync;            /* zizhan 0013: the last frame was flipped without waiting for the latch */
+ 	uint32_t        fStatSwapsLate;         /* swaps that came more than a refresh and a quarter after the one before (and no pause) */
+ 	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
+ 	/* how the display is doing: frames and time spent drawing them here since fStatSince */
+@@ -991,7 +994,9 @@
+ 	const uint32_t swapID = swapWord(swap, SWAP_ID);
+ 	/* its turn has come: the swap after it may be handed over */
+ 	IOLockLock(fSwapLock);
+-	swapPresentedLocked(swapID - 1);        /* zizhan 0012: everything before this swap has at least been handed over */
++	if (!fLatchAsync) {
++		swapPresentedLocked(swapID - 1);        /* zizhan 0012: everything before this swap has at least been handed over */
++	}
+ 	fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
+ 	fSwapsWaiting--;
+ 	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
+@@ -1019,6 +1024,7 @@
+ 	 * unscaled layer; other layouts use CPU composition unless explicitly disabled.
+ 	 * No CPU writes may race an outstanding GPU copy after a timeout. */
+ 	bool gpuFrame=false;
++	fLatchAsync=false;
+ #if XNU_PONG_ADRENO_PLATFORM
+ 	if(pong_scanout_quarantined()){IOLockUnlock(fLock);return;}
+ 	MiniIOSurface *base=surfaces[0];
+@@ -1034,7 +1040,10 @@
+ 		IOMemoryDescriptor *memory=base->client?base->client:base->memory;
+ 		size_t offset=(size_t)(base->pixels()-(base->client?base->kpixels:base->kbase));
+ 		beginGraphics();
+-		gpuFrame=pong_scanout_frame(memory,offset,base->info.bytesPerRow,fPanelWidth,fPanelHeight)==1;
++		pong_scanout_set_tag(swapID);   /* zizhan 0013 */
++		const int scanned=pong_scanout_frame(memory,offset,base->info.bytesPerRow,fPanelWidth,fPanelHeight);
++		gpuFrame=scanned==1 || scanned==3;
++		fLatchAsync=scanned==3;         /* flipped, the latch still to come: SwapWait asks pong_scanout_latch_poll */
+ 	}
+ 	/* A delivered GPU copy whose completion is uncertain must never race a
+ 	 * CPU write. Result 2 poisons the handoff; result 0 permits CPU fallback. */
+@@ -1159,7 +1168,9 @@
+ 		fStatSince = 0;
+ 	}
+ 	IOLockUnlock(fLock);
+-	swapPresented(swapID);                  /* zizhan 0012: on the panel (a GPU frame returns from pong_scanout_frame once its flip latched) */
++	if (!fLatchAsync) {
++		swapPresented(swapID);          /* zizhan 0012: on the panel (a GPU frame returns from pong_scanout_frame once its flip latched) */
++	}
+ }
+ 
+ /* zizhan 0012 (docs/plan/2026-10-31-triple-buffer-swapwait.md): after every SwapEnd N CoreAnimation asks whether N is on the panel
+@@ -1170,7 +1181,7 @@
+ IOMobileFramebuffer::swapPresentedLocked(uint32_t id)
+ {
+ 	if (id != 0 && (int32_t) (id - fPresentedID) > 0) {
+-		fRetiredID = fPresentedID;
++		fRetiredID = id - 1;            /* zizhan 0013: every older swap is off the panel (polling may skip ids) */
+ 		fPresentedID = id;
+ 		IOLockWakeup(fSwapLock, &fPresentedID, false);
+ 	}
+@@ -1197,6 +1208,13 @@
+ 	clock_interval_to_deadline(50, kMillisecondScale, &deadline);
+ 	IOLockLock(fSwapLock);
+ 	for (;;) {
++		if (fLatchAsync) {
++			const uint32_t latched = pong_scanout_latch_poll();     /* zizhan 0013 */
++
++			if (latched != 0) {
++				swapPresentedLocked(latched);
++			}
++		}
+ 		const uint32_t mark = presentedIsEnough ? fPresentedID : fRetiredID;
+ 
+ 		if ((int32_t) (id - fEndedID) > 0 || (int32_t) (mark - id) >= 0) {
+@@ -1206,6 +1224,14 @@
+ 			ret = gSwapWait == 2 ? kIOReturnBusy : kIOReturnNotReady;
+ 			fStatSwapWaitNotReady++;
+ 			break;
++		}
++		if (fLatchAsync && mach_absolute_time() < deadline) {
++			uint64_t soon;                  /* zizhan 0013: nothing wakes us at the latch: look again every millisecond */
++
++			clock_interval_to_deadline(1, kMillisecondScale, &soon);
++			if (IOLockSleepDeadline(fSwapLock, &fPresentedID, soon < deadline ? soon : deadline, THREAD_ABORTSAFE) != THREAD_INTERRUPTED) {
++				continue;
++			}
+ 		}
+ 		if (IOLockSleepDeadline(fSwapLock, &fPresentedID, deadline, THREAD_ABORTSAFE) != THREAD_AWAKENED) {
+ 			fStatSwapWaitTimeouts++;

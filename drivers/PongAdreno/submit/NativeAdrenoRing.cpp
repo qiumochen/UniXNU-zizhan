@@ -64,8 +64,14 @@ static uint32_t ilog2(size_t value)
 {
     uint32_t result=0;while(value>1) {value>>=1;++result;}return result;
 }
-IOReturn NativeAdrenoRing::poison()
+/* zizhan: g116/g119 lost the whole GPU around frame 60 with nothing logged. [0] ring poisonings, [1] the caller's return address
+ * (low 32 bits of the kernel VA), [2] the fence value in memory then, [3] seqno_, [4] next_, [5] the RPTR shadow;
+ * PongAdrenoScanout.cpp's fenceReport prints it. */
+extern "C" {volatile uint32_t native_adreno_ring_poison[6];}
+__attribute__((noinline)) IOReturn NativeAdrenoRing::poison()
 {
+    volatile uint32_t *p=native_adreno_ring_poison;
+    p[0]=p[0]+1;p[1]=(uint32_t)(uintptr_t)__builtin_return_address(0);p[2]=fence_?fence_[1]:0;p[3]=seqno_;p[4]=next_;p[5]=rptr_shadow_;
     poisoned_=true;return kIOReturnIOError;
 }
 IOReturn NativeAdrenoRing::readRptr(uint32_t *value)

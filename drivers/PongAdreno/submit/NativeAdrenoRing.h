@@ -101,6 +101,17 @@ public:
     uint32_t outstanding() const {return seqno_-completed_;}
     uint32_t lastSubmitted() const {return seqno_;}      /* the newest fence number handed out */
     uint32_t completedFence() const {return completed_;}
+    /* zizhan GPU timeline (NativeAdrenoSubmit.cpp pong_gtrace): the CP-written timestamp as it is now, after invalidating the fence
+     * page; nothing is accounted or retired. */
+    bool peekFence(uint32_t *value) {
+        if(!attached_ || poisoned_ || cache_.acquire(cache_.cookie,fence_,fence_bytes_))return false;
+        *value=fence_[1];return true;
+    }
+    /* ... and the fence page itself: bytes 0x100.. are free (the CP uses +0 RPTR, +4 fence, +8/+12 BV), the per-IB RB_DONE_TS
+     * timestamps of pong_gtrace live there (NativeAdrenoSubmit.cpp). peekFence() has invalidated the page before a read. */
+    uint64_t fenceIova() const {return fence_iova_;}
+    volatile uint32_t *fencePage() const {return fence_;}
+    size_t fenceBytes() const {return fence_bytes_;}
     uint32_t submissions() const {return submissions_;}
     uint32_t readPointer() const {return rptr_shadow_;}
 };

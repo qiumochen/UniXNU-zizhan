@@ -278,3 +278,62 @@ failed_gpu:
     d->poisoned=1;d->hfi.poisoned=1;
     return status;
 }
+
+#ifndef GEN7_GMU_CX_GMU_POWER_COUNTER_ENABLE
+#define GEN7_GMU_CX_GMU_POWER_COUNTER_ENABLE 0x1f840u
+#define GEN7_GMU_CX_GMU_POWER_COUNTER_SELECT_0 0x1f841u
+#define GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_L 0x1f844u
+#define GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_H 0x1f845u
+#endif
+#ifndef GEN7_GPU_GMU_AO_GPU_CX_BUSY_MASK
+#define GEN7_GPU_GMU_AO_GPU_CX_BUSY_MASK 0x23b0eu
+#endif
+/* As Linux's a6xx_hw_init: the busy mask, countable 5 (GPU busy) on power counter 0, and the counter enabled. */
+PongGpuStatus PongAdrenoGmuEnableBusyCounter(PongGpuGmuDevice *d)
+{
+    PongGpuGmuResult r={0};uint32_t select=0;
+    if(!d || !d->power_started || d->poisoned)return PongGpuPrerequisite;
+    if(core_write(d,GEN7_GPU_GMU_AO_GPU_CX_BUSY_MASK,0xff000000u,&r) ||
+       core_read(d,GEN7_GMU_CX_GMU_POWER_COUNTER_SELECT_0,&select) ||
+       core_write(d,GEN7_GMU_CX_GMU_POWER_COUNTER_SELECT_0,(select&~0xffu)|0x20u,&r) ||
+       core_write(d,GEN7_GMU_CX_GMU_POWER_COUNTER_ENABLE,1,&r) || d->io.barrier(d->io.cookie))return PongGpuIo;
+    return PongGpuSuccess;
+}
+/* Diagnostics for the busy counter: 32-bit reads of GMU CX words (bring-up only). */
+int PongAdrenoGmuReadWord(PongGpuGmuDevice *d,uint32_t reg,uint32_t *value)
+{return !d || !value || core_read(d,reg,value);}
+PongGpuStatus PongAdrenoGmuBusyTicks(PongGpuGmuDevice *d,uint64_t *ticks)
+{
+    uint32_t high=0,low=0,again=0;
+    if(!d || !ticks)return PongGpuArgument;
+    for(unsigned n=0;n<4;n++) {
+        if(core_read(d,GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_H,&high) ||
+           core_read(d,GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_L,&low) ||
+           core_read(d,GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_0_H,&again))return PongGpuIo;
+        if(high==again) {*ticks=(uint64_t)high<<32|low;return PongGpuSuccess;}
+    }
+    return PongGpuIo;
+}
+/* A blocking GX_BW_PERF_VOTE {ack, GPU level, bus level}. A refused or unanswered vote leaves the HFI request pending, so the
+ * caller must stop voting (nothing else uses the HFI after the start). */
+PongGpuStatus PongAdrenoGmuSetLevel(PongGpuGmuDevice *d,unsigned gpu_index,unsigned bus_index,uint32_t *firmware_error)
+{
+    if(firmware_error)*firmware_error=0;
+    if(!d || !d->power_started || d->poisoned || d->hfi.poisoned || d->hfi.pending_header)return PongGpuPrerequisite;
+    PongGpuStatus status=healthy(d);
+    if(status)return status;
+    const uint32_t vote[3]={1,gpu_index,bus_index};uint32_t header=0;
+    if(PongAdrenoHfiSend(&d->hfi,30,vote,3,&header)!=PongAdrenoHfiSuccess)return PongGpuIo;
+    uint64_t begin,now;
+    if(d->io.now_us(d->io.cookie,&begin))return PongGpuIo;
+    for(unsigned n=0;n<4000;n++) {
+        uint32_t output[16];size_t count=0;uint32_t error=0;
+        PongAdrenoHfiStatus polled=PongAdrenoHfiPoll(&d->hfi,output,16,&count,&error);
+        if(polled==PongAdrenoHfiSuccess) {if(firmware_error)*firmware_error=error;return error?PongGpuIo:PongGpuSuccess;}
+        if(polled!=PongAdrenoHfiEmpty)return PongGpuIo;
+        if(d->io.now_us(d->io.cookie,&now) || now<begin)return PongGpuIo;
+        if(now-begin>=100000)return PongGpuTimeout;
+        if(d->io.wait_us(d->io.cookie,50))return PongGpuIo;
+    }
+    return PongGpuTimeout;
+}

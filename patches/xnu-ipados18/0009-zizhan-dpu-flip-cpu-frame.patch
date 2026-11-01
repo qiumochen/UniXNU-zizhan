@@ -1,0 +1,25 @@
+zizhan: a CPU-composed frame puts the display pipes back on the panel memory (pong_dpu_flip, docs/progress/2026-10-31-frame-timeline.md section 7).
+Stacks on 0001 (MiniIOMobileFramebuffer.cpp); like 0002+ it is reversed and re-applied by every build.
+
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -47,6 +47,7 @@
+ extern "C" void pong_scanout_initialize(uint64_t,size_t,uint32_t,uint32_t,uint32_t);
+ extern "C" int pong_scanout_frame(IOMemoryDescriptor *,size_t,uint32_t,uint32_t,uint32_t);
+ extern "C" bool pong_scanout_quarantined(void);
++extern "C" void pong_scanout_cpu_frame(void);
+ #endif
+ #if XNU_PONG_BACKLIGHT
+ extern "C" void pong_backlight_start(IOService *display);
+@@ -1033,6 +1034,11 @@
+ 		if(missed++<4)IOLog("PONG GPU ONLY: no completed GPU frame; CPU composition disabled\n");
+ 		IOLockUnlock(fLock);return;
+ 	}
++#if XNU_PONG_ADRENO_PLATFORM
++	/* zizhan pong_dpu_flip (drivers/PongAdreno/PongAdrenoScanout.cpp dbuf): this frame is composed into the panel memory, so the
++	 * display pipes, possibly on another panel buffer after a GPU frame, go back to it first. */
++	if(!gpuFrame)pong_scanout_cpu_frame();
++#endif
+ 
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));

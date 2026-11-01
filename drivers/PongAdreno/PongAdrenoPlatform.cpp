@@ -21,6 +21,7 @@
 extern "C" const uint8_t PongAdrenoGmuFirmware[];
 extern "C" const size_t PongAdrenoGmuFirmwareBytes;
 extern "C" void pong_ramoops_diagnostic_write(const char *,int);
+extern "C" struct vnode *rootvnode;
 namespace {
 struct Mapping {OSSharedPtr<IOMemoryMap> keep;uintptr_t cpu=0;size_t bytes=0;};
 struct Memory {IOBufferMemoryDescriptor *keep=nullptr;uint8_t *cpu=nullptr;uint64_t pa=0;size_t bytes=0;};
@@ -329,11 +330,14 @@ static int cp_write(void *,uint32_t reg,uint32_t value)
         return gpu_write(nullptr,w,size_t(pa-PongAdrenoWindows[w].physical),value);
     return 1;
 }
+static void dcvs(void *,wait_result_t);
 static void run(void *,wait_result_t)
 {
     record("startup requested; no accelerator published",0);
     if(!map(gcc,0x100000,0x1f4200)||!map(rsc,0x17a20000,0x10000)||!map(db,0x80860000,0x20000))
         {record("SKIP resource mapping",1);return;}
+    (void)PE_parse_boot_argn("pong_gpu_level",&pong_adreno_start_level,sizeof(pong_adreno_start_level));
+    record("GMU start level",0,pong_adreno_start_level);
     PongPowerInputs inputs={};auto input_status=PongAdrenoReadPowerInputs(
         reinterpret_cast<const uint8_t *>(db.cpu),db.bytes,PongAdrenoChipId,&inputs);
     if(input_status){record("SKIP command-db",input_status);return;}
@@ -375,12 +379,155 @@ static void run(void *,wait_result_t)
     if(ps)return;
     auto cp_status=PongAdrenoCpStart(&gmu);
     record("CP/user-client startup",cp_status,gr.core_version,gr.hfi_version);
+    unsigned dcvsEnabled=1;
+    (void)PE_parse_boot_argn("pong_gpu_dcvs",&dcvsEnabled,sizeof(dcvsEnabled));
+    if(!cp_status && dcvsEnabled==1) {
+        thread_t thread;
+        if(kernel_thread_start(dcvs,nullptr,&thread)==KERN_SUCCESS)thread_deallocate(thread);
+    }
     if(cp_status)record("GX clock state after CP failure",rd(windows[PongGpuClock],0x90a8),
         (uint64_t(rd(windows[PongGpuClock],0))<<32)|rd(windows[PongGpuClock],0x1000),
         (uint64_t(rd(windows[PongGpuClock],4))<<32)|rd(windows[PongGpuClock],0x1004));
 }
+/* GPU frequency governor (pong_gpu_dcvs=1, the default), ported from UniXNU-sheng's gpuDcvsThread (package/GpuPowerProbe.cpp),
+ * which derives from Linux msm_gpu_devfreq's simple_ondemand (upthreshold 50); the KGSL this phone ships with decides in TrustZone
+ * (msm-adreno-tz) and votes the same HFI GX_BW_PERF_VOTE. The GMU's XO power counter 0 counts 19.2 MHz ticks while the GPU is busy
+ * (Linux a6xx_hw_init / KGSL gen7_start: busy mask 0xff000000, countable 5 on counter 0). Every 16 ms it takes the frequency that
+ * would have kept that window 50 % busy and goes up at once to the lowest level at or above 1.1 x of it, to the top after a window
+ * over 85 % busy or 50 ms busy without a break; it goes down one level after 4 windows in a row (5 right after a step up) that would
+ * have needed at most 0.8 x the next lower level, and back to the floor after 80 ms without work (no busy tick, CP ring empty).
+ * Two boosts serve the first frames of an animation, which a window-based governor otherwise renders at the floor (sheng i560: app
+ * launch frames 30-36 ms at 348 MHz): work after the idle drop starts at the lowest level at or above max(2 x now, 578 MHz) for
+ * 50 ms, and a touch report (pong_touch_activity, real or pong_touch_synth) holds the top level until pong_gpu_dcvs_boost_ms
+ * (default 1000, 0 = off) after the last one. pong_gpu_dcvs_min is the floor (default 3, 324 MHz) and pong_gpu_max_level the top
+ * (default 13, 900 MHz; also a heat cap, since this port has no thermal management). Until the busy counter first moves (the GPU
+ * idles until backboardd renders; a dead counter would read as idle) the start level stays. Every 10 s: busy share and time per
+ * level, changes, failed votes and boosts, to the console and the diagnostic record. */
+extern "C" volatile uint32_t pong_touch_activity __attribute__((weak));
+/* submit/NativeAdrenoUserClient.cpp and NativeAdrenoMemory.cpp: per-method {calls, failures, last status, total us} and the slowest call
+ * (reset at each report), and the BO pool's {MiB, BOs from it, fell back, MiB in use, peak MiB, scattered BOs, their spans, import spans}:
+ * the 10 s report also prints "PONG GPU BO" when BOs were made, to see what a home-screen or app transition paid for its memory. */
+extern "C" volatile uint32_t native_adreno_method_stats[20][4],native_adreno_method_max_us[20],native_adreno_pool_stats[8];
+// PongAdrenoScanout.cpp: fence-wait and poison record, printed when a poison count moved since the last call.
+extern "C" void pong_fence_report_if_changed(void) __attribute__((weak));
+#ifndef GEN7_CP_RB_RPTR
+#define GEN7_CP_RB_RPTR 0x806u   /* PongAdrenoCpProfile.h */
+#define GEN7_CP_RB_WPTR 0x807u
+#endif
+static unsigned dcvsMHz(unsigned level) {return PongAdrenoPowerLevels[13-level].hz/1000000;}
+static void dcvs(void *,wait_result_t)
+{
+    unsigned top=13,floor=3,boostMs=1000;
+    (void)PE_parse_boot_argn("pong_gpu_max_level",&top,sizeof(top));
+    (void)PE_parse_boot_argn("pong_gpu_dcvs_min",&floor,sizeof(floor));
+    (void)PE_parse_boot_argn("pong_gpu_dcvs_boost_ms",&boostMs,sizeof(boostMs));
+    if(top<1 || top>13)top=13;
+    if(floor<1)floor=1;
+    if(floor>top)floor=top;
+    auto levelFor=[&](uint64_t mhz){unsigned l=1;while(l<top && dcvsMHz(l)<mhz)++l;return l;};
+    auto done=[]{thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);};
+    if(PongAdrenoGmuEnableBusyCounter(&gmu)) {record("SKIP DCVS busy counter",1);done();return;}
+    uint64_t lastBusy=0;
+    if(PongAdrenoGmuBusyTicks(&gmu,&lastBusy)) {record("SKIP DCVS busy read",1);done();return;}
+    unsigned cur=pong_adreno_start_level<1 || pong_adreno_start_level>13?9:pong_adreno_start_level;
+    const uint64_t first=lastBusy;
+    uint64_t lastT=mach_absolute_time(),idleSince=lastT,runNs=0,winBusy=0,winNs=0,atLevel[14]={};
+    uint64_t boostAbs=0,wakeAbs=0,touchEnd=0,wakeEnd=0;
+    nanoseconds_to_absolutetime(uint64_t(boostMs)*1000000ull,&boostAbs);
+    nanoseconds_to_absolutetime(50000000ull,&wakeAbs);
+    uint32_t touches=&pong_touch_activity?pong_touch_activity:0;
+    unsigned down=0,hold=0,changes=0,failed=0,touchBoosts=0,wakeBoosts=0;
+    bool idle=false,moved=false;
+    record("DCVS started (sheng governor)",0,(uint64_t(floor)<<32)|top,cur);
+    for(;;) {
+        IOSleep(16);
+        uint64_t busy=0,ns=0;
+        if(PongAdrenoGmuBusyTicks(&gmu,&busy)) {record("STOP DCVS busy read",1);break;}
+        const uint64_t t=mach_absolute_time();
+        absolutetime_to_nanoseconds(t-lastT,&ns);
+        uint64_t busyNs=(busy-lastBusy)*625/12;   /* 52.083 ns per XO tick */
+        if(busyNs>ns)busyNs=ns;
+        lastBusy=busy;lastT=t;
+        if(!ns)continue;
+        moved=moved || busy!=first;
+        if(!moved)continue;
+        winBusy+=busyNs;winNs+=ns;atLevel[cur]+=ns;
+        const bool active=busyNs>0 || rd(windows[PongGpuCore],GEN7_CP_RB_RPTR*4)!=rd(windows[PongGpuCore],GEN7_CP_RB_WPTR*4);
+        const uint64_t need=busyNs*dcvsMHz(cur)*2/ns;
+        runNs=busyNs*100>=ns*95?runNs+ns:0;
+        unsigned want=cur;
+        if(busyNs*100>ns*85 || runNs>=50000000ull) {
+            want=top;
+        } else if(levelFor(need*11/10)>cur) {
+            want=levelFor(need*11/10);
+        } else if(active) {
+            if(cur>floor && need*10<=uint64_t(dcvsMHz(cur-1))*8) {
+                if(++down>=4+hold)want=cur-1;
+            } else {
+                down=0;
+            }
+        } else {
+            uint64_t idleNs=0;
+            absolutetime_to_nanoseconds(t-idleSince,&idleNs);
+            if(idleNs>=80000000ull)want=floor;
+        }
+        if(active)idleSince=t;
+        if(!active && want==floor)idle=true;
+        if(active && idle) {idle=false;wakeEnd=t+wakeAbs;++wakeBoosts;}
+        if(boostAbs && &pong_touch_activity && pong_touch_activity!=touches) {
+            touches=pong_touch_activity;
+            if(t>=touchEnd)++touchBoosts;
+            touchEnd=t+boostAbs;
+        }
+        if(t<touchEnd)want=top;
+        else if(t<wakeEnd) {
+            const unsigned wake=levelFor(dcvsMHz(cur)*2>578?dcvsMHz(cur)*2:578);
+            if(want<wake)want=wake;
+        }
+        if(want<floor)want=floor;
+        if(want>top)want=top;
+        if(want!=cur) {
+            uint32_t error=0;
+            if(!PongAdrenoGmuSetLevel(&gmu,want,PongAdrenoPowerLevels[13-want].bus,&error)) {hold=want>cur;cur=want;++changes;}
+            else if(++failed>=8) {record("STOP DCVS: votes refused",error,want,cur);break;}
+            down=0;
+        }
+        if(winNs>=10000000000ull) {
+            char text[240];int len=snprintf(text,sizeof(text),
+                "PONG GPU DCVS: busy %llu%%, level %u (%u MHz), %% of 10 s at levels 3/6/9/11/13: %llu/%llu/%llu/%llu/%llu, %u changes, %u failed, boosts touch %u wake %u\n",
+                winBusy*100/winNs,cur,dcvsMHz(cur),atLevel[3]*100/winNs,atLevel[6]*100/winNs,atLevel[9]*100/winNs,atLevel[11]*100/winNs,
+                atLevel[13]*100/winNs,changes,failed,touchBoosts,wakeBoosts);
+            if(len>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,len);}
+            if(pong_fence_report_if_changed)pong_fence_report_if_changed();
+            {
+                static uint32_t last[20][4],lastPool[8];
+                const unsigned methods[5]={2,3,4,13,14};   /* BoAlloc, BoMap, BoFree, BoCpuMap, BoCpuUnmap */
+                char bo[300];int at=snprintf(bo,sizeof(bo),"PONG GPU BO:");
+                bool any=false;
+                for(unsigned m:methods) {
+                    const uint32_t n=native_adreno_method_stats[m][0]-last[m][0],us=native_adreno_method_stats[m][3]-last[m][3];
+                    if(n)any=true;
+                    if(at>0 && at<(int)sizeof(bo))at+=snprintf(bo+at,sizeof(bo)-at," m%u %u x %u us (max %u)",m,n,n?us/n:0,native_adreno_method_max_us[m]);
+                    native_adreno_method_max_us[m]=0;
+                    for(unsigned k=0;k<4;++k)last[m][k]=native_adreno_method_stats[m][k];
+                }
+                if(at>0 && at<(int)sizeof(bo))at+=snprintf(bo+at,sizeof(bo)-at,"; pool %u MiB, in use %u peak %u, pooled +%u fell back +%u, scattered +%u (%u spans)\n",
+                    native_adreno_pool_stats[0],native_adreno_pool_stats[3],native_adreno_pool_stats[4],native_adreno_pool_stats[1]-lastPool[1],
+                    native_adreno_pool_stats[2]-lastPool[2],native_adreno_pool_stats[5]-lastPool[5],native_adreno_pool_stats[6]-lastPool[6]);
+                for(unsigned k=0;k<8;++k)lastPool[k]=native_adreno_pool_stats[k];
+                if(any && at>0){IOLog("%s",bo);pong_ramoops_diagnostic_write(bo,at<(int)sizeof(bo)?at:(int)sizeof(bo)-1);}
+            }
+            winBusy=winNs=0;for(auto &a:atLevel)a=0;
+        }
+    }
+    done();
+}
 static void worker(void *parameter,wait_result_t result)
 {
+    /* Bring-up concurrent with the APFS root mount stalled root I/O (g2, g5):
+     * wait for the root vnode first (bounded). */
+    for(unsigned i=0;i<3000 && !__atomic_load_n(&rootvnode,__ATOMIC_ACQUIRE);i++)IOSleep(100);
+    IOSleep(2000);
     run(parameter,result);
     thread_terminate(current_thread());
     thread_block(THREAD_CONTINUE_NULL);

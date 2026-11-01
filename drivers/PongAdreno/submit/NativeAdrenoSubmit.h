@@ -47,7 +47,7 @@ class NativeAdrenoSubmit final {
     /* Serialized by the owner; a 128-IB batch must not consume kernel stack
      * with its 1 KiB handle list and 2 KiB packet list. */
     uint64_t scratch_handles_[128]{};
-    uint32_t scratch_words_[128*4]{};
+    uint32_t scratch_words_[128*4+34*8]{};   /* + pong_gtrace's per-IB timestamp packets (8 words each, 34 at most) */
     Job *find(uint32_t fence);
     Job *free();
     IOReturn release(Job &);

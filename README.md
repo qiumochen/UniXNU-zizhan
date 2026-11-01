@@ -59,6 +59,10 @@ $ZIZHAN_SRC/
 | 启动镜像 | `PROFILE=zizhan_ipados18_gpu ci_boot_ufs.sh NAME <根镜像 4K 块号>` |
 | 上机一轮（无人值守） | `cycle.sh IMG RUN`：启动 → 看门狗复位回 fastboot → RamoopsDump 写 logfs → 回到 Android 取回日志 |
 | 局部刷新 | `metal-refresh.sh`、`ui-refresh.sh`、`fw-refresh.sh`（只重写根镜像里的 OS 窗口） |
+| 编译 + 打包 + 上机一轮 | `round.sh RUN [内核参数…]`（`ADSP=2` 带电池；等待时间按 `pong_autoreset` 算） |
+| 轮次中断 / 手机掉线后收尾 | `cycle-resume.sh IMG RUN`（只做取日志的后半段）、`when-back.sh RUN [参数…]`（等手机重新出现再接着跑） |
+| 从现有镜像去掉 launchd 任务 | `jobs-refresh.sh TAG LABEL…`（与 `userland/build-ipados18.py` 的 `EXCLUDED18` 对应） |
+| 诊断 | `gsym.py LOG 手势号 [TID…] --bin 二进制`（采样器 `gs_all=2` 的整条栈）、`settings-ui.py LOG`（带 `pong_url` 的轮里设置界面的打印） |
 
 `.github/workflows/macos-build.yml` 沿用 UniXNU-pong 的 GitHub Actions 内核构建，用法见 [UniXNU-pong 的 README](https://github.com/Chengdong-Yu/UniXNU-pong#用-github-actions-编译内核)。
 

@@ -52,13 +52,16 @@ def main():
  # Leave CPU time for the software compositor and stock service startup.
  if gpu:
   opts=[x for x in opts if x not in ('pong_ui_software=1','pong_software_ui=1')]
-  opts+=['pong_ui_software=0','pong_software_ui=0','pong_adreno_start=1','pong_metal=1',
+  # Absent means off for both software-UI switches (ui_compat18.c, kern_persona.c): leaving them out keeps the GPU build
+  # software-free and saves the command line's bytes (DarwinBoot24 caps it at 1020; 11-01 g223 missed by one).
+  opts+=['pong_adreno_start=1','pong_metal=1',
          'pong_gpu_scanout=1','pong_gpu_pool_mib=256','pong_metal_global=1']
  # PCM stays optional and publishes only after the real APM/amp/DMA route
  # is ready. Do not silently disable it in an otherwise audio-enabled build.
  # Keep the live board's Wi-Fi worker and wallpaper snapshot policy in
  # every package; rebuilding must not silently drop these opt-in paths.
- opts+=['pong_ram_banks=1','launchd_unsecure_cache=1','pong_wifi=1','pong_poster_snapshot=1',f'fb_threads={min(a.cpus,4)}']
+ # pong_ram_banks: DarwinBoot24 only looks for pong_ram_banks=0, so the default needs no argument.
+ opts+=['launchd_unsecure_cache=1','pong_wifi=1','pong_poster_snapshot=1',f'fb_threads={min(a.cpus,4)}']
  if report['settings'].get('XNU_PONG_BACKLIGHT')=='1':opts+=['pong_backlight=1']
  # PE_parse_boot_argn can select the first duplicate. Apply command-line
  # overrides before packaging so there is exactly one value per named key.

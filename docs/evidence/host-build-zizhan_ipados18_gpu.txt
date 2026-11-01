@@ -1,0 +1,214 @@
+# Host build of UniXNU-zizhan 1ec1190f4e3467a36a7a7402bc766dfdf688adf1
+# host: Mac Studio (Apple silicon), Xcode 26.6.0, macOS; command:
+#   ZIZHAN_SRC=<work dir> ci_prep.sh && DEFCONFIG=zizhan_ipados18_gpu_defconfig JOBS=10 ci_kernel.sh
+
+## verify.log
+=== 19:19:03 ci_prep
+=== 19:19:03 tools
+=== 19:19:04 sheng
+=== 19:19:04 refer pins
+cached xnu-11417.140.69
+cached libplatform-349.140.6
+cached libdispatch-1521.140.2
+cached AvailabilityVersions-143.7
+cached IOStorageFamily-323
+=== 19:19:04 DarwinBoot24
+Full build log: $ZIZHAN_SRC/work/Pong-DarwinBoot24/build-20261101T111904266525Z.log
+$ZIZHAN_SRC/UniXNU-zizhan/mac-build/darwinboot24/DarwinBoot24.efi
+-rw-r--r--  1 user  staff  34304 Nov  1 19:19 mac-build/darwinboot24/DarwinBoot24.efi
+=== 19:19:08 layout and kernelcache
+-rw-r--r--  1 user  staff  48562204 Oct 29 00:22 apple/ipados18-22H374/components/kernelcache.release.ipad7c.decompressed/kernelcache.release.ipad7c.decompressed
+PREP_DONE
+=== 19:19:08 ci_kernel
+== configuration zizhan_ipados18_gpu_defconfig -> $ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/.config
+== tree $ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/tree
++ /opt/homebrew/bin/dtc -I dts -O dtb -o $ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/device-tree/hardware.dtb -i $ZIZHAN_SRC/UniXNU-sm8475-common/dts $ZIZHAN_SRC/UniXNU-zizhan/dts/zizhan.dts
+Building Darwin 24; log: $ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/build-20261101T111908Z.log
+$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/kernel/mach.development.pong
+{
+  "artifact_dir": "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/kernel",
+  "command": [
+    "<workspace>/venv/bin/python3",
+    "$ZIZHAN_SRC/UniXNU-zizhan/scripts/build-ipados18-pong-macos.py",
+    "--artifact-dir",
+    "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/kernel",
+    "--jobs",
+    "10",
+    "--skip-image-verification",
+    "--tree",
+    "$ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/tree",
+    "--developer-dir",
+    "/Applications/Xcode-26.6.0.app/Contents/Developer",
+    "--volume-layout",
+    "$ZIZHAN_SRC/work/pong-work/build/volume-layout.json",
+    "--config-path",
+    "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/.config",
+    "--hardware-dtb",
+    "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/device-tree/hardware.dtb"
+  ]
+}
+{
+  "schema_version": 2,
+  "source_pins": {
+    "schema_version": 2,
+    "upstream_revision": "0fc0fc1f9ddd0fbd4787738afef38667df5e0a95",
+    "device_base": "0b56a7c444ccd8b7e30c9d8d6db45b684b71a28a",
+    "soc_revision": "a107f6ae646b997086fa1dd1c8ddee0e0d8b5b21",
+    "os_profile": "ipados-18.7.10-22H374",
+    "local_unpublished_edits": false,
+    "source_pins_preserved": true,
+    "image_hashes_used": false,
+    "published_source_revision": "f62243e56a30472deed9112631b2480ab461df3e",
+    "published_soc_path": "migration/format2/soc-seed",
+    "soc_seed_commit": "a107f6ae646b997086fa1dd1c8ddee0e0d8b5b21"
+  },
+  "output": "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu",
+  "hardware_dtb": "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/device-tree/hardware.dtb",
+  "configuration": "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/.config",
+  "kernel_built": true
+}
+KERNEL_DONE
+=== 19:19:58 VERIFY_DONE
+
+## kernel/PONG_BUILD_RESULT.json
+{
+  "profile": "Pong-iPadOS18-22H374-Darwin24",
+  "tree": "$ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/tree",
+  "settings": {
+    "UNIXNU_IOS_TARGET": "18.0",
+    "UNIXNU_XNU_TAG": "xnu-11417.140.69",
+    "UNIXNU_XNU_COMMIT": "43a90889846e00bfb5cf1d255cdc0a701a1e05a4",
+    "UNIXNU_XNU_DARWIN": "24.6.0",
+    "UNIXNU_XNU_VERSION": "11417.140.69",
+    "UNIXNU_DRIVERKIT_TAG": "xnu-10063.121.3",
+    "UNIXNU_TRUSTCACHE_TAG": "xnu-8796.101.5",
+    "UNIXNU_LIBPLATFORM_TAG": "libplatform-349.140.6",
+    "UNIXNU_LIBPLATFORM_COMMIT": "8b02fc711d41a40477bfe857dd39755f250d1d7e",
+    "UNIXNU_LIBDISPATCH_TAG": "libdispatch-1521.140.2",
+    "UNIXNU_LIBDISPATCH_COMMIT": "934ff27e48ab7a6ee799442c5f19ebbb990567e8",
+    "UNIXNU_AVAILABILITYVERSIONS_TAG": "AvailabilityVersions-143.7",
+    "UNIXNU_AVAILABILITYVERSIONS_COMMIT": "2f2dc3dd7fadd28f600d7ef517737ea99be4b94f",
+    "XNU_BUILD_ARCHIVES": "1",
+    "XNU_SOURCE_CORECRYPTO14": "0",
+    "XNU_SOURCE_PTHREAD": "0",
+    "XNU_ARM_DT_PLATFORM": "1",
+    "XNU_ARMCPU": "1",
+    "XNU_NATIVE_AES": "0",
+    "XNU_NATIVE_ARCH_TIMER": "1",
+    "XNU_NATIVE_PAN": "1",
+    "XNU_PONG_LEGACY_UACCESS": "0",
+    "XNU_OWNER_CACHE_MOUNT": "1",
+    "XNU_OWNER_CRYPTEX_FILES": "1",
+    "XNU_OWNER_DATA_UFS": "1",
+    "XNU_ADRENO_FIRMWARE_PROBE": "0",
+    "XNU_ADRENO_PM4_PROBE": "0",
+    "XNU_ARMVIRT_PLATFORM": "0",
+    "XNU_BOOT_PROGRESS": "0",
+    "XNU_BUILD_WERROR": "0",
+    "XNU_CONSTANT_UPLOADS_PROBE": "0",
+    "XNU_CRYPTO_BOOTSTRAP": "prelinked",
+    "XNU_DT_PANIC_REGION": "1",
+    "XNU_NATIVE_ADRENO": "0",
+    "XNU_NATIVE_AIR_INIT": "0",
+    "XNU_NATIVE_CS_HASH_CACHE": "1",
+    "XNU_NATIVE_LEGACY_DISPLAY": "0",
+    "XNU_NATIVE_MOBILE_DISPLAY": "0",
+    "XNU_NATIVE_OFFLINE_GPU": "0",
+    "XNU_NATIVE_RAM_BLOCK": "0",
+    "XNU_NATIVE_TRUST_CACHE": "0",
+    "XNU_NATIVE_UFS": "1",
+    "XNU_NATIVE_VIRTIO_BLOCK": "0",
+    "XNU_NATIVE_VIRTIO_CONSOLE": "0",
+    "XNU_OWNER_BOOT_MANIFEST": "0",
+    "XNU_OWNER_CACHE_CARRIER": "0",
+    "XNU_OWNER_CACHE_CARRIER_WRONG_UUID": "0",
+    "XNU_OWNER_CACHE_STARTUP": "1",
+    "XNU_OWNER_DATA_MOUNT": "1",
+    "XNU_OWNER_ROOT_VOLUME_UUID": "2ff2d90d-4d56-5642-b919-4acb02f48f5f",
+    "XNU_OWNER_DATA_VOLUME_UUID": "6cecfcc9-9599-5251-b366-11279aa20065",
+    "XNU_OWNER_CACHE_VOLUME_UUID": "fdd6e887-0481-5d3c-9beb-9363dadf0b53",
+    "XNU_OWNER_ROOT_AUDIT": "0",
+    "XNU_OWNER_ROOT_TRUST": "0",
+    "XNU_OWNER_UNION_SYSTEMOS": "0",
+    "XNU_PONG_APFS_DEBUG": "1",
+    "XNU_PONG_ADRENO_PLATFORM": "1",
+    "XNU_PONG_BACKLIGHT": "0",
+    "XNU_PONG_EARLY_TRACE": "0",
+    "XNU_PONG_RAMOOPS_CONSOLE": "1",
+    "XNU_PONG_VOLATILE_PANIC_LOG": "1",
+    "XNU_SHENG_PMGR": "0",
+    "XNU_SMMU4K_PROBE": "0",
+    "XNU_SOURCE_MOCKFS": "0",
+    "XNU_TRUST_CACHE_RUNTIME": "0",
+    "XNU_VERIFIED_ROOT_PROBE": "0",
+    "XNU_ZONE_PGZ_ALIGNMENT_PROBE": "0",
+    "XNU_PONG_WIFI": "0",
+    "XNU_PONG_POWER": "1",
+    "XNU_BUILD_DSYM": "0"
+  },
+  "debug_symbols_generated": false,
+  "reference_commits": {
+    "xnu": "43a90889846e00bfb5cf1d255cdc0a701a1e05a4",
+    "libplatform": "8b02fc711d41a40477bfe857dd39755f250d1d7e",
+    "libdispatch": "934ff27e48ab7a6ee799442c5f19ebbb990567e8",
+    "AvailabilityVersions": "2f2dc3dd7fadd28f600d7ef517737ea99be4b94f",
+    "IOStorageFamily": "1b96f8f04b9dff4dc0277ac43625bf694e62c5aa"
+  },
+  "image_verification": "skipped by request",
+  "build_complete": true,
+  "hardware_dtb": "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/device-tree/hardware.dtb",
+  "configuration": "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/.config",
+  "schema_version": 2,
+  "returncode": 0,
+  "log": "$ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/build-20261101T111908Z.log",
+  "kernel": {
+    "path": "$ZIZHAN_SRC/UniXNU-zizhan/out/zizhan/ipados-18.7.10-22H374/zizhan_ipados18_gpu/kernel/mach.development.pong",
+    "bytes": 18321080
+  }
+}
+
+## last 40 lines of the Darwin 24 build log
+  486 |         IOFreeType(data, T);
+      |         ^~~~~~~~~~~~~~~~~~~
+$ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/tree/build/xnu/ios-obj/EXPORT_HDRS/iokit/IOKit/IOLib.h:357:9: note: expanded from macro 'IOFreeType'
+  357 |         static _KALLOC_TYPE_DEFINE(kt_view_var, type,       \
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  358 |            KT_SHARED_ACCT);                                 \
+      |            ~~~~~~~~~~~~~~~
+$ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/tree/build/xnu/ios-obj/EXPORT_HDRS/osfmk/kern/kalloc.h:1577:17: note: expanded from macro '_KALLOC_TYPE_DEFINE'
+ 1577 |             .kt_size = sizeof(type),                                    \
+      |                        ^~~~~~~~~~~~
+clang: warning: no such include directory: '/Applications/Xcode-26.6.0.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk//System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/AppleFeatures' [-Wmissing-include-dirs]
+15 warnings generated.
+1 warning generated.
+5 warnings generated.
+     LDFILELIST bsd
+             CC lastkerneldataconst.o
+             CC lastkernelconstructor.o
+             CC nonlto.o
+clang: warning: clang: warning: no such include directory: '/Applications/Xcode-26.6.0.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk//System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/AppleFeatures' [-Wmissing-include-dirs]
+clang: no such include directory: '/Applications/Xcode-26.6.0.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk//System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/AppleFeatures' [-Wmissing-include-dirs]
+warning: no such include directory: '/Applications/Xcode-26.6.0.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk//System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/AppleFeatures' [-Wmissing-include-dirs]
+$ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/tree/.cache/xnu-work/libsa/lastkernelconstructor.c:31:13: warning: declaration requires a global constructor [-Wglobal-constructors]
+   31 | static void last_kernel_constructor(void) __attribute__ ((constructor));
+      | ~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~
+1 warning generated.
+             CC version.o
+clang: warning: no such include directory: '/Applications/Xcode-26.6.0.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk//System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/AppleFeatures' [-Wmissing-include-dirs]
+             LD mach.development.pong.unstripped.noctf
+ld: warning: search path '$ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/tree/.cache/fakeroot/usr/local/lib/kernel/platform' not found
+ld: warning: -segment_order should list all segments, __PRELINK_TEXT is missing
+ld: warning: -segment_order should list all segments, __PRELINK_INFO is missing
+ld: warning: -segment_order should list all segments, __PLK_TEXT_EXEC is missing
+ld: warning: -segment_order should list all segments, __PRELINK_DATA is missing
+ld: warning: -segment_order should list all segments, __PLK_DATA_CONST is missing
+ld: warning: -segment_order should list all segments, __PLK_LLVM_COV is missing
+ld: warning: -segment_order should list all segments, __PLK_LINKEDIT is missing
+ld: warning: -segment_order should list all segments, __LINKINFO is missing
+ld: warning: -segment_order of __LINKEDIT is ignored, the segment must be ordered last
+          STRIP mach.development.pong
+built kernel at $ZIZHAN_SRC/work/pong-work/build/Pong-iPadOS18-native/tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_PONG//mach.development.pong
+
+## kernel
+481f1857dc9e1e8132231353d2859d1125752b455becb53752dac18d4eac29bc  mach.development.pong
+18321080 bytes

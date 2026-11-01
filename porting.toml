@@ -162,7 +162,7 @@ evidence = [{kind = "source", reference = "docs/progress/2026-11-01-battery.md",
 
 [[area]]
 id = "packaging"
-status = "implemented"
+status = "host-verified"
 components = ["PongPlatform24"]
 paths = ["scripts/build-ipados18*", "scripts/make-pong-adt-ipados18.py", "scripts/build-xnu-ipados18.sh", "patches/xnu-ipados18/**", "userland/build-ipados18.py", "scripts/build-pong-metal-bridge.py", "scripts/build-pong-metal-plugin.py", "scripts/build-pong-*-macos.py"]
 inputs = ["xnu-11417.140.69（Darwin 24.6.0）和 22H374 restore 的原始组件"]
@@ -171,8 +171,8 @@ procedure = ["ci_prep.sh 准备依赖，ci_kernel.sh 构建内核，ci_boot_ufs.
 findings = ["干净的 xnu-11417.140.69 按 series 依次应用全部补丁后，与实际构建用的工作树逐文件一致。", "新版 Xcode 的 clang 多了三个警告，在 -Werror 下需要关掉；Pong 脚本原来只允许 Intel 主机，现在也允许 arm64 主机。"]
 completion = ["从本仓库的提交构建出能上机的启动镜像"]
 limits = ["Apple 镜像、固件和 ABI 二进制都要在本机准备。"]
-next_action = ["记录本仓库发布版本的完整主机构建结果。"]
-evidence = [{kind = "source", reference = "docs/progress/2026-10-29-xnu-bringup.md", result = "构建链说明。"}]
+next_action = ["用这个版本打包启动镜像并上机跑一轮，记录设备结果。"]
+evidence = [{kind = "source", reference = "docs/progress/2026-10-29-xnu-bringup.md", result = "构建链说明。"}, {kind = "host", command = "ZIZHAN_SRC=<work dir> ci_prep.sh && DEFCONFIG=zizhan_ipados18_gpu_defconfig JOBS=10 ci_kernel.sh", revision = "1ec1190f4e3467a36a7a7402bc766dfdf688adf1", reference = "docs/evidence/host-build-zizhan_ipados18_gpu.txt", result = "Mac Studio（Apple silicon，Xcode 26.6.0）从全新的构建目录完整编译出 DEVELOPMENT_ARM64_PONG 内核，18321080 字节；zizhan 的 boot-arg 字符串（pong_fts、pong_panel_hz、pong_dpu_flip 等）与上机使用的内核一致。"}]
 
 [[area]]
 id = "diagnostics"

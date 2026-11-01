@@ -23,12 +23,18 @@ extern "C" int proc_pid(struct proc *p);
 extern "C" void proc_name(int pid, char *buf, int size);
 // osfmk/kern/debug.c (patches/xnu-ipados18/0004): called after the panic log is complete, instead of spinning forever.
 extern "C" void (*pong_panic_reset_hook)(void);
-// PongAdrenoScanout.cpp: whole-boot frame-rate summary, printed before the deadline reset (absent without the GPU platform).
-extern "C" void pong_scanout_summary(void) __attribute__((weak));
-// osfmk/kern/thread.c (patches/xnu-ipados18/0007): plan A2's thread-state sampler.
+// osfmk/kern/thread.c (patches/xnu-ipados18/0005): plan A2's thread-state sampler.
 extern "C" void pong_thread_sampler_start(const char *proc, unsigned seconds) __attribute__((weak));
+#if XNU_PONG_ADRENO_PLATFORM
+// PongAdrenoScanout.cpp: whole-boot frame-rate summary, printed before the deadline reset.
+extern "C" void pong_scanout_summary(void) __attribute__((weak));
 // PongAdreno/submit/NativeAdrenoSubmit.cpp: the GPU submission/completion timeline (pong_gtrace=<s>), same start as the sampler.
 extern "C" void pong_gtrace_start(unsigned seconds) __attribute__((weak));
+#else
+// Without the GPU platform neither exists, and the static kernel link takes no undefined weak symbol.
+static inline void pong_scanout_summary(void) {}
+static void (*const pong_gtrace_start)(unsigned seconds) = nullptr;
+#endif
 // NativeUfs/PongUfsTransport.cpp: copy the ramoops zones to the pinned klog file (pong_klog_4k), 1 = deadline, 2 = panic,
 // 3 = DPU-flip mark, 4 = power-key long press.
 extern "C" int pong_klog_flush(int reason) __attribute__((weak));
@@ -159,7 +165,7 @@ static void pinger(void *, wait_result_t) {
     IOSleep(1000);
   }
   gPingerEnd = mach_absolute_time();
-  if (pong_scanout_summary) pong_scanout_summary();
+  pong_scanout_summary();
   IOLog("PONG_AUTORESET: deadline reached after %u pings; watchdog bites in 1 s\n", gPings);
   gResetting = true;
   IOSleep(200);
@@ -216,7 +222,7 @@ static void buttonReset() {
     IOLog("PONG_AUTORESET: mark bootloader (power key): %s\n", text);
   }
   IOLog("PONG_AUTORESET: power key held: resetting into fastboot now\n");
-  if (pong_scanout_summary) pong_scanout_summary();
+  pong_scanout_summary();
   IOSleep(200);
   if (pong_klog_flush) pong_klog_flush(4);
   resetNow();

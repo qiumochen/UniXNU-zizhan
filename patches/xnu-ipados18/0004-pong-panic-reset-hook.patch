@@ -1,0 +1,24 @@
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -157,6 +157,11 @@
+ unsigned int    current_debugger = 0;
+ unsigned int    active_debugger = 0;
+ SECURITY_READ_ONLY_LATE(unsigned int)    panicDebugging = FALSE;
++/*
++ * zizhan unattended bring-up: the platform's pong_autoreset sets this to reset
++ * into fastboot once the panic log is complete, instead of spinning forever.
++ */
++void (*pong_panic_reset_hook)(void) = NULL;
+ unsigned int    kernel_debugger_entry_count = 0;
+ 
+ #if DEVELOPMENT || DEBUG
+@@ -1646,6 +1651,9 @@
+ 	}
+ 
+ 	paniclog_append_noflush("\nPlease go to https://panic.apple.com to report this panic\n");
++	if (pong_panic_reset_hook != NULL) {
++		pong_panic_reset_hook();
++	}
+ 	panic_spin_forever();
+ }
+ 

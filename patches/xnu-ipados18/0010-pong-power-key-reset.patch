@@ -1,0 +1,52 @@
+From: zizhan port
+Subject: [PATCH 0010] pong_buttons: power key held 3 s calls the platform reset hook
+
+Power held for pong_button_reset ms (default 3000, 0 = off) calls pong_button_reset_hook, which
+ArmDTPlatform/PongBootReset.h points at a warm reset into fastboot (DRAM + klog intact). Gives a
+way back from a running iOS that needs neither the autoreset deadline nor the PMIC 10 s combination.
+
+---
+diff --git a/bsd/dev/pong_buttons.c b/bsd/dev/pong_buttons.c
+--- a/bsd/dev/pong_buttons.c
++++ b/bsd/dev/pong_buttons.c
+@@ -13,6 +13,13 @@
+ #include <sys/systm.h>
+ extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
++/* Power key held for pong_button_reset ms (default 3000, 0 = off): call the hook the platform kext installs
++ * (ArmDTPlatform/PongBootReset.h buttonReset): a warm reset into fastboot with DRAM and klog intact. The only
++ * way back from a running iOS besides the autoreset deadline: no USB device stack, no network. */
++void (*pong_button_reset_hook)(void)=NULL;
++static uint32_t reset_ms=3000;
++static uint64_t power_down_at;
++static bool reset_fired;
+ static vm_offset_t core,cnfg,observer;
+ static bool v7;
+ static uint32_t channels;
+@@ -121,6 +128,18 @@
+             if (read_registers(&pin,0x10,&state,1)) look(&keys[1],(state&1)==0);
+             else good=false;
+         }
++        if (reset_ms && keys[0].usable) {
++            if (!keys[0].down) power_down_at=0;
++            else if (!power_down_at) power_down_at=mach_absolute_time();
++            else if (!reset_fired) {
++                uint64_t held=0;absolutetime_to_nanoseconds(mach_absolute_time()-power_down_at,&held);
++                if (held>=(uint64_t)reset_ms*NSEC_PER_MSEC) {
++                    reset_fired=true;
++                    printf("Pong keys: power held %u ms: %s\n",reset_ms,pong_button_reset_hook?"resetting":"no reset hook");
++                    if (pong_button_reset_hook) pong_button_reset_hook();
++                }
++            }
++        }
+         failures=good?0:failures+1;
+         if (failures>=8) {
+             for (unsigned i=0;i<3;i++) if (keys[i].down)
+@@ -138,6 +157,7 @@
+ {
+     uint32_t enabled=0;thread_t t;
+     if (!PE_parse_boot_argn("pong_buttons",&enabled,sizeof(enabled)) || !enabled) return;
++    PE_parse_boot_argn("pong_button_reset",&reset_ms,sizeof(reset_ms));
+     if (kernel_thread_start(keys_thread,NULL,&t)==KERN_SUCCESS) thread_deallocate(t);
+ }
+ #endif

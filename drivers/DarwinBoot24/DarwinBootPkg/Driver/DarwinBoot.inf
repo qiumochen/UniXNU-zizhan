@@ -32,6 +32,7 @@
 [Protocols]
   gUniXNULoaderProtocolGuid ## PRODUCES
   gEfiSimpleFileSystemProtocolGuid ## CONSUMES
+  gEfiPartitionInfoProtocolGuid ## SOMETIMES_CONSUMES
   gEfiLoadedImageProtocolGuid ## CONSUMES
   gEfiGraphicsOutputProtocolGuid ## CONSUMES
 

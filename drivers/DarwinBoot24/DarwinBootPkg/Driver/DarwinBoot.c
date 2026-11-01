@@ -12,10 +12,12 @@
 #include <Protocol/LoadedImage.h>
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/SimpleFileSystem.h>
+#include <Protocol/PartitionInfo.h>
 #include "BootArgs.h"
 #include "BootVideo.h"
 #include "PackedRamdisk.h"
 #include "WindowSize.h"
+#include "PongAutoReset.h"
 
 #define WINDOW_SIZE  SIZE_256MB
 #define BLOCK_SIZE   SIZE_2MB
@@ -40,6 +42,9 @@ typedef struct {
 STATIC EFI_HANDLE  mImage;
 STATIC EFI_HANDLE  mReplacedHandle;
 STATIC VOID        *mReplacedLoader;
+// Why the last attempt failed, for BootFailLog: the stage, and the NO WINDOW line when the window did not fit.
+STATIC CONST CHAR16 *mFailStage;
+STATIC CHAR16      mFailNote[96];
 UINT64 EFIAPI DarwinCurrentEl (VOID);
 VOID EFIAPI DarwinEnter (UINT64 Args, UINT64 Entry, UINT64 Memory, UINT64 PopulatedBytes, UINT64 VideoBase, UINT64 VideoBytes);
 VOID EFIAPI DarwinEnterEnd (VOID);
@@ -198,6 +203,13 @@ ParseKernel (CONST UINT8 *Data, UINTN Size, KERNEL *Kernel)
 }
 
 STATIC UINTN mAudioDmaOffset = MAX_UINTN;
+// zizhan panel pool: 96 MiB below 4 GiB for the DPU (32-bit SSPP addresses, display SMMU bypassed), five 17 MiB buffers
+// (2160x1916 at CoreAnimation's 8704-byte rows)
+// (up to three for the kernel's own flip buffers, the rest for backboardd's canvases, xnu patch 0011).
+// XNU owns no low RAM on this device (the 4 GiB window and extra banks all sit above 4 GiB), so the kernel cannot allocate it
+// later (g152i, 2026-10-31); reserved here like the audio lease and published as /chosen/pong-panel-pool {pa, bytes}.
+#define PANEL_POOL_PAGES 24576
+STATIC UINTN mPanelPoolOffset = MAX_UINTN;
 #define PONG_RAM_MAX 64
 #define PONG_RAM_WIRE_SIZE (32 + PONG_RAM_MAX * 16)
 STATIC UINTN mRamWireOffset = MAX_UINTN, mRamAllowedOffset = MAX_UINTN, mRamAllowedCount;
@@ -216,6 +228,7 @@ AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN Parent
   UINTN  TrustCandidate;
   UINTN  MemoryCandidate;
   UINTN  AudioCandidate, RamCandidate, AllowedCandidate, AllowedCount;
+  UINTN  PanelCandidate;
   CONST UINT8 *Name;
   UINTN  NameLength;
 
@@ -225,6 +238,7 @@ AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN Parent
   TrustCandidate = MAX_UINTN;
   MemoryCandidate = MAX_UINTN;
   AudioCandidate = MAX_UINTN;
+  PanelCandidate = MAX_UINTN;
   RamCandidate = AllowedCandidate = MAX_UINTN; AllowedCount = 0;
   if ((Depth > 64) || (Size - *Offset < 8)) { return FALSE; }
   Properties = U32 (Data + *Offset);
@@ -264,6 +278,10 @@ AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN Parent
       if ((AudioCandidate != MAX_UINTN) || (Length != 16)) { return FALSE; }
       AudioCandidate = *Offset;
     }
+    if (AsciiStrCmp ((CONST CHAR8 *)(Data + *Offset - 36), "pong-panel-pool") == 0) {
+      if ((PanelCandidate != MAX_UINTN) || (Length != 16)) { return FALSE; }
+      PanelCandidate = *Offset;
+    }
     if (AsciiStrCmp ((CONST CHAR8 *)(Data + *Offset - 36), "TrustCache") == 0) {
       if ((TrustCandidate != MAX_UINTN) || (Length != 16)) { return FALSE; }
       TrustCandidate = *Offset;
@@ -291,6 +309,10 @@ AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN Parent
   if (AudioCandidate != MAX_UINTN) {
     if ((Path != 1) || (mAudioDmaOffset != MAX_UINTN)) { return FALSE; }
     mAudioDmaOffset = AudioCandidate;
+  }
+  if (PanelCandidate != MAX_UINTN) {
+    if ((Path != 1) || (mPanelPoolOffset != MAX_UINTN)) { return FALSE; }
+    mPanelPoolOffset = PanelCandidate;
   }
   if (RamCandidate != MAX_UINTN || AllowedCandidate != MAX_UINTN) {
     if (Path != 1 || RamCandidate == MAX_UINTN || AllowedCandidate == MAX_UINTN) { return FALSE; }
@@ -489,6 +511,7 @@ AllocateWindow (KERNEL *Kernel, UINT64 WindowSize, EFI_PHYSICAL_ADDRESS *Address
     CHAR16 Line[96];
     UINTN  Row = 1;
     UnicodeSPrint (Line, sizeof (Line), L"NO WINDOW %lx BIG RUN %lx @ %lx", WindowSize, BestBytes, BestStart);
+    StrCpyS (mFailNote, ARRAY_SIZE (mFailNote), Line);
     DiagDraw (Line, 0);
     for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
       Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
@@ -602,8 +625,7 @@ WritePongRam (UINT64 TreeAddress, PONG_RAM_BANK *Owned, UINTN Count)
 
 STATIC
 EFI_STATUS
-EFIAPI
-Boot (
+BootOnce (
   IN UNIXNU_LOADER_PROTOCOL    *This,
   IN CONST UNIXNU_LOADER_BOOT_REQUEST *Request
   )
@@ -624,6 +646,7 @@ Boot (
   KERNEL                          Kernel;
   EFI_PHYSICAL_ADDRESS            Address;
   EFI_PHYSICAL_ADDRESS            AudioAddress = 0;
+  EFI_PHYSICAL_ADDRESS            PanelAddress = 0;
   UINT64                          ArgsAddress;
   UINT64                          TreeAddress;
   UINT64                          Used;
@@ -648,6 +671,7 @@ Boot (
   UINT32                          Version;
   UINTN                           Attempt;
   CHAR8                           CommandLine[DARWIN_BOOT_LINE_LENGTH];
+  BOOLEAN                         AutoReset;
   UINT64                          Video[6];
   PONG_RAM_BANK                   Owned[PONG_RAM_MAX];
   UINTN                           OwnedCount = 0;
@@ -685,6 +709,7 @@ Boot (
   Status = Fs->OpenVolume (Fs, &Root);
   if (EFI_ERROR (Status)) { return Status; }
   Stage = L"READ KERNEL";
+  mFailStage = Stage;
   DiagDraw (Stage, 0);
   Status = ReadFile (Root, Request->KernelPath, SIZE_128MB, &Image, &ImageSize);
   if (EFI_ERROR (Status)) { goto Fail; }
@@ -703,6 +728,7 @@ Boot (
   RamdiskOffset = MAX_UINTN;
   TrustCacheOffset = MAX_UINTN;
   mAudioDmaOffset = MAX_UINTN;
+  mPanelPoolOffset = MAX_UINTN;
   mRamWireOffset = mRamAllowedOffset = MAX_UINTN;
   mRamAllowedCount = 0;
   WindowSize = 0;
@@ -752,6 +778,15 @@ Boot (
       FlushRange (AudioAddress, 65536);
     }
   }
+  if (mPanelPoolOffset != MAX_UINTN) {
+    PanelAddress = 0xffffffffULL;
+    Status = gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, PANEL_POOL_PAGES, &PanelAddress);
+    if (EFI_ERROR (Status)) { PanelAddress = 0; }
+    else {
+      ZeroMem ((VOID *)(UINTN)PanelAddress, EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES));
+      FlushRange (PanelAddress, EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES));
+    }
+  }
   ArgsAddress = ALIGN_VALUE (Address + Kernel.End - Kernel.Base, SIZE_16KB);
   TreeAddress = ArgsAddress + EFI_PAGE_SIZE;
   RamdiskAddress = ALIGN_VALUE (TreeAddress + TreeSize, EFI_PAGE_SIZE);
@@ -793,6 +828,10 @@ Boot (
     WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mAudioDmaOffset), AudioAddress);
     WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mAudioDmaOffset + 8), AudioAddress ? 65536 : 0);
   }
+  if (mPanelPoolOffset != MAX_UINTN) {
+    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mPanelPoolOffset), PanelAddress);
+    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mPanelPoolOffset + 8), PanelAddress ? EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES) : 0);
+  }
   if (Request->Ramdisk != NULL) {
     if (KeepPacked) { CopyMem ((VOID *)(UINTN)RamdiskAddress, Request->Ramdisk, Request->RamdiskSize); }
     else { CopyRamdisk ((VOID *)(UINTN)RamdiskAddress, Request->Ramdisk, Request->RamdiskSize, RamdiskPacked); }
@@ -829,6 +868,14 @@ Boot (
     // Claiming free descriptors can split the map. Leave room before ExitBootServices.
     Status = GetMap (&Map, &Capacity, &MapSize, &Key, &Stride);
     if (EFI_ERROR (Status)) { goto Fail; }
+  }
+  AutoReset = PongAutoResetWanted (CommandLine);
+  if (AutoReset) {
+    UINT8  Before, After;
+    INT32  Marked = PongMarkBootloader (&Before, &After);
+    Print (L"DARWINBOOT24: pong_autoreset: reboot-reason cell %02x -> %02x rc=%d; watchdog armed at hand-off\n",
+           Before, After, Marked);
+    AutoReset = (Marked == 0);   // without the cell a bite would boot Android and overwrite the ramoops console
   }
   Stage = L"READY TO ENTER";
   DiagDrawVideo (Stage, 0, Video);
@@ -878,6 +925,7 @@ Boot (
       // segments/BSS, args, ADT, initrd, trustcache and copied trampoline.
       // Untouched free pages are not boot input. Clean only populated data,
       // while boot_args still advertises the complete owned window/banks.
+      if (AutoReset) { PongArmWatchdog (); }
       Enter (ArgsAddress, Address + Kernel.Entry - Kernel.Base, Address, Used, Video[0], Video[2] * Video[4]);
       CpuDeadLoop ();
     }
@@ -886,6 +934,7 @@ Boot (
   CpuDeadLoop ();
   return EFI_ABORTED;
 Fail:
+  mFailStage = Stage;
   UnicodeSPrint (Failure, sizeof (Failure), L"BOOT FAILED %s %016lx", Stage, Status);
   DiagDraw (Failure, 0);
   if (Root != NULL) { Root->Close (Root); }
@@ -898,8 +947,92 @@ Fail:
     gBS->FreePages (Owned[Index].Start, EFI_SIZE_TO_PAGES (Owned[Index].Size));
   }
   if (AudioAddress != 0) { gBS->FreePages (AudioAddress, 16); }
+  if (PanelAddress != 0) { gBS->FreePages (PanelAddress, PANEL_POOL_PAGES); }
   if (Address != 0) { gBS->FreePages (Address, EFI_SIZE_TO_PAGES (WindowSize)); }
   Print (L"DARWINBOOT: boot refused: %r; firmware retained\n", Status);
+  return Status;
+}
+
+// Appends Line to logfs:\BOOTFAIL.TXT, the FAT partition RamoopsDump writes and cycle.sh reads back from Android.
+STATIC
+VOID
+BootFailLog (CONST CHAR8 *Line)
+{
+  EFI_HANDLE                      *Handles;
+  UINTN                           Count, I, Size;
+  EFI_PARTITION_INFO_PROTOCOL     *Info;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *Fs;
+  EFI_FILE_PROTOCOL               *Root = NULL, *File;
+
+  if (EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &gEfiPartitionInfoProtocolGuid, NULL, &Count, &Handles))) { return; }
+  for (I = 0; (I < Count) && (Root == NULL); I++) {
+    if (EFI_ERROR (gBS->HandleProtocol (Handles[I], &gEfiPartitionInfoProtocolGuid, (VOID **)&Info)) ||
+        (Info->Type != PARTITION_TYPE_GPT) || (StrCmp (Info->Info.Gpt.PartitionName, L"logfs") != 0)) {
+      continue;
+    }
+    if (EFI_ERROR (gBS->HandleProtocol (Handles[I], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&Fs)) ||
+        EFI_ERROR (Fs->OpenVolume (Fs, &Root))) {
+      Root = NULL;
+    }
+  }
+  FreePool (Handles);
+  if (Root == NULL) { return; }
+  if (!EFI_ERROR (Root->Open (Root, &File, L"BOOTFAIL.TXT", EFI_FILE_MODE_CREATE | EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0))) {
+    File->SetPosition (File, MAX_UINT64);   // end of file
+    Size = AsciiStrLen (Line);
+    File->Write (File, &Size, (VOID *)Line);
+    File->Flush (File);
+    File->Close (File);
+  }
+  Root->Close (Root);
+}
+
+// zizhan: now and then the first automatic boot came back to the UniXNU menu ("'<title>' returned: <status>", g98), which
+// then waits for input with no watchdog armed, so an unattended round sat there until someone picked the entry by hand
+// (that always worked). Retry the hand-off, log every failure, and in unattended rounds (pong_autoreset) go back to
+// fastboot after the last one instead of waiting at the menu.
+#define BOOT_ATTEMPTS  3
+
+STATIC
+EFI_STATUS
+EFIAPI
+Boot (
+  IN UNIXNU_LOADER_PROTOCOL    *This,
+  IN CONST UNIXNU_LOADER_BOOT_REQUEST *Request
+  )
+{
+  EFI_STATUS   Status = EFI_ABORTED;
+  UINTN        Attempt;
+  CONST CHAR16 *Arg;
+  CHAR8        Line[256];
+  UINT8        Before, After;
+  INT32        Marked;
+
+  for (Attempt = 1; Attempt <= BOOT_ATTEMPTS; Attempt++) {
+    mFailStage = L"REQUEST";
+    mFailNote[0] = 0;
+    Status = BootOnce (This, Request);   // returns only when the boot was refused
+    AsciiSPrint (Line, sizeof (Line), "DARWINBOOT24 attempt %u/%u: %s failed %r (0x%lx) %s\r\n", (UINT32)Attempt,
+                 (UINT32)BOOT_ATTEMPTS, mFailStage, Status, (UINT64)Status, mFailNote);
+    BootFailLog (Line);
+    Print (L"DARWINBOOT24: attempt %u: %s failed %r\n", (UINT32)Attempt, mFailStage, Status);
+    gBS->Stall (500000);
+  }
+  Arg = (Request != NULL && Request->BootArgs != NULL) ? StrStr (Request->BootArgs, L"pong_autoreset=") : NULL;
+  if ((Arg != NULL) && (StrDecimalToUintn (Arg + 15) != 0)) {
+    Marked = PongMarkBootloader (&Before, &After);
+    AsciiSPrint (Line, sizeof (Line), "DARWINBOOT24 giving up: reboot-reason %02x -> %02x rc=%d, watchdog bite to fastboot\r\n",
+                 Before, After, Marked);
+    BootFailLog (Line);
+    if (Marked == 0) {
+      // Interrupts off so no firmware timer pets or disables the watchdog; the bite lands in fastboot.
+      __asm__ volatile ("msr daifset, #0xf" ::: "memory");
+      PongSmc (0x86000005, 2, 0);
+      PongSmc (0x86000008, 1000, 1000);
+      PongSmc (0x86000005, 3, 0);
+      CpuDeadLoop ();
+    }
+  }
   return Status;
 }
 

@@ -628,6 +628,11 @@ jobs:
           } > ci-env.sh
       - name: Compile CI kernel
         id: kernel
+        env:
+          # prepare-xnu-source.py reads DriverKit headers through the GitHub API; anonymous calls from
+          # hosted runners hit "HTTP Error 403: rate limit exceeded" (2026-11-01). The script sends the
+          # token to GitHub hosts only.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           source ci-env.sh

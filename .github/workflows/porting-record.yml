@@ -1,4 +1,4 @@
-name: Pong porting record
+name: Porting record
 on: [push, pull_request]
 permissions:
   contents: read

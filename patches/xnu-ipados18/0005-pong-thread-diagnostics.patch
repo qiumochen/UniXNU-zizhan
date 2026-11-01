@@ -1,0 +1,799 @@
+# 0005: diagnostics in osfmk/kern/thread.c -- pong_dump_waiting_threads (root-mount stall, g28) and plan A2s
+# 1 ms thread-state sampler pong_thread_sampler_start (formerly 0007; one patch, as both append to the file end).
+# Also the gesture sampler pong_gesture_sample (gs=<ms>, 2026-11-01: SpringBoard main thread after each touch down).
+diff --git a/osfmk/kern/thread.c b/osfmk/kern/thread.c
+index 0bfcb98..14a5739 100644
+--- a/osfmk/kern/thread.c
++++ b/osfmk/kern/thread.c
+@@ -4419,3 +4419,791 @@ dtrace_thread_didexec(thread_t thread)
+ 	thread->t_dtrace_flags |= TH_DTRACE_EXECSUCCESS;
+ }
+ #endif /* CONFIG_DTRACE */
++
++#if defined(__arm64__)  /* thread_kernel_state comes in through arm/thread.h */
++
++#if __has_feature(ptrauth_calls)
++#define PONG_STRIP(p) ((uintptr_t)ptrauth_strip((void *)(p), ptrauth_key_return_address))
++#else
++#define PONG_STRIP(p) ((uintptr_t)(p))
++#endif
++
++/*
++ * zizhan bring-up: one console line per waiting thread -- wait event, block
++ * hint, continuation and the saved frame-pointer chain -- so a stalled root
++ * mount shows which thread waits on what. Frames are read only inside the
++ * thread's own kernel stack; the kernel has no slide, so addresses symbolicate
++ * directly against the kernel Mach-O.
++ */
++void pong_dump_waiting_threads(const char *why);
++void
++pong_dump_waiting_threads(const char *why)
++{
++	thread_t thread;
++	unsigned shown = 0;
++
++	printf("PONG WAITERS begin: %s\n", why);
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&threads, thread, thread_t, threads) {
++		char line[400];
++		int n;
++
++		if (!(thread->state & TH_WAIT) || shown >= 400) {
++			continue;
++		}
++		shown++;
++		n = snprintf(line, sizeof(line), "PONG WAIT tid=%llu %s hint=%d ev=0x%llx cont=0x%lx",
++		    thread_tid(thread), get_threadtask(thread) == kernel_task ? "k" : "u",
++		    (int)thread->block_hint, (unsigned long long)thread->wait_event,
++		    (unsigned long)PONG_STRIP(thread->continuation));
++		if (thread->kernel_stack != 0 && thread->machine.kstackptr != NULL) {
++			struct arm_kernel_saved_state *ss =
++			    &((thread_kernel_state_t)thread->machine.kstackptr)->machine.ss;
++			uintptr_t lo = thread->kernel_stack, hi = lo + kernel_stack_size;
++			uintptr_t fp = ss->fp;
++
++			n += snprintf(line + n, sizeof(line) - n, " lr=%lx bt", (unsigned long)PONG_STRIP(ss->lr));
++			for (int frame = 0; frame < 16 && fp >= lo && fp + 16 <= hi && (fp & 7) == 0 &&
++			    n < (int)sizeof(line) - 20; frame++) {
++				uintptr_t next = ((uintptr_t *)fp)[0];
++
++				n += snprintf(line + n, sizeof(line) - n, " %lx",
++				    (unsigned long)PONG_STRIP(((uintptr_t *)fp)[1]));
++				if (next <= fp) {
++					break;
++				}
++				fp = next;
++			}
++		}
++		printf("%s\n", line);
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++	printf("PONG WAITERS end: %u waiting threads\n", shown);
++}
++#endif /* __arm64__ */
++
++#if defined(__arm64__)
++/*
++ * zizhan plan A2 (docs/plan/2026-10-30-cpu-side.md): sample one process's threads every millisecond -- running (and on which
++ * core), queued to run, or waiting (block hint and four kernel return addresses past thread_invoke/thread_block_reason, or the
++ * continuation of a stackless wait) -- in the manner of UniXNU-sheng's BootProgress / BootUiTraceProbe rows, to see where a
++ * frame's 25-35 ms goes while neither the CPU nor the GPU is saturated. pong_thread_sampler_start() runs it for the given
++ * seconds; then the heaviest entries are printed twice (console and diagnostic record) for tools/mac/tsample.py.
++ */
++#define PONG_TS_ENTRIES 512
++#define PONG_TS_THREADS 96
++struct pong_ts_entry {
++	uint64_t tid;
++	uintptr_t site[4];
++	uint32_t count;
++	uint8_t kind;           /* 'R' running, 'Q' queued to run, 'W' waiting */
++	uint8_t hint;
++	uint16_t cpu;           /* running: the core */
++};
++static struct pong_ts_entry pong_ts[PONG_TS_ENTRIES];
++static struct { uint64_t tid; char name[MAXTHREADNAMESIZE]; } pong_ts_names[PONG_TS_THREADS];
++static uint32_t pong_ts_samples, pong_ts_lost, pong_ts_seconds;
++static char pong_ts_proc[MAXCOMLEN + 1];
++extern char *proc_name_address(void *);
++extern void pong_ramoops_diagnostic_write(const char *, int);
++
++static void
++pong_ts_count(uint64_t tid, uint8_t kind, uint8_t hint, uint16_t cpu, const uintptr_t site[4])
++{
++	uint64_t h = tid * 0x9e3779b97f4a7c15ull ^ kind ^ ((uint64_t)hint << 8) ^ ((uint64_t)cpu << 16) ^
++	    site[0] ^ (site[1] << 1) ^ (site[2] << 2) ^ (site[3] << 3);
++
++	for (unsigned probe = 0; probe < PONG_TS_ENTRIES; probe++) {
++		struct pong_ts_entry *e = &pong_ts[(h + probe) % PONG_TS_ENTRIES];
++
++		if (e->count == 0) {
++			e->tid = tid; e->kind = kind; e->hint = hint; e->cpu = cpu;
++			memcpy(e->site, site, sizeof(e->site));
++			e->count = 1;
++			return;
++		}
++		if (e->tid == tid && e->kind == kind && e->hint == hint && e->cpu == cpu &&
++		    memcmp(e->site, site, sizeof(e->site)) == 0) {
++			e->count++;
++			return;
++		}
++	}
++	pong_ts_lost++;
++}
++
++static void
++pong_ts_name(thread_t thread, uint64_t tid)
++{
++	for (unsigned i = 0; i < PONG_TS_THREADS; i++) {
++		if (pong_ts_names[i].tid == tid) {
++			return;
++		}
++		if (pong_ts_names[i].tid == 0) {
++			pong_ts_names[i].tid = tid;
++			thread_get_thread_name(thread, pong_ts_names[i].name);
++			for (char *c = pong_ts_names[i].name; *c; c++) {
++				if (*c == ' ') {
++					*c = '_';       /* one word per field for tools/mac/tsample.py */
++				}
++			}
++			return;
++		}
++	}
++}
++
++static const char *
++pong_ts_name_of(uint64_t tid)
++{
++	for (unsigned i = 0; i < PONG_TS_THREADS && pong_ts_names[i].tid; i++) {
++		if (pong_ts_names[i].tid == tid) {
++			return pong_ts_names[i].name[0] ? pong_ts_names[i].name : "-";
++		}
++	}
++	return "?";
++}
++
++static void
++pong_ts_sample(thread_t thread)
++{
++	uintptr_t site[4] = {0, 0, 0, 0};
++	const uint64_t tid = thread_tid(thread);
++	const int state = thread->state;
++
++	pong_ts_name(thread, tid);
++	if ((state & TH_RUN) || !(state & TH_WAIT)) {
++		/* the raw field, not thread_get_runq(): that asserts the thread lock (g90 panicked "Lock not owned"); a stale read
++		 * only misfiles one sample */
++		if (os_atomic_load(&thread->__runq.runq, relaxed) != PROCESSOR_NULL) {
++			pong_ts_count(tid, 'Q', 0, 0, site);
++		} else {
++			processor_t p = thread->last_processor;
++			pong_ts_count(tid, 'R', 0, p ? (uint16_t)p->cpu_id : 0xffff, site);
++		}
++		return;
++	}
++	const vm_offset_t stack = thread->kernel_stack;
++	if (stack != 0 && thread->machine.kstackptr != NULL) {
++		struct arm_kernel_saved_state *ss = &((thread_kernel_state_t)thread->machine.kstackptr)->machine.ss;
++		uintptr_t fp = ss->fp;
++		unsigned got = 0;
++
++		for (unsigned frame = 0; frame < 8 && got < 4 && fp >= stack && fp + 16 <= stack + kernel_stack_size &&
++		    (fp & 7) == 0; frame++) {
++			const uintptr_t next = ((uintptr_t *)fp)[0];
++			if (frame >= 2) {
++				site[got++] = PONG_STRIP(((uintptr_t *)fp)[1]);
++			}
++			if (next <= fp) {
++				break;
++			}
++			fp = next;
++		}
++	} else {
++		site[0] = PONG_STRIP(thread->continuation);
++	}
++	pong_ts_count(tid, 'W', (uint8_t)thread->block_hint, 0, site);
++}
++
++/* Per-thread totals: g95/g99 printed only the 48 heaviest entries, and SpringBoard's many idle threads (one wait site each)
++ * pushed every running entry out. Threads that never ran or queued are summed into one line and left out of the entries. */
++struct pong_ts_sum {
++	uint64_t tid;
++	uint32_t little, big, queued, wait;
++};
++static struct pong_ts_sum pong_ts_sums[PONG_TS_THREADS];
++static bool pong_ts_shown[PONG_TS_ENTRIES];
++
++static struct pong_ts_sum *
++pong_ts_sum_of(uint64_t tid)
++{
++	for (unsigned i = 0; i < PONG_TS_THREADS; i++) {
++		if (pong_ts_sums[i].tid == tid || pong_ts_sums[i].tid == 0) {
++			pong_ts_sums[i].tid = tid;
++			return &pong_ts_sums[i];
++		}
++	}
++	return NULL;
++}
++
++static void
++pong_ts_emit(char *line, int n)
++{
++	printf("%s", line);
++	if (n > 0) {
++		pong_ramoops_diagnostic_write(line, n);
++	}
++}
++
++static void
++pong_ts_report(void)
++{
++	char line[300];
++	unsigned idle = 0, other = 0;
++	uint32_t idle_wait = 0;
++
++	for (unsigned i = 0; i < PONG_TS_ENTRIES; i++) {
++		const struct pong_ts_entry *e = &pong_ts[i];
++		struct pong_ts_sum *s = e->count ? pong_ts_sum_of(e->tid) : NULL;
++		if (s == NULL) {
++			other += e->count;
++		} else if (e->kind == 'R') {
++			*(e->cpu < 4 ? &s->little : &s->big) += e->count;
++		} else if (e->kind == 'Q') {
++			s->queued += e->count;
++		} else {
++			s->wait += e->count;
++		}
++	}
++	for (int copy = 0; copy < 2; copy++) {
++		pong_ts_emit(line, snprintf(line, sizeof(line), "PONG TS: %s, %u samples of 1 ms, %u lost\n", pong_ts_proc,
++		    pong_ts_samples, pong_ts_lost));
++		bool *shown = pong_ts_shown;
++		bzero(pong_ts_shown, sizeof(pong_ts_shown));
++		idle = 0;
++		idle_wait = 0;
++		for (unsigned rank = 0; rank < 40; rank++) {
++			unsigned best = PONG_TS_THREADS;
++			uint32_t best_busy = 0;
++			for (unsigned i = 0; i < PONG_TS_THREADS && pong_ts_sums[i].tid; i++) {
++				const struct pong_ts_sum *s = &pong_ts_sums[i];
++				const uint32_t busy = s->little + s->big + s->queued;
++				if (!shown[i] && busy > best_busy) {
++					best = i;
++					best_busy = busy;
++				}
++			}
++			if (best == PONG_TS_THREADS) {
++				break;
++			}
++			shown[best] = true;
++			const struct pong_ts_sum *s = &pong_ts_sums[best];
++			pong_ts_emit(line, snprintf(line, sizeof(line), "PONG TSUM %u %s tid %llu little %u big %u queued %u wait %u\n",
++			    rank, pong_ts_name_of(s->tid), s->tid, s->little, s->big, s->queued, s->wait));
++		}
++		for (unsigned i = 0; i < PONG_TS_THREADS && pong_ts_sums[i].tid; i++) {
++			if (pong_ts_sums[i].little + pong_ts_sums[i].big + pong_ts_sums[i].queued == 0) {
++				idle++;
++				idle_wait += pong_ts_sums[i].wait;
++			}
++		}
++		pong_ts_emit(line, snprintf(line, sizeof(line), "PONG TSUM idle %u threads wait %u, untracked %u\n", idle, idle_wait,
++		    other));
++		bzero(pong_ts_shown, sizeof(pong_ts_shown));
++		for (unsigned rank = 0; rank < 48; rank++) {
++			unsigned best = PONG_TS_ENTRIES;
++			for (unsigned i = 0; i < PONG_TS_ENTRIES; i++) {
++				const struct pong_ts_sum *s = pong_ts[i].count ? pong_ts_sum_of(pong_ts[i].tid) : NULL;
++				if (s != NULL && s->little + s->big + s->queued == 0) {
++					continue;       /* an idle thread's wait: summed above */
++				}
++				if (pong_ts[i].count && !shown[i] && (best == PONG_TS_ENTRIES || pong_ts[i].count > pong_ts[best].count)) {
++					best = i;
++				}
++			}
++			if (best == PONG_TS_ENTRIES) {
++				break;
++			}
++			shown[best] = true;
++			const struct pong_ts_entry *e = &pong_ts[best];
++			const unsigned permille = pong_ts_samples ? (unsigned)((uint64_t)e->count * 1000 / pong_ts_samples) : 0;
++			pong_ts_emit(line, snprintf(line, sizeof(line), "PONG TS %u %s tid %llu %c cpu %u hint %u n %u (%u.%u%%) bt %lx %lx %lx %lx\n",
++			    rank, pong_ts_name_of(e->tid), e->tid, e->kind, e->cpu, e->hint, e->count, permille / 10, permille % 10,
++			    (unsigned long)e->site[0], (unsigned long)e->site[1], (unsigned long)e->site[2], (unsigned long)e->site[3]));
++		}
++	}
++}
++
++static void
++pong_ts_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	task_t target = TASK_NULL, task;
++
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&tasks, task, task_t, tasks) {
++		void *p = get_bsdtask_info(task);
++		if (p != NULL && strncmp(proc_name_address(p), pong_ts_proc, MAXCOMLEN) == 0) {
++			target = task;
++			task_reference(target);
++			break;
++		}
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++	if (target == TASK_NULL) {
++		printf("PONG TS: no process %s\n", pong_ts_proc);
++	} else {
++		uint64_t interval, end;
++		nanoseconds_to_absolutetime(NSEC_PER_MSEC, &interval);
++		end = mach_absolute_time() + interval * 1000 * pong_ts_seconds;
++		printf("PONG TS: sampling %s every 1 ms for %u s\n", pong_ts_proc, pong_ts_seconds);
++		for (uint64_t now = mach_absolute_time(); now < end; now = mach_absolute_time()) {
++			thread_t thread;
++			task_lock(target);
++			queue_iterate(&target->threads, thread, thread_t, task_threads) {
++				pong_ts_sample(thread);
++			}
++			task_unlock(target);
++			pong_ts_samples++;
++			assert_wait_deadline((event_t)&pong_ts_samples, THREAD_UNINT, now + interval);
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++		pong_ts_report();
++		task_deallocate(target);
++	}
++	thread_terminate(current_thread());
++}
++
++void pong_thread_sampler_start(const char *proc, unsigned seconds);
++void
++pong_thread_sampler_start(const char *proc, unsigned seconds)
++{
++	thread_t thread;
++
++	if (pong_ts_seconds != 0 || seconds == 0) {
++		return;
++	}
++	strlcpy(pong_ts_proc, proc, sizeof(pong_ts_proc));
++	pong_ts_seconds = seconds;
++	if (kernel_thread_start_priority(pong_ts_thread, NULL, MAXPRI_KERNEL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++#endif /* __arm64__ */
++
++#if defined(__arm64__)
++/*
++ * zizhan (docs/progress/2026-11-01-120hz-and-cadence.md section 8): the gesture sampler. Every home-screen page swipe stops 160-215 ms
++ * at the finger lift with the GPU idle and no swap, so SpringBoard's main thread is busy or waiting. Boot-arg gs=<ms> (at most
++ * 1000; short gs_* names, as the command line is near its 1023 bytes): every touch down (pong_fts.c touch_post) starts <ms> of 1 ms samples of gs_proc's (default SpringBoard) main
++ * thread -- running (core), queued, or waiting (block hint and kernel wait sites, as the A2 sampler above) -- with its user backtrace
++ * (saved user pc and lr, then the frame-pointer chain; for a thread running in user mode that is the state of its last kernel entry)
++ * and the number of its other threads that run, and which process each of the 8 cores runs (who the main thread waits for: g161
++ * found it 74 % in a port receive during the stalls; g162: that receive is its idle run loop). The first gs_n gestures (default 24) are printed for
++ * tools/mac/gsample.py: timelines with one character per ms, a process-name table, and one line per distinct backtrace.
++ * gs_all=1 also records every running or queued thread of the process (g162: SpringBoard's main thread idles in its run
++ * loop during the stall while backboardd is busier), from gs_from ms after the down on, summed over the gestures and
++ * printed after every 4th; gs_sum=1 sums the main thread's samples from gs_from ms on over the gs_n gestures and prints them once,
++ * after the last (the log of a whole round otherwise overflows the ramoops ring). MaliMetal's notes section 7 asked for the same
++ * ("a gesture-triggered sample of SpringBoard's user stacks").
++ */
++#include <pexpert/pexpert.h>
++#include <arm/cpu_data_internal.h>
++#include <arm64/proc_reg.h>
++#define PONG_GS_MS_MAX 1000
++#define PONG_GS_BTS 400
++#define PONG_GS_CPUS 8
++#define PONG_GS_NAMES 90
++/* index -> timeline character: printable ASCII without '.' (no sample, idle core) and '?' (table full) */
++static const char pong_gs_alphabet[] =
++    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-/:;<=>@[\\]^_`{|}~";
++#define PONG_GS_FRAMES 14
++struct pong_gs_bt {
++	uintptr_t pc[PONG_GS_FRAMES];   /* user pc, lr, then the return addresses of the frame chain */
++	uintptr_t site[4];
++	uint32_t count;
++	uint16_t first, last;
++	uint8_t kind, hint;
++	uint16_t cpu;
++	uint64_t tid;
++};
++static struct pong_gs_bt pong_gs_bts[PONG_GS_BTS];
++static char pong_gs_state[PONG_GS_MS_MAX + 1], pong_gs_which[PONG_GS_MS_MAX + 1], pong_gs_others[PONG_GS_MS_MAX + 1];
++static char pong_gs_cpu[PONG_GS_CPUS][PONG_GS_MS_MAX + 1], pong_gs_names[PONG_GS_NAMES][MAXCOMLEN + 1];
++static unsigned pong_gs_nnames;
++static uint32_t pong_gs_all, pong_gs_sum, pong_gs_from, pong_gs_ms, pong_gs_n = 24, pong_gs_count, pong_gs_parsed, pong_gs_lost;
++static volatile uint32_t pong_gs_busy;
++static char pong_gs_proc[MAXCOMLEN + 1] = "SpringBoard";
++static uint64_t pong_gs_down;
++
++static uint64_t
++pong_gs_micros(uint64_t absolute)
++{
++	uint64_t ns;
++
++	absolutetime_to_nanoseconds(absolute, &ns);
++	return ns / 1000;
++}
++
++/* the A2 sampler's classification for one thread: 'R' running (and the core), 'Q' queued, 'W' waiting (hint, kernel sites) */
++static uint8_t
++pong_gs_classify(thread_t thread, uint16_t *cpu, uint8_t *hint, uintptr_t site[4])
++{
++	const int state = thread->state;
++
++	*cpu = 0; *hint = 0;
++	if ((state & TH_RUN) || !(state & TH_WAIT)) {
++		if (os_atomic_load(&thread->__runq.runq, relaxed) != PROCESSOR_NULL) {
++			return 'Q';
++		}
++		processor_t p = thread->last_processor;
++		*cpu = p ? (uint16_t)p->cpu_id : 0xffff;
++		return 'R';
++	}
++	const vm_offset_t stack = thread->kernel_stack;
++	if (stack != 0 && thread->machine.kstackptr != NULL) {
++		struct arm_kernel_saved_state *ss = &((thread_kernel_state_t)thread->machine.kstackptr)->machine.ss;
++		uintptr_t fp = ss->fp;
++		unsigned got = 0;
++
++		for (unsigned frame = 0; frame < 8 && got < 4 && fp >= stack && fp + 16 <= stack + kernel_stack_size &&
++		    (fp & 7) == 0; frame++) {
++			const uintptr_t next = ((uintptr_t *)fp)[0];
++			if (frame >= 2) {
++				site[got++] = PONG_STRIP(((uintptr_t *)fp)[1]);
++			}
++			if (next <= fp) {
++				break;
++			}
++			fp = next;
++		}
++	} else {
++		site[0] = PONG_STRIP(thread->continuation);
++	}
++	*hint = (uint8_t)thread->block_hint;
++	return 'W';
++}
++
++/*
++ * A thread running in user mode has no saved user state of the moment (g168: SpringBoard's main thread ran 75 % of a tap's stall and
++ * its saved pc was wherever it last entered the kernel). As kperf does, an IPI to its core reads the interrupted registers
++ * (cpu_int_state) there; the frame chain is walked afterwards from here, so its outer frames can be a little late.
++ */
++static struct {
++	thread_t thread;
++	uintptr_t pc, lr, fp;
++	volatile uint32_t done, user;
++} pong_gs_ipi_box;
++
++static void
++pong_gs_ipi(void *arg)
++{
++	__typeof__(pong_gs_ipi_box) *box = arg;
++	arm_saved_state_t *state = getCpuDatap()->cpu_int_state;
++
++	if (current_thread() == box->thread && state != NULL && PSR64_IS_USER(get_saved_state_cpsr(state))) {
++		box->pc = get_saved_state_pc(state);
++		box->lr = get_saved_state_lr(state);
++		box->fp = get_saved_state_fp(state);
++		box->user = 1;
++	}
++	os_atomic_store(&box->done, 1, release);
++}
++
++/* the running thread's user registers now, through an IPI to its core; false when it was not in user mode there */
++static bool
++pong_gs_running_regs(thread_t thread, uint16_t cpu, uintptr_t regs[3])
++{
++	if (cpu == 0xffff || (int)cpu == cpu_number() || (os_atomic_load(&pong_gs_ipi_box.done, acquire) == 0 &&
++	    pong_gs_ipi_box.thread != THREAD_NULL)) {
++		return false;   /* our own core, or a previous IPI not yet answered */
++	}
++	pong_gs_ipi_box.thread = thread;
++	pong_gs_ipi_box.user = 0;
++	os_atomic_store(&pong_gs_ipi_box.done, 0, release);
++	if (cpu_xcall(cpu, pong_gs_ipi, &pong_gs_ipi_box) != KERN_SUCCESS) {
++		os_atomic_store(&pong_gs_ipi_box.done, 1, release);
++		return false;
++	}
++	uint64_t deadline;
++	nanoseconds_to_absolutetime(200 * NSEC_PER_USEC, &deadline);
++	deadline += mach_absolute_time();
++	while (os_atomic_load(&pong_gs_ipi_box.done, acquire) == 0 && mach_absolute_time() < deadline) {
++		;
++	}
++	if (os_atomic_load(&pong_gs_ipi_box.done, acquire) == 0 || !pong_gs_ipi_box.user) {
++		return false;
++	}
++	regs[0] = pong_gs_ipi_box.pc; regs[1] = pong_gs_ipi_box.lr; regs[2] = pong_gs_ipi_box.fp;
++	return true;
++}
++
++/* the saved user state (or, for a running thread, its registers from pong_gs_running_regs) and frame chain; outside the task lock,
++ * as reading the user stack can fault */
++static void
++pong_gs_backtrace(thread_t thread, vm_map_t map, uintptr_t pc[PONG_GS_FRAMES], const uintptr_t *now)
++{
++	struct arm_saved_state *regs = get_user_regs(thread);
++	uintptr_t fp;
++
++	if (now != NULL) {
++		pc[0] = PONG_STRIP(now[0]);
++		pc[1] = PONG_STRIP(now[1]);
++		fp = now[2];
++	} else if (regs == NULL) {
++		return;
++	} else {
++		pc[0] = PONG_STRIP(get_saved_state_pc(regs));
++		pc[1] = PONG_STRIP(get_saved_state_lr(regs));
++		fp = get_saved_state_fp(regs);
++	}
++	for (unsigned i = 2; i < PONG_GS_FRAMES && fp != 0 && (fp & 7) == 0 && fp < MACH_VM_MAX_ADDRESS_RAW; i++) {
++		uintptr_t frame[2];
++		if (vm_map_read_user(map, fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++			break;
++		}
++		pc[i] = PONG_STRIP(frame[1]);
++		if (frame[0] <= fp) {
++			break;
++		}
++		fp = frame[0];
++	}
++}
++
++static unsigned
++pong_gs_record(unsigned ms, uint64_t tid, uint8_t kind, uint8_t hint, uint16_t cpu, const uintptr_t site[4], const uintptr_t pc[PONG_GS_FRAMES])
++{
++	for (unsigned i = 0; i < PONG_GS_BTS; i++) {
++		struct pong_gs_bt *b = &pong_gs_bts[i];
++		if (b->count == 0) {
++			memcpy(b->pc, pc, sizeof(b->pc));
++			memcpy(b->site, site, sizeof(b->site));
++			b->kind = kind; b->hint = hint; b->cpu = cpu >= 4 ? 4 : 0; b->tid = tid;
++			b->first = (uint16_t)ms;
++		} else if (b->tid != tid || b->kind != kind || b->hint != hint || (cpu >= 4 ? 4 : 0) != b->cpu ||
++		    memcmp(b->pc, pc, sizeof(b->pc)) != 0 || memcmp(b->site, site, sizeof(b->site)) != 0) {
++			continue;
++		}
++		b->count++;
++		b->last = (uint16_t)ms;
++		return i;
++	}
++	pong_gs_lost++;
++	return PONG_GS_BTS;
++}
++
++static char
++pong_gs_state_char(uint8_t kind, uint8_t hint, uint16_t cpu)
++{
++	if (kind == 'R' || kind == 'P') {
++		return cpu >= 4 ? 'R' : 'r';     /* zizhan: cores 0-3 are the A510s */
++	}
++	if (kind == 'Q') {
++		return 'q';
++	}
++	return hint < 10 ? (char)('0' + hint) : hint < 26 ? (char)('A' + hint - 10) : '+';
++}
++
++/* the process a core runs now, as a timeline character; unlocked reads of another core's active thread, as the A2 sampler */
++static char
++pong_gs_core(unsigned cpu)
++{
++	processor_t p = processor_array[cpu];
++	const char *name;
++
++	if (p == PROCESSOR_NULL) {
++		return '.';
++	}
++	thread_t th = p->active_thread;
++	if (th == THREAD_NULL || th == p->idle_thread) {
++		return '.';
++	}
++	task_t task = get_threadtask(th);
++	if (task == TASK_NULL) {
++		return '?';
++	}
++	if (task == kernel_task) {
++		name = "kernel_task";
++	} else {
++		void *bsd = get_bsdtask_info(task);
++		name = bsd ? proc_name_address(bsd) : "?";
++	}
++	for (unsigned i = 0; i < pong_gs_nnames; i++) {
++		if (strncmp(pong_gs_names[i], name, MAXCOMLEN) == 0) {
++			return pong_gs_alphabet[i];
++		}
++	}
++	if (pong_gs_nnames >= PONG_GS_NAMES) {
++		return '?';
++	}
++	strlcpy(pong_gs_names[pong_gs_nnames], name, sizeof(pong_gs_names[0]));
++	return pong_gs_alphabet[pong_gs_nnames++];
++}
++
++static void
++pong_gs_print_line(const char *what, unsigned gesture, const char *chars, unsigned length)
++{
++	for (unsigned off = 0; off < length; off += 100) {
++		printf("PONG GS %s %u off %u %.*s\n", what, gesture, off, (int)(length - off < 100 ? length - off : 100), chars + off);
++	}
++}
++
++static void
++pong_gs_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	task_t target = TASK_NULL, task;
++	const unsigned gesture = pong_gs_count;
++
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&tasks, task, task_t, tasks) {
++		void *p = get_bsdtask_info(task);
++		if (p != NULL && strncmp(proc_name_address(p), pong_gs_proc, MAXCOMLEN) == 0) {
++			target = task;
++			task_reference(target);
++			break;
++		}
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++	if (target == TASK_NULL) {
++		pong_gs_busy = 0;
++		thread_terminate(current_thread());
++		return;
++	}
++	vm_map_t map = get_task_map_reference(target);
++	uint64_t info[24] = {0}, interval, next;
++	const mach_vm_address_t images = task_get_all_image_info_addr(target);
++
++	/* dyld_all_image_infos (64-bit): sharedCacheSlide at 152, sharedCacheUUID at 160, sharedCacheBaseAddress at 176 */
++	if (map != VM_MAP_NULL && images != 0 && vm_map_read_user(map, images, info, sizeof(info)) != KERN_SUCCESS) {
++		bzero(info, sizeof(info));
++	}
++	if (!(pong_gs_all || pong_gs_sum) || gesture == 0) {
++		bzero(pong_gs_bts, sizeof(pong_gs_bts));
++		pong_gs_lost = 0;
++	}
++	memset(pong_gs_state, '.', pong_gs_ms);
++	memset(pong_gs_which, '.', pong_gs_ms);
++	memset(pong_gs_others, '.', pong_gs_ms);
++	for (unsigned c = 0; c < PONG_GS_CPUS; c++) {
++		memset(pong_gs_cpu[c], '.', pong_gs_ms);
++	}
++	pong_gs_nnames = 0;
++	nanoseconds_to_absolutetime(NSEC_PER_MSEC, &interval);
++	next = mach_absolute_time();
++	for (unsigned ms = 0; ms < pong_gs_ms && map != VM_MAP_NULL; ms++) {
++		thread_t thread, main = THREAD_NULL;
++		thread_t busy[12];
++		uint8_t busy_kind[12];
++		uint16_t busy_cpu[12];
++		unsigned others = 0, nbusy = 0;
++		uintptr_t site[4] = {0, 0, 0, 0}, pc[PONG_GS_FRAMES];
++		uint16_t cpu = 0;
++		uint8_t hint = 0, kind = 0;
++
++		task_lock(target);
++		queue_iterate(&target->threads, thread, thread_t, task_threads) {
++			if (main == THREAD_NULL) {
++				main = thread;          /* the first thread of the task: the main thread */
++				thread_reference(main);
++				kind = pong_gs_classify(main, &cpu, &hint, site);
++				pong_ts_name(main, thread_tid(main));
++			} else if ((thread->state & TH_RUN) || !(thread->state & TH_WAIT)) {
++				others++;
++				if (pong_gs_all && ms >= pong_gs_from && nbusy < 12) {
++					uintptr_t unused[4] = {0, 0, 0, 0};
++					uint8_t h;
++					busy_kind[nbusy] = pong_gs_classify(thread, &busy_cpu[nbusy], &h, unused);
++					pong_ts_name(thread, thread_tid(thread));
++					thread_reference(thread);
++					busy[nbusy++] = thread;
++				}
++			}
++		}
++		task_unlock(target);
++		if (main != THREAD_NULL) {
++			uintptr_t now[3];
++			const bool precise = kind == 'R' && pong_gs_running_regs(main, cpu, now);
++			bzero(pc, sizeof(pc));
++			pong_gs_backtrace(main, map, pc, precise ? now : NULL);
++			if (precise) {
++				kind = 'P';     /* running, registers of the moment */
++			}
++			thread_deallocate(main);
++			const unsigned b = !(pong_gs_all || pong_gs_sum) || ms >= pong_gs_from ? pong_gs_record(ms, thread_tid(main), kind, hint, cpu, site, pc) : PONG_GS_BTS;
++			pong_gs_state[ms] = pong_gs_state_char(kind, hint, cpu);
++			pong_gs_which[ms] = b < sizeof(pong_gs_alphabet) - 1 ? pong_gs_alphabet[b] : '?';
++		}
++		for (unsigned i = 0; i < nbusy; i++) {
++			const uintptr_t none[4] = {0, 0, 0, 0};
++			bzero(pc, sizeof(pc));
++			pong_gs_backtrace(busy[i], map, pc, NULL);
++			(void)pong_gs_record(ms, thread_tid(busy[i]), busy_kind[i], 0, busy_cpu[i], none, pc);
++			thread_deallocate(busy[i]);
++		}
++		pong_gs_others[ms] = (char)('0' + (others > 9 ? 9 : others));
++		for (unsigned c = 0; c < PONG_GS_CPUS; c++) {
++			pong_gs_cpu[c][ms] = pong_gs_core(c);
++		}
++		next += interval;
++		assert_wait_deadline((event_t)&pong_gs_busy, THREAD_UNINT, next);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++	printf("PONG GS g %u down %llu ms %u slide %#llx base %#llx uuid %016llx%016llx lost %u\n", gesture, pong_gs_down, pong_gs_ms,
++	    info[19], info[22], info[20], info[21], pong_gs_lost);
++	if (gesture == 0 && map != VM_MAP_NULL) {
++		/* the images outside the shared cache (the Metal plug-in, the Vulkan driver), once: dyld_all_image_infos has infoArrayCount at 4
++		 * and infoArray at 8, entries {load address, path, date} */
++		const uint32_t count = (uint32_t)(info[0] >> 32);
++		for (uint32_t i = 0; i < count && i < 1500 && info[1] != 0; i++) {
++			uint64_t entry[3];
++			char path[160];
++			if (vm_map_read_user(map, info[1] + 24 * i, entry, sizeof(entry)) != KERN_SUCCESS) {
++				break;
++			}
++			if (entry[0] >= info[22] && entry[0] < info[22] + 0x100000000ull) {
++				continue;       /* in the shared cache: ipsw a2s with the slide */
++			}
++			bzero(path, sizeof(path));
++			if (entry[1] == 0 || vm_map_read_user(map, entry[1], path, sizeof(path) - 1) != KERN_SUCCESS) {
++				strlcpy(path, "?", sizeof(path));
++			}
++			printf("PONG GS img %#llx %s\n", entry[0], path);
++		}
++	}
++	pong_gs_print_line("s", gesture, pong_gs_state, pong_gs_ms);
++	pong_gs_print_line("w", gesture, pong_gs_which, pong_gs_ms);
++	pong_gs_print_line("o", gesture, pong_gs_others, pong_gs_ms);
++	for (unsigned c = 0; c < PONG_GS_CPUS; c++) {
++		char what[4] = {'c', (char)('0' + c), 0, 0};
++		pong_gs_print_line(what, gesture, pong_gs_cpu[c], pong_gs_ms);
++	}
++	for (unsigned i = 0; i < pong_gs_nnames; i++) {
++		printf("PONG GS n %u %c %s\n", gesture, pong_gs_alphabet[i], pong_gs_names[i]);
++	}
++	for (unsigned i = 0; i < PONG_GS_BTS && pong_gs_bts[i].count && (pong_gs_sum ? gesture + 1 == pong_gs_n : !pong_gs_all || gesture % 4 == 3); i++) {
++		const struct pong_gs_bt *b = &pong_gs_bts[i];
++		char line[512];
++		int at = snprintf(line, sizeof(line), "PONG GS b %u %u n %u ms %u-%u %c cpu %u hint %u k %lx %lx %lx %lx t %llu %s u", gesture,
++		    i, b->count, b->first, b->last, b->kind, b->cpu, b->hint, (unsigned long)b->site[0], (unsigned long)b->site[1],
++		    (unsigned long)b->site[2], (unsigned long)b->site[3], b->tid, pong_ts_name_of(b->tid));
++		for (unsigned f = 0; f < PONG_GS_FRAMES && b->pc[f] && at > 0 && at < (int)sizeof(line) - 20; f++) {
++			at += snprintf(line + at, sizeof(line) - at, " %lx", (unsigned long)b->pc[f]);
++		}
++		printf("%s\n", line);
++	}
++	if (map != VM_MAP_NULL) {
++		vm_map_deallocate(map);
++	}
++	task_deallocate(target);
++	pong_gs_count++;
++	pong_gs_busy = 0;
++	thread_terminate(current_thread());
++}
++
++void pong_gesture_sample(void);
++void
++pong_gesture_sample(void)
++{
++	thread_t thread;
++
++	if (!pong_gs_parsed) {
++		pong_gs_parsed = 1;
++		PE_parse_boot_argn("gs", &pong_gs_ms, sizeof(pong_gs_ms));
++		PE_parse_boot_argn("gs_n", &pong_gs_n, sizeof(pong_gs_n));
++		PE_parse_boot_argn("gs_proc", pong_gs_proc, sizeof(pong_gs_proc));
++		PE_parse_boot_argn("gs_all", &pong_gs_all, sizeof(pong_gs_all));
++		PE_parse_boot_argn("gs_sum", &pong_gs_sum, sizeof(pong_gs_sum));
++		PE_parse_boot_argn("gs_from", &pong_gs_from, sizeof(pong_gs_from));
++		if (pong_gs_ms > PONG_GS_MS_MAX) {
++			pong_gs_ms = PONG_GS_MS_MAX;
++		}
++	}
++	if (pong_gs_ms == 0 || pong_gs_count >= pong_gs_n || !os_atomic_cmpxchg(&pong_gs_busy, 0, 1, relaxed)) {
++		return;
++	}
++	pong_gs_down = pong_gs_micros(mach_absolute_time());
++	if (kernel_thread_start_priority(pong_gs_thread, NULL, MAXPRI_KERNEL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		pong_gs_busy = 0;
++	}
++}
++#endif /* __arm64__ */

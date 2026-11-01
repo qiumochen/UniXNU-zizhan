@@ -19,10 +19,14 @@
 #include <libkern/c++/OSIterator.h>
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
+#include "PongBootReset.h"
+#include "PongCpuPark.h"
 
 extern "C" bool pong_cpu_start(IOService *platform);
 #if XNU_PONG_WIFI
 extern "C" void pong_wifi_start_optional(void);
+#endif
+#if XNU_PONG_WIFI || XNU_PONG_POWER
 extern "C" void pong_power_start_optional(void);
 #endif
 #if XNU_PONG_ADRENO_PLATFORM
@@ -145,6 +149,9 @@ bool ArmDTPlatform::createDeviceNubs (IOService *provider)
 
 bool ArmDTPlatform::configure (IOService *provider)
 {
+  // zizhan unattended bring-up (pong_autoreset=<s>): later resets land in fastboot with the ramoops intact.
+  pong_boot_reset::start ();
+  pong_cpu_park::start ();
   __atomic_store_n (&fCalendarOffset, 0, __ATOMIC_RELAXED);
   IORegistryEntry *chosen = provider->childFromPath ("chosen", gIODTPlane);
   OSData *sample = chosen ? OSDynamicCast (OSData, chosen->getProperty ("boot-epoch")) : nullptr;
@@ -222,8 +229,10 @@ bool ArmDTPlatform::configure (IOService *provider)
     return false;
   }
   armdt_platform_configured = 1;
+#if XNU_PONG_WIFI || XNU_PONG_POWER
+  pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack
+#endif
 #if XNU_PONG_WIFI
-  pong_power_start_optional();
   pong_wifi_start_optional();
 #endif
   IOLog ("ArmDTPlatform: registered platform cpus=%u arm-io=%u devices=%u nvram-proxy=%u\n",

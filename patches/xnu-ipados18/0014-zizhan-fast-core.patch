@@ -1,0 +1,40 @@
+zizhan: UI-priority threads take an idle Cortex-X2 (cpu 7) first. Edge treats the three A710s and the X2 of the P cluster as
+equal; SpringBoard's main thread spent 0.73 of a core on the A710s and 0.09 on the X2 in app-open stalls (g170). boot-args
+pong_fast_pri=<pri> (default BASEPRI_FOREGROUND 47, 0 = off), pong_fast_cpu=<n> (default 7).
+
+--- a/osfmk/kern/sched_prim.c
++++ b/osfmk/kern/sched_prim.c
+@@ -248,6 +248,16 @@ rt_runq_is_low_latency(processor_set_t pset)
+ 
+ TUNABLE(bool, cpulimit_affects_quantum, "cpulimit_affects_quantum", true);
+ 
++/*
++ * zizhan (docs/progress/2026-11-01-120hz-and-cadence.md section 12): the P cluster is three Cortex-A710 (cpu 4-6, 2.5-2.7 GHz) and
++ * one Cortex-X2 (cpu 7, 3.0 GHz, a wider core). The scheduler treats them as equal: choose_processor() takes the hint or the
++ * next idle core in order, so during app-open stalls SpringBoard's main thread ran 0.73 of a core on the A710s and 0.09 on the
++ * X2. A user thread at or above pong_fast_pri (default BASEPRI_FOREGROUND, 0 = off) and below the realtime band takes an idle
++ * pong_fast_cpu first (kernel threads, the gesture sampler among them, keep the normal choice).
++ */
++TUNABLE(uint32_t, pong_fast_pri, "pong_fast_pri", BASEPRI_FOREGROUND);
++TUNABLE(uint32_t, pong_fast_cpu, "pong_fast_cpu", 7);
++
+ /* TODO: enable this, to 50us (less than the deferred IPI latency, to beat a spill) */
+ TUNABLE(uint32_t, nonurgent_preemption_timer_us, "nonurgent_preemption_timer", 0); /* microseconds */
+ static uint64_t nonurgent_preemption_timer_abs = 0;
+@@ -5801,6 +5811,16 @@ choose_processor(
+ 
+ 	assert(thread->sched_pri <= MAXPRI);
+ 
++	if (pong_fast_pri != 0 && thread->sched_pri >= (int)pong_fast_pri && thread->sched_pri < BASEPRI_RTQUEUES &&
++	    pong_fast_cpu < MAX_SCHED_CPUS && get_threadtask(thread) != kernel_task) {
++		processor_t fast = processor_array[pong_fast_cpu];
++		if (fast != PROCESSOR_NULL && fast->processor_set == pset && fast->is_recommended &&
++		    bit_test(pset->recommended_bitmask & pset->cpu_state_map[PROCESSOR_IDLE], fast->cpu_id) &&
++		    !bit_test(pset->pending_AST_URGENT_cpu_mask, fast->cpu_id)) {
++			return fast;
++		}
++	}
++
+ 	/*
+ 	 * At this point, we may have a processor hint, and we may have
+ 	 * an initial starting pset. If the hint is not in the pset, or

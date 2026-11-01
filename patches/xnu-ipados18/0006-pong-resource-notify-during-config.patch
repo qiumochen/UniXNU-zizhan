@@ -1,0 +1,30 @@
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -5042,6 +5042,27 @@
+ 
+ 	gIOResourceGenerationCount++;
+ 	gIOResources->registerService();
++#if defined(PONG)
++	/*
++	 * zizhan g28: a driver start() that never returns (AppleImage4 waits
++	 * forever for IOAESAccelerator, which Pong does not provide) keeps
++	 * IOResources' config running, so the re-match requested above is
++	 * deferred for good. A waitForMatchingService(resourceMatching(key))
++	 * that began before this publish -- APFS waiting for "IOBSD" while
++	 * holding the lock the root container probe needs -- then never wakes,
++	 * and the root mount times out. Deliver the matched notification now,
++	 * as the deferred re-match would have.
++	 */
++	gIOResources->lockForArbitration();
++	bool configRunning = (0 != (gIOResources->__state[1] & kIOServiceConfigRunning));
++	gIOResources->unlockForArbitration();
++	if (configRunning) {
++		/* deliverNotification() is a panic stub; do what doServiceMatch does. */
++		OSArray * notifiers = gIOResources->copyNotifiers(gIOMatchedNotification,
++		    kIOServiceMatchedState, 0xffffffff);
++		gIOResources->invokeNotifiers(&notifiers);
++	}
++#endif
+ }
+ 
+ void

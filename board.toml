@@ -5,7 +5,7 @@ name = "pong"
 soc = "SM8475"
 soc_source = "sm8475"
 os_profile = "ipados-18.7.10-22H374"
-description = "Nothing Phone (2): UniXNU UEFI bring-up"
+description = "Xiaomi MIX Fold 2 (zizhan, SM8475): UniXNU bring-up derived from Pong"
 kit = "pong"
 
 # iPadOS 18.7.10 restore selected from the matching J171 BuildIdentity.
@@ -36,9 +36,9 @@ archives = ["component:PongPlatform24"]
 
 # Local prelink and userdata entries are documented under migration/ipados18.
 [firmware]
-config = "pong"
-dsc = "Platforms/Nothing/pongPkg/pong.dsc"
-fd = "Build/pongPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+config = "zizhan"
+dsc = "Platforms/Xiaomi/zizhanPkg/zizhan.dsc"
+fd = "Build/zizhanPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
 patches = [
   "Resources/MuPatches/AsmMacroLib.patch",
   "Resources/MuPatches/Auth-Service.patch",
@@ -51,6 +51,7 @@ packages = [
   "{tree}/package",
   "{tree}/drivers/DarwinBoot24",
   "{edk2}",
+  "{uefi}/Platforms/Xiaomi",
   "{uefi}/Platforms/Nothing",
   "{uefi}/Common/Mu",
   "{uefi}/Common/Mu_OEM_Sample",
@@ -66,7 +67,7 @@ DEVICE_MODEL = "0"
 ENABLE_SECUREBOOT = "0"
 MEMORY_PROTECTION = "TRUE"
 SHIP_MODE = "FALSE"
-BUILDID_STRING = "UniXNU-Pong"
+BUILDID_STRING = "UniXNU-Zizhan"
 PONG_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE.
 
 [payload]

@@ -47,7 +47,7 @@ def load_format2_hardware(path):
     """
     global DRAM_BASE, GIC_DIST, GIC_DIST_SIZE, GIC_REDIST, GIC_REDIST_SIZE
     global GIC_REDIST_STRIDE, TIMEBASE, UFS_HC, UFS_HC_SIZE, GCC_UFS_PAGE
-    global UFS_STREAM_ID, UFS_SPI, CPU_AFFINITIES
+    global UFS_STREAM_ID, UFS_SPI, CPU_AFFINITIES, CPU_CLUSTER_TYPES
     spec=importlib.util.spec_from_file_location('pong_fdt',ROOT/'scripts/prepare-pong-wifi.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     nodes=module.fdt_nodes(Path(path).read_bytes())
@@ -63,6 +63,8 @@ def load_format2_hardware(path):
     cpus=[p for n,p in nodes.items() if n.startswith('/cpus/cpu@') and
           p.get('status',b'okay\0') in (b'okay\0',b'ok\0')]
     CPU_AFFINITIES=sorted(value(p,'reg') for p in cpus)
+    # unixnu,cluster-type ("E"/"P") per affinity, as UniXNU's devicetree.py exports it (XNU reads 'E' or 'P' as an integer).
+    CPU_CLUSTER_TYPES={value(p,'reg'):p['unixnu,cluster-type'].rstrip(b'\0') for p in cpus if 'unixnu,cluster-type' in p}
     if len(CPU_AFFINITIES)!=8 or CPU_AFFINITIES[0]!=0:
         raise ValueError('This Pong profile requires its eight physical CPU affinities')
     memory=next(p for p in nodes.values() if p.get('device_type')==b'memory\0')
@@ -175,12 +177,16 @@ def main():
         # scale becomes 0 in FBSDisplayMode (infinite logical dimensions) and
         # SpringBoard deliberately traps before creating its main display.
         # Keep the real framebuffer pixels; do not substitute an Apple panel.
-        ('display-scale', struct.pack('<I', 3)),
+        # zizhan: the 2160x1916 inner panel needs an integer logical size; 1916/3 is fractional and
+        # SpringBoard's status-bar Auto Layout recursed until its stack overflowed. 2x gives 1080x958 points.
+        ('display-scale', struct.pack('<I', 2)),
         ('pong-dsi-backlight', struct.pack('<Q6I',
             int(backlight['controller'], 0), backlight['register_bytes'],
             backlight['maximum'], backlight['minimum_nonzero'],
             int(backlight['bl_inverted_dbv']), backlight['channel'], backlight['version'])),
         ('pong-audio-dma', bytes(16)),
+        # zizhan: DarwinBoot24 fills {pa, bytes} of a 48 MiB panel pool below 4 GiB (PANEL_POOL_PAGES) for the DPU flip path.
+        ('pong-panel-pool', bytes(16)),
         ('darwinboot-memory-ranges', bytes(32 + 64 * 16)),
         ('pong-allocatable-ram', b''.join(
             struct.pack('<QQ', int(bank['base'], 0), int(bank['size'], 0))
@@ -227,6 +233,9 @@ def main():
         ('device_type', b'cpu\0'),
         ('compatible', b'qcom,kryo\0'),
         ('timebase-frequency', struct.pack('<I', TIMEBASE)),
+        # Only for a kernel built with __ARM_AMP__ and two clusters (patches/xnu-ipados18/0008): a one-cluster kernel asserts.
+        *([('cluster-type', struct.pack('<I', CPU_CLUSTER_TYPES[CPU_AFFINITIES[i]][0]))]
+          if os.environ.get('PONG_ADT_CLUSTERS') == '1' and CPU_AFFINITIES[i] in CPU_CLUSTER_TYPES else []),
     ]) for i in range(args.cpus)]
     gic = node('intc', [
         ('compatible', b'arm,gic-v3\0'),
@@ -253,8 +262,11 @@ def main():
     ])
     # Actual Pong live DT: QUP0 SE4 / Goodix Berlin-D, GPIO20 reset/21 IRQ.
     # Absolute metadata avoids an incomplete arm-io interrupt/reg mapping.
+    # zizhan: the inner ST FingerTip (st,spi-pri) sits on the same QUP0 SE4 / GPIO16-19, IRQ 21, reset 20 as Pong's
+    # Goodix, powered by ldoc7 (AVDD 3.0 V) and ldoc2 (DVDD 1.8 V); axes 19140 x 21600. Pong's Goodix driver
+    # rejects this node (max-x/max-y), bsd/dev/pong_fts.c takes it.
     touch = node('pong-touch', [
-        ('compatible', b'pong,goodix-berlin-d\0'),
+        ('compatible', b'st,fts-zizhan-pri\0'),
         ('spi-base', struct.pack('<Q', 0x990000)),
         ('tlmm-base', struct.pack('<Q', 0xF000000)),
         ('gcc-base', struct.pack('<Q', 0x100000)),
@@ -262,7 +274,7 @@ def main():
         ('cmd-db-base', struct.pack('<Q', 0x80860000)),
         ('gpio-offset', struct.pack('<I', 0x100000)),
         ('pins', struct.pack('<6I', 16, 17, 18, 19, 21, 20)),
-        ('max-x', struct.pack('<I', 1080)), ('max-y', struct.pack('<I', 2412)),
+        ('max-x', struct.pack('<I', 19140)), ('max-y', struct.pack('<I', 21600)),
     ])
     tree = node('device-tree', [
         # Keys use the actual SM8475 PMIC-arbiter resources below.
@@ -323,7 +335,7 @@ def main():
             ('allow-32bit-apps', struct.pack('<I', 0)),
             ('ephemeral-data-mode', struct.pack('<I', 0)),
             ('udid-version', struct.pack('<I', 1)),
-            ('artwork-scale-factor', struct.pack('<I', 3)),
+            ('artwork-scale-factor', struct.pack('<I', 2)),   # zizhan: matches display-scale
         ]),
     ])
     # Hardware-only probes do not load AppleImage4. Full root boot does, and its

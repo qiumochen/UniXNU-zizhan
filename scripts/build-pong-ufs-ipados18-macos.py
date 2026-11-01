@@ -25,7 +25,7 @@ def main():
                         help='compile/link without source or archive digests')
     args = parser.parse_args()
     tree = args.tree.resolve()
-    if platform.system() != 'Darwin' or platform.machine() != 'x86_64':
+    if platform.system() != 'Darwin' or platform.machine() not in ("x86_64", "arm64"):
         raise SystemExit('This continuation uses the Intel macOS toolchain')
     out = tree / 'build/native-ufs'
     out.mkdir(parents=True, exist_ok=True)
@@ -46,7 +46,7 @@ def main():
         '-I' + str(DEVICE / 'mac-build/storage-abi18/include'),
         '-I' + str(tree / '.cache/xnu-work/EXTERNAL_HEADERS'),
         '-I' + str(framework / 'PrivateHeaders'), '-I' + str(framework / 'Headers'),
-        '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
+        '-Wall', '-Wextra', '-Werror', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier', '-Wno-deprecated-declarations',
         '-Wno-unused-parameter', '-c', str(source), '-o', str(obj)]
     result = subprocess.run(command, capture_output=True, text=True, env=env)
     (out / 'build.log').write_text(result.stdout + result.stderr)

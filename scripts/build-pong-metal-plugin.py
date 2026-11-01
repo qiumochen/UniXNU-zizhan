@@ -36,7 +36,7 @@ sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=e
 minimum='18.0' if a.guest_build=='22H374' else '16.6.1'
 command=['xcrun','clang++','-target','arm64-apple-ios'+minimum,'-isysroot',sdk,
     *(['-DPONG_GUEST_22H374=1'] if a.guest_build=='22H374' else []),
-    '-std=c++17','-fobjc-arc','-fblocks','-Os','-Wall','-Wextra','-Werror',
+    '-std=c++17','-fobjc-arc','-fblocks','-Os','-Wall','-Wextra','-Werror', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier',
     '-Wno-deprecated-declarations','-I'+str(ROOT/'drivers/PongMetal'),
     '-I'+str(ROOT/'drivers/PongAdreno/submit'),
     '-dynamiclib',str(ROOT/'drivers/PongMetal/PongMetalPlugin.mm'),

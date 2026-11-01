@@ -62,7 +62,7 @@ def main():
         cmd=['xcrun','clang','-target',target,'-isysroot',sdk,
              '-mkernel','-ffreestanding','-fno-builtin','-fno-stack-protector','-mgeneral-regs-only',
              '-fno-asynchronous-unwind-tables','-Os',
-             '-Wall','-Wextra','-Werror','-I'+str(out),'-I'+str(source),
+             '-Wall','-Wextra','-Werror', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier','-I'+str(out),'-I'+str(source),
              '-I'+str(source/'ArmSmmu4K'),
              '-c',str(source/(name+'.c')),'-o',str(obj)]
         subprocess.run(cmd,env=env,check=True);commands.append(cmd);objects.append(obj)

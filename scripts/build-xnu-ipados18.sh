@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 # Refuse Wi-Fi and backlight before any XNU compile when their trees are absent.
 # The later builders still refuse on their own; this only moves that refusal forward.
-if [ "${XNU_PONG_WIFI:-0}" = 1 ] || [ "${XNU_PONG_BACKLIGHT:-0}" = 1 ]; then
+if [ "${XNU_PONG_WIFI:-0}" = 1 ] || [ "${XNU_PONG_BACKLIGHT:-0}" = 1 ] || [ "${XNU_PONG_POWER:-0}" = 1 ]; then
   if [ -z "${PONG_NATIVE_DRIVER_SOURCE:-}" ]; then
     echo 'refusing before compile: PONG_NATIVE_DRIVER_SOURCE is unset, so Wi-Fi and backlight inputs cannot be resolved' >&2
     exit 1
@@ -104,6 +104,10 @@ while IFS= read -r LATE_PATCH; do
 done < <(python3 - <<'PY_LATE_PATCHES'
 from pathlib import Path
 patches = [p.resolve() for p in Path('patches/xnu').glob('zz*pong*.patch')]
+# zizhan: 0002+ stack on 0001: 0008 edits PONG.h and board_config.h, which 0001 creates or changes, so the reverse check of
+# 0001 fails while they are applied, and the fallback below then undid 0001. Take them off too; the loop re-applies them
+# and the mtime snapshot keeps unchanged files from rebuilding. No parentheses or quotes here: bash 3.2 parses this heredoc.
+patches += [p.resolve() for p in Path('patches/xnu').glob('[0-9][0-9][0-9][0-9]-*.patch') if not p.name.startswith('0001-')]
 patches += [Path('patches/xnu/zzz-boot-progress.patch').resolve(),
             Path('patches/xnu/zzy-native-gpu-addon-mount.patch').resolve()]
 for patch in sorted(set(patches), reverse=True):
@@ -158,8 +162,9 @@ for PATCH in "${PATCHES[@]}"; do
     echo "Already applied: $(basename "$PATCH")"
   elif git -C .cache/xnu-work apply --check "$PATCH" >/dev/null 2>&1; then
     git -C .cache/xnu-work apply "$PATCH"
-  elif patch --dry-run --batch --fuzz=3 -p1 -d .cache/xnu-work < "$PATCH" >/dev/null 2>&1; then
-    patch --batch --fuzz=3 -p1 -d .cache/xnu-work < "$PATCH"
+  elif patch --dry-run --forward --batch --fuzz=3 -p1 -d .cache/xnu-work < "$PATCH" >/dev/null 2>&1; then
+    # --forward: plain --batch takes hunks that look applied as reversed and undoes them (g100 lost 0001 that way)
+    patch --forward --batch --fuzz=3 -p1 -d .cache/xnu-work < "$PATCH"
   else
     echo "Patch does not apply cleanly to XNU $XNU_VERSION: $PATCH" >&2
     exit 1
@@ -269,7 +274,7 @@ if [ "${XNU_PONG_WIFI:-0}" = 1 ]; then
   python3 "$PONG_NATIVE_DRIVER_SOURCE/scripts/build-pong-wifi-native.py" --tree "$ROOT" \
     --ath11k "$WIFI_BUILD/libPongAth11k.a"
 fi
-if [ "${XNU_PONG_WIFI:-0}" = 1 ] || [ "${XNU_PONG_BACKLIGHT:-0}" = 1 ]; then
+if [ "${XNU_PONG_WIFI:-0}" = 1 ] || [ "${XNU_PONG_BACKLIGHT:-0}" = 1 ] || [ "${XNU_PONG_POWER:-0}" = 1 ]; then
   python3 "$PONG_NATIVE_DRIVER_SOURCE/scripts/build-pong-power-native.py" --tree "$ROOT"
 fi
 if [ ! -f "$KERNEL_SDKROOT/usr/local/lib/kernel/libfirehose_kernel.a" ]; then
@@ -1002,7 +1007,7 @@ PY_RAM_BLOCK_BINDINGS
     PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$ROOT/build/pong-adreno/libPongAdrenoPlatform.a"
     PLATFORM_DEPENDENCIES="$PLATFORM_DEPENDENCIES $ROOT/build/pong-adreno/libPongAdrenoPlatform.a"
   fi
-  if [ "${XNU_PONG_WIFI:-0}" = 1 ] || [ "${XNU_PONG_BACKLIGHT:-0}" = 1 ]; then
+  if [ "${XNU_PONG_WIFI:-0}" = 1 ] || [ "${XNU_PONG_BACKLIGHT:-0}" = 1 ] || [ "${XNU_PONG_POWER:-0}" = 1 ]; then
     POWER_ARCHIVE=$ROOT/build/pong-power/libPongPower.a
     test -f "$POWER_ARCHIVE"
     PLATFORM_ARCHIVES="$PLATFORM_ARCHIVES -Wl,-force_load,$POWER_ARCHIVE"

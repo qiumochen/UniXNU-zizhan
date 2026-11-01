@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--skip-image-verification', action='store_true')
     args = parser.parse_args()
     tree = args.tree.resolve()
-    if platform.system() != 'Darwin' or platform.machine() != 'x86_64':
+    if platform.system() != 'Darwin' or platform.machine() not in ("x86_64", "arm64"):
         raise SystemExit('This continuation uses the Intel macOS toolchain')
     out = tree / 'build/native-ram-block'
     out.mkdir(parents=True, exist_ok=True)
@@ -43,7 +43,7 @@ def main():
         '-I' + str(DEVICE / 'mac-build/storage-abi/include'),
         '-I' + str(tree / '.cache/xnu-work/EXTERNAL_HEADERS'),
         '-I' + str(framework / 'PrivateHeaders'), '-I' + str(framework / 'Headers'),
-        '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
+        '-Wall', '-Wextra', '-Werror', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier', '-Wno-deprecated-declarations',
         '-Wno-unused-parameter', '-c', str(source), '-o', str(obj),
     ]
     result = subprocess.run(command, capture_output=True, text=True, env=env)
@@ -67,7 +67,7 @@ def main():
                                 for name in imports))
     alias = out / 'original-bindings.o'
     subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios16.0',
-                    '-Werror', '-c', str(assembly), '-o', str(alias)], check=True, env=env)
+                    '-Werror', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier', '-c', str(assembly), '-o', str(alias)], check=True, env=env)
     archive = out / 'libNativeRamBlock.a'
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'libtool', '-static', '-o', str(archive), str(obj), str(alias)],

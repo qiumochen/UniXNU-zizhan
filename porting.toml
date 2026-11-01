@@ -8,7 +8,7 @@ summary = "Xiaomi MIX Fold 2：iPadOS 18.7.10 主屏、内屏触摸、Adreno 730
 
 [[area]]
 id = "configuration"
-status = "implemented"
+status = "host-verified"
 components = ["PongPlatform24"]
 paths = ["board.toml", "proprietary-files.txt", "feeds.toml", "unixnu.lock", "configs/**", "dts/**", "migration/format2/**", "scripts/*format2*", "scripts/build-pong-profile-kernel.py"]
 inputs = ["zizhan（22061218C）实机 /sys/firmware/fdt，MIUI V14.0.15.0.TLRCNXM（Android 13，内核 5.10.136）", "UniXNU-pong 的 SM8475 公共层与 PongPlatform24（Nothing Phone (2)，同为 SM8475）", "iPad7,11 的 iPadOS 18.7.10 22H374 restore"]
@@ -17,8 +17,8 @@ procedure = ["tools/gen_reserved.py 按 pong.dts 的布局从实机 DT 生成 dt
 findings = ["zizhan 与 Pong 的 DRAM 第二段不同（0xf4600000+0xba00000，Pong 为 0xf1400000+0xec00000），ADSP carveout 为 0x9fd00000+0x3100000（Pong 为 0x85700000+0x2800000）；其余 SMEM、IPCC、AOSS、cmd-db 地址相同。", "构建脚本不读取 board 名，改名 zizhan 不影响 Pong 脚本。"]
 completion = ["dts/zizhan.dts 能编译，内核与启动镜像能构建，手机能进入 iPadOS 主屏"]
 limits = ["外屏（DSI-2，1080x2520）、Wi-Fi、音频没有接入，配置里关闭。"]
-next_action = ["在 GitHub Actions 的 macOS runner 上构建本仓库发布的版本，记录主机构建结果和完整 revision。"]
-evidence = [{kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了实机硬件参数、全分区备份和原厂 UEFI 内存表对照。"}, {kind = "source", reference = "docs/progress/2026-11-01-battery.md", result = "记录了 zizhan 与 Pong 的硬件地址差异。"}]
+next_action = ["用发布的版本打包启动镜像并上机跑一轮，记录设备结果。"]
+evidence = [{kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了实机硬件参数、全分区备份和原厂 UEFI 内存表对照。"}, {kind = "source", reference = "docs/progress/2026-11-01-battery.md", result = "记录了 zizhan 与 Pong 的硬件地址差异。"}, {kind = "host", command = "GitHub Actions zizhan macOS build（macos-15-intel，Xcode 16.4，pong_ipados18_ci_defconfig）", revision = "28d9f4fe869293e7a384b18b800ceb8dd56c1244", reference = "https://github.com/qiumochen/UniXNU-zizhan/actions/runs/41304992346", result = "托管 runner 上解析四层配置、编译 dts/zizhan.dts、应用全部 13 个 XNU 补丁并链接出 CI 内核，产物 pong-macos-products 已上传。"}]
 
 [[area]]
 id = "firmware"

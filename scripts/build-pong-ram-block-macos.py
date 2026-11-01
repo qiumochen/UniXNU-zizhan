@@ -43,7 +43,7 @@ def main():
         '-I' + str(DEVICE / 'mac-build/storage-abi/include'),
         '-I' + str(tree / '.cache/xnu-work/EXTERNAL_HEADERS'),
         '-I' + str(framework / 'PrivateHeaders'), '-I' + str(framework / 'Headers'),
-        '-Wall', '-Wextra', '-Werror', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier', '-Wno-deprecated-declarations',
+        '-Wall', '-Wextra', '-Werror', '-Wno-unknown-warning-option', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier', '-Wno-deprecated-declarations',
         '-Wno-unused-parameter', '-c', str(source), '-o', str(obj),
     ]
     result = subprocess.run(command, capture_output=True, text=True, env=env)
@@ -67,7 +67,7 @@ def main():
                                 for name in imports))
     alias = out / 'original-bindings.o'
     subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios16.0',
-                    '-Werror', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier', '-c', str(assembly), '-o', str(alias)], check=True, env=env)
+                    '-Werror', '-Wno-unknown-warning-option', '-Wno-c99-designator', '-Wno-reorder-init-list', '-Wno-unnecessary-virtual-specifier', '-c', str(assembly), '-o', str(alias)], check=True, env=env)
     archive = out / 'libNativeRamBlock.a'
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'libtool', '-static', '-o', str(archive), str(obj), str(alias)],

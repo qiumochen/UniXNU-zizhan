@@ -74,10 +74,11 @@ diff -ruN a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobile
  		fPresentedID = id;
  		IOLockWakeup(fSwapLock, &fPresentedID, false);
  	}
-@@ -1197,6 +1208,13 @@
+@@ -1197,6 +1208,15 @@
  	clock_interval_to_deadline(50, kMillisecondScale, &deadline);
  	IOLockLock(fSwapLock);
  	for (;;) {
++#if XNU_PONG_ADRENO_PLATFORM
 +		if (fLatchAsync) {
 +			const uint32_t latched = pong_scanout_latch_poll();     /* zizhan 0013 */
 +
@@ -85,10 +86,11 @@ diff -ruN a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobile
 +				swapPresentedLocked(latched);
 +			}
 +		}
++#endif
  		const uint32_t mark = presentedIsEnough ? fPresentedID : fRetiredID;
  
  		if ((int32_t) (id - fEndedID) > 0 || (int32_t) (mark - id) >= 0) {
-@@ -1206,6 +1224,14 @@
+@@ -1206,6 +1226,14 @@
  			ret = gSwapWait == 2 ? kIOReturnBusy : kIOReturnNotReady;
  			fStatSwapWaitNotReady++;
  			break;

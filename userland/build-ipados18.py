@@ -34,6 +34,11 @@ import apfs
 sys.path.insert(0, str(PROJECT / 'tools'))
 from sparsebundle import storage_for
 
+# Jobs left out of the service cache. fairplayd.A2 exits(0) at once on this port and launchd, holding its KeepAlive ports, relaunches
+# it every 10 s: requests queued there are never answered. locationd's main silo blocked on one (MIG 1203), and through it
+# contextstored -> PowerUIAgent -> Settings > Battery (11-01 g208-g212). Without the job the lookups fail and the clients take their
+# error paths at once (tools/zizhan/mac/jobs-refresh.sh drops it from an existing image).
+EXCLUDED18 = {'com.apple.fairplayd.A2': 'exits at once on this port; its queued requests are never answered'}
 CORE = '''com.apple.notifyd com.apple.cfprefsd.xpc.daemon com.apple.cfprefsd.xpc.daemon.system
 com.apple.logd com.apple.syslogd com.apple.distnoted.xpc.daemon com.apple.diagnosticd
 com.apple.fseventsd com.apple.containermanagerd com.apple.containermanagerd.system
@@ -487,6 +492,7 @@ def jobs(root, cryptex, overlay, out, app_cryptex=None):
             reason = None
             if not mapped or not mapped.is_file(): reason = 'program absent from supplied 22H374 OS/SystemOS/AppOS'
             elif job.get('_LimitLoadToVariant') == 'IsDarwinOS': reason = 'DarwinOS variant; this source is iOS'
+            elif label in EXCLUDED18: reason = EXCLUDED18[label]
             record = dict(source=f.relative_to(root).as_posix(), label=label, program=program,
                           action='excluded' if reason else ('boot' if core or job.get('RunAtLoad') or job.get('KeepAlive') is True else 'on-demand'), reason=reason)
             records.append(record)

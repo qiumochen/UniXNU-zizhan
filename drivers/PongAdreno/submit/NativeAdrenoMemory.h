@@ -23,6 +23,10 @@ IOReturn NativeAdrenoSetPagesCacheMode(const NativeAdrenoPhysicalSpan *,size_t c
  * attribute when it populates or tears down a device-pager view. Every page of the spans no longer write-combined is made so again (the pmap
  * then rewrites every mapping it tracks and writes the page's cache lines back); *reset counts them. */
 IOReturn NativeAdrenoReassertWriteCombined(const NativeAdrenoPhysicalSpan *,size_t count,uint32_t *reset);
+/* Removes every CPU mapping of the spans' pages, whichever pmap holds it, before the pages go back to the VM (counted in
+ * native_adreno_disconnect_stats[0]: BOs, [1]: pages). 11-01 g216-g219: a GPU client killed on its memory ledger (SBRendererService) closed
+ * with a user PTE of a BO page still live, and the VM's free panicked in pmap_assert_free. */
+IOReturn NativeAdrenoDisconnectPages(const NativeAdrenoPhysicalSpan *,size_t count);
 
 /* Native XNU backing store, not a Metal device or user ABI. No IOMMU mapper,
  * Linux fd/ioctl, hardware address, guessed PA or implicit destructor cleanup.

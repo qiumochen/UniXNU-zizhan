@@ -13,6 +13,8 @@ extern "C" vm_offset_t phystokv(uint64_t pa);
 extern "C" boolean_t pmap_valid_page(ppnum_t pn);
 extern "C" void pmap_set_cache_attributes(ppnum_t pn,unsigned int cacheattr);
 extern "C" unsigned int pmap_cache_attributes(ppnum_t pn);
+extern "C" unsigned int pmap_disconnect(ppnum_t pn);
+extern "C" {volatile uint64_t native_adreno_disconnect_stats[2];}
 /* Time and bytes of every CPU cache maintenance pass (the board page shows them per submission), and the pages user BOs made
  * write-combined: [0] ticks, [1] bytes, [2] longest pass in ticks, [3] passes, [4] write-combined pages now. */
 extern "C" {volatile uint64_t native_adreno_cache_stats[5];}
@@ -149,6 +151,19 @@ IOReturn NativeAdrenoSetPagesCacheMode(const NativeAdrenoPhysicalSpan *spans,siz
             pmap_set_cache_attributes((ppnum_t)((spans[i].physical+offset)>>12),write_combined?VM_WIMG_WCOMB:VM_WIMG_USE_DEFAULT);
     if(write_combined)__atomic_fetch_add(&native_adreno_cache_stats[4],pages,__ATOMIC_RELAXED);
     else __atomic_fetch_sub(&native_adreno_cache_stats[4],pages,__ATOMIC_RELAXED);
+    return kIOReturnSuccess;
+}
+IOReturn NativeAdrenoDisconnectPages(const NativeAdrenoPhysicalSpan *spans,size_t count)
+{
+    if(!spans || !count)return kIOReturnBadArgument;
+    uint64_t pages=0;
+    for(size_t i=0;i<count;++i) {
+        if(!managedSpan(spans[i].physical,spans[i].bytes))return kIOReturnBadArgument;
+        for(uint64_t offset=0;offset<spans[i].bytes;offset+=4096,++pages)
+            (void)pmap_disconnect((ppnum_t)((spans[i].physical+offset)>>12));
+    }
+    __atomic_fetch_add(&native_adreno_disconnect_stats[0],1,__ATOMIC_RELAXED);
+    __atomic_fetch_add(&native_adreno_disconnect_stats[1],pages,__ATOMIC_RELAXED);
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoReassertWriteCombined(const NativeAdrenoPhysicalSpan *spans,size_t count,uint32_t *reset)

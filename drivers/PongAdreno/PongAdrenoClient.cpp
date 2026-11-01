@@ -68,7 +68,10 @@ void PongAdrenoUserClient::dropViews(uint32_t token)
             if(views[i].memory && (!token || views[i].token==token)) {memory=views[i].memory;views[i]={};break;}
         IOLockUnlock(client_gate);
         if(!memory)return;
-        while(removeMappingForDescriptor(memory)){}
+        /* removeMappingForDescriptor hands back the task's map retained and leaves it mapped. Unmap it before the BO pages are freed:
+         * a task killed on its memory ledger closes this client while its VM map is still intact, and freeing still-mapped pages
+         * panics in pmap_assert_free (11-01 g216/g217, SBRendererService rendering Settings > Battery). */
+        while(IOMemoryMap *map=removeMappingForDescriptor(memory)){map->unmap();map->release();}
         memory->release();
     }
 }

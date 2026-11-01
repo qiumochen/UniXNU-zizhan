@@ -271,6 +271,8 @@ IOReturn NativeAdrenoMemory::release()
             prepared_=false;
         }
         native_adreno_trace_stage=33;
+        /* No CPU mapping of these pages may outlive them: a view a dying client left would panic the VM's free (pmap_assert_free). */
+        if(spans_ && span_count_)(void)NativeAdrenoDisconnectPages(spans_,span_count_);
         descriptor_->release();descriptor_=nullptr;
         native_adreno_trace_stage=34;
     }

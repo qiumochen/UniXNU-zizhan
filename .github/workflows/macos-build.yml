@@ -159,7 +159,18 @@ jobs:
           # `brew install cmake` on macos-15-intel failed with "cmake: no bottle available".
           # The current Homebrew llvm formula also has no bottle on this Tier 3 runner.
           # The image already has the llvm@18 keg. XNU keeps using xcrun.
-          brew install dtc lzfse mtools nasm acpica
+          brew install dtc lzfse nasm acpica
+          # mtools lost its bottle on this Tier 3 runner (2026-11-01: "mtools: no bottle available!").
+          # Fall back to the signed GNU release, pinned by hash, built into ~/.local.
+          if ! brew install mtools; then
+            MTOOLS=mtools-4.0.50
+            curl -fsSL -o "$RUNNER_TEMP/$MTOOLS.tar.gz" "https://ftp.gnu.org/gnu/mtools/$MTOOLS.tar.gz"
+            echo "7f078accae7551c6b3a316ccd8296357329f7bbbc09583dcd1a2bbaeb081a7a4  $RUNNER_TEMP/$MTOOLS.tar.gz" | shasum -a 256 -c -
+            tar -xzf "$RUNNER_TEMP/$MTOOLS.tar.gz" -C "$RUNNER_TEMP"
+            (cd "$RUNNER_TEMP/$MTOOLS" && ./configure --prefix="$HOME/.local" --disable-floppyd >/dev/null && make -j"$(sysctl -n hw.ncpu)" >/dev/null && make install >/dev/null)
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
           require_cmd() {
             local tool="$1" stage="$2"
             if ! command -v "$tool" >/dev/null 2>&1; then

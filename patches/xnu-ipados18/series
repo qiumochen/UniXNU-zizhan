@@ -1,1 +1,13 @@
 0001-pong-darwin24.patch
+0002-zizhan-fts.patch
+0003-qsort-bounded-recursion.patch
+0004-pong-panic-reset-hook.patch
+0005-pong-thread-diagnostics.patch
+0006-pong-resource-notify-during-config.patch
+0008-zizhan-amp.patch
+0009-zizhan-dpu-flip-cpu-frame.patch
+0010-pong-power-key-reset.patch
+0011-zizhan-panel-pool-canvases.patch
+0012-zizhan-swapwait.patch
+0013-zizhan-latch-async.patch
+0014-zizhan-fast-core.patch

@@ -1,7 +1,7 @@
 schema_version = 2
 
 [board]
-name = "pong"
+name = "zizhan"
 soc = "SM8475"
 soc_source = "sm8475"
 os_profile = "ipados-18.7.10-22H374"
@@ -24,11 +24,11 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemOS", "
 include = ["PongPlatform24"]
 
 [device_tree]
-source = "device:dts/pong.dts"
+source = "device:dts/zizhan.dts"
 include_dirs = ["soc:dts"]
 
 [kernel]
-defconfig = "pong_ipados18_defconfig"
+defconfig = "zizhan_ipados18_gpu_defconfig"
 config_fragments = ["arch:configs/common.config", "soc:configs/sm8475.config", "os:configs/ipados.config"]
 patch_series = ["device:migration/format2/arch-darwin24.series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ipados18/series"]
 archives = ["component:PongPlatform24"]
@@ -71,7 +71,7 @@ BUILDID_STRING = "UniXNU-Zizhan"
 PONG_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE.
 
 [payload]
-title = "Pong iPadOS 18.7.10"
+title = "Zizhan iPadOS 18.7.10"
 [payload.adt]
 packed_data_ramdisk = false
 [pong_build]

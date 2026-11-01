@@ -1,6 +1,6 @@
 /dts-v1/;
 /include/ "sm8475.dtsi"
-// Generated from the zizhan live /sys/firmware/fdt (MIUI V14.0.15.0.TLRCNXM) by tools/gen_reserved.py; layout follows UniXNU-pong dts/pong.dts.
+// Generated from the zizhan live /sys/firmware/fdt (MIUI V14.0.15.0.TLRCNXM) by tools/gen_reserved.py; layout follows UniXNU-pong dts/pong.dts (Nothing Phone (2)).
 / {
     model = "Xiaomi MIX Fold 2";
     compatible = "xiaomi,zizhan", "qcom,sm8475";

@@ -1,12 +1,8 @@
-# zizhan: the CI configuration plus the Adreno 730 platform (Wi-Fi and backlight stay off).
-# Hosted CI compile. Not the shipping kernel.
-# WIFI, backlight, and the Adreno platform are off because those stages need
-# private firmware this public repository does not carry:
-#   modem amss/m3/regdb and tfa98xx.cnt
-#   Adreno730 gmu_gen70000.bin, a730_sqe.fw, a730_zap.*
-#     (build-pong-adreno-platform.py refuses to continue without them)
-# NativeUfs, the DT platform, and ArmCpu stay on, so the Intel host gates
-# and the XNU link still run.
+# zizhan (Xiaomi MIX Fold 2) shipping kernel: Pong's iPadOS 18 / Darwin 24 configuration
+# with the Adreno 730 platform and the ADSP/battery path (PongPower) on.
+# Wi-Fi and backlight stay off: neither is brought up on zizhan yet. The Adreno platform needs the private firmware listed in
+# proprietary-files.txt (gmu_gen70000.bin, a730_sqe.fw, a730_zap.*) in
+# PONG_ADRENO_FIRMWARE; build-pong-adreno-platform.py refuses to continue without it.
 # The boot packager defaults to all 8 SM8475 CPU nodes; PSCI starts them.
 # --cpus 1 retains the isolated bring-up option. CPU composition is selected
 # separately by pong_ui_software=1 and the matching 22H374 runtime adapter.

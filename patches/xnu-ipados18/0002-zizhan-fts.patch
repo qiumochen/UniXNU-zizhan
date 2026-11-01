@@ -1,0 +1,1123 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -619,3 +619,4 @@
+ bsd/skywalk/packet/pbufpool.c			optional skywalk bound-checks
+ bsd/skywalk/packet/pbufpool_kern.c		optional skywalk bound-checks
+ bsd/dev/cpu_copy_in_cksum_gen.c			optional skywalk bound-checks
++bsd/dev/pong_fts.c			standard
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1243,6 +1243,11 @@
+ 	machine_timeout_bsd_init();
+ #endif /* DEVELOPMENT || DEBUG */
+ 
++#if defined(PONG)
++	/* zizhan: ST FST2 inner touch; returns at once unless the ADT carries its node. */
++	extern void pong_fts_init(void);
++	pong_fts_init();
++#endif
+ 	bsd_init_kprintf("done\n");
+ }
+ 
+--- /dev/null
++++ b/bsd/dev/pong_fts.c
+@@ -0,0 +1,1099 @@
++/* ST FingerTip FST2 (chip 0x3652) inner touch of the Xiaomi MIX Fold 2 (zizhan, SM8475).
++ * The board plumbing -- QUP0 SE4 GENI SPI on GPIO16-19, IRQ GPIO21, reset GPIO20, RPMh supplies, GCC votes --
++ * is Pong's pong_goodix.c (itself from HackiOS redwood_goodix.c, APSL 2.0), because zizhan wires its inner touch
++ * to the same serial engine and pins. The chip layer follows the zizhan fst2 6.0.3 Linux driver. */
++#include <pexpert/arm64/board_config.h>
++#if defined(PONG)
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <libkern/libkern.h>
++#include <mach/mach_types.h>
++#include <pexpert/pexpert.h>
++#include <sys/pong_input.h>
++#include <kern/sched_prim.h>
++#include <pexpert/device_tree.h>
++#include <sys/systm.h>
++#include <sys/proc_internal.h>
++
++
++
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++extern kern_return_t thread_terminate(thread_t thread);
++
++static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
++static uint64_t tlmm_phys, gcc_phys, se_phys, rsc_phys, cmd_db_phys;
++static uint32_t pins[6], gpio_offset, max_x, max_y;
++
++/* Boot-arg touch_lat=1 (with MiniIOMobileFramebuffer's "tl:" frame trace, same microsecond clock): "tl: t TYPE ID at US" for every
++ * touch down and up and for the first move after a down, so a round shows how long a gesture waits for its first frames. */
++static uint32_t touch_lat;
++extern void pong_gesture_sample(void);
++
++static void
++touch_post(uint32_t type, uint32_t id, uint32_t x, uint32_t y)
++{
++	static uint32_t moved;
++	uint64_t ns;
++
++	if (touch_lat && (type != PONG_TOUCH_MOVE || !(moved & (1u << id)))) {
++		absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++		printf("tl: t %u %u at %llu\n", type, id, ns / 1000);
++	}
++	if (type == PONG_TOUCH_MOVE) {
++		moved |= 1u << id;
++	} else {
++		moved &= ~(1u << id);
++	}
++	if (type == PONG_TOUCH_DOWN) {
++		pong_gesture_sample();     /* osfmk/kern/thread.c (0005), boot-arg gs */
++	}
++	pong_touch_post(type, id, x, y);
++}
++
++static bool
++property(DTEntry entry, const char *name, void *out, unsigned size)
++{
++    void *value = NULL; unsigned length = 0;
++    if (SecureDTGetProperty(entry, name, &value, &length) != kSuccess || length != size) return false;
++    memcpy(out, value, size); return true;
++}
++
++static bool
++configuration(void)
++{
++    DTEntry entry;
++    if (SecureDTLookupEntry(NULL, "/arm-io/pong-touch", &entry) != kSuccess) return false;
++    return property(entry,"spi-base",&se_phys,8) && property(entry,"tlmm-base",&tlmm_phys,8) &&
++        property(entry,"gcc-base",&gcc_phys,8) && property(entry,"rsc-base",&rsc_phys,8) &&
++        property(entry,"cmd-db-base",&cmd_db_phys,8) && property(entry,"gpio-offset",&gpio_offset,4) &&
++        property(entry,"pins",pins,sizeof(pins)) && property(entry,"max-x",&max_x,4) &&
++        property(entry,"max-y",&max_y,4) && se_phys==0x990000 && tlmm_phys==0xf000000 &&
++        gcc_phys==0x100000 && rsc_phys==0x17a20000 && cmd_db_phys==0x80860000 &&
++        gpio_offset==0x100000 && pins[0]==16 && pins[1]==17 && pins[2]==18 &&
++        pins[3]==19 && pins[4]==21 && pins[5]==20 && max_x==19140 && max_y==21600;
++}
++
++static inline uint32_t
++rd(vm_offset_t address)
++{
++	return *(volatile uint32_t *)address;
++}
++
++static inline void
++wr(vm_offset_t address, uint32_t value)
++{
++	*(volatile uint32_t *)address = value;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++static void
++sleep_us(uint32_t us)
++{
++	delay_for_interval(us, NSEC_PER_USEC);
++}
++
++static void
++sleep_ms(uint32_t ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	assert_wait_deadline((event_t)&cmd_db, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* ---- pins (TLMM) ------------------------------------------------------------------------------- */
++
++#define TLMM_PHYS               tlmm_phys
++#define TLMM_SIZE               0x200000UL
++#define GPIO_CFG(n)             (tlmm + gpio_offset + 0x1000UL * (n))         /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
++#define GPIO_IO(n)              (tlmm + gpio_offset + 0x1000UL * (n) + 4)     /* bit 0 in, bit 1 out */
++#define PULL_NONE               0
++#define PULL_UP                 3
++
++#define PIN_MISO                pins[0]
++#define PIN_MOSI                pins[1]
++#define PIN_CLK                 pins[2]
++#define PIN_CS                  pins[3]
++#define PIN_INT                 pins[4]      /* low = the chip has a report */
++#define PIN_RESET               pins[5]     /* low = in reset */
++#define PIN_FUNCTION_SPI        1       /* "qup15" */
++
++static void
++gpio_configure(unsigned pin, unsigned function, unsigned pull, unsigned ma, bool output)
++{
++	uint32_t value = pull | function << 2 | (ma / 2 - 1) << 6 | (output ? 1u << 9 : 0);
++	wr(GPIO_CFG(pin), (rd(GPIO_CFG(pin)) & ~0x3ffu) | value);
++}
++
++static void
++gpio_set(unsigned pin, bool high)
++{
++	wr(GPIO_IO(pin), high ? 2 : 0);
++}
++
++static bool
++gpio_get(unsigned pin)
++{
++	return rd(GPIO_IO(pin)) & 1;
++}
++
++static void
++gpio_output(unsigned pin, bool high, unsigned pull, unsigned ma)
++{
++	gpio_set(pin, high);            /* the level first, so that the pin never drives the wrong one */
++	gpio_configure(pin, 0, pull, ma, true);
++}
++
++/* ---- the I/O supply (RPMh) ----------------------------------------------------------------------- */
++
++#define CMD_DB_PHYS             cmd_db_phys
++#define CMD_DB_SIZE             0x20000UL
++#define RSC_PHYS                rsc_phys    /* the application processor's "DRV 2" */
++#define RSC_SIZE                0x10000UL
++#define TCS(reg)                (rsc + 0xd00 + (reg))           /* command slot set 0, an "active" one */
++#define TCS_IRQ_ENABLE          0x00
++#define TCS_IRQ_STATUS          0x04
++#define TCS_IRQ_CLEAR           0x08
++#define TCS_WAIT_FOR_COMPLETION 0x10
++#define TCS_CONTROL             0x14
++#define TCS_CONTROL_ENABLE      (1u << 16)
++#define TCS_CONTROL_TRIGGER     (1u << 24)
++#define TCS_STATUS              0x18            /* 0 while busy */
++#define TCS_CMD_ENABLE          0x1c
++#define TCS_CMD_MSGID(n)        (0x30 + 20 * (n))
++#define TCS_CMD_ADDR(n)         (0x34 + 20 * (n))
++#define TCS_CMD_DATA(n)         (0x38 + 20 * (n))
++#define MSGID_WRITE_4_BYTES     0x10008
++#define MSGID_RESPONSE          0x100
++
++#define VRM_VOLTAGE             0               /* a regulator's registers, from its address: millivolts */
++#define VRM_ENABLE              4
++#define VRM_MODE                8
++#define VRM_MODE_LDO_HPM        7
++
++struct cmd_db_slave {
++	uint16_t id, header_offset, data_offset, count, version, reserved[3];
++};
++struct cmd_db_header {
++	uint32_t version;
++	uint8_t magic[4];
++	struct cmd_db_slave slave[8];
++	uint32_t checksum, reserved;
++	uint8_t data[];
++};
++struct cmd_db_entry {
++	char id[8];
++	uint32_t priority[2];
++	uint32_t address;
++	uint16_t length, offset;
++};
++
++/* The RPMh address of a resource by its name in the command database the boot loader left; 0 = none. */
++static uint32_t
++rpmh_address(const char *name)
++{
++	const struct cmd_db_header *db = (const struct cmd_db_header *)cmd_db;
++	char id[8] = { 0 };
++
++	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
++		printf("fts: no command database (magic %02x %02x %02x %02x)\n", db->magic[0], db->magic[1], db->magic[2],
++		    db->magic[3]);
++		return 0;
++	}
++	strlcpy(id, name, sizeof(id));
++	for (unsigned s = 0; s < 8; s++) {
++		const struct cmd_db_slave *slave = &db->slave[s];
++		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);
++
++		if (slave->id == 0 || slave->header_offset >= CMD_DB_SIZE - 0x1000 || slave->count > 512 ||
++            144u + slave->header_offset + slave->count * sizeof(*entry) > CMD_DB_SIZE) {
++			continue;
++		}
++		for (unsigned i = 0; i < slave->count; i++) {
++			if (memcmp(entry[i].id, id, sizeof(id)) == 0) {
++				return entry[i].address;
++			}
++		}
++	}
++	return 0;
++}
++
++static bool
++rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
++{
++	for (int i = 0; i < 2000; i++) {
++		if ((rd(TCS(reg)) & mask) == value) {
++			return true;
++		}
++		sleep_us(100);
++	}
++	printf("fts: RPMh: timeout waiting for %s (register %#x = %#x)\n", what, reg, rd(TCS(reg)));
++	return false;
++}
++
++/* Send up to three register writes to RPMh and wait until they are done. */
++static bool
++rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
++{
++	uint32_t irq_enable = rd(TCS(TCS_IRQ_ENABLE));
++	bool done;
++
++	/* the slot set must be idle, and switched off the way the hardware wants it: trigger, then enable */
++	for (int i = 0; rd(TCS(TCS_STATUS)) == 0; i++) {
++		if (i > 2000) {
++			printf("fts: RPMh: the command slots stay busy\n");
++			return false;
++		}
++		sleep_us(100);
++	}
++	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
++	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
++	wr(TCS(TCS_IRQ_CLEAR), 1);
++	for (unsigned i = 0; i < count; i++) {
++		wr(TCS(TCS_CMD_MSGID(i)), MSGID_WRITE_4_BYTES | MSGID_RESPONSE);
++		wr(TCS(TCS_CMD_ADDR(i)), address[i]);
++		wr(TCS(TCS_CMD_DATA(i)), data[i]);
++	}
++	wr(TCS(TCS_WAIT_FOR_COMPLETION), (1u << count) - 1);
++	wr(TCS(TCS_CMD_ENABLE), (1u << count) - 1);
++	wr(TCS(TCS_IRQ_ENABLE), irq_enable | 1);        /* the status bit follows the enable; the interrupt itself stays masked */
++	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE);
++	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
++
++	done = rpmh_wait(TCS_IRQ_STATUS, 1, 1, "the request");
++	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
++	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
++	wr(TCS(TCS_CMD_ENABLE), 0);
++	wr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
++	wr(TCS(TCS_IRQ_CLEAR), 1);
++	wr(TCS(TCS_IRQ_ENABLE), irq_enable);
++	return done;
++}
++
++/* zizhan DT (fts-pri): DVDD=pm8350c_l2 at 1.8 V, then AVDD=pm8350c_l7 at 3.0 V, as fst2 fts_enable_reg() orders them. */
++static bool
++io_supply_on(void)
++{
++    uint32_t avdd=rpmh_address("ldoc7"), dvdd=rpmh_address("ldoc2");
++    if (!avdd || !dvdd || ((avdd>>16)&15)!=4 || ((dvdd>>16)&15)!=4) return false;
++    uint32_t address[3]={dvdd,dvdd+4,dvdd+8}, data[3]={1800,1,7};
++    if (!rpmh_write(address,data,3)) return false;
++    sleep_ms(3);
++    address[0]=avdd;address[1]=avdd+4;address[2]=avdd+8;data[0]=3000;
++    if (!rpmh_write(address,data,3)) return false;
++    sleep_ms(15);return true;
++}
++
++/* ---- clocks (GCC) -------------------------------------------------------------------------------- */
++
++#define GCC_PHYS                gcc_phys
++#define GCC_SIZE                0x70000UL
++#define GCC_VOTE                (gcc + 0x62008)         /* the application processor's votes */
++#define VOTE_QUP0_CORE_2X       (1u << 9)
++#define VOTE_QUP0_CORE          (1u << 8)
++#define VOTE_QUP0_M_AHB         (1u << 6)
++#define VOTE_QUP0_S_AHB         (1u << 7)
++#define VOTE_QUP0_SE4           (1u << 14)             /* Pong and zizhan: wrapper 0 serial engine 4 */
++#define GCC_QUP0_M_AHB_CBCR     (gcc + 0x27004)         /* bit 31: the clock is off */
++#define GCC_QUP0_S_AHB_CBCR     (gcc + 0x27008)
++#define GCC_QUP0_SE4_CBCR       (gcc + 0x274dc)
++#define GCC_QUP0_SE4_CMD        (gcc + 0x274e4)         /* bit 0: take the new configuration */
++#define GCC_QUP0_SE4_CFG        (gcc + 0x274e8)         /* [4:0] 2*divider-1, [10:8] source, [13:12] mode */
++#define GCC_QUP0_SE4_DFSR       (gcc + 0x274f8)         /* bit 0: the engine chooses among preset rates itself */
++#define GCC_QUP0_SE4_PERF_CFG(l) (gcc + 0x27500 + 4 * (l))
++#define GCC_QUP0_SE4_PERF_M(l)  (gcc + 0x27540 + 4 * (l))
++#define GCC_QUP0_SE4_PERF_N(l)  (gcc + 0x27580 + 4 * (l))
++#define CLOCK_OFF               (1u << 31)
++#define XO_HZ                   19200000
++
++static uint32_t se_source_hz, se_clock_select;
++
++/* CLOCK_OFF of a branch, unless the branch is hardware-gated (HW_CTL, bit 1), whose status then reads off when idle */
++static uint32_t
++clock_state(uint32_t cbcr)
++{
++	return (cbcr & 2) ? 0 : (cbcr & CLOCK_OFF);
++}
++
++static uint32_t
++rcg_rate(uint32_t cfg, uint32_t m, uint32_t not_n_minus_m)
++{
++	static const uint32_t parent[8] = { XO_HZ, 600000000, 0, 0, 0, 0, 300000000, 0 };
++	uint64_t hz = parent[cfg >> 8 & 7];
++	uint32_t divider = cfg & 0x1f, mode = cfg >> 12 & 3;
++
++	if (divider) {
++		hz = hz * 2 / (divider + 1);
++	}
++	if (mode) {
++		uint32_t n = (~not_n_minus_m & 0xffff) + (m & 0xffff);
++
++		if (n) {
++			hz = hz * (m & 0xffff) / n;
++		}
++	}
++	return (uint32_t)hz;
++}
++
++static bool
++clocks_on(void)
++{
++	wr(GCC_VOTE, rd(GCC_VOTE) | VOTE_QUP0_CORE_2X | VOTE_QUP0_CORE | VOTE_QUP0_M_AHB | VOTE_QUP0_S_AHB);
++	if (rd(GCC_QUP0_SE4_DFSR) & 1) {
++		/* preset rates: the lowest that is at least 4 MHz */
++		for (uint32_t level = 0; level < 8; level++) {
++			uint32_t hz = rcg_rate(rd(GCC_QUP0_SE4_PERF_CFG(level)), rd(GCC_QUP0_SE4_PERF_M(level)),
++			    rd(GCC_QUP0_SE4_PERF_N(level)));
++
++			if (hz >= 4000000 && (se_source_hz == 0 || hz < se_source_hz)) {
++				se_source_hz = hz;
++				se_clock_select = level;
++			}
++		}
++		if (se_source_hz == 0) {
++			printf("fts: no usable preset clock rate\n");
++			return false;
++		}
++	} else {
++		/* the crystal, undivided: nothing else has to be running */
++		wr(GCC_QUP0_SE4_CFG, (rd(GCC_QUP0_SE4_CFG) & ~0x371fu) | 1);
++		wr(GCC_QUP0_SE4_CMD, rd(GCC_QUP0_SE4_CMD) | 1);
++		for (int i = 0; i < 500 && (rd(GCC_QUP0_SE4_CMD) & 1); i++) {
++			sleep_us(10);
++		}
++		if (rd(GCC_QUP0_SE4_CMD) & 1) {
++			printf("fts: the serial engine's clock does not take its configuration (%#x)\n", rd(GCC_QUP0_SE4_CMD));
++			return false;
++		}
++		se_source_hz = XO_HZ;
++		se_clock_select = 0;
++	}
++	wr(GCC_VOTE, rd(GCC_VOTE) | VOTE_QUP0_SE4);
++	for (int i = 0; i < 1000; i++) {
++		/* zizhan: the S-AHB branch runs under hardware clock gating (CBCR bit 1) and reads "off" while idle */
++		if (!(clock_state(rd(GCC_QUP0_M_AHB_CBCR)) | clock_state(rd(GCC_QUP0_S_AHB_CBCR)) |
++		    clock_state(rd(GCC_QUP0_SE4_CBCR)))) {
++			return true;
++		}
++		sleep_us(10);
++	}
++	printf("fts: clocks stay off: %#x %#x %#x\n", rd(GCC_QUP0_M_AHB_CBCR), rd(GCC_QUP0_S_AHB_CBCR),
++	    rd(GCC_QUP0_SE4_CBCR));
++	return false;
++}
++
++/* ---- SPI through the serial engine (GENI) ---------------------------------------------------------- */
++
++#define SE_PHYS                 se_phys
++#define SE_SIZE                 0x4000UL
++#define GENI_FORCE_DEFAULT      (se + 0x020)
++#define GENI_OUTPUT_CTRL        (se + 0x024)
++#define GENI_CGC_CTRL           (se + 0x028)
++#define GENI_STATUS             (se + 0x040)    /* bit 0: a command is running */
++#define GENI_SER_M_CLK_CFG      (se + 0x048)    /* bit 0 enable, [15:4] divider */
++#define GENI_IF_DISABLE_RO      (se + 0x064)    /* bit 0: no FIFO interface */
++#define GENI_FW_REVISION_RO     (se + 0x068)    /* [15:8] protocol: 1 = SPI */
++#define GENI_CLK_SEL            (se + 0x07c)
++#define SPI_CPHA                (se + 0x224)
++#define SPI_LOOPBACK            (se + 0x22c)
++#define SPI_CPOL                (se + 0x230)
++#define SPI_DEMUX_OUTPUT_INV    (se + 0x24c)
++#define SPI_DEMUX_SEL           (se + 0x250)
++#define GENI_BYTE_GRAN          (se + 0x254)
++#define GENI_DMA_MODE_EN        (se + 0x258)
++#define SPI_TRANS_CFG           (se + 0x25c)
++#define GENI_TX_PACKING_CFG0    (se + 0x260)
++#define GENI_TX_PACKING_CFG1    (se + 0x264)
++#define SPI_WORD_LEN            (se + 0x268)
++#define SPI_TX_TRANS_LEN        (se + 0x26c)
++#define SPI_RX_TRANS_LEN        (se + 0x270)
++#define SPI_DELAY_COUNTERS      (se + 0x278)
++#define GENI_RX_PACKING_CFG0    (se + 0x284)
++#define GENI_RX_PACKING_CFG1    (se + 0x288)
++#define GENI_M_CMD0             (se + 0x600)    /* [31:27] operation */
++#define GENI_M_CMD_CTRL         (se + 0x604)    /* bit 2 cancel, bit 1 abort */
++#define GENI_M_IRQ_STATUS       (se + 0x610)
++#define GENI_M_IRQ_EN           (se + 0x614)
++#define GENI_M_IRQ_CLEAR        (se + 0x618)
++#define GENI_S_IRQ_CLEAR        (se + 0x648)
++#define GENI_TX_FIFO            (se + 0x700)
++#define GENI_RX_FIFO            (se + 0x780)
++#define GENI_TX_FIFO_STATUS     (se + 0x800)    /* [27:0] words */
++#define GENI_RX_FIFO_STATUS     (se + 0x804)    /* bit 31 last, [30:28] bytes of the last word, [24:0] words */
++#define GENI_TX_WATERMARK       (se + 0x80c)
++#define GENI_RX_WATERMARK       (se + 0x810)
++#define GENI_RX_RFR_WATERMARK   (se + 0x814)
++#define SE_DMA_TX_IRQ_CLR       (se + 0xc44)
++#define SE_DMA_RX_IRQ_CLR       (se + 0xd44)
++#define SE_GSI_EVENT_EN         (se + 0xe18)
++#define SE_IRQ_EN               (se + 0xe1c)
++#define SE_HW_PARAM_0           (se + 0xe24)    /* [21:16] FIFO depth in words */
++#define SE_DMA_GENERAL_CFG      (se + 0xe30)
++
++#define M_CMD_DONE              (1u << 0)
++#define M_CMD_CANCEL            (1u << 4)
++#define M_CMD_ABORT             (1u << 5)
++#define M_ERRORS                ((1u << 1) | (1u << 2) | (1u << 3) | (1u << 24) | (1u << 25) | (1u << 28) | (1u << 29))
++#define SPI_FULL_DUPLEX         (3u << 27)
++
++static uint32_t fifo_depth;
++
++/* 0 = ready; otherwise why the engine cannot be used */
++static const char *
++geni_spi_init(uint32_t hz)
++{
++	uint32_t divider;
++
++	if ((rd(GENI_FW_REVISION_RO) >> 8 & 0xff) != 1) {
++		return "the serial engine has no SPI firmware";
++	}
++	if (rd(GENI_IF_DISABLE_RO) & 1) {
++		return "the serial engine's FIFO interface is disabled";
++	}
++	fifo_depth = rd(SE_HW_PARAM_0) >> 16 & 0x3f;
++	if (fifo_depth < 4) {
++		return "the serial engine reports no FIFO";
++	}
++	wr(SE_GSI_EVENT_EN, 0);
++	wr(GENI_M_IRQ_CLEAR, 0xffffffff);
++	wr(GENI_S_IRQ_CLEAR, 0xffffffff);
++	wr(SE_DMA_TX_IRQ_CLR, 0xffffffff);
++	wr(SE_DMA_RX_IRQ_CLR, 0xffffffff);
++	wr(GENI_CGC_CTRL, rd(GENI_CGC_CTRL) | 0x7f);
++	wr(SE_DMA_GENERAL_CFG, rd(SE_DMA_GENERAL_CFG) | 0xf);
++	wr(GENI_OUTPUT_CTRL, 0x7f);
++	wr(GENI_FORCE_DEFAULT, 1);
++	wr(GENI_DMA_MODE_EN, rd(GENI_DMA_MODE_EN) & ~1u);
++	wr(GENI_RX_WATERMARK, fifo_depth - 3);
++	wr(GENI_RX_RFR_WATERMARK, fifo_depth - 2);
++	wr(GENI_TX_WATERMARK, 0);
++	/* the status bits we poll follow these enables; the interrupt itself stays masked at the GIC */
++	wr(SE_IRQ_EN, rd(SE_IRQ_EN) | 0xf);
++	wr(GENI_M_IRQ_EN, rd(GENI_M_IRQ_EN) | 0x7fc0007f);
++
++	/* mode 0, chip select 0, 8 bits, most significant first, four bytes in a FIFO word */
++	wr(SPI_LOOPBACK, 0);
++	wr(SPI_DEMUX_SEL, 0);
++	wr(SPI_CPHA, 0);
++	wr(SPI_CPOL, 0);
++	wr(SPI_DEMUX_OUTPUT_INV, 0);
++	wr(SPI_TRANS_CFG, rd(SPI_TRANS_CFG) & ~2u);
++	wr(SPI_DELAY_COUNTERS, 0);
++	wr(GENI_TX_PACKING_CFG0, 0x0007f8fe);
++	wr(GENI_TX_PACKING_CFG1, 0x000ffefe);
++	wr(GENI_RX_PACKING_CFG0, 0x0007f8fe);
++	wr(GENI_RX_PACKING_CFG1, 0x000ffefe);
++	wr(GENI_BYTE_GRAN, 0);
++	wr(SPI_WORD_LEN, 8 - 4);
++
++	divider = (se_source_hz + hz - 1) / hz;
++	wr(GENI_CLK_SEL, se_clock_select & 7);
++	wr(GENI_SER_M_CLK_CFG, (divider ? divider : 1) << 4 | 1);
++	return NULL;
++}
++
++static void
++geni_drain(uint8_t *rx, uint32_t length, uint32_t *received)
++{
++	uint32_t status = rd(GENI_RX_FIFO_STATUS), words = status & 0x01ffffff, bytes = words * 4;
++	if (words > fifo_depth) return; /* inaccessible/bad status must not cause an unbounded MMIO drain */
++
++	if (status & 0x80000000u) {
++		uint32_t valid = status >> 28 & 7;
++
++		if (valid && valid < 4) {
++			bytes -= 4 - valid;
++		}
++	}
++	for (uint32_t i = 0; i < words; i++) {
++		uint32_t word = rd(GENI_RX_FIFO);
++
++		for (int j = 0; j < 4 && bytes; j++, bytes--) {
++			if (*received < length) {
++				if (rx) {
++					rx[*received] = (uint8_t)(word >> (8 * j));
++				}
++				(*received)++;
++			}
++		}
++	}
++}
++
++static void
++geni_recover(void)
++{
++	wr(GENI_M_CMD_CTRL, 1u << 2);
++	for (int i = 0; i < 2000 && !(rd(GENI_M_IRQ_STATUS) & M_CMD_CANCEL); i++) {
++		sleep_us(100);
++	}
++	if (!(rd(GENI_M_IRQ_STATUS) & M_CMD_CANCEL)) {
++		wr(GENI_M_CMD_CTRL, 1u << 1);
++		for (int i = 0; i < 2000 && !(rd(GENI_M_IRQ_STATUS) & M_CMD_ABORT); i++) {
++			sleep_us(100);
++		}
++	}
++	for (int i = 0; i < 64 && (rd(GENI_RX_FIFO_STATUS) & 0x01ffffff); i++) {
++		(void)rd(GENI_RX_FIFO);
++	}
++	wr(GENI_M_IRQ_CLEAR, 0xffffffff);
++}
++
++/* One transfer with the chip selected throughout: `length` bytes out (zeros without tx) and as many in. */
++static bool
++geni_transfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
++{
++	static unsigned complaints;
++	uint32_t sent = 0, received = 0, status = 0;
++	uint64_t deadline;
++
++	for (int i = 0; rd(GENI_STATUS) & 1; i++) {
++		if (i > 2000) {
++			geni_recover();
++			break;
++		}
++		sleep_us(100);
++	}
++	wr(GENI_M_IRQ_CLEAR, 0xffffffff);
++	wr(SPI_TX_TRANS_LEN, length);
++	wr(SPI_RX_TRANS_LEN, length);
++	wr(GENI_M_CMD0, SPI_FULL_DUPLEX);
++	clock_interval_to_deadline(200, NSEC_PER_MSEC, &deadline);
++	while (mach_absolute_time() < deadline) {
++		while (sent < length && (rd(GENI_TX_FIFO_STATUS) & 0x0fffffff) + 1 < fifo_depth) {
++			uint32_t word = 0;
++
++			for (int j = 0; j < 4 && sent < length; j++, sent++) {
++				word |= (uint32_t)(tx ? tx[sent] : 0) << (8 * j);
++			}
++			wr(GENI_TX_FIFO, word);
++		}
++		status = rd(GENI_M_IRQ_STATUS);
++		geni_drain(rx, length, &received);
++		if (status & M_ERRORS) {
++			break;
++		}
++		if (status & M_CMD_DONE) {
++			geni_drain(rx, length, &received);
++			wr(GENI_M_IRQ_CLEAR, status);
++			if (received == length) {
++				return true;
++			}
++			break;
++		}
++	}
++	if (complaints++ < 8) {
++		printf("fts: SPI transfer of %u bytes failed: status %#x, sent %u, received %u\n", length, status, sent,
++		    received);
++	}
++	geni_recover();
++	return false;
++}
++
++/* ---- SPI by hand, on the same pins ----------------------------------------------------------------- */
++
++static unsigned bitbang_in, bitbang_out;
++
++static void
++bitbang_init(void)
++{
++	gpio_output(PIN_CS, true, PULL_NONE, 6);
++	gpio_output(PIN_CLK, false, PULL_NONE, 6);
++	gpio_output(bitbang_out, false, PULL_NONE, 6);
++	gpio_configure(bitbang_in, 0, PULL_NONE, 2, false);
++}
++
++static bool
++bitbang_transfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
++{
++	gpio_set(PIN_CS, false);
++	for (uint32_t i = 0; i < length; i++) {
++		uint8_t out = tx ? tx[i] : 0, in = 0;
++
++		for (int bit = 7; bit >= 0; bit--) {
++			gpio_set(bitbang_out, out >> bit & 1);
++			gpio_set(PIN_CLK, true);
++			in = (uint8_t)(in << 1 | gpio_get(bitbang_in));
++			gpio_set(PIN_CLK, false);
++		}
++		if (rx) {
++			rx[i] = in;
++		}
++	}
++	gpio_set(PIN_CS, true);
++	return true;
++}
++
++static bool (*spi_transfer)(const uint8_t *tx, uint8_t *rx, uint32_t length);
++
++void pong_fts_init(void);
++
++/* ---- the ST FingerTip (FST2, chip 0x3652 "spruce") ------------------------------------------------ */
++/* From the zizhan fst2 driver 6.0.3 (LineageOS android_kernel_xiaomi_sm8450 drivers/input/touchscreen/fst2):
++ * every read returns one dummy byte first; the opcode, address and read stay under one chip select. */
++
++#define FTS_OP_HW_WRITE         0xfa            /* 32-bit big-endian hardware address */
++#define FTS_OP_HW_READ          0xfb
++#define FTS_OP_FW_WRITE         0xb2            /* 16-bit big-endian firmware register */
++#define FTS_OP_FW_READ          0xb1
++#define FTS_OP_HDM_READ         0xb7
++#define FTS_HW_CHIP_ID          0x20000000u
++#define FTS_HW_SPI4_CONFIG      0x2000002du
++#define FTS_HW_GPIO_PU          0x20000034u
++#define FTS_HW_MISO_CONFIG      0x2000003eu
++#define FTS_FW_SCAN_MODE        0x0010
++#define FTS_FW_HDM_REQ          0x0023
++#define FTS_FW_FIFO             0x0060
++#define FTS_CHIP_ID             0x3652
++#define FTS_EVENT_SIZE          8
++#define FTS_EVENT_READY         0x03
++#define FTS_EVENT_ENTER         0x13
++#define FTS_EVENT_MOTION        0x23
++#define FTS_EVENT_LEAVE         0x33
++#define FTS_EVENT_ERROR         0xf3
++#define FTS_MAX_TOUCHES         10
++#define FTS_MAX_READ            256
++
++static uint8_t spi_tx[8 + FTS_MAX_READ], spi_rx[8 + FTS_MAX_READ];
++
++/* opcode + address bytes out, then (dummy + length) bytes in, with the chip selected throughout */
++static bool
++fts_read(uint8_t op, uint32_t address, unsigned address_bytes, uint8_t *data, uint32_t length)
++{
++	uint32_t head = 1 + address_bytes;
++
++	if (length > FTS_MAX_READ) {
++		return false;
++	}
++	memset(spi_tx, 0, head + 1 + length);
++	spi_tx[0] = op;
++	for (unsigned i = 0; i < address_bytes; i++) {
++		spi_tx[1 + i] = (uint8_t)(address >> (8 * (address_bytes - 1 - i)));
++	}
++	if (!spi_transfer(spi_tx, spi_rx, head + 1 + length)) {
++		return false;
++	}
++	memcpy(data, spi_rx + head + 1, length);
++	return true;
++}
++
++static bool
++fts_write(uint8_t op, uint32_t address, unsigned address_bytes, const uint8_t *data, uint32_t length)
++{
++	uint32_t head = 1 + address_bytes;
++
++	if (length > 128) {
++		return false;
++	}
++	spi_tx[0] = op;
++	for (unsigned i = 0; i < address_bytes; i++) {
++		spi_tx[1 + i] = (uint8_t)(address >> (8 * (address_bytes - 1 - i)));
++	}
++	memcpy(spi_tx + head, data, length);
++	return spi_transfer(spi_tx, NULL, head + length);
++}
++
++static bool
++fts_hw_write8(uint32_t address, uint8_t value)
++{
++	return fts_write(FTS_OP_HW_WRITE, address, 4, &value, 1);
++}
++
++static bool
++fts_fw_write8(uint16_t address, uint8_t value)
++{
++	return fts_write(FTS_OP_FW_WRITE, address, 2, &value, 1);
++}
++
++static bool
++fts_read_event(uint8_t *event)
++{
++	return fts_read(FTS_OP_FW_READ, FTS_FW_FIFO, 2, event, FTS_EVENT_SIZE);
++}
++
++static void
++touch_reset(void)
++{
++	gpio_set(PIN_RESET, false);
++	sleep_ms(20);
++	gpio_set(PIN_RESET, true);
++	sleep_ms(20);
++}
++
++/* configure_spi4() of the reference driver: the chip's SPI pins need it before the first read */
++static bool
++fts_configure_spi4(void)
++{
++	return fts_hw_write8(FTS_HW_GPIO_PU, 0x02) && fts_hw_write8(FTS_HW_MISO_CONFIG, 0x07) &&
++	       fts_hw_write8(FTS_HW_SPI4_CONFIG, 0x02);
++}
++
++static bool
++fts_probe(bool verbose)
++{
++	uint8_t id[2] = { 0 };
++
++	if (!fts_configure_spi4() || !fts_read(FTS_OP_HW_READ, FTS_HW_CHIP_ID, 4, id, 2)) {
++		return false;
++	}
++	if ((id[0] << 8 | id[1]) != FTS_CHIP_ID) {
++		if (verbose) {
++			printf("fts: chip id %02x %02x, expected 36 52\n", id[0], id[1]);
++		}
++		return false;
++	}
++	printf("fts: chip id 0x3652 (FST2)\n");
++	return true;
++}
++
++/* Reset with the GPIO, then wait for the controller-ready event like fts_system_reset(). */
++static bool
++fts_system_reset(void)
++{
++	uint8_t event[FTS_EVENT_SIZE];
++
++	touch_reset();
++	fts_configure_spi4();
++	for (int i = 0; i < 100; i++) {
++		if (fts_read_event(event) && event[0] == FTS_EVENT_READY) {
++			return true;
++		}
++		sleep_ms(10);
++	}
++	printf("fts: no controller-ready event after reset\n");
++	return false;
++}
++
++/* System information from the host data memory: firmware/config versions and the reporting resolution. */
++static void
++fts_sys_info(void)
++{
++	uint8_t done = 0xff, info[32];
++
++	if (!fts_fw_write8(FTS_FW_HDM_REQ, 0x01)) {
++		return;
++	}
++	for (int i = 0; i < 300 && done != 0; i++) {
++		sleep_ms(10);
++		if (!fts_read(FTS_OP_FW_READ, FTS_FW_HDM_REQ, 2, &done, 1)) {
++			return;
++		}
++	}
++	if (done != 0 || !fts_read(FTS_OP_HDM_READ, 0x0000, 2, info, sizeof(info)) || info[0] != 0x01) {
++		printf("fts: no system information (request %02x, header %02x)\n", done, info[0]);
++		return;
++	}
++	printf("fts: firmware %#x, svn %#x, config %#x, resolution %u x %u, %u x %u nodes\n",
++	    info[16] | info[17] << 8, info[18] | info[19] << 8, info[22] | info[23] << 8,
++	    info[24] | info[25] << 8, info[26] | info[27] << 8, info[28], info[29]);
++}
++
++static bool
++fts_scan_on(void)
++{
++	return fts_fw_write8(FTS_FW_SCAN_MODE, 0x01);
++}
++
++static struct {
++	uint32_t polls, events, touches, errors, last_x, last_y;
++} seen;
++
++static struct {
++	bool down;
++	uint32_t x, y;
++} contact[FTS_MAX_TOUCHES];
++
++/*
++ * boot-arg touch_flip: bit 0 mirrors the screen's x, bit 1 its y, bit 2 keeps the controller's axes unswapped.
++ * The controller reports 0..19139 across the 1914-pixel side and 0..21599 along the 2160-pixel side, while the
++ * framebuffer is 2160 x 1916, so by default the axes are swapped. Measured on t3 (taps on the top-left and
++ * bottom-right corners of the upright home screen: raw 18345,485 and 675,20565) the screen's y also runs against
++ * the controller's x, hence the default 2.
++ */
++static uint32_t flip = 2;
++
++/* Every touch report sent up, real or synthetic: the GPU governor's touch boost (PongAdrenoPlatform.cpp) watches it. */
++volatile uint32_t pong_touch_activity;
++
++static void
++fts_release_all(void)
++{
++	for (uint32_t id = 0; id < FTS_MAX_TOUCHES; id++) {
++		if (contact[id].down) {
++			contact[id].down = false;
++			touch_post(PONG_TOUCH_UP, id, contact[id].x, contact[id].y);
++		}
++	}
++}
++
++static void
++fts_touch(const uint8_t *e)
++{
++	static unsigned shown;
++	uint32_t id = e[1] >> 4, kind = e[1] & 0xf;
++	uint32_t tx = e[2] | e[3] << 8, ty = e[4] | e[5] << 8, x, y;
++
++	if (id >= FTS_MAX_TOUCHES) {
++		return;
++	}
++	if (e[0] == FTS_EVENT_LEAVE) {
++		if (contact[id].down) {
++			contact[id].down = false;
++			touch_post(PONG_TOUCH_UP, id, contact[id].x, contact[id].y);
++		}
++		return;
++	}
++	if (kind < 1 || kind > 3) {             /* 0 hover; 1 finger, 2 glove, 3 large */
++		return;
++	}
++	if (tx >= max_x) {
++		tx = max_x - 1;
++	}
++	if (ty >= max_y) {
++		ty = max_y - 1;
++	}
++	if (shown < 8) {
++		shown++;
++		printf("fts: %s finger %u type %u raw %u, %u (of %u x %u)\n", e[0] == FTS_EVENT_ENTER ? "enter" : "move",
++		    id, kind, tx, ty, max_x, max_y);
++	}
++	seen.touches++;
++	seen.last_x = tx;
++	seen.last_y = ty;
++	if (flip & 4) {
++		x = tx * 65535 / (max_x - 1);
++		y = ty * 65535 / (max_y - 1);
++	} else {
++		x = ty * 65535 / (max_y - 1);
++		y = tx * 65535 / (max_x - 1);
++	}
++	if (flip & 1) {
++		x = 65535 - x;
++	}
++	if (flip & 2) {
++		y = 65535 - y;
++	}
++	pong_touch_activity++;
++	if (!contact[id].down) {
++		touch_post(PONG_TOUCH_DOWN, id, x, y);
++	} else if (contact[id].x != x || contact[id].y != y) {
++		touch_post(PONG_TOUCH_MOVE, id, x, y);
++	}
++	contact[id].down = true;
++	contact[id].x = x;
++	contact[id].y = y;
++}
++
++/* Drain the event FIFO (this is what releases the level-low interrupt), one 8-byte event per read. */
++static void
++fts_poll(void)
++{
++	static unsigned logged;
++	uint8_t e[FTS_EVENT_SIZE];
++
++	seen.polls++;
++	for (int n = 0; n < 100; n++) {
++		if (!fts_read_event(e) || e[0] == 0x00) {
++			return;
++		}
++		seen.events++;
++		switch (e[0]) {
++		case FTS_EVENT_ENTER:
++		case FTS_EVENT_MOTION:
++		case FTS_EVENT_LEAVE:
++			fts_touch(e);
++			break;
++		case FTS_EVENT_READY:
++			/* the controller restarted by itself: nothing it reported before is still down */
++			printf("fts: unexpected controller-ready event; scan mode again\n");
++			fts_release_all();
++			fts_scan_on();
++			break;
++		case FTS_EVENT_ERROR:
++			seen.errors++;
++			printf("fts: error event %02x %02x %02x %02x %02x %02x %02x %02x\n", e[0], e[1], e[2], e[3], e[4],
++			    e[5], e[6], e[7]);
++			if (e[1] == 0x01 || e[1] == 0x05) {     /* hard fault, watchdog */
++				fts_release_all();
++				if (fts_system_reset()) {
++					fts_scan_on();
++				}
++			}
++			return;
++		default:
++			if (logged < 16) {
++				logged++;
++				printf("fts: event %02x %02x %02x %02x %02x %02x %02x %02x\n", e[0], e[1], e[2], e[3], e[4], e[5],
++				    e[6], e[7]);
++			}
++			break;
++		}
++	}
++}
++
++/* No firmware flashing: the factory firmware (0xE455) is already in the controller's flash. */
++static bool
++bring_up(void)
++{
++	gpio_output(PIN_RESET, true, PULL_UP, 8);
++	gpio_configure(PIN_INT, 0, PULL_UP, 8, false);
++	/* the reference driver runs 5 MHz, mode 0 */
++	const char *problem = clocks_on() ? geni_spi_init(4000000) : "its clocks stay off";
++	if (!problem) {
++		gpio_configure(PIN_MISO, 1, PULL_NONE, 6, false);
++		gpio_configure(PIN_MOSI, 1, PULL_NONE, 6, false);
++		gpio_configure(PIN_CLK, 1, PULL_NONE, 6, false);
++		gpio_configure(PIN_CS, 1, PULL_UP, 16, false);
++		spi_transfer = geni_transfer;
++	} else {
++		/* zizhan's SE4 firmware is loaded in GSI (DMA-only) mode: FIFO access is disabled, so drive the same
++		 * four pins as GPIOs (mode 0: data set while the clock is low, sampled on the rising edge) */
++		printf("zizhan touch: GENI unavailable: %s; SPI by GPIO\n", problem);
++		bitbang_in = PIN_MISO;
++		bitbang_out = PIN_MOSI;
++		bitbang_init();
++		spi_transfer = bitbang_transfer;
++	}
++	if (fts_probe(false)) {
++		return true;
++	}
++	if (!io_supply_on()) {
++		printf("zizhan touch: cannot switch on ldoc2/ldoc7\n");
++		return false;
++	}
++	touch_reset();
++	return fts_probe(true);
++}
++
++static void
++touch_thread(__unused void *parameter, __unused wait_result_t result)
++{
++	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE); gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
++	se = ml_io_map(SE_PHYS, SE_SIZE); rsc = ml_io_map(RSC_PHYS, RSC_SIZE);
++	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);
++	if (!tlmm || !gcc || !se || !rsc || !cmd_db || !bring_up()) {
++		printf("zizhan touch: FST2 initialization failed; normal UI boot continues\n");
++		thread_terminate(current_thread()); return;
++	}
++	/* Android may have left it hibernating: reset, wait for ready, then the one command that starts reporting. */
++	if (!fts_system_reset()) {
++		thread_terminate(current_thread()); return;
++	}
++	fts_sys_info();
++	if (!fts_scan_on()) {
++		printf("zizhan touch: cannot enable scanning; SKIP\n");
++		thread_terminate(current_thread()); return;
++	}
++	if (!pong_touch_device_ready()) { thread_terminate(current_thread()); return; }
++	printf("zizhan touch: FST2 ready, SPI 0x%llx GPIO reset=%u irq=%u, axes %ux%u, flip %u\n",
++	    se_phys, PIN_RESET, PIN_INT, max_x, max_y, flip);
++	unsigned idle = 0, minute = 0;
++	for (;;) {
++		if (!gpio_get(PIN_INT) || ++idle >= 10) { idle = 0; fts_poll(); }
++		sleep_ms(8);
++		if (++minute >= 7500) {
++			minute = 0;
++			printf("fts: %u polls, %u events, %u touches (last raw %u, %u), %u errors\n", seen.polls, seen.events,
++			    seen.touches, seen.last_x, seen.last_y, seen.errors);
++		}
++	}
++}
++
++/*
++ * boot-arg pong_touch_synth=<seconds>: a repeatable animation load for unattended frame-rate rounds. Once SpringBoard
++ * runs (plus 20 s to settle) one finger swipes across the middle of the screen every <seconds>, alternately right to
++ * left and back (250 ms, a move every 8 ms), paging the home screen. It uses the last contact id, which the
++ * controller's own reports never reach while a single real finger is down.
++ */
++static int
++synth_find_springboard(proc_t p, void *found)
++{
++	char name[32] = {};
++
++	proc_name(proc_pid(p), name, sizeof(name));
++	if (strcmp(name, "SpringBoard") == 0) {
++		*(bool *)found = true;
++	}
++	return PROC_RETURNED;
++}
++
++static void
++synth_thread(void *parameter, __unused wait_result_t result)
++{
++	const uint32_t period = (uint32_t)(uintptr_t)parameter, id = FTS_MAX_TOUCHES - 1, y = 32768, steps = 31;
++	bool found = false;
++
++	for (unsigned waited = 0; !found && waited < 600; waited++) {
++		sleep_ms(1000);
++		proc_iterate(PROC_ALLPROCLIST, synth_find_springboard, &found, NULL, NULL);
++	}
++	if (!found) {
++		printf("zizhan touch: synthetic swipes SKIP (no SpringBoard)\n");
++		thread_terminate(current_thread()); return;
++	}
++	sleep_ms(20000);
++	/* Boot-arg tsa=XXYY (percent of the width, of the height): instead of page swipes, tap there (a dock icon), wait <period> s,
++	 * go home with a swipe up from the bottom edge, wait again -- the app-open / return-home zooms (11-01: they hitch). */
++	/* tsb=XXYY: a second tap 2.5 s after the first (a row inside the app just opened: Settings > Battery hung, 11-01 v6) */
++	uint32_t app = 0, inner = 0;
++	PE_parse_boot_argn("tsb", &inner, sizeof(inner));
++	if (PE_parse_boot_argn("tsa", &app, sizeof(app)) && app) {
++		const uint32_t ax = (app / 100) % 100 * 65535 / 100, ay = app % 100 * 65535 / 100, home_steps = 12;
++		printf("zizhan touch: synthetic app open at %u%%,%u%% and home swipe every %u s\n", app / 100 % 100, app % 100, period);
++		for (;;) {
++			pong_touch_activity++;
++			touch_post(PONG_TOUCH_DOWN, id, ax, ay);
++			sleep_ms(60);
++			touch_post(PONG_TOUCH_UP, id, ax, ay);
++			if (inner) {
++				const uint32_t bx = (inner / 100) % 100 * 65535 / 100, by = inner % 100 * 65535 / 100;
++				sleep_ms(2500);
++				pong_touch_activity++;
++				touch_post(PONG_TOUCH_DOWN, id, bx, by);
++				sleep_ms(60);
++				touch_post(PONG_TOUCH_UP, id, bx, by);
++			}
++			sleep_ms(period * 1000);
++			const uint32_t from = 65200, to = 36000;   /* the bottom edge up to 55% */
++			pong_touch_activity++;
++			touch_post(PONG_TOUCH_DOWN, id, 32768, from);
++			for (uint32_t i = 1; i <= home_steps; i++) {
++				sleep_ms(8);
++				pong_touch_activity++;
++				touch_post(PONG_TOUCH_MOVE, id, 32768, from - (from - to) * i / home_steps);
++			}
++			touch_post(PONG_TOUCH_UP, id, 32768, to);
++			sleep_ms(period * 1000);
++		}
++	}
++	printf("zizhan touch: synthetic swipe every %u s\n", period);
++	for (unsigned n = 0;; n++) {
++		const uint32_t from = n & 1 ? 13107 : 52428, to = n & 1 ? 52428 : 13107;   /* 20% and 80% of the width */
++		pong_touch_activity++;
++		touch_post(PONG_TOUCH_DOWN, id, from, y);
++		for (uint32_t i = 1; i <= steps; i++) {
++			sleep_ms(8);
++			pong_touch_activity++;
++			touch_post(PONG_TOUCH_MOVE, id, from + (int32_t)(to - from) * (int32_t)i / (int32_t)steps, y);
++		}
++		touch_post(PONG_TOUCH_UP, id, to, y);
++		sleep_ms(period * 1000);
++	}
++}
++
++void
++pong_fts_init(void)
++{
++	uint32_t enabled = 0; thread_t thread;
++	if (!PE_parse_boot_argn("pong_touch", &enabled, sizeof(enabled)) || !enabled) return;
++	if (!configuration()) { return; }       /* not the zizhan FST2 node: Pong's Goodix driver owns it */
++	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
++	PE_parse_boot_argn("touch_lat", &touch_lat, sizeof(touch_lat));
++	if (kernel_thread_start(touch_thread, NULL, &thread) == KERN_SUCCESS) thread_deallocate(thread);
++	uint32_t synth = 0;
++	if (PE_parse_boot_argn("pong_touch_synth", &synth, sizeof(synth)) && synth &&
++	    kernel_thread_start(synth_thread, (void *)(uintptr_t)synth, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++#endif /* PONG */

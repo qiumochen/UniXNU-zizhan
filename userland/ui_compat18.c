@@ -36,6 +36,8 @@ static bool format_installed;
 static bool personas_installed;
 static bool springboard_process;
 static bool phone_ui_process;
+/* Processes whose MobileGestalt answers this file adjusts: the phone UI processes and the render server (backboardd). */
+static bool gestalt_process;
 static bool skip_setup;
 static IMP setup_reason_original;
 static bool activation_installed;
@@ -647,15 +649,24 @@ static bool install_compositor_code(const struct mach_header *header,intptr_t sl
  * particular this does not advertise Face ID, telephony or camera hardware.
  * Identity/artwork/home gestures are provided by the ADT, not by this hook.
  */
+/* zizhan (docs/progress/2026-11-01-120hz-and-cadence.md section 12): MobileGestalt answers DeviceSupportsASTC (hashed
+ * ji56BO1mUeT7Qg9RO7Er9w) false for this identity, so QuartzCore's CADeviceSupportsASTC is false: CompressedImage refuses ASTC
+ * texture data and every CA::Render::Texture is flagged for CPU decoding, and SpringBoard decoded ASTC icons and snapshots on its
+ * main thread through ImageIO's ATXReadPlugin during app-open zooms. The GPU (Adreno 730, Turnip) samples ASTC LDR natively and
+ * metal2vulkan maps the ASTC pixel formats. BUT with the answer true in SpringBoard and backboardd every app drew black (user v4,
+ * screenshots g193/g194: Weather's sky with the native answer, black with it true), so it is opt-in: boot-arg pong_astc=1 answers
+ * true in the UI processes and the render server, pong_astc=2 in SpringBoard/Preferences only (experiment); default native. */
 static bool phone_gestalt_bool(CFStringRef key)
 {
-    if(key && (CFEqual(key,CFSTR("YlEtTtHlNesRBMal1CqRaA")) ||
+    if(phone_ui_process && key && (CFEqual(key,CFSTR("YlEtTtHlNesRBMal1CqRaA")) ||
                CFEqual(key,CFSTR("DeviceSupportsDynamicIsland"))))return true;
+    if(key && (CFEqual(key,CFSTR("ji56BO1mUeT7Qg9RO7Er9w")) || CFEqual(key,CFSTR("DeviceSupportsASTC"))) &&
+       (boot_option("pong_astc=1") || (phone_ui_process && boot_option("pong_astc=2"))))return true;
     return phone_gestalt_bool_original(key);
 }
 static void phone_gestalt_image(const struct mach_header *header,intptr_t slide)
 {
-    if(!phone_ui_process || phone_gestalt_bool_original || header->magic!=MH_MAGIC_64)return;
+    if(!gestalt_process || phone_gestalt_bool_original || header->magic!=MH_MAGIC_64)return;
     static const uint8_t uuid[16]={0xbe,0xed,0x77,0xde,0x98,0x7a,0x34,0x7e,
                                  0xad,0xa9,0x88,0x63,0x4a,0x6b,0xe5,0x6a};
     const struct mach_header_64 *h=(const void *)header;
@@ -1212,6 +1223,41 @@ static void wake_home(void *unused)
     fprintf(stderr,"Pong UI18: main queue wake completed backlight=%d lockscreen=%d\n",backlight!=nil,lock!=nil);
 }
 
+/* Value of boot-arg KEY=<value> (KEY includes the '='), copied into out; false when absent. */
+static bool boot_value(const char *key,char *out,size_t size)
+{
+    char args[2048];size_t length=sizeof(args)-1;
+    if(sysctlbyname("kern.bootargs",args,&length,NULL,0))return false;
+    args[length<sizeof(args)?length:sizeof(args)-1]='\0';
+    for(const char *p=args;(p=strstr(p,key));p++) {
+        if(p!=args && p[-1]!=' ' && p[-1]!='\t')continue;
+        p+=strlen(key);size_t n=strcspn(p," \t");
+        if(n>=size)n=size-1;
+        memcpy(out,p,n);out[n]='\0';return true;
+    }
+    return false;
+}
+
+/* Boot-arg pong_url=<s>: <s> seconds after SpringBoard starts, open Settings at pane pong_pane (default BATTERY_USAGE) without a
+ * finger, so an unattended round can sample the pane (11-01 v6: Settings > Battery hangs its main thread). The open goes
+ * through lsd/FrontBoard back to SpringBoard, so it is sent from a global queue, never SpringBoard's main queue. */
+static void open_pane(void *unused)
+{
+    (void)unused;
+    char pane[64]="BATTERY_USAGE",url[96];
+    (void)boot_value("pong_pane=",pane,sizeof(pane));
+    snprintf(url,sizeof(url),"prefs:root=%s",pane);
+    Class workspace=objc_lookUpClass("LSApplicationWorkspace");
+    SEL open=sel_registerName("openSensitiveURL:withOptions:");
+    id ws=workspace?((id(*)(id,SEL))objc_msgSend)((id)workspace,sel_registerName("defaultWorkspace")):nil;
+    CFURLRef target=CFURLCreateWithBytes(NULL,(const UInt8 *)url,strlen(url),kCFStringEncodingUTF8,NULL);
+    BOOL accepted=NO;
+    if(ws && target && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),open))
+        accepted=((BOOL(*)(id,SEL,id,id))objc_msgSend)(ws,open,(id)target,nil);
+    fprintf(stderr,"Pong UI18: open %s accepted=%d (workspace %d)\n",url,accepted,ws!=nil);
+    if(target)CFRelease(target);
+}
+
 static bool own_directory(const char *path)
 {
     if(mkdir(path,0700) && errno!=EEXIST)return false;
@@ -1724,9 +1770,10 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     const char *name=getprogname();
     if(!name)return;
     phone_ui_process=!strcmp(name,"Preferences") || !strcmp(name,"SpringBoard");
+    gestalt_process=phone_ui_process || !strcmp(name,"backboardd");
     // Install the capability answer before status-provider +initialize can
     // cache it during the regular all-images callback below.
-    if(phone_ui_process)for(uint32_t i=0,n=_dyld_image_count();i<n;i++)
+    if(gestalt_process)for(uint32_t i=0,n=_dyld_image_count();i<n;i++)
         phone_gestalt_image(_dyld_get_image_header(i),_dyld_get_image_vmaddr_slide(i));
     if(phone_ui_process) {
         dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,phone_repair_existing);
@@ -1776,6 +1823,10 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         skip_setup=boot_option("pong_skip_setup=1");
         CFPreferencesSetAppValue(CFSTR("SBDisableAutoDim"),kCFBooleanTrue,kCFPreferencesCurrentApplication);
         dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,wake_home);
+        char delay[16];
+        if(boot_value("pong_url=",delay,sizeof(delay)) && atoi(delay)>0)
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)atoi(delay)*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),NULL,open_pane);
     }
     if(strcmp(name,"backboardd")==0) {
         software_composition=boot_option("pong_ui_software=1");

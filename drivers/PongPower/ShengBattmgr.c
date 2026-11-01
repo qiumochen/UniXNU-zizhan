@@ -1,4 +1,4 @@
-/* Pong adaptation: NothingOSS qti_battery_charger.c standard property IDs; no Xiaomi extensions or charger writes. */
+/* Pong adaptation (NothingOSS qti_battery_charger.c), renumbered for zizhan's Xiaomi firmware as UniXNU-sheng; no charger writes. */
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 #include "ShengBattmgr.h"
 
@@ -9,28 +9,32 @@
  * USB: online 0, voltage now 1 (uV), voltage max 2, current now 3 (uA), current max 4, input current limit 5, type 6, adapter type 7.
  * Board: battery authenticated 3, adapter type 7, PD adapter authenticated 0x18, input suspended 0x2a, adapter watts 0x33, the fuel
  * gauges 0x8a/0x8b and 0xa6/0xa7, second cell authenticated 0xa5. */
+/* zizhan (docs/progress/2026-11-01-battery.md): Xiaomi's battery manager inserts one property at 12, as UniXNU-sheng found on its
+ * Xiaomi SM8550 (porting.toml: "Battery properties after 11 are shifted by one"): temperature 13, charge counter 15, cycles 16, design
+ * 17, full 18, time to full 20, to empty 21. Pong (Nothing) used the unshifted QTI numbers; checked against Android's sysfs on this
+ * phone (g204: property 12 read as a temperature of 0). */
 static const struct {uint8_t opcode, property, slow;} kFields[BmFields] = {
     [BmStatus] = {SHENG_BATTMGR_OP_BATTERY_GET, 0, 0},
     [BmPresent] = {SHENG_BATTMGR_OP_BATTERY_GET, 2, 0},
     [BmCapacity] = {SHENG_BATTMGR_OP_BATTERY_GET, 4, 0},
     [BmVoltage] = {SHENG_BATTMGR_OP_BATTERY_GET, 7, 0},
     [BmCurrent] = {SHENG_BATTMGR_OP_BATTERY_GET, 9, 0},
-    [BmTemperature] = {SHENG_BATTMGR_OP_BATTERY_GET, 12, 0},
-    [BmCharge] = {SHENG_BATTMGR_OP_BATTERY_GET, 14, 0},
+    [BmTemperature] = {SHENG_BATTMGR_OP_BATTERY_GET, 13, 0},
+    [BmCharge] = {SHENG_BATTMGR_OP_BATTERY_GET, 15, 0},
     [BmUsbOnline] = {SHENG_BATTMGR_OP_USB_GET, 0, 0},
     [BmUsbType] = {SHENG_BATTMGR_OP_USB_GET, 6, 0},
     [BmUsbVoltage] = {SHENG_BATTMGR_OP_USB_GET, 1, 0},
     [BmUsbCurrent] = {SHENG_BATTMGR_OP_USB_GET, 3, 0},
-    [BmTimeToEmpty] = {SHENG_BATTMGR_OP_BATTERY_GET, 20, 0},
-    [BmTimeToFull] = {SHENG_BATTMGR_OP_BATTERY_GET, 19, 0},
+    [BmTimeToEmpty] = {SHENG_BATTMGR_OP_BATTERY_GET, 21, 0},
+    [BmTimeToFull] = {SHENG_BATTMGR_OP_BATTERY_GET, 20, 0},
     /* the fuel gauges: remaining and full charge of each (mAh) */
     [BmGauge1Remaining] = {SHENG_BATTMGR_OP_BOARD_GET, 0x8a, 0},
     [BmGauge1Full] = {SHENG_BATTMGR_OP_BOARD_GET, 0x8b, 0},
     [BmGauge2Remaining] = {SHENG_BATTMGR_OP_BOARD_GET, 0xa6, 0},
     [BmGauge2Full] = {SHENG_BATTMGR_OP_BOARD_GET, 0xa7, 0},
-    [BmFull] = {SHENG_BATTMGR_OP_BATTERY_GET, 17, 1},
-    [BmDesign] = {SHENG_BATTMGR_OP_BATTERY_GET, 16, 1},
-    [BmCycles] = {SHENG_BATTMGR_OP_BATTERY_GET, 15, 1},
+    [BmFull] = {SHENG_BATTMGR_OP_BATTERY_GET, 18, 1},
+    [BmDesign] = {SHENG_BATTMGR_OP_BATTERY_GET, 17, 1},
+    [BmCycles] = {SHENG_BATTMGR_OP_BATTERY_GET, 16, 1},
     [BmUsbAdapter] = {SHENG_BATTMGR_OP_USB_GET, 7, 0},
     [BmUsbLimit] = {SHENG_BATTMGR_OP_USB_GET, 5, 0},
     [BmUsbMax] = {SHENG_BATTMGR_OP_USB_GET, 4, 0},
@@ -192,7 +196,8 @@ int sheng_battmgr_receive(ShengBattmgr *b, const uint8_t *data, uint32_t length)
         b->errors++;
         b->valid &= ~(1u << b->cursor);
     } else {
-        b->value[b->cursor] = b->cursor==BmTemperature ? (int32_t)value*10 : (int32_t)value;
+        /* zizhan: property 13 is already hundredths of a degree (Pong's tenths took * 10, which put 34.1 C at 34100, out of range) */
+        b->value[b->cursor] = (int32_t)value;
         b->valid |= 1u << b->cursor;
     }
     advance(b);

@@ -170,6 +170,9 @@ class PongBattery : public IOPMPowerSource {
             native_battery_stats[0] = 4;IOLog("PongBattery: physical battery power source published %d%% %dmV\n",s.percent,s.voltage_mv);
         }
         updateStatus();
+        IOLog("PongBattery: %d%% %dmV %dmA temp %d flags 0x%x usb %d full %d design %d mAh cycles %d\n",native_battery_stats[1],
+            native_battery_stats[2],native_battery_stats[3],native_battery_stats[4],native_battery_stats[5],native_battery_stats[10],
+            native_battery_stats[11],native_battery_stats[12],native_battery_stats[13]);
     }
     void counters() {
         native_battery_stats[6] = (int32_t)bm.cycles_done;

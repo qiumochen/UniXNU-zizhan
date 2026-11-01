@@ -36,7 +36,15 @@ def main():
  env=dict(os.environ,DEVELOPER_DIR=str(pong_paths.developer_dir()))
  sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
  flags=['-target','arm64-apple-ios18.0','-isysroot',sdk,'-mkernel','-ffreestanding','-fno-builtin','-fno-stack-protector','-mgeneral-regs-only','-fblocks','-O2','-DKERNEL=1','-DKERNEL_PRIVATE=1','-DXNU_KERNEL_PRIVATE=1','-DARM64_BOARD_CONFIG_PONG=1','-I'+str(framework/'PrivateHeaders'),'-I'+str(framework/'Headers'),'-I'+str(ROOT/'drivers/PongPower'),'-I'+str(out),'-I'+str(pong_paths.sheng_root()/'package'),'-Wno-deprecated-declarations']
- subprocess.run([os.sys.executable,str(ROOT/'scripts/prepare-pong-audio.py'),'--container',str(pong_paths.audio_inputs()/'tfa98xx.cnt'),'--output',str(out/'PongAmpProfiles.h')],check=True)
+ container=pong_paths.audio_inputs()/'tfa98xx.cnt'
+ if container.is_file():
+  subprocess.run([os.sys.executable,str(ROOT/'scripts/prepare-pong-audio.py'),'--container',str(container),'--output',str(out/'PongAmpProfiles.h')],check=True)
+ else:
+  # zizhan (docs/progress/2026-11-01-battery.md): no Pong TFA9873 pair and no CNT; the ADSP/battery part is built and PongAudio keeps
+  # an empty profile it never applies (pong_audio=0 on this board).
+  (out/'PongAmpProfiles.h').write_text('struct PongAmpField {unsigned field,value;};\n'
+   '// no tfa98xx.cnt: not a Pong board, audio is not started\n'
+   'static constexpr PongAmpField kPongAmp0[]={{0,0}};\nstatic constexpr PongAmpField kPongAmp1[]={{0,0}};\n')
  objects=[]
  for name in ('QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','PongFirmware.c','PongAdsp.cpp','PongBattery.cpp','PongAudio.cpp','PongAudioService.cpp','PongPower.cpp','PongBacklight.cpp'):
   source=ROOT/'drivers/PongPower'/name;obj=out/(source.stem+'.o');cpp=source.suffix=='.cpp'
@@ -47,6 +55,14 @@ def main():
   if name=='PongAudioService.cpp':obj=late_init(obj,name,'PongAudioServiceStaticInit')
   if name=='PongBacklight.cpp':obj=late_init(obj,name,'PongBacklightStaticInit')
   objects.append(obj)
+ if os.environ.get('XNU_PONG_WIFI')!='1':
+  # zizhan: without the Wi-Fi archive, the shared RPMh owner (PongRpmh.cpp) and Sheng's cmd-db/RPMh helpers come from here
+  for source in (ROOT/'drivers/PongPower/PongRpmh.cpp',pong_paths.sheng_root()/'package/QcomRpmh.c'):
+   obj=out/('Power'+source.stem+'.o');cpp=source.suffix=='.cpp'
+   cmd=['xcrun','clang++' if cpp else 'clang',*flags,*(['-std=gnu++17','-fno-exceptions','-fno-rtti'] if cpp else []),'-c',str(source),'-o',str(obj)]
+   r=subprocess.run(cmd,env=env,capture_output=True,text=True);(out/(obj.stem+'.log')).write_text(r.stdout+r.stderr)
+   if r.returncode:raise SystemExit(r.stderr)
+   objects.append(obj)
  archive=out/'libPongPower.a';archive.unlink(missing_ok=True)
  subprocess.run(['xcrun','libtool','-static','-o',str(archive),*map(str,objects)],env=env,check=True)
  (out/'build-report.json').write_text(json.dumps(dict(board='SM8475 Pong',guest='22H374',adsp_pas=1,adsp_carveout=[0x85700000,0x2800000],ipcc=0xed18000,smem=0x80900000,battery='Nothing standard PMIC GLINK, single pack, read only',audio='adsp_apps APM graphs, SID1801, TFA9873 stereo PCM ring; no microphone endpoint',firmware='Local REC image staged to /pong/firmware/adsp.mbn',runtime_observed=False),indent=2)+'\n')

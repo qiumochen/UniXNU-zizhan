@@ -14,8 +14,9 @@ volatile int32_t native_battery_stats[16];
 void pong_power_start_optional(void) {
  pong_rpmh_init();
  unsigned enabled=0;PE_parse_boot_argn("pong_adsp",&enabled,sizeof(enabled));
+ if(!enabled)return;
+ sheng_adsp_probe();   // pong_adsp=1: map and survey only (zizhan bring-up); 2: boot the DSP and its clients
  if(enabled!=2)return;
- sheng_adsp_probe();
  // DSP channel registration is ready synchronously; remote opens follow
  // only after firmware and PAS prerequisites complete on its worker.
  void *h=OSMetaClass::preModLoad(g_kernel_kmod_info.name);

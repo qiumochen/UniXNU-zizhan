@@ -43,7 +43,10 @@ enum Stage {
 };
 constexpr uint64_t kSmem = 0x80900000, kSmemSize = 0x200000, kMutex = 0x1f40000 + 3 * 0x1000, kIpcc = 0x0ed18000, kAoss = 0xc300000;
 constexpr uint64_t kRscDrv = 0x17a20000, kRscTcs = 0xd00, kCmdDb = 0x80860000, kCmdDbSize = 0x20000;
-constexpr uint64_t kAdspBase = 0x85700000, kAdspSize = 0x2800000, kDtbBase = 0x9e980000, kDtbSize = 0x80000;
+// zizhan (docs/progress/2026-11-01-battery.md): the live DT (Android /sys/firmware/fdt) reserves adsp_region@9fd00000, 0x3100000
+// bytes, and the phone's adsp.mdt spans exactly 0x3100000 (Pong: 0x85700000 + 0x2800000). SMEM, TCSR mutex, IPCC, AOSS, RSC DRV2 and
+// cmd-db are at Pong's addresses on zizhan too.
+constexpr uint64_t kAdspBase = 0x9fd00000, kAdspSize = 0x3100000, kDtbBase = 0x9e980000, kDtbSize = 0x80000;
 constexpr uint32_t kPasAdsp = 1, kPasDtb = 36, kRemotePid = 2, kItemIn = 443, kItemOut = 429, kItemCrash = 423;
 constexpr uint32_t kItemGlinkDesc = 478, kItemGlinkTx = 479, kItemGlinkRx = 480, kGlinkFifo = 0x4000;
 constexpr uint32_t kSpiIpcc = 229, kSpiRsc = 5;
@@ -574,6 +577,8 @@ void adspThread(void *, wait_result_t) {
     stage(StMapped);
     survey();
     stage(StSurveyed);
+    IOLog("PongAdsp: survey slave-kernel %d items 0x%x aoss 0x%x rsc 0x%x crash '%s'\n",native_adsp_stats[3],native_adsp_stats[4],
+        native_adsp_stats[5],native_adsp_stats[6],native_adsp_text);
     if (mode < 2 || !start() || !startGlink()) return;
     // From here on the thread only answers doorbells and client sends; with nothing pending it sleeps without a deadline, except while
     // a send waits for an intent or FIFO room (then it looks again every second).

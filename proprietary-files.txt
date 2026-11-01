@@ -8,7 +8,8 @@ Cryptex1,SystemTrustCache
 Cryptex1,AppOS
 Cryptex1,AppTrustCache
 OS
-# Pong firmware comes from this phone's REC modem/vendor partitions:
-# adsp.mbn, QCA6490 amss/amss20/m3/regdb and selected board data,
-# TFA9873 tfa98xx.cnt, Adreno730/GMU/ZAP and Goodix firmware.
+# zizhan firmware comes from the phone's own partitions (MIUI V14.0.15.0.TLRCNXM):
+#   /vendor/firmware/a730_sqe.fw, gmu_gen70000.bin, a730_zap.mdt, a730_zap.b01, a730_zap.b02 -> PONG_ADRENO_FIRMWARE
+#   /vendor/firmware_mnt/image/adsp.mdt + adsp.b00..b25 (modem partition) -> adsp.mbn via tools/zizhan/mdt2mbn.py
+# tools/zizhan/phone/collect.sh copies the Adreno files (and the live DT) off the phone; pull adsp.* with adb.
 # No firmware binaries are stored in this repository.

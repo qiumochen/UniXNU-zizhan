@@ -137,6 +137,11 @@ def main():
     subprocess.run([sys.executable, str(DEVICE / 'scripts/make-pong-adt-ipados18.py'),
         '--cpus', str(args.cpus),
         '--dram-size', '0x300000000', '--window-size', hex(args.window_size),
+        # Software IOPlatformUUID seeds. Without /chosen unique-chip-id + chip-id the kernel never publishes IOPlatformUUID and
+        # every gethostuuid() waits forever: timed did, then locationd's silo (TMGetRTCResetCount), contextstored, PowerUIAgent and
+        # Settings > Battery behind it (11-01 g215). The ECID seed is this phone's fastboot serial; 0x8010 is the A10 of the
+        # iPad7,11 restore this port runs. Neither is an Apple silicon identifier.
+        '--unique-chip-id', 'b0f5da20', '--chip-id', '8010',
         '--output', str(payload / 'kernel.macho.adt'),
         '--boot-manifest', str(manifest_path),
         *(['--skip-image-verification'] if args.skip_image_verification else []),

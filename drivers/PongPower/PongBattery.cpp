@@ -19,6 +19,7 @@
 #include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSString.h>
 #include <libkern/c++/OSSymbol.h>
 #include <pexpert/pexpert.h>
 extern "C" {
@@ -47,8 +48,11 @@ namespace {
 constexpr uint32_t kRequestMs = 2000, kRefreshMs = 60000, kSlowEvery = 10, kRing = 16, kMessage = 64;
 }
 
-class PongBattery : public IOPMPowerSource {
-    OSDeclareDefaultStructors(PongBattery)
+// Named as Apple's battery driver: PerfPowerServices' PLBatteryAgent records the battery (Settings > Battery charts) and answers the
+// health queries only when hasAppleSmartBattery finds this class; powerd derives "Maximum Capacity Percent" and "Battery Service State"
+// from the same entry's NominalChargeCapacity / DesignCapacity / CycleCount / Serial (11-01 v10: health spinner, empty charts).
+class AppleSmartBattery : public IOPMPowerSource {
+    OSDeclareDefaultStructors(AppleSmartBattery)
     IOWorkLoop *loop = nullptr;
     IOTimerEventSource *request = nullptr, *refresh = nullptr;
     IOInterruptEventSource *inbox = nullptr;
@@ -63,13 +67,13 @@ class PongBattery : public IOPMPowerSource {
     ShengAdspChannel *channel = nullptr;
 
     static void dspState(void *context, int up) {
-        PongBattery *self = static_cast<PongBattery *>(context);
+        AppleSmartBattery *self = static_cast<AppleSmartBattery *>(context);
         __atomic_store_n(&self->channelUp, up ? 1u : 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&self->channelChanged, 1u, __ATOMIC_RELEASE);
         self->inbox->interruptOccurred(nullptr, nullptr, 0);
     }
     static void dspReceive(void *context, const uint8_t *data, uint32_t length) {
-        PongBattery *self = static_cast<PongBattery *>(context);
+        AppleSmartBattery *self = static_cast<AppleSmartBattery *>(context);
         IOSimpleLockLock(self->ringLock);
         if (self->ringCount < kRing && length <= kMessage) {
             auto &slot = self->ring[(self->ringHead + self->ringCount) % kRing];
@@ -140,6 +144,27 @@ class PongBattery : public IOPMPowerSource {
         if (s.raw_mah > 0) number("AppleRawCurrentCapacity", s.raw_mah);
         if (s.full_mah > 0) {number("AppleRawMaxCapacity", s.full_mah); number("NominalChargeCapacity", s.full_mah);}
         if (s.design_mah > 0) number("DesignCapacity", s.design_mah);
+        if (s.full_mah > 0 && s.design_mah > 0) number("MaximumCapacityPercent", s.full_mah * 100 / s.design_mah);
+        // powerd keeps its health history per battery serial: a stable one, the cell has none the battmgr protocol reports.
+        const OSSymbol *serialKey = OSSymbol::withCString("Serial");
+        OSString *serial = OSString::withCString("ZIZHAN-BM4V");
+        if (serialKey && serial) setPSProperty(serialKey, serial);
+        OSSafeReleaseNULL(serial); OSSafeReleaseNULL(serialKey);
+        OSDictionary *data = OSDictionary::withCapacity(6);
+        if (data) {
+            const struct {const char *key; int64_t value; bool ok;} fields[] = {
+                {"DesignCapacity", s.design_mah, s.design_mah > 0}, {"CycleCount", s.cycles, s.cycles > 0},
+                {"NominalChargeCapacity", s.full_mah, s.full_mah > 0}, {"StateOfCharge", s.percent, true},
+                {"Voltage", s.voltage_mv, s.voltage_mv > 0}};
+            for (const auto &f : fields) {
+                OSNumber *n = f.ok ? OSNumber::withNumber((unsigned long long)f.value, 32) : nullptr;
+                if (n) {data->setObject(f.key, n); n->release();}
+            }
+            const OSSymbol *key = OSSymbol::withCString("BatteryData");
+            if (key) setPSProperty(key, data);
+            OSSafeReleaseNULL(key);
+            data->release();
+        }
         OSDictionary *adapter = OSDictionary::withCapacity(5);
         if (adapter) {
             OSNumber *family = OSNumber::withNumber(s.adapter_family, 32);
@@ -188,7 +213,7 @@ class PongBattery : public IOPMPowerSource {
     }
 
     static void inboxAction(OSObject *owner, IOInterruptEventSource *, int) {
-        PongBattery *self = OSDynamicCast(PongBattery, owner);
+        AppleSmartBattery *self = OSDynamicCast(AppleSmartBattery, owner);
         if (!self) return;
         if (__atomic_exchange_n(&self->channelChanged, 0u, __ATOMIC_ACQ_REL)) {
             const bool up = __atomic_load_n(&self->channelUp, __ATOMIC_ACQUIRE) != 0;
@@ -222,14 +247,14 @@ class PongBattery : public IOPMPowerSource {
         }
     }
     static void requestAction(OSObject *owner, IOTimerEventSource *) {
-        PongBattery *self = OSDynamicCast(PongBattery, owner);
+        AppleSmartBattery *self = OSDynamicCast(AppleSmartBattery, owner);
         if (!self || !self->wasUp) return;
         const uint32_t before = self->bm.cycles_done;
         sheng_battmgr_timeout(&self->bm);
         self->handle(self->bm.cycles_done != before ? BmCycleDone : BmAnswer);
     }
     static void refreshAction(OSObject *owner, IOTimerEventSource *sender) {
-        PongBattery *self = OSDynamicCast(PongBattery, owner);
+        AppleSmartBattery *self = OSDynamicCast(AppleSmartBattery, owner);
         if (!self || !self->wasUp) return;
         sheng_battmgr_refresh(&self->bm, ++self->refreshes % kSlowEvery == 0);
         self->handle(BmAnswer);
@@ -244,25 +269,25 @@ public:
         sdpLimit = bm.sdp_limit_ua;
         loop = IOWorkLoop::workLoop();
         ringLock = IOSimpleLockAlloc();
-        inbox = IOInterruptEventSource::interruptEventSource(this, &PongBattery::inboxAction);
-        request = IOTimerEventSource::timerEventSource(this, &PongBattery::requestAction);
-        refresh = IOTimerEventSource::timerEventSource(this, &PongBattery::refreshAction);
+        inbox = IOInterruptEventSource::interruptEventSource(this, &AppleSmartBattery::inboxAction);
+        request = IOTimerEventSource::timerEventSource(this, &AppleSmartBattery::requestAction);
+        refresh = IOTimerEventSource::timerEventSource(this, &AppleSmartBattery::refreshAction);
         if (!loop || !ringLock || !inbox || !request || !refresh || loop->addEventSource(inbox) != kIOReturnSuccess ||
             loop->addEventSource(request) != kIOReturnSuccess || loop->addEventSource(refresh) != kIOReturnSuccess)
             return false;
         native_battery_stats[0] = 1;
-        const ShengAdspClient client = {&PongBattery::dspState, &PongBattery::dspReceive};
+        const ShengAdspClient client = {&AppleSmartBattery::dspState, &AppleSmartBattery::dspReceive};
         channel = sheng_adsp_channel ? sheng_adsp_channel("PMIC_RTR_ADSP_APPS", 1024, 4, 0, &client, this) : nullptr;
         if (!channel) return false;
         native_battery_stats[0] = 2;
         return true;
     }
 };
-OSDefineMetaClassAndStructors(PongBattery, IOPMPowerSource)
+OSDefineMetaClassAndStructors(AppleSmartBattery, IOPMPowerSource)
 
 // Called by BatteryProbe.cpp once this file's classes are registered.
 extern "C" void sheng_battery_start(void) {
-    PongBattery *battery = OSTypeAlloc(PongBattery);
+    AppleSmartBattery *battery = OSTypeAlloc(AppleSmartBattery);
     if (!battery || !battery->init() || !battery->attach(IOService::getPlatform())) {
         if (battery) battery->release();
         native_battery_stats[0] = -1;

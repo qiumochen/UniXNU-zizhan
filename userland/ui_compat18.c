@@ -660,6 +660,10 @@ static bool phone_gestalt_bool(CFStringRef key)
 {
     if(phone_ui_process && key && (CFEqual(key,CFSTR("YlEtTtHlNesRBMal1CqRaA")) ||
                CFEqual(key,CFSTR("DeviceSupportsDynamicIsland"))))return true;
+    /* Battery authentication (hashed D6/BMDrlb8V3WSiqL8gL+w; BatteryUsageUI +[BatteryUIResourceClass genuineBatteryStatus] asks it
+     * first): this cell has no Apple authentication chip, so no AppleAuthCPRelay ever answers isTrustedForUI and Settings > Battery
+     * Health spun forever (11-01 g229, status -1). false = authentication not applicable (status 0), the truth for this battery. */
+    if(phone_ui_process && key && CFEqual(key,CFSTR("D6/BMDrlb8V3WSiqL8gL+w")))return false;
     if(key && (CFEqual(key,CFSTR("ji56BO1mUeT7Qg9RO7Er9w")) || CFEqual(key,CFSTR("DeviceSupportsASTC"))) &&
        (boot_option("pong_astc=1") || (phone_ui_process && boot_option("pong_astc=2"))))return true;
     return phone_gestalt_bool_original(key);

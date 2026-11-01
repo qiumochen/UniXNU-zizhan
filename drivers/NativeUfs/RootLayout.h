@@ -55,8 +55,10 @@ static bool rootEntryUsed (const uint8_t *entry)
 }
 
 // Find the partition named "userdata" in LUN 0's primary GPT (4096-byte sectors), then read the
-// manifest at its first block. Read-only. Returns false only if the GPT itself is unusable.
-static bool findRootLayout (RootLayout *layout, const char **why)
+// manifest at its first block, or at manifest4k blocks into the partition when the root image lives
+// inside a contiguous pinned file of a live Android /data (zizhan). In that case every window must lie
+// after the manifest block. Read-only. Returns false only if the GPT itself is unusable.
+static bool findRootLayout (RootLayout *layout, const char **why, uint64_t manifest4k = 0)
 {
   gRootDiagnostic.stage = "GPT header";
   bzero (layout, sizeof (*layout));
@@ -144,8 +146,12 @@ static bool findRootLayout (RootLayout *layout, const char **why)
   gRootDiagnostic.first = layout->userdataFirst;
   gRootDiagnostic.last = layout->userdataLast;
   gRootDiagnostic.stage = "root manifest";
+  if (manifest4k > layout->userdataLast - layout->userdataFirst) {
+    *why = "SHNGROOT block outside userdata";
+    return false;
+  }
   // First block of the partition: manifest if the root image was flashed, ext4 otherwise.
-  if (hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
+  if (hostRead4k (0, layout->userdataFirst + manifest4k, 1, gScratch) != kIOReturnSuccess) {
     *why = "userdata first block read";
     return false;
   }
@@ -172,7 +178,7 @@ static bool findRootLayout (RootLayout *layout, const char **why)
         for (uint32_t index = 0; index < n && bounds; index++) {
           const uint8_t *entry = gScratch + 24 + 128 * index;
           uint64_t offset = le64 (entry + 32), size = le64 (entry + 40);
-          if ((offset & 4095) || offset < 4096 || (size & 511) || !size || offset >= imageBytes ||
+          if ((offset & 4095) || offset < (manifest4k + 1) * 4096 || (size & 511) || !size || offset >= imageBytes ||
               size > imageBytes - offset || ((size + 4095) & ~4095ULL) > imageBytes - offset) {
             bounds = false;
             break;

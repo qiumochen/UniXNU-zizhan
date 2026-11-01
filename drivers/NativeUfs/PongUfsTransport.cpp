@@ -11,6 +11,7 @@
 #include <IOKit/IOLib.h>
 #include <vm/vm_kern.h>
 #include <kern/clock.h>
+#include <kern/thread.h>
 #include <mach/mach_time.h>
 #include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSDictionary.h>
@@ -45,9 +46,10 @@ static UfsHost gHost;
 static uint32_t gWifiUfsReady;
 static bool gTransportAttempted;
 enum : uint64_t {
-  // Pong LUN0 GPT entry "userdata", captured from this phone in recovery.
-  kPongUserdataFirst4k = 0x413248ULL,
-  kPongUserdataLast4k = 0x75a40eaULL,
+  // zizhan (MIX Fold 2) LUN0 GPT entry "userdata" (sda36), read from the live device;
+  // Pong's were 0x413248 / 0x75a40ea. Names kept so the shared code stays unchanged.
+  kPongUserdataFirst4k = 0x2dfa00ULL,
+  kPongUserdataLast4k = 0x76753faULL,
   kRootLogicalBlock = 512,
 };
 struct RootDiskWindow {
@@ -211,8 +213,39 @@ static bool hostBringUp() {
 }
 }
 
+// Boot-time I/O accounting per window (OS, SystemOS, Data), printed every 5 s
+// while the root is being found: tells a stalled transport from a stalled consumer.
+struct UfsIoStat { uint64_t count, bytes, since, longest; };
+static UfsIoStat gIoStat[3];
+extern "C" struct vnode *rootvnode;
+// osfmk/kern/thread.c (patches/xnu-ipados18/0005): one console line per waiting thread with its wait event and frames.
+extern "C" void pong_dump_waiting_threads(const char *why);
+static void ufsIoMonitor(void *, wait_result_t) {
+  static const char *const names[3] = {"OS", "SystemOS", "Data"};
+  for (unsigned tick = 1; tick <= 36; ++tick) {
+    IOSleep(5000);
+    char line[400]; int n = snprintf(line, sizeof(line), "PONG_UFS IO t=%us", tick * 5);
+    const uint64_t now = mach_absolute_time();
+    for (unsigned i = 0; i < 3 && n > 0 && n < int(sizeof(line)); ++i) {
+      const uint64_t since = __atomic_load_n(&gIoStat[i].since, __ATOMIC_RELAXED);
+      uint64_t busy = 0, longest = 0;
+      if (since) absolutetime_to_nanoseconds(now - since, &busy);
+      absolutetime_to_nanoseconds(__atomic_load_n(&gIoStat[i].longest, __ATOMIC_RELAXED), &longest);
+      n += snprintf(line + n, sizeof(line) - n, " %s n=%llu KiB=%llu busy=%llums longest=%llums", names[i],
+                    __atomic_load_n(&gIoStat[i].count, __ATOMIC_RELAXED),
+                    __atomic_load_n(&gIoStat[i].bytes, __ATOMIC_RELAXED) / 1024, busy / 1000000, longest / 1000000);
+    }
+    IOLog("%s\n", line);
+    // A good boot has the root mounted within ~10 s. A failed one stalls with the transport idle (g14, g22, g24),
+    // so show where every thread waits, twice, to tell stuck threads from slow ones.
+    if ((tick == 5 || tick == 9) && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE))
+      pong_dump_waiting_threads(tick == 5 ? "root not mounted at 25 s" : "root not mounted at 45 s");
+  }
+  thread_terminate(current_thread());
+}
 class PongUfsBlock : public IOBlockStorageDevice {
   OSDeclareDefaultStructors(PongUfsBlock)
+  unsigned slot = 2;
   uint8_t *bounce = nullptr;
   IOLock *mutex = nullptr;
   bool online = false;
@@ -242,8 +275,74 @@ public:
   IOReturn getWriteCacheState(bool *v) override { *v = false; return kIOReturnSuccess; }
   IOReturn setWriteCacheState(bool) override { return kIOReturnNotWritable; }
   IOReturn doAsyncReadWrite(IOMemoryDescriptor *, UInt64, UInt64, IOStorageAttributes *, IOStorageCompletion *) override;
+  void completeTransfer(IOMemoryDescriptor *buffer, UInt64 block, UInt64 count, IOStorageCompletion completion);
 };
 OSDefineMetaClassAndStructors(PongUfsBlock, IOBlockStorageDevice)
+// zizhan: the ramoops console comes back from DRAM with flipped bits once the phone is warm (the reset's self-refresh;
+// g54-g104 lost most summaries). pong_klog_4k=<4 KiB block relative to userdata> names a pinned Android file
+// (tools/mac/klog.py) whose first block holds "PONGKLOG", that block number and the data block count. pong_klog_flush()
+// copies both ramoops zones (CONSOLE and DIAG, raw, as RamoopsDump reads them) behind that block with FUA writes and
+// then marks the header written; the host reads the file's blocks from the userdata partition. Called before the deadline
+// and panic resets (ArmDTPlatform/PongBootReset.h). Nothing is written unless the header names itself.
+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+enum : uint64_t {kKlogRamoops = 0x85200000ULL, kKlogBytes = 0x400000ULL, kKlogData4k = kKlogBytes / 4096};
+static uint64_t gKlog4k, gKlogLba, gKlogFlushes;
+static vm_offset_t gKlogSource;
+static void klogHeader(uint8_t *h, uint32_t state, uint32_t reason, uint32_t status) {
+  bzero(h, 4096);
+  memcpy(h, "PONGKLOG", 8);
+  memcpy(h + 8, &gKlog4k, 8);
+  const uint32_t data = kKlogData4k;
+  memcpy(h + 16, &data, 4);
+  memcpy(h + 20, &state, 4);
+  memcpy(h + 24, &gKlogFlushes, 8);
+  const uint64_t now = mach_absolute_time();
+  memcpy(h + 32, &now, 8);
+  memcpy(h + 40, &reason, 4);
+  memcpy(h + 44, &status, 4);
+}
+static void klogInit(const RootLayout &layout, uint64_t manifest4k) {
+  uint64_t klog4k = 0;
+  if (!PE_parse_boot_argn("pong_klog_4k", &klog4k, sizeof(klog4k)) || !klog4k) return;
+  const uint64_t rootEnd4k = manifest4k + (layout.imageBytes + 4095) / 4096;
+  const uint64_t lba = layout.userdataFirst + klog4k;
+  const char *why = nullptr;
+  if (lba + 1 + kKlogData4k > layout.userdataLast + 1) why = "outside userdata";
+  else if (klog4k < rootEnd4k && klog4k + 1 + kKlogData4k > manifest4k) why = "overlaps the root image";
+  else if (hostRead4k(0, lba, 1, gScratch) != kIOReturnSuccess) why = "header read";
+  else if (memcmp(gScratch, "PONGKLOG", 8) || le64(gScratch + 8) != klog4k || le32(gScratch + 16) != kKlogData4k)
+    why = "header does not name this block";
+  else if (!gHost.writable) why = "writes disabled (pong_ufs_readwrite)";
+  else if (!(gKlogSource = ml_io_map_wcomb(kKlogRamoops, kKlogBytes))) why = "ramoops map";
+  if (why) {
+    IOLog("PONG KLOG: userdata+%llu not used: %s\n", klog4k, why);
+    return;
+  }
+  gKlog4k = klog4k;
+  __atomic_store_n(&gKlogLba, lba, __ATOMIC_RELEASE);
+  IOLog("PONG KLOG: ramoops copies go to userdata+%llu (LUN 0 block %llu), %llu blocks\n", klog4k, lba, 1 + kKlogData4k);
+}
+// reason 1 = deadline, 2 = panic. In a panic the other cores are stopped: no lock (a transfer cut off midway fails or
+// times out, and the ramoops stays in DRAM as before). Returns 0 when the copy and its header are on the medium.
+extern "C" int pong_klog_flush(int reason) {
+  const uint64_t lba = __atomic_load_n(&gKlogLba, __ATOMIC_ACQUIRE);
+  if (!lba || !gKlogSource) return -1;
+  const bool panicking = reason == 2;
+  if (!panicking) IOLockLock(gHost.lock);
+  IOReturn status = kIOReturnSuccess;
+  uint8_t *data = gHost.virt + kDataOffset;
+  for (uint64_t done = 0; done < kKlogBytes && status == kIOReturnSuccess; done += kDataMax) {
+    memcpy(data, reinterpret_cast<const void *>(gKlogSource + done), kDataMax);
+    status = hostWrite4kLocked(0, lba + 1 + done / 4096, kDataMax / 4096);
+  }
+  ++gKlogFlushes;
+  klogHeader(data, status == kIOReturnSuccess ? 1 : 2, uint32_t(reason), uint32_t(status));
+  IOReturn headerStatus = hostWrite4kLocked(0, lba, 1);
+  if (!panicking) IOLockUnlock(gHost.lock);
+  return status == kIOReturnSuccess && headerStatus == kIOReturnSuccess ? 0 : int(status ? status : headerStatus);
+}
+
+static bool deferPublish(PongUfsBlock *block);
 
 // If an expected APFS volume is absent, list only IOMedia objects beneath the
 // selected UFS window. This keeps the failure report specific to the
@@ -414,6 +513,7 @@ bool PongUfsBlock::init(OSDictionary *properties, const RootDiskWindow &selected
       (selected.baseByte & 4095) || (selected.size & 511) ||
       !IOBlockStorageDevice::init(properties)) return false;
   window = selected;
+  slot = !strcmp(selected.name, "OS") ? 0 : !strcmp(selected.name, "SystemOS") ? 1 : 2;
   return true;
 }
 bool PongUfsBlock::start(IOService *provider) {
@@ -450,7 +550,8 @@ bool PongUfsBlock::start(IOService *provider) {
   setProperty("PongSystemOSWindow", !strcmp(window.name, "SystemOS"));
   setProperty("PongDataWindow", !strcmp(window.name, "Data"));
   setProperty("Physical Interconnect", "UFS");
-  online = true; registerService();
+  online = true;
+  if (!deferPublish(this)) registerService();
   char detail[96];
   snprintf(detail, sizeof(detail), "SHNGROOT %s disk published", window.name);
   PongProbeRecord(4, "ufs-transport", PongProbePass, detail, window.size);
@@ -461,6 +562,94 @@ void PongUfsBlock::free() {
   if (mutex) IOLockFree(mutex);
   IOBlockStorageDevice::free();
 }
+// Requests complete on transport worker threads, as a hardware driver's would
+// from its interrupt context. Completing on the issuing thread, inside
+// doAsyncReadWrite, intermittently hung the concurrent APFS container probes
+// with every request retired (g14). Off by default (pong_ufs_async=1 turns it on): with it the phone hung in g16.
+struct UfsRequest {
+  UfsRequest *next;
+  PongUfsBlock *device;
+  IOMemoryDescriptor *buffer;
+  UInt64 block, count;
+  IOStorageCompletion completion;
+};
+// SystemOS and Data are published only after the root volume is mounted, one at a time. In every failed root mount
+// (g9, g14, g22) the OS, SystemOS and Data containers ran nx_mount concurrently and all three stopped after the
+// checkpoint search with the transport idle. Their consumers (native_pong_ufs_volume_device) already wait 5 s for the
+// volume to appear. pong_ufs_defer=0 publishes all windows at once as before.
+static PongUfsBlock *gDeferred[2];
+static unsigned gDeferredCount;
+static bool deferPublish(PongUfsBlock *block) {
+  unsigned defer = 1;
+  PE_parse_boot_argn("pong_ufs_defer", &defer, sizeof(defer));
+  if (defer != 1 || block->getProperty("PongRootWindow") == kOSBooleanTrue || gDeferredCount >= 2) return false;
+  block->retain();
+  gDeferred[gDeferredCount++] = block;
+  return true;
+}
+static void publishDeferred(void *, wait_result_t) {
+  unsigned waited = 0;
+  for (; waited < 1200 && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE); ++waited) IOSleep(100);
+  IOLog("PONG_UFS: root %s after %u ms; publishing %u deferred windows\n",
+        __atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE) ? "mounted" : "still missing", waited * 100, gDeferredCount);
+  for (unsigned i = 0; i < gDeferredCount; ++i) {
+    if (i) IOSleep(1500);
+    IOLog("PONG_UFS: publish deferred %s window\n", gDeferred[i]->getProperty("PongSystemOSWindow") == kOSBooleanTrue
+          ? "SystemOS" : "Data");
+    gDeferred[i]->registerService();
+    gDeferred[i]->release();
+    gDeferred[i] = nullptr;
+  }
+  thread_terminate(current_thread());
+  thread_block(THREAD_CONTINUE_NULL);
+}
+static IOLock *gQueueLock;
+static UfsRequest *gQueueHead, *gQueueTail;
+static constexpr unsigned kUfsWorkers = 4;
+static void ufsWorker(void *, wait_result_t) {
+  for (;;) {
+    IOLockLock(gQueueLock);
+    while (!gQueueHead) IOLockSleep(gQueueLock, &gQueueHead, THREAD_UNINT);
+    UfsRequest *request = gQueueHead;
+    gQueueHead = request->next;
+    if (!gQueueHead) gQueueTail = nullptr;
+    IOLockUnlock(gQueueLock);
+    request->device->completeTransfer(request->buffer, request->block, request->count, request->completion);
+    request->buffer->release();
+    request->device->release();
+    IOFreeType(request, UfsRequest);
+  }
+}
+static void ufsQueueStart() {
+  unsigned async = 0;   // pong_ufs_async=1 opts in: it hung the phone in g16 and every round since turned it off
+  PE_parse_boot_argn("pong_ufs_async", &async, sizeof(async));
+  if (async != 1 || !(gQueueLock = IOLockAlloc())) return;
+  unsigned started = 0;
+  for (unsigned i = 0; i < kUfsWorkers; ++i) {
+    thread_t worker = THREAD_NULL;
+    if (kernel_thread_start(ufsWorker, nullptr, &worker) != KERN_SUCCESS) break;
+    thread_deallocate(worker);
+    ++started;
+  }
+  if (!started) { IOLockFree(gQueueLock); gQueueLock = nullptr; }
+  IOLog("PONG_UFS: %u transport workers complete requests off the issuing thread\n", started);
+}
+static bool ufsQueue(PongUfsBlock *device, IOMemoryDescriptor *buffer, UInt64 block, UInt64 count,
+                     const IOStorageCompletion &completion) {
+  if (!gQueueLock) return false;
+  UfsRequest *request = IOMallocType(UfsRequest);
+  if (!request) return false;
+  device->retain();
+  buffer->retain();
+  *request = {nullptr, device, buffer, block, count, completion};
+  IOLockLock(gQueueLock);
+  if (gQueueTail) gQueueTail->next = request; else gQueueHead = request;
+  gQueueTail = request;
+  IOLockWakeup(gQueueLock, &gQueueHead, true);
+  IOLockUnlock(gQueueLock);
+  return true;
+}
+
 IOReturn PongUfsBlock::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UInt64 count,
                                       IOStorageAttributes *, IOStorageCompletion *completion) {
   const uint64_t rootBlocks = window.size / kRootLogicalBlock;
@@ -473,8 +662,19 @@ IOReturn PongUfsBlock::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block
   if (write && (!gHost.writable || (window.baseByte & 4095) || (window.size & 4095)))
     return kIOReturnNotWritable;
   if (!online || !gHost.ready) return kIOReturnNotReady;
+  if (ufsQueue(this, buffer, block, count, *completion)) return kIOReturnSuccess;
+  completeTransfer(buffer, block, count, *completion);
+  return kIOReturnSuccess;
+}
+// Does one validated request and calls its completion. Runs on a transport
+// worker (never the issuing thread) unless the queue is unavailable.
+void PongUfsBlock::completeTransfer(IOMemoryDescriptor *buffer, UInt64 block, UInt64 count,
+                                    IOStorageCompletion completion) {
+  const bool write = buffer->getDirection() == kIODirectionOut;
   uint64_t done = 0, bytes = count * kRootLogicalBlock;
   IOReturn result = kIOReturnSuccess;
+  const uint64_t queued = mach_absolute_time();
+  __atomic_store_n(&gIoStat[slot].since, queued, __ATOMIC_RELAXED);
   IOLockLock(mutex);
   while (done < bytes) {
     const uint64_t absolute = window.baseByte + block * kRootLogicalBlock + done;
@@ -515,10 +715,17 @@ IOReturn PongUfsBlock::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block
     done += take;
   }
   IOLockUnlock(mutex);
+  {
+    UfsIoStat &st = gIoStat[slot];
+    const uint64_t took = mach_absolute_time() - queued;
+    __atomic_store_n(&st.since, 0, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&st.count, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&st.bytes, done, __ATOMIC_RELAXED);
+    if (took > st.longest) st.longest = took;
+  }
   if (result != kIOReturnSuccess && result != kIOReturnNotWritable)
     transportFailure(write ? "block write failed" : "block read failed");
-  completion->action(completion->target, completion->parameter, result, done);
-  return kIOReturnSuccess;
+  completion.action(completion.target, completion.parameter, result, done);
 }
 extern "C" bool pong_ufs_transport_start(IOService *provider) {
   if (gTransportAttempted) {
@@ -548,11 +755,22 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
   if (!hostBringUp()) return false;
   RootLayout layout;
   const char *why = nullptr;
-  if (!findRootLayout(&layout, &why)) return transportFailure(why);
+  // zizhan keeps Android's f2fs /data: the SHNGROOT image is one contiguous pinned file
+  // and this boot-arg gives its first 4 KiB block relative to the partition start.
+  uint64_t manifest4k = 0;
+  if (!PE_parse_boot_argn("pong_shngroot_4k", &manifest4k, sizeof(manifest4k))) manifest4k = 0;
+  IOLog("PONG_UFS: SHNGROOT manifest at userdata+%llu (4 KiB blocks)\n", manifest4k);
+  if (!findRootLayout(&layout, &why, manifest4k)) return transportFailure(why);
+  {
+    thread_t monitor = THREAD_NULL;
+    if (kernel_thread_start(ufsIoMonitor, nullptr, &monitor) == KERN_SUCCESS) thread_deallocate(monitor);
+  }
+  ufsQueueStart();
   if (layout.userdataFirst != kPongUserdataFirst4k || layout.userdataLast != kPongUserdataLast4k ||
       layout.userdataLast >= gHost.blocks)
     return transportFailure("Pong userdata geometry changed");
   if (layout.manifestStatus) return transportFailure("invalid SHNGROOT manifest/hash/bounds");
+  klogInit(layout, manifest4k);
   static const struct { const char *name, *product, *signature; unsigned offset; } wanted[] = {
     {"OS", "Pong OS root", "EFI PART", 512},
     {"SystemOS", "Pong SystemOS", "NXSB", 32},
@@ -586,6 +804,15 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
       continue;
     }
     if (!strcmp(gRootWindows[index].name, "OS")) rootPublished = true;
+  }
+  if (gDeferredCount) {
+    thread_t publisher = THREAD_NULL;
+    if (kernel_thread_start(publishDeferred, nullptr, &publisher) == KERN_SUCCESS) {
+      thread_deallocate(publisher);
+    } else {
+      for (unsigned i = 0; i < gDeferredCount; ++i) { gDeferred[i]->registerService(); gDeferred[i]->release(); }
+      gDeferredCount = 0;
+    }
   }
   return rootPublished;
 }

@@ -63,5 +63,6 @@ mtype -i "$LOGFS" ::XNULOG.TXT > $L/$RUN.txt 2>/dev/null || { echo "$(ts) no XNU
 if [ $KLOG = 1 ] && python3 $S/klog.py read $L/$RUN.klog.txt; then
   mv $L/$RUN.txt $L/$RUN.ramoops.txt; cp $L/$RUN.klog.txt $L/$RUN.txt; echo "$(ts) using the klog copy (DRAM copy: $RUN.ramoops.txt)"
 fi
+bash "$S/UniXNU-zizhan/tools/zizhan/mac/decode-shots.sh" "$RUN" || echo "$(ts) screenshot decoding failed; inspect $L/$RUN.txt"
 echo "$(ts) saved $L/$RUN.txt ($(wc -c < $L/$RUN.txt) bytes); battery $(battery_temp) (tenths C) back in Android"
 [ -z "${ZIZHAN_ASK_FILE:-}" ] || printf '%s\n' "第 $RUN 轮结束，手机已回到安卓，日志已自动取回。" > "$ZIZHAN_ASK_FILE"

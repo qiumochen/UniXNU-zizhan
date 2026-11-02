@@ -83,3 +83,11 @@ g268 等待器仍在本机运行，手机若在 12 小时窗口内枚举，会�
 ## 下一步
 
 USB 恢复后先确认 Android 或 fastboot 可见，再用 g268 镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。
+
+## 接续：自动解码截图
+
+g268 镜像已有 `pong_shot=60`，但原轮次脚本只取回文本日志，PNG 需要手动运行 `shot.py`。现在 `cycle.sh` 和 `cycle-resume.sh` 在选择本轮 klog/ramoops 后调用 `decode-shots.sh`，把有效的 `PONG SHOT` 记录解码到本机 `logs/RUN.shotN.png`，同时报告生成数量。成功取回同名轮次的新日志时先清掉旧 PNG；若新日志没有截图记录，输出为 0 张，避免把上次的截图当作本轮画面。PNG 仍留本机，公开前需人工筛选和去除私人内容。
+
+主机用已保存的 g264 日志在临时目录回放：生成 6 张具有 PNG 签名的图片；改为无截图的新日志后重跑，旧 PNG 清零。三脚本语法和 `git diff --check` 通过。该检查只证明自动取证路径，g268 仍无设备截图；截图是每 16 个像素取一个样本并放大，不能代表面板原生清晰度。
+
+约定的 `pong_ipados18_ci_defconfig` 与 `zizhan_ipados18_gpu_defconfig` 再次构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-shot-auto-ci.log`、`ci_kernel-shot-auto-gpu.log`，均以 `KERNEL_DONE` 结束。此改动只在 Mac 取证脚本，不改变已打包的 g268 镜像。

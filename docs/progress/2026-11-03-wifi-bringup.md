@@ -24,6 +24,8 @@ Android live DT 显示 WLAN 为 QCA6490（PCI `17cb:1103`），走 PCIe0；使�
 
 为避免下一轮无限阻塞，`fastboot-visible.sh` 给探测加 6 秒上限，`boot.sh` 与 `cycle.sh` 均调用它。模拟可见、不可见、阻塞三种 fastboot 响应的主机检查分别返回成功、失败、6 秒超时。实际设备自动回路仍待 USB 恢复后验证。
 
+无人值守恢复脚本 `when-back.sh` 也改用有界探测；设置 `WHEN_BACK_IMAGE` 后，不论手机先回到 Android 还是 fastboot，都会用指定的已打包镜像调用 `cycle.sh`。主机模拟 fastboot 恢复时，g266 选择了正确试验镜像和 420 秒等待参数；设备端结果仍待取回。
+
 ## 下一步
 
-USB 恢复后先确认 Android 或 fastboot 可见，再用现有试验镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。
+USB 恢复后先确认 Android 或 fastboot 可见，再用现有试验镜像执行 g266 临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。

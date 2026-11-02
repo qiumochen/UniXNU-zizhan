@@ -8,6 +8,7 @@
 
 - 固件：[uefi-zizhan](https://github.com/qiumochen/uefi-zizhan)（uefi-pong 加 `Platforms/Xiaomi/zizhanPkg`）
 - 结构化移植记录：[porting.toml](porting.toml)
+- 开发交接与 Mac 配置：[CLAUDE.md](CLAUDE.md)（含最新 GPU WIP 与待验证项）
 - 开发记录：[docs/progress/](docs/progress/)（按日期，含每一轮的配置、结果和根因）
 
 ![内屏 iPadOS 主屏](docs/evidence/2026-10-30-u3-ipados-homescreen.jpg)
@@ -22,7 +23,7 @@
 | 显示 | 内屏 2160×1916 显示 iPadOS 主屏，面板切到 120 Hz，DPU 直接翻页（零拷贝三缓冲）；外屏未驱动，亮度不可调 |
 | 触摸 | 内屏 ST FTS（GPIO 模拟 SPI），能点开应用、滑动；外屏触摸未驱动 |
 | GPU | Adreno 730，Turnip + metal2vulkan；合成滑动约 54 fps；壁纸扩展默认不能使用 GPU（会和 backboardd 抢 GPU 导致丢失） |
-| 电池 | ADSP 启动，经 PMIC GLINK 读到电池，读数与 Android 一致；状态栏显示待人工确认 |
+| 电池 | ADSP 启动，经 PMIC GLINK 读到电池，读数与 Android 一致；状态栏与充电拔插已确认，设置电池页能打开；健康度仍转圈 |
 | 按键 | 长按电源键 3 秒热复位回 fastboot；其他按键未核对 |
 | Wi-Fi / 音频 | 未接入（Wi-Fi 是 QCA6490，音频功放是 CS35L41，与 Pong 的 TFA9873 不同） |
 

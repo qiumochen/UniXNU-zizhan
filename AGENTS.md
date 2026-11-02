@@ -21,3 +21,7 @@
 - Publish source, configuration, porting records and scripts only. Apple restore binaries, firmware, userdata, root images, credentials and build artifacts stay local.
 - Record host build results separately from device results in porting.toml. A successful build is not evidence of a working device function.
 - Scripts read paths from ZIZHAN_SRC; do not commit personal paths, host names or account names.
+
+# Development handoff
+
+- Read [CLAUDE.md](CLAUDE.md) for the sanitized project handoff, current WIP status, Mac Studio clone setup, build/test workflow and lessons learned. Keep it aligned with dated progress notes and porting.toml; the rules above remain authoritative.

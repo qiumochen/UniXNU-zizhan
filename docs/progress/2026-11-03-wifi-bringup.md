@@ -62,6 +62,12 @@ Wi-Fi 配置和约定的 CI/GPU 两配置重新构建通过；生成的 ath11k `
 
 g268 等待器仍在本机运行，手机若在 12 小时窗口内枚举，会自动用已打包镜像开始轮次。下一次接续先看 `$ZIZHAN_SRC/logs/g268-when-back.log`、USB 枚举和 `logs/g268*`，确认是否真的执行过 `fastboot boot`、是否自动回 Android、是否取得 klog/ramoops 和截图；然后处理 Wi-Fi 的首个失败阶段。若等待已过期且手机仍不可见，按待人工清单恢复实体 USB 连接后再启动有界等待。
 
+## 接续：持久等待与推送恢复
+
+后续接管时发现普通工具会话启动的 g268 等待进程已随会话结束而退出，日志停在 `still waiting for USB`，没有设备轮次。已改由当前用户的 launchd 图形域提交同一个 `when-back.sh g268` 命令；`launchctl list` 显示任务运行，进程父级为 launchd，日志出现新的等待首行。该任务仍有 12 小时上限，不会无限循环。手机继续在 adb、fastboot 两种状态下都不可见。
+
+同一图形域执行的一次性普通 `git push origin main` 成功，远端 `main` 与本机的 `5eaa262` 一致，先前 Keychain 失败的三个提交已全部发布；未推送 upstream。此处只记录认证环境差异，未读取或保存令牌。下次先检查 launchd 任务状态和 g268 日志，再决定是否需要重新启动等待器。仍须以实际 `fastboot boot`、自动返回、klog/ramoops 和截图判定设备结果。
+
 ## 下一步
 
 USB 恢复后先确认 Android 或 fastboot 可见，再用 g268 镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。

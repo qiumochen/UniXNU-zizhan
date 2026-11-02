@@ -131,3 +131,9 @@ CI、GPU 两套内核配置再次构建通过，本机日志为 `$ZIZHAN_SRC/ci_
 `pong_ipados18_ci_defconfig`、`zizhan_ipados18_gpu_defconfig`、最后构建的 `zizhan_ipados18_wifi_defconfig` 均成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-wifi-subsystem-ci.log`、`ci_kernel-wifi-subsystem-gpu.log`、`ci_kernel-wifi-subsystem-wifi.log`。在 Wi-Fi 配置占用共用构建树时打包的 g269 镜像，命令行 913 字节，含唯一 `pong_wifi=1`、`pong_autoreset=300`、`pong_autoreset_sb=60` 与定时截图参数。只读核对确认新日志标记、PWF2 固件包和 `amss20.bin` 均在 g269 镜像中，且镜像与 g268 不同。
 
 g268 等待器在未启动设备时撤下；g269 等待器已由 launchd 托管，启动日志为 `$ZIZHAN_SRC/logs/g269-when-back.log`。目前手机仍无 USB 枚举，g269 **没有执行 `fastboot boot`**，没有自动返回、内核日志或截图结果。恢复后先核实实际 PCI subsystem 值，再沿供电、PCIe、DMA、MSI、固件、station、扫描找首个失败阶段。
+
+## 接续：PCI subsystem 自动摘要
+
+g269 驱动会打印读到的 PCI subsystem 值，但先前的 `wifi-stage.py` 摘要只列阶段标签。摘要现在提取这一条完整的十六进制值及行号，保留原始日志作为核对依据。用两次冷启动的隔离日志确认只报告最后一次的值；损坏值不被误读，g264 非 Wi-Fi 日志仍输出 `NO_WIFI_LOG`。这项修改只影响回收日志后的主机分析，不改变已打包的 g269 镜像或设备行为。
+
+约定的 CI、GPU 两配置构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-wifi-subsystem-summary-ci.log`、`ci_kernel-wifi-subsystem-summary-gpu.log`，末尾均为 `KERNEL_DONE`。g269 等待器继续记录 USB 心跳，仍无设备日志或截图。

@@ -99,3 +99,11 @@ g268 镜像已有 `pong_shot=60`，但原轮次脚本只取回文本日志，PNG
 主机隔离模拟覆盖：失败的 `boot.sh` 不留下标记；成功启动后有匹配标记；恢复脚本对无标记、其他镜像标记选择 ramoops，对匹配标记选择 klog。模拟分别在预期的等待/启动失败点退出，没有操作手机。脚本语法与差异检查通过。实际设备 klog/ramoops 和截图仍须 g268 上机后核对。
 
 `pong_ipados18_ci_defconfig` 与 `zizhan_ipados18_gpu_defconfig` 均再次构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-klog-marker-ci.log`、`ci_kernel-klog-marker-gpu.log`，末尾均为 `KERNEL_DONE`。内核及已打包的 g268 镜像未因这次主机脚本修改而改变。
+
+## 接续：Wi-Fi 首轮日志摘要
+
+`cycle.sh` 与 `cycle-resume.sh` 在取得新日志后运行 `wifi-stage.py`，生成本机 `logs/RUN.wifi-summary.txt`。摘要只列当前驱动实际输出的已观察里程碑（供电请求确认、PCIe/BAR、DMA、MSI 接收器、固件文件读取、MSI 到达、station 启动、扫描结果）及首条错误；若 ramoops 含多次冷启动，只统计最后一次。它不把文件读取、station 启动或扫描结果当成联网、DHCP 或日常可用的证明。摘要生成失败时删除同名旧文件，原始日志仍为判读依据。
+
+主机用五组隔离日志覆盖无 Wi-Fi、供电失败、PCIe 后 ath11k 失败、重复启动只取最后一轮、扫描结果；已有的 g264 非 Wi-Fi 日志输出 `NO_WIFI_LOG`。语法和差异检查通过。g268 仍没有设备日志，此摘要尚未通过真机 Wi-Fi 输出验证。
+
+`pong_ipados18_ci_defconfig` 与 `zizhan_ipados18_gpu_defconfig` 构建通过，本机日志为 `$ZIZHAN_SRC/ci_kernel-wifi-stage-ci.log`、`ci_kernel-wifi-stage-gpu.log`，均以 `KERNEL_DONE` 结束。本次只改 Mac 取证脚本，不改变 g268 内核或镜像。

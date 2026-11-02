@@ -276,6 +276,95 @@ struct NBLayoutWatermark {uint64_t words[2];};
    (const uint8_t *)memory+(region.origin.y+y)*_rowBytes+region.origin.x*_pixelBytes,bytes);
 }
 @end
+// Block-compressed, mipmapped or layered textures (NBTextureLayout refuses them): our own packed layout, each slice's levels one after
+// another, each level in rows of texels or compressed blocks, the images of a 3D level one after another. With DeviceSupportsASTC true,
+// CoreUI and RenderBox fill ASTC images through this layout and hand the memory to newTextureWithBytesNoCopy:, which copies it into an
+// ordinary texture once. A nil layout left those images 0 bytes long, and backboardd then refused every commit of the window holding the
+// apps' scenes: all apps black (g193; the same chain as K90 annibale bo47). After dada's NBLinearLayout (hakios-arm64e-dada gpu2).
+static bool blockShape(NSUInteger format,NSUInteger &bw,NSUInteger &bh,NSUInteger &bb) {
+ static const uint8_t astc[16][2]={{4,2},{4,4},{5,4},{5,5},{6,5},{6,6},{8,4},{8,5},{8,6},{8,8},{10,5},{10,6},{10,8},{10,10},{12,10},{12,12}};
+ bw=bh=1;bb=0;
+ if(format>=185 && format<=200) {bw=astc[format-185][0];bh=astc[format-185][1];bb=16;return true;}   // ASTC sRGB
+ if(format>=203 && format<=218) {bw=astc[format-203][0];bh=astc[format-203][1];bb=16;return true;}   // ASTC LDR
+ if(format>=221 && format<=236) {bw=astc[format-221][0];bh=astc[format-221][1];bb=16;return true;}   // ASTC HDR
+ switch(format) {
+  case 130:case 131:case 140:case 141:case 170:case 172:case 180:case 181:case 182:case 183:bw=bh=4;bb=8;return true;   // BC1, BC4, EAC R11, ETC2
+  case 132:case 133:case 134:case 135:case 142:case 143:case 150:case 151:case 152:case 153:case 174:case 176:case 178:case 179:
+   bw=bh=4;bb=16;return true;   // BC2/3/5/6H/7, EAC RG11, EAC RGBA8
+  default:break;
+ }
+ if(format>=160 && format<=167)return false;   // PVRTC is not in rows of blocks
+ const NBFormatInfo info=MTLPixelFormatGetInfo(format);   // any other format: the texel size, as NBTextureLayout reads it
+ if(!info.name || (info.flags&0x400) || !info.words[0] || info.words[0]>16)return false;
+ bb=info.words[0];return true;
+}
+struct NBBlockShape {
+ NSUInteger bw=1,bh=1,bb=0,width=0,height=0,depth=1,levels=1,slices=1,size=0;
+ bool init(MTLTextureDescriptor *d) {
+  if(!d || !d.width || !d.height || d.width>16384 || d.height>16384 ||
+     d.depth>2048 || d.arrayLength>2048 || d.mipmapLevelCount>16 ||
+     d.sampleCount>1 || d.storageMode==MTLStorageModeMemoryless ||
+     !blockShape(d.pixelFormat,bw,bh,bb))return false;
+  width=d.width;height=d.height;depth=d.textureType==MTLTextureType3D?std::max<NSUInteger>(1,d.depth):1;
+  levels=std::max<NSUInteger>(1,d.mipmapLevelCount);
+  slices=std::max<NSUInteger>(1,d.arrayLength)*(d.textureType==MTLTextureTypeCube || d.textureType==MTLTextureTypeCubeArray?6:1);
+  size=offset(slices,0);return size!=0;
+ }
+ NSUInteger w(NSUInteger level) const {return std::max<NSUInteger>(1,width>>level);}
+ NSUInteger h(NSUInteger level) const {return std::max<NSUInteger>(1,height>>level);}
+ NSUInteger dz(NSUInteger level) const {return std::max<NSUInteger>(1,depth>>level);}
+ NSUInteger rowBytes(NSUInteger level) const {return (w(level)+bw-1)/bw*bb;}
+ NSUInteger rows(NSUInteger level) const {return (h(level)+bh-1)/bh;}
+ NSUInteger imageBytes(NSUInteger level) const {return rowBytes(level)*rows(level);}
+ NSUInteger offset(NSUInteger slice,NSUInteger level) const {
+  NSUInteger perSlice=0;for(NSUInteger l=0;l<levels;l++)perSlice+=imageBytes(l)*dz(l);
+  NSUInteger at=slice*perSlice;for(NSUInteger l=0;l<level;l++)at+=imageBytes(l)*dz(l);
+  return at;
+ }
+ // `region` of (slice, level) between texture memory and linear bytes, in whole blocks
+ void copy(uint8_t *memory,uint8_t *linear,NSUInteger row,NSUInteger image,NSUInteger slice,NSUInteger level,MTLRegion r,bool toMemory) const {
+  if(!memory || !linear || slice>=slices || level>=levels ||
+     !r.size.width || !r.size.height || !r.size.depth || r.origin.x%bw || r.origin.y%bh)return;
+  if(r.origin.x>w(level) || r.size.width>w(level)-r.origin.x ||
+     r.origin.y>h(level) || r.size.height>h(level)-r.origin.y ||
+     r.origin.z>dz(level) || r.size.depth>dz(level)-r.origin.z)return;
+  const NSUInteger x=r.origin.x/bw*bb,bytes=(r.size.width+bw-1)/bw*bb,y=r.origin.y/bh,count=(r.size.height+bh-1)/bh;
+  if(x+bytes>rowBytes(level) || y+count>rows(level) || row<bytes ||
+     (r.size.depth>1 && (row>NSUIntegerMax/count || image<row*count)))return;
+  const NSUInteger base=offset(slice,level);
+  for(NSUInteger z=0;z<r.size.depth;z++)for(NSUInteger k=0;k<count;k++) {
+   uint8_t *m=memory+base+(r.origin.z+z)*imageBytes(level)+(y+k)*rowBytes(level)+x,*l=linear+z*image+k*row;
+   if(toMemory)std::memcpy(m,l,bytes);else std::memcpy(l,m,bytes);
+  }
+ }
+};
+@interface NBBlockTextureLayout : NSObject
+@property(nonatomic) NSUInteger size,alignment;
++ (instancetype)layoutForDescriptor:(MTLTextureDescriptor *)descriptor;
+@end
+@implementation NBBlockTextureLayout {NBBlockShape _shape;NSUInteger _format;}
++ (instancetype)layoutForDescriptor:(MTLTextureDescriptor *)d {
+ NBBlockShape shape;if(!shape.init(d))return nil;
+ NBBlockTextureLayout *layout=[NBBlockTextureLayout new];layout->_shape=shape;layout->_format=d.pixelFormat;
+ layout.size=shape.size;layout.alignment=256;return layout;
+}
+- (NBLayoutWatermark)watermark {
+ return {{UINT64_C(0x504f4e47424c4b31),((uint64_t)_format<<48)|((uint64_t)_shape.width<<24)|_shape.height}};
+}
+- (MTLSize)copyGranularity {return MTLSizeMake(_shape.bw,_shape.bh,1);}
+- (void)initializeTextureMemory:(void *)memory {if(memory)memset(memory,0,_shape.size);}
+- (void)finalizeTextureMemory:(void *)memory {(void)memory;}
+- (void)copyFromLinearBytes:(const void *)linear linearOffset:(NSUInteger)offset
+ linearBytesPerRow:(NSUInteger)row linearBytesPerImage:(NSUInteger)image
+ toTextureMemory:(void *)memory textureSlice:(NSUInteger)slice textureLevel:(NSUInteger)level textureRegion:(MTLRegion)region {
+ if(linear)_shape.copy((uint8_t *)memory,(uint8_t *)linear+offset,row,image,slice,level,region,true);
+}
+- (void)copyFromTextureMemory:(const void *)memory textureSlice:(NSUInteger)slice textureLevel:(NSUInteger)level
+ textureRegion:(MTLRegion)region toLinearBytes:(void *)linear linearOffset:(NSUInteger)offset
+ linearBytesPerRow:(NSUInteger)row linearBytesPerImage:(NSUInteger)image {
+ if(linear)_shape.copy((uint8_t *)memory,(uint8_t *)linear+offset,row,image,slice,level,region,false);
+}
+@end
 @implementation NBTexture
 - (void)dealloc {nmb_texture_release(_handle);if(_surface)CFRelease(_surface);}
 - (MTLTextureType)textureType {return (MTLTextureType)_descriptor.type;}
@@ -1436,6 +1525,24 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 // imported with its real row stride. Unsupported layouts still return nil.
 - (id<MTLTexture>)newTextureWithBytesNoCopy:(void *)bytes length:(NSUInteger)length descriptor:(MTLTextureDescriptor *)d deallocator:(void (^)(void *,NSUInteger))deallocator {
  NBTextureLayout *layout=[NBTextureLayout layoutForDescriptor:d];
+ NBBlockShape shape;
+ if(!layout && bytes && shape.init(d)) {
+  // Memory in NBBlockTextureLayout's layout, copied into an ordinary texture once. RenderBox hands ASTC images with a length of 0
+  // (dada g2k9): the memory is then the whole layout. The caller's deallocator runs when the texture goes.
+  if(!length)length=shape.size;
+  id<MTLTexture> texture=length>=shape.size?[(id<MTLDevice>)self newTextureWithDescriptor:d]:nil;
+  if(!texture) {NBLOG(@"native-metal: block texture refused (format %lu, %lu bytes of %lu)",(unsigned long)d.pixelFormat,
+   (unsigned long)length,(unsigned long)shape.size);return nil;}
+  for(NSUInteger slice=0;slice<shape.slices;slice++)for(NSUInteger level=0;level<shape.levels;level++)
+   [texture replaceRegion:MTLRegionMake3D(0,0,0,shape.w(level),shape.h(level),shape.dz(level)) mipmapLevel:level slice:slice
+    withBytes:(const uint8_t *)bytes+shape.offset(slice,level) bytesPerRow:shape.rowBytes(level) bytesPerImage:shape.imageBytes(level)];
+  if(deallocator) {
+   static char owner;
+   objc_setAssociatedObject(texture,&owner,[[NSData alloc] initWithBytesNoCopy:bytes length:length
+    deallocator:^(void *pointer,NSUInteger size){deallocator(pointer,size);}],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+  return texture;
+ }
  if(!layout || !bytes || d.storageMode!=MTLStorageModeShared || length<layout.size ||
     (uintptr_t)bytes%layout.alignment || length%layout.alignment) {
   NBLOG(@"native-metal: raw texture requires supported native linear layout and page-aligned host memory");return nil;
@@ -1450,7 +1557,8 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 }
 - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
  (void)backed;
- return [NBTextureLayout layoutForDescriptor:d];
+ if(NBTextureLayout *layout=[NBTextureLayout layoutForDescriptor:d])return layout;
+ return [NBBlockTextureLayout layoutForDescriptor:d];
 }
 - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)count {(void)count;return [(id<MTLDevice>)self newCommandQueue];}
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {

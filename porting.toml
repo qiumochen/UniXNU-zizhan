@@ -112,11 +112,16 @@ paths = ["drivers/PongAdreno/**", "drivers/PongMetal/**", "patches/mesa/**", "pa
 inputs = ["Adreno730v3；手机自带固件 a730_sqe.fw、gmu_gen70000.bin、a730_zap.*（不进仓库）", "Turnip 和 metal2vulkan"]
 configuration = ["PONG_ADRENO_FIRMWARE 指向固件目录", "pong_gpu_level（GMU 起始档位，默认 9 = 710 MHz）", "内核默认拒绝 MercuryPosterEx 使用 GPU（pong_gpu_deny=- 恢复）"]
 procedure = ["Adreno bring-up 等 rootvnode 出现后再开始；Metal provider 在挂根之后才发布。", "扫描输出按 surface 缓存映射和导入。"]
-findings = ["GPU 渲染的主屏和动画已由用户照片确认。", "壁纸扩展 MercuryPosterEx 会和 backboardd 抢 GPU，基线 13 轮里有 5 轮整机 GPU 丢失；拒绝它之后 6/6 没有丢失，滑动帧率平均 54.5 fps。", "固定 900 MHz 不比 DCVS 快，GPU 频率不是瓶颈。", "GPU 客户端因内存 ledger 被杀（SBRendererService 渲染电池页时）会在用户映射还在时释放 BO 页，内核 pmap_assert_free panic；PongAdrenoClient 的 dropViews 现在 unmap 并释放映射，NativeAdrenoMemory::release 在页还给 VM 前对每页 pmap_disconnect（NativeAdrenoDisconnectPages）。"]
+findings = ["GPU 渲染的主屏和动画已由用户照片确认。", "壁纸扩展 MercuryPosterEx 会和 backboardd 抢 GPU，基线 13 轮里有 5 轮整机 GPU 丢失；拒绝它之后 6/6 没有丢失，滑动帧率平均 54.5 fps。", "固定 900 MHz 不比 DCVS 快，GPU 频率不是瓶颈。", "GPU 客户端因内存 ledger 被杀（SBRendererService 渲染电池页时）会在用户映射还在时释放 BO 页，内核 pmap_assert_free panic；PongAdrenoClient 的 dropViews 现在 unmap 并释放映射，NativeAdrenoMemory::release 在页还给 VM 前对每页 pmap_disconnect（NativeAdrenoDisconnectPages）。", "ASTC 布局修复后，g239、g246 和最终版 g247 在 DeviceSupportsASTC=1 时自动打开天气 App，内核截图显示天气内容，不再是旧版 g194 的全黑。"]
 completion = ["主屏和应用由 GPU 渲染，长时间滑动没有 GPU 丢失"]
-limits = ["壁纸扩展不能用 GPU；metal2vulkan 每次提交仍有约 10–20 ms 的 CPU 开销。"]
-next_action = ["支持 IOSurfaceSharedEvent 监听，让壁纸扩展重新使用 GPU。"]
-evidence = [{kind = "source", reference = "docs/progress/2026-10-30-root-and-autoloop.md", result = "GPU bring-up、GPU 丢失的诊断和拒绝壁纸扩展的对照实验。"}, {kind = "source", reference = "docs/progress/2026-10-31-frame-timeline.md", result = "逐帧 GPU 提交时间线。"}]
+limits = ["壁纸扩展不能用 GPU；metal2vulkan 每次提交仍有约 10–20 ms 的 CPU 开销。", "ASTC 修复只自动验证了天气 App；多任务和其他 App 待人工确认，默认仍关闭 ASTC。GPU fence 停滞也在关闭 ASTC 的轮次发生，另案排查。"]
+next_action = ["定位 ASTC 开关两种轮次均出现的 GPU fence 停滞。", "支持 IOSurfaceSharedEvent 监听，让壁纸扩展重新使用 GPU。"]
+evidence = [
+  {kind = "source", reference = "docs/progress/2026-10-30-root-and-autoloop.md", result = "GPU bring-up、GPU 丢失的诊断和拒绝壁纸扩展的对照实验。"},
+  {kind = "source", reference = "docs/progress/2026-10-31-frame-timeline.md", result = "逐帧 GPU 提交时间线。"},
+  {kind = "host", command = "metal-refresh.sh astc-final 的 bridge / plugin 构建", reference = "docs/progress/2026-11-02-astc-layout.md", result = "最终 Metal 桥接库和插件构建成功；源码里的 ASTC 格式编号与 iPhoneOS SDK 核对。"},
+  {kind = "device", command = "round.sh g247 pong_touch_synth=3 tsa=1118 touch_lat=1 pong_shot=60 pong_shot_ms=1000 pong_astc=1", reference = "docs/progress/2026-11-02-astc-layout.md", result = "最终版临时启动；backboardd 和 SpringBoard 回答 ASTC=1，天气 App 连续 3 张截图显示画面，自动返回 Android。"},
+]
 
 [[area]]
 id = "network"

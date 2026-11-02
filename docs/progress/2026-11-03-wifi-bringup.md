@@ -56,6 +56,12 @@ Wi-Fi 配置和约定的 CI/GPU 两配置重新构建通过；生成的 ath11k `
 
 `porting-record.py check --base origin/main` 对本次增量的 13 个 area 检查通过。直接用当前 `upstream/main` 作基线会因上游后来新增的 `drivers/PongBootCapture/PongBootCapture.h` 在本设备记录里无 owner 而失败；该文件未进入本设备工作树，本次没有将其误记为设备改动。
 
+## 本轮交接状态
+
+本机 `main` 已提交 USB 轮次工具和结构化记录（`890ec93`、`b415a17`），工作树无待提交源码。向 `origin main` 的普通推送失败：当前无交互会话的 macOS Keychain 无法交出 GitHub 凭据；`gh` 与 SSH 也没有可用认证。没有向 upstream 推送，也没有强推。恢复可用 GitHub 认证后，先核对远端再普通推送本机提交。
+
+g268 等待器仍在本机运行，手机若在 12 小时窗口内枚举，会自动用已打包镜像开始轮次。下一次接续先看 `$ZIZHAN_SRC/logs/g268-when-back.log`、USB 枚举和 `logs/g268*`，确认是否真的执行过 `fastboot boot`、是否自动回 Android、是否取得 klog/ramoops 和截图；然后处理 Wi-Fi 的首个失败阶段。若等待已过期且手机仍不可见，按待人工清单恢复实体 USB 连接后再启动有界等待。
+
 ## 下一步
 
 USB 恢复后先确认 Android 或 fastboot 可见，再用 g268 镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。

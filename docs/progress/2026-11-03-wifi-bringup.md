@@ -74,6 +74,12 @@ g268 等待器仍在本机运行，手机若在 12 小时窗口内枚举，会�
 
 这只是主机包内容验证。等待器仍在运行，日志继续显示 USB 等待；没有新的 `fastboot boot`、设备日志或截图。
 
+## 取证链防止旧 logfs 冒充本轮
+
+检查 `cycle.sh` 和 `cycle-resume.sh` 时发现，两者曾忽略 Android 侧 `dd` 导出与 `adb pull` 的退出码；如果本机 `/tmp/logfs-$RUN.img` 已存在，拉取失败后仍可能把旧内容当成本轮的 `XNULOG.TXT`。新增 `pull-logfs.sh`：先删除本机同名副本，再清除 Android 临时副本并导出；任一步失败或拉取结果为空，都删除本机副本并停止轮次。两条轮次路径现在共同调用该脚本，避免行为分叉。
+
+主机失败注入覆盖导出失败、拉取中途留下部分文件、空文件和成功四种情况；前三种均返回失败且本机无旧副本，成功仅留下新内容。脚本语法和暂存差异检查通过。此修改只影响自动取证，g268 的内核镜像无需重打包。CI、GPU、Wi-Fi 三配置构建日志分别留在 `$ZIZHAN_SRC/ci_kernel-g268-logfs-guard-ci.log`、`ci_kernel-g268-logfs-guard-gpu.log`、`ci_kernel-g268-logfs-guard-wifi.log`；设备端取证仍需 USB 恢复后验证。
+
 ## 下一步
 
 USB 恢复后先确认 Android 或 fastboot 可见，再用 g268 镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。

@@ -43,14 +43,14 @@ until in_adb; do
 done
 sleep 5
 bash $S/usbkick.sh remember >/dev/null 2>&1
-adb shell -T "su -c 'dd if=/dev/block/by-name/logfs of=/data/local/tmp/logfs.img bs=1048576 2>/dev/null'"
-adb pull /data/local/tmp/logfs.img /tmp/logfs-$RUN.img >/dev/null
+LOGFS=/tmp/logfs-$RUN.img
+bash "$S/pull-logfs.sh" "$LOGFS" || exit $?
 # DarwinBoot24 appends every refused hand-off (and its retries) to BOOTFAIL.TXT; keep it with the round and clear it.
-if mtype -i /tmp/logfs-$RUN.img ::BOOTFAIL.TXT > $L/$RUN.bootfail.txt 2>/dev/null; then
+if mtype -i "$LOGFS" ::BOOTFAIL.TXT > $L/$RUN.bootfail.txt 2>/dev/null; then
   echo "$(ts) DarwinBoot24 refused the boot (logs/$RUN.bootfail.txt):"; sed 's/^/  /' $L/$RUN.bootfail.txt
   adb shell -T "su -c 'rm -f /dev/logfs/BOOTFAIL.TXT /dev/logfs/bootfail.txt; sync'"   # Android mounts logfs at /dev/logfs
 else rm -f $L/$RUN.bootfail.txt; fi
-mtype -i /tmp/logfs-$RUN.img ::XNULOG.TXT > $L/$RUN.txt 2>/dev/null || { echo "$(ts) no XNULOG.TXT in logfs"; mdir -i /tmp/logfs-$RUN.img ::; exit 6; }
+mtype -i "$LOGFS" ::XNULOG.TXT > $L/$RUN.txt 2>/dev/null || { echo "$(ts) no XNULOG.TXT in logfs"; mdir -i "$LOGFS" ::; exit 6; }
 # The kernel's UFS copy of the ramoops zones has no reset bit flips: when it was written this round it becomes RUN.txt.
 if [ $KLOG = 1 ] && python3 $S/klog.py read $L/$RUN.klog.txt; then
   mv $L/$RUN.txt $L/$RUN.ramoops.txt; cp $L/$RUN.klog.txt $L/$RUN.txt; echo "$(ts) using the klog copy (DRAM copy: $RUN.ramoops.txt)"

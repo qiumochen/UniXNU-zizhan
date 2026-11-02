@@ -107,6 +107,7 @@ DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh
 - 中断时用 `cycle-resume.sh IMG RUN` 接后半段；USB 掉线时 `when-back.sh RUN [args…]` 等恢复再跑。`usbkick.sh remember` 在手机可见时记端口；换口后重记。先判断端口枚举，不能把 USB 不可见直接当内核冻结。
 - 无人值守等待器如果由临时工具会话直接启动，会随会话结束而退出。要跨会话等待，使用当前用户图形域的 `launchctl submit` 托管 `when-back.sh`，设置 `ZIZHAN_SRC` 和 `WHEN_BACK_IMAGE`，将输出写入本机日志；用 `launchctl list` 和日志心跳核对存活。已运行的 g268 任务见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)。
 - `klog.py` 把状态保存在工作目录；干净 UFS klog 优先于热机后位翻转严重的 DRAM ramoops。每轮日志保留参数、源码版本、镜像 / plugin / UI 版本、结果和下一步。
+- `cycle.sh` 和 `cycle-resume.sh` 经 `pull-logfs.sh` 导出 logfs；导出或拉取失败会清掉本机同名旧副本并停止轮次。只有真实取回的新镜像才能继续提取 `XNULOG.TXT`。
 
 常用参数（内核和打包脚本默认值分开）：
 

@@ -303,6 +303,7 @@ struct NBBlockShape {
  bool init(MTLTextureDescriptor *d) {
   if(!d || !d.width || !d.height || d.width>16384 || d.height>16384 ||
      d.depth>2048 || d.arrayLength>2048 || d.mipmapLevelCount>16 ||
+     d.pixelFormat>UINT16_MAX || d.textureType>UINT8_MAX ||
      d.sampleCount>1 || d.storageMode==MTLStorageModeMemoryless ||
      !blockShape(d.pixelFormat,bw,bh,bb))return false;
   width=d.width;height=d.height;depth=d.textureType==MTLTextureType3D?std::max<NSUInteger>(1,d.depth):1;
@@ -342,14 +343,17 @@ struct NBBlockShape {
 @property(nonatomic) NSUInteger size,alignment;
 + (instancetype)layoutForDescriptor:(MTLTextureDescriptor *)descriptor;
 @end
-@implementation NBBlockTextureLayout {NBBlockShape _shape;NSUInteger _format;}
+@implementation NBBlockTextureLayout {NBBlockShape _shape;NSUInteger _format,_type;}
 + (instancetype)layoutForDescriptor:(MTLTextureDescriptor *)d {
  NBBlockShape shape;if(!shape.init(d))return nil;
- NBBlockTextureLayout *layout=[NBBlockTextureLayout new];layout->_shape=shape;layout->_format=d.pixelFormat;
+ NBBlockTextureLayout *layout=[NBBlockTextureLayout new];layout->_shape=shape;layout->_format=d.pixelFormat;layout->_type=d.textureType;
  layout.size=shape.size;layout.alignment=256;return layout;
 }
 - (NBLayoutWatermark)watermark {
- return {{UINT64_C(0x504f4e47424c4b31),((uint64_t)_format<<48)|((uint64_t)_shape.width<<24)|_shape.height}};
+ // All supported fields fit without a hash: two layouts with different mip or slice offsets must not share this identifier.
+ return {{(UINT64_C(0x504f4e47)<<32)|((uint64_t)_format<<16)|((uint64_t)_shape.levels<<8)|_shape.bb,
+  ((uint64_t)_shape.width<<49)|((uint64_t)_shape.height<<34)|((uint64_t)_shape.depth<<22)|
+  ((uint64_t)_shape.slices<<8)|_type}};
 }
 - (MTLSize)copyGranularity {return MTLSizeMake(_shape.bw,_shape.bh,1);}
 - (void)initializeTextureMemory:(void *)memory {if(memory)memset(memory,0,_shape.size);}

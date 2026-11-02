@@ -824,22 +824,26 @@ extern "C" IOReturn pong_scanout_call(task_t owner,unsigned op,const void *in,si
  * pong_shot_n (default 6) captures pong_shot_ms (default 1000) apart of the zero-copy frame just flipped: every 16th pixel of every
  * 16th row (135 x 120 of 2160 x 1916), read through an uncached mapping once the frame's GPU work retired (copied frames too: with an
  * app in front CoreAnimation's canvas is not a pool slot). A thread prints each as
- * "PONG SHOT <n> begin <w> <h> at <us>", then one "PONG SHOT <n> <row> <RGB hex>" per row (IOLog only, not the ramoops copy);
+ * "PONG SHOT <n> begin <w> <h> at <us>", then "PONG SHOT <n> <row> <x> <RGB hex>" in 32-pixel chunks.
+ * IOLog truncates a line near 255 bytes: a whole 135-pixel row silently lost its right 95 pixels, and shot.py painted them black.
  * tools/mac/shot.py writes PNGs. The canvases are BGRA8 (deep framebuffers are off). Lets a round check what the panel showed. */
 static uint32_t shotAt,shotN=6,shotMs=1000,shotTaken,shotHud;   /* pong_shot_hud=1: 136 x 120 at full resolution from 160 px left of the top right corner (the fps_hud box) */static uint64_t shotNext;static bool shotArgs,shotThread;
 static uint8_t shotPix[120][136*3];static unsigned shotW,shotH;static uint64_t shotWhen;static volatile uint32_t shotReady;
 static void shotPrint(void *,wait_result_t)
 {
-    static char line[16+136*6+8];
+    static char line[256];
     for(;;) {
         IOSleep(100);
         const uint32_t n=shotReady;
         if(n) {
             IOLog("PONG SHOT %u begin %u %u at %llu\n",n,shotW,shotH,us(shotWhen));
             for(unsigned y=0;y<shotH;++y) {
-                int k=snprintf(line,sizeof line,"PONG SHOT %u %u ",n,y);
-                for(unsigned i=0;i<shotW*3 && k+3<int(sizeof line);++i)k+=snprintf(line+k,sizeof line-k,"%02x",shotPix[y][i]);
-                IOLog("%s\n",line);
+                for(unsigned x=0;x<shotW;x+=32) {
+                    int k=snprintf(line,sizeof line,"PONG SHOT %u %u %u ",n,y,x);
+                    const unsigned end=x+32<shotW?x+32:shotW;
+                    for(unsigned i=x*3;i<end*3;++i)k+=snprintf(line+k,sizeof line-k,"%02x",shotPix[y][i]);
+                    IOLog("%s\n",line);
+                }
                 if(y%8==7)IOSleep(5);   /* let the log drain */
             }
             shotReady=0;

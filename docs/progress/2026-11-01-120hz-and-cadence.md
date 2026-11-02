@@ -319,6 +319,8 @@ INTF 块 = live.dts `qcom,sde-intf-off <0x35000 0x36000 0x37000 0x38000>`（MDSS
 - **待确认显示正确**：Apple 的 ASTC 数据是 twiddled 块序，若 CA 把它原样交给 m2v 当线性数据，图标/快照会花。→ 12.6 的截图。
 
 ### 12.6 内核截图（pong_shot）
+**11-02 更正**：这一节旧截图的右侧黑区是 `IOLog` 单行约 255 B 截断、旧解码器补黑的产物。只能用记录到的左侧约 39–40/135 个采样列判断颜色；不能据此判断整屏布局。分段日志与新解码器见 `docs/progress/2026-11-02-shot-and-watermark.md`。
+
 - `PongAdrenoScanout.cpp` `shotCapture`：`pong_shot=<s>`（开机后秒）起每 `pong_shot_ms` 抓一张、共 `pong_shot_n` 张：零拷贝帧 flip 后，
   非缓存映射读每 16 行的每 16 个像素（135 × 120），线程打 `PONG SHOT` 行；`tools/mac/shot.py LOG` 出 PNG（3 倍放大）。
 - g183/g184 截图：主屏图标（FaceTime、备忘录、小组件）清晰，没有块状花屏 → **ASTC 走 GPU 显示正确**。模糊过渡也正常。

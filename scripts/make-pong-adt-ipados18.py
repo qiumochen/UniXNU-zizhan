@@ -334,7 +334,11 @@ def main():
             ('thin-bezel', struct.pack('<I', 1)),
             ('allow-32bit-apps', struct.pack('<I', 0)),
             ('ephemeral-data-mode', struct.pack('<I', 0)),
-            ('udid-version', struct.pack('<I', 1)),
+            # Version 1 hashes SerialNumber, ECID, WifiAddress and BluetoothAddress; with Wi-Fi off,
+            # the WifiAddress answer kept every MGCopyAnswer(UniqueDeviceID) caller waiting for seconds
+            # (zizhan 11-02 g237: Settings' main thread in -[ISDefaults init], 6.4 s to its first
+            # screen). Version 2, an iPhone17,1's own, is ChipID-ECID from the /chosen seeds.
+            ('udid-version', struct.pack('<I', 2 if args.unique_chip_id is not None else 1)),
             ('artwork-scale-factor', struct.pack('<I', 2)),   # zizhan: matches display-scale
         ]),
     ])

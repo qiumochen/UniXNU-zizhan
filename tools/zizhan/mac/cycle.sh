@@ -9,8 +9,12 @@
 set -uo pipefail
 export PATH=/opt/homebrew/bin:$PATH MTOOLS_SKIP_CHECK=1
 S=${ZIZHAN_SRC:-$HOME/zizhan}
+if [ "$#" -lt 2 ]; then echo "usage: $0 IMG RUN [MAX_WAIT_SECONDS]" >&2; exit 2; fi
 IMG=$1; RUN=$2; WAIT=${3:-600}
+case "$RUN" in ''|*[!a-zA-Z0-9_-]*) echo 'run must contain only letters, digits, _ or -' >&2; exit 2;; esac
 L=${ZIZHAN_SRC:-$HOME/zizhan}/logs; mkdir -p $L
+KLOG_MARKER="$L/$RUN.klog-armed"
+rm -f "$KLOG_MARKER"
 ts() { date '+%H:%M:%S'; }
 in_fastboot() { bash "$S/fastboot-visible.sh"; }
 in_adb() { bash "$S/adb-visible.sh"; }
@@ -29,6 +33,7 @@ fi
 KLOG=0
 if in_adb && [ -f $S/klog.json ]; then python3 $S/klog.py arm && KLOG=1 || echo "$(ts) klog arm failed; ramoops only"; fi
 bash $S/boot.sh "$IMG" "第 $RUN 轮已自动启动，全程不需要操作；屏幕有变化可以随手拍一张。" || exit 2
+if [ "$KLOG" = 1 ]; then printf '%s\n' "$IMG" > "$KLOG_MARKER"; fi
 echo "$(ts) booted $IMG; waiting up to ${WAIT}s for the autoreset into fastboot"
 sleep 20
 start=$(date +%s); nextkick=120
@@ -63,6 +68,7 @@ mtype -i "$LOGFS" ::XNULOG.TXT > $L/$RUN.txt 2>/dev/null || { echo "$(ts) no XNU
 if [ $KLOG = 1 ] && python3 $S/klog.py read $L/$RUN.klog.txt; then
   mv $L/$RUN.txt $L/$RUN.ramoops.txt; cp $L/$RUN.klog.txt $L/$RUN.txt; echo "$(ts) using the klog copy (DRAM copy: $RUN.ramoops.txt)"
 fi
+rm -f "$KLOG_MARKER"
 bash "$S/UniXNU-zizhan/tools/zizhan/mac/decode-shots.sh" "$RUN" || echo "$(ts) screenshot decoding failed; inspect $L/$RUN.txt"
 echo "$(ts) saved $L/$RUN.txt ($(wc -c < $L/$RUN.txt) bytes); battery $(battery_temp) (tenths C) back in Android"
 [ -z "${ZIZHAN_ASK_FILE:-}" ] || printf '%s\n' "第 $RUN 轮结束，手机已回到安卓，日志已自动取回。" > "$ZIZHAN_ASK_FILE"

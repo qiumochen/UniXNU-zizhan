@@ -91,3 +91,11 @@ g268 镜像已有 `pong_shot=60`，但原轮次脚本只取回文本日志，PNG
 主机用已保存的 g264 日志在临时目录回放：生成 6 张具有 PNG 签名的图片；改为无截图的新日志后重跑，旧 PNG 清零。三脚本语法和 `git diff --check` 通过。该检查只证明自动取证路径，g268 仍无设备截图；截图是每 16 个像素取一个样本并放大，不能代表面板原生清晰度。
 
 约定的 `pong_ipados18_ci_defconfig` 与 `zizhan_ipados18_gpu_defconfig` 再次构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-shot-auto-ci.log`、`ci_kernel-shot-auto-gpu.log`，均以 `KERNEL_DONE` 结束。此改动只在 Mac 取证脚本，不改变已打包的 g268 镜像。
+
+## 接续：恢复轮次的 klog 归属
+
+`cycle-resume.sh` 原先默认 `KLOG=1`。如果原轮从 fastboot 启动，`cycle.sh` 不会执行 `klog.py arm`；恢复脚本仍可能把上一次写入、状态为 1 的 pinned klog 当成本轮日志。现在正常轮次启动时先清理同名旧标记，仅在 `klog.py arm` 和 `fastboot boot` 都成功后保存本轮镜像名到本机 `logs/RUN.klog-armed`。恢复脚本只在标记与镜像名匹配时读 klog，否则保留本轮 ramoops；日志取回后删除标记。两条脚本也限制轮次名为字母、数字、下划线或短横线，避免轮次文件路径越界。
+
+主机隔离模拟覆盖：失败的 `boot.sh` 不留下标记；成功启动后有匹配标记；恢复脚本对无标记、其他镜像标记选择 ramoops，对匹配标记选择 klog。模拟分别在预期的等待/启动失败点退出，没有操作手机。脚本语法与差异检查通过。实际设备 klog/ramoops 和截图仍须 g268 上机后核对。
+
+`pong_ipados18_ci_defconfig` 与 `zizhan_ipados18_gpu_defconfig` 均再次构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-klog-marker-ci.log`、`ci_kernel-klog-marker-gpu.log`，末尾均为 `KERNEL_DONE`。内核及已打包的 g268 镜像未因这次主机脚本修改而改变。

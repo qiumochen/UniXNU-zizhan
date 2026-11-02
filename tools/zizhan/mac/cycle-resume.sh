@@ -1,16 +1,19 @@
 #!/bin/bash
-# Mac: finish a cycle.sh round whose script was stopped after the boot (steps 2-4 only; the klog was armed).
+# Mac: finish a cycle.sh round whose script was stopped after the boot (steps 2-4 only).
 #   1. fastboot-boot IMG (adb reboot bootloader first when the phone is in Android)
 #   2. wait for the kernel's pong_autoreset watchdog to bring the phone back to fastboot
 #   3. fastboot-boot RamoopsDump, which saves the ramoops console to logfs:\XNULOG.TXT and resets into Android
 #   4. read logfs over adb and save the log to logs/RUN.txt
-# usage: cycle.sh IMG RUN [MAX_WAIT_SECONDS]
+# usage: cycle-resume.sh IMG RUN [MAX_WAIT_SECONDS]
 # When the phone stays invisible on USB (the bootloader's attach failed, usbkick.sh), the waits in 2 and 3 power-cycle its port.
 set -uo pipefail
 export PATH=/opt/homebrew/bin:$PATH MTOOLS_SKIP_CHECK=1
 S=${ZIZHAN_SRC:-$HOME/zizhan}
+if [ "$#" -lt 2 ]; then echo "usage: $0 IMG RUN [MAX_WAIT_SECONDS]" >&2; exit 2; fi
 IMG=$1; RUN=$2; WAIT=${3:-600}
+case "$RUN" in ''|*[!a-zA-Z0-9_-]*) echo 'run must contain only letters, digits, _ or -' >&2; exit 2;; esac
 L=${ZIZHAN_SRC:-$HOME/zizhan}/logs; mkdir -p $L
+KLOG_MARKER="$L/$RUN.klog-armed"
 ts() { date '+%H:%M:%S'; }
 in_fastboot() { bash "$S/fastboot-visible.sh"; }
 in_adb() { bash "$S/adb-visible.sh"; }
@@ -20,7 +23,9 @@ in_adb() { bash "$S/adb-visible.sh"; }
 # break, g48 2.5%, g58 onwards about 0%).
 COOL=${COOL:-350}
 battery_temp() { adb shell dumpsys battery 2>/dev/null | awk '/temperature/{print $2; exit}'; }
-KLOG=${KLOG:-1}
+KLOG=0
+if [ -f "$KLOG_MARKER" ] && [ "$(cat "$KLOG_MARKER")" = "$IMG" ]; then KLOG=1; fi
+if [ "$KLOG" = 1 ]; then echo "$(ts) klog armed for this run"; else echo "$(ts) no matching klog arm marker; using ramoops"; fi
 echo "$(ts) booted $IMG; waiting up to ${WAIT}s for the autoreset into fastboot"
 sleep 20
 start=$(date +%s); nextkick=120
@@ -55,6 +60,7 @@ mtype -i "$LOGFS" ::XNULOG.TXT > $L/$RUN.txt 2>/dev/null || { echo "$(ts) no XNU
 if [ $KLOG = 1 ] && python3 $S/klog.py read $L/$RUN.klog.txt; then
   mv $L/$RUN.txt $L/$RUN.ramoops.txt; cp $L/$RUN.klog.txt $L/$RUN.txt; echo "$(ts) using the klog copy (DRAM copy: $RUN.ramoops.txt)"
 fi
+rm -f "$KLOG_MARKER"
 bash "$S/UniXNU-zizhan/tools/zizhan/mac/decode-shots.sh" "$RUN" || echo "$(ts) screenshot decoding failed; inspect $L/$RUN.txt"
 echo "$(ts) saved $L/$RUN.txt ($(wc -c < $L/$RUN.txt) bytes); battery $(battery_temp) (tenths C) back in Android"
 [ -z "${ZIZHAN_ASK_FILE:-}" ] || printf '%s\n' "第 $RUN 轮结束，手机已回到安卓，日志已自动取回。" > "$ZIZHAN_ASK_FILE"

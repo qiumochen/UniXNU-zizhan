@@ -10,7 +10,7 @@
 
 | 阶段 | OS 服务状态 | 操作与证据 |
 | --- | --- | --- |
-| B1 | 当前镜像含 fairplayd | g268 Wi-Fi 轮次结束并恢复连接后，使用同一内核启动，收集 launchd/fairplayd 退出频率、Settings 与 Weather 的日志和截图。 |
+| B1 | 当前镜像含 fairplayd | g269 Wi-Fi 轮次结束并恢复连接后，使用同一内核启动，收集 launchd/fairplayd 退出频率、Settings 与 Weather 的日志和截图。 |
 | A | 从 B1 当前镜像仅移除 fairplayd 的缓存项和 plist | 在 Android/adb 可用且根镜像备份已核对时，用新标签运行 `jobs-refresh.sh TAG com.apple.fairplayd.A2`；自动返回后收集同样证据。 |
 | B2 | 恢复 fairplayd 的缓存项和 plist | 用 `job-restore.sh TAG g213 com.apple.fairplayd.A2` 恢复同一项，再重复采集，排除时间和缓存状态的影响。 |
 
@@ -26,4 +26,4 @@ B2 使用的 `job-restore.sh` 也在复制当前 OS 镜像前检查 Android adb�
 
 ## 下一步
 
-优先完成 g268 的临时 Wi-Fi 启动、自动返回和日志/截图取证。随后按 B1–A–B2 顺序执行 fairplayd 对照，分别核对 OS layout 与安装结果；依据实际退出、同步请求与 UI 证据决定是否修改 `EXCLUDED18`。
+优先完成 g269 的临时 Wi-Fi 启动、自动返回和日志/截图取证。随后按 B1–A–B2 顺序执行 fairplayd 对照，分别核对 OS layout 与安装结果；依据实际退出、同步请求与 UI 证据决定是否修改 `EXCLUDED18`。

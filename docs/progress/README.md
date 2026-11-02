@@ -11,6 +11,7 @@ Paths in the notes refer to the author's workspace:
 
 ## 最新交接
 
+- [2026-11-03 display-link 主机核对](2026-11-03-displaylink-host.md)（当前准备镜像含 hook；UI、bridge、plugin 与双配置构建通过，设备帧率待验证）。
 - [2026-11-03 音频板级审查](2026-11-03-audio-board-audit.md)（公开 zizhan DT 与 Pong 音频常量对照；未上机）。
 - [2026-11-03 Wi-Fi 首轮准备](2026-11-03-wifi-bringup.md)（三配置已构建；g268 等 USB 恢复，尚未上机）。
 - [2026-11-03 Photos 零尺寸断言](2026-11-03-photos-context.md)（最终 g264 已上机）。

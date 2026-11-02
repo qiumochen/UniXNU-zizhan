@@ -6,6 +6,8 @@
 
 Photos 零尺寸断言修复已在 g262–g264 上机验证，g264 的截图、双配置构建和自动返回记录见 [Photos 记录](docs/progress/2026-11-03-photos-context.md)。GPU fence g253/g254 的时间线全部完成；deadline 最后一笔仅在途 26 ms，见 [fence 记录](docs/progress/2026-11-02-fence-diagnostics.md)。下方 11-02 的 GPU WIP 描述保留为历史状态。
 
+display-link 拦截的当前本机准备镜像已含 hook；UI 库、Metal bridge/plugin 和双配置内核完成主机构建，设备加载与帧率仍未验证。`ui-refresh.sh` 的 Photos 路径与设备前置检查已修正；详见 [主机核对](docs/progress/2026-11-03-displaylink-host.md)。
+
 Wi-Fi 试验配置 `zizhan_ipados18_wifi_defconfig` 已构建，约定的 CI/GPU 两配置也已构建；试验镜像含 `pong_wifi=1` 和自动返回。g265 因主机 USB 无枚举，**没有进入 fastboot boot**，不能作为设备结果。设备连接恢复后从 PCIe、供电、MHI、固件、MSI、扫描逐段验证。细节见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)，需物理恢复连接的事项见 [待人工清单](docs/progress/HUMAN_CHECKLIST.md)。
 
 后续核对本机 live DT，发现旧试验镜像使用的 Pong PHY 表和一条额外 WLAN 供电请求不适合 zizhan；g266 的 USB 监视已撤下，设备未启动。`configs/zizhan-wifi-sm8475.json` 和 g267 试验镜像已按 zizhan 数据重建，双配置回归成功；仍需 USB 恢复后的自动设备轮次。旧镜像不得当作 Wi-Fi 验证输入。

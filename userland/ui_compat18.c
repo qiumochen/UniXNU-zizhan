@@ -1855,7 +1855,7 @@ static void backboard_container(void)
     fprintf(stderr,"Pong UI18: backboardd container uses writable %s\n",path);
 }
 
-/* zizhan WIP: not built or tested on device; pong_dl_full=0 preserves requested rates.
+/* zizhan WIP: host-built, not installed or tested on device; pong_dl_full=0 preserves requested rates.
  * SpringBoard's own animations at the panel's rate. UIKit's UIViewInProcessAnimationManager (the animations an app runs in its own
  * process, a home-screen page settling among them) asks its CADisplayLink for 20..30 a second: the frames after a swipe came 33.3 ms
  * apart (g136-g143 gap p90 33.2 ms). On a ProMotion iPhone the low rate saves power; this panel refreshes at 120 whatever is drawn. The

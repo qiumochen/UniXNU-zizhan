@@ -1,29 +1,27 @@
 # fairplayd.A2 对照实验（2026-11-03）
 
-## 目的
-在 USB 设备不可见期间，通过本地双配置验证 `EXCLUDED18` 移除 fairplayd 对 Battery/Weather 行为的影响。
+## 目标与现有输入
 
-## 前提
-- 主机可独立构建 `pong_ipados18_ci_defconfig` 和 `zizhan_ipados18_gpu_defconfig`（含/不含 fairplayd）。
-- fairplayd 上次表现：启动后快速退出，KeepAlive 每 10 s 重启，launchd 阻塞端口。
+确认 fairplayd.A2 在当前移植中是否仍快速退出，以及服务缓存的有无如何影响 Settings 电池页与 Weather。内核构建不改变 `EXCLUDED18`；该选项只在重新生成 OS 服务缓存时生效。对照轮次应使用同一内核和启动参数，只改变 OS 镜像中这个 job 的缓存项与 plist。
 
-## 实验设计
-| 项目 | A（baseline） | B（对照） |
+本机对三个已有 OS 镜像做了只读挂载，并解析 `/System/Library/xpc/launchd.plist`：当前 `pong-ipados18-system.cdr` 和 `g213` 备份均有一条 `com.apple.fairplayd.A2`，对应 plist 存在，`KeepAlive=true`，程序为 `/usr/sbin/fairplayd.A2`；`f245` 备份没有缓存项和 plist。三个镜像均已正常卸载。这证明现有输入的服务状态，不证明它们其他内容一致，也不证明 fairplayd 工作。当前源码 `EXCLUDED18` 仍排除该 job；全量重建会再次移除它。
+
+## 设备轮次设计
+
+| 阶段 | OS 服务状态 | 操作与证据 |
 | --- | --- | --- |
-| 服务缓存 | `EXCLUDED18` 包含 fairplayd | `EXCLUDED18` 排除 fairplayd |
-| 预期行为 | 电池健康页无转圈提示但健康度可能为空 | fairplayd 正常响应；电池健康度显示数值 |
+| B1 | 当前镜像含 fairplayd | g268 Wi-Fi 轮次结束并恢复连接后，使用同一内核启动，收集 launchd/fairplayd 退出频率、Settings 与 Weather 的日志和截图。 |
+| A | 从 B1 当前镜像仅移除 fairplayd 的缓存项和 plist | 在 Android/adb 可用且根镜像备份已核对时，用新标签运行 `jobs-refresh.sh TAG com.apple.fairplayd.A2`；自动返回后收集同样证据。 |
+| B2 | 恢复 fairplayd 的缓存项和 plist | 用 `job-restore.sh TAG g213 com.apple.fairplayd.A2` 恢复同一项，再重复采集，排除时间和缓存状态的影响。 |
 
-## 构建与部署
-1. 本地构建两套内核与打包，标签分别为 `g-fp-x` 和 `g-fp-ok`。
-2. 两轮均用 `ci_boot_ufs.sh` 打包，不改动 rootfs UUID。
+`f245` 可作为历史参照，不能直接充当 A：它与当前镜像还可能有其他差异。天气数据下载还依赖网络；只有网络已实测可用时才将 Weather 在线结果用于判断。电池健康度依赖 thermalmonitord 的管理状态及 powerd 的服务状态，fairplayd 单项恢复不应预设能产生健康度数值。
 
-## 自动化验证脚本（macos 侧）
-- `tools/mac/baseline-fairplayd-run.sh TAG WAIT`：fastboot boot → 等待 launchd 稳定（默认 180 s）→ 抓取日志并统计崩溃次数、端口占用时间。
-- 若 B 镜像出现频繁崩溃（>5 次/10 分钟），则回退到 A 策略。
+## 主机安全检查
 
-## 成功标准
-- B 镜像下 fairplayd 不再频繁崩溃，设置电池页健康度字段有数值或明确“不可用”文案。
-- Weather App 能在打开后 1–2 分钟内完成天气数据下载。
+`jobs-refresh.sh` 现在先校验参数、备份标签和 Android adb 可见，再复制与修改 OS 镜像；不存在的 label 会报错，避免无变化却重写手机 OS 窗口。挂载和编辑失败时执行卸载清理。主机检查包括脚本语法、无设备时的提前拒绝、备份标签冲突拒绝，以及用临时 plist 验证缺失 label 不写缓存。设备写入、启动行为、日志和截图仍待 USB 枚举恢复，不能记为已验证。
+
+`pong_ipados18_ci_defconfig` 和 `zizhan_ipados18_gpu_defconfig` 均完成 `ci_kernel.sh` 构建，日志分别在本机 `$ZIZHAN_SRC/ci_kernel-fairplay-guard-ci.log` 与 `ci_kernel-fairplay-guard-gpu.log`，末尾均为 `KERNEL_DONE`。本轮没有修改内核；构建结果只验证工作树仍可构建。g268 等待器继续由 launchd 托管，截至本次记录 adb/fastboot 无枚举，没有本轮设备日志或截图。
 
 ## 下一步
-USB 恢复后优先执行 g268 Wi‑Fi 轮次；若无设备结果则切换到 fairplayd 对照实验的本地构建与自动化验证流程。
+
+优先完成 g268 的临时 Wi-Fi 启动、自动返回和日志/截图取证。随后按 B1–A–B2 顺序执行 fairplayd 对照，分别核对 OS layout 与安装结果；依据实际退出、同步请求与 UI 证据决定是否修改 `EXCLUDED18`。

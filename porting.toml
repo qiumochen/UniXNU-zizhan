@@ -112,10 +112,10 @@ paths = ["drivers/PongAdreno/**", "drivers/PongMetal/**", "patches/mesa/**", "pa
 inputs = ["Adreno730v3；手机自带固件 a730_sqe.fw、gmu_gen70000.bin、a730_zap.*（不进仓库）", "Turnip 和 metal2vulkan"]
 configuration = ["PONG_ADRENO_FIRMWARE 指向固件目录", "pong_gpu_level（GMU 起始档位，默认 9 = 710 MHz）", "内核默认拒绝 MercuryPosterEx 使用 GPU（pong_gpu_deny=- 恢复）"]
 procedure = ["Adreno bring-up 等 rootvnode 出现后再开始；Metal provider 在挂根之后才发布。", "扫描输出按 surface 缓存映射和导入。"]
-findings = ["GPU 渲染的主屏和动画已由用户照片确认。", "壁纸扩展 MercuryPosterEx 会和 backboardd 抢 GPU，基线 13 轮里有 5 轮整机 GPU 丢失；拒绝它之后 6/6 没有丢失，滑动帧率平均 54.5 fps。", "固定 900 MHz 不比 DCVS 快，GPU 频率不是瓶颈。", "GPU 客户端因内存 ledger 被杀（SBRendererService 渲染电池页时）会在用户映射还在时释放 BO 页，内核 pmap_assert_free panic；PongAdrenoClient 的 dropViews 现在 unmap 并释放映射，NativeAdrenoMemory::release 在页还给 VM 前对每页 pmap_disconnect（NativeAdrenoDisconnectPages）。", "ASTC 布局修复后，g248 和已安装 watermark 桥接库的 g249 在 DeviceSupportsASTC=1 时自动打开天气 App；各 6 张分段截图均记录完整 135/135 列，主屏与天气画面横跨整屏。g251 时钟和 g252 设置也记录到完整宽度的 App 画面。", "g253、g254 的 GPU 时间线分别完整完成 592/592 和 403/403 笔提交；deadline 看到的 submitted/retired 差 1 是 backboardd 在复位前 26 ms 正常提交的在途工作，不是持续 fence 停滞。"]
+findings = ["GPU 渲染的主屏和动画已由用户照片确认。", "壁纸扩展 MercuryPosterEx 会和 backboardd 抢 GPU，基线 13 轮里有 5 轮整机 GPU 丢失；拒绝它之后 6/6 没有丢失，滑动帧率平均 54.5 fps。", "固定 900 MHz 不比 DCVS 快，GPU 频率不是瓶颈。", "GPU 客户端因内存 ledger 被杀（SBRendererService 渲染电池页时）会在用户映射还在时释放 BO 页，内核 pmap_assert_free panic；PongAdrenoClient 的 dropViews 现在 unmap 并释放映射，NativeAdrenoMemory::release 在页还给 VM 前对每页 pmap_disconnect（NativeAdrenoDisconnectPages）。", "ASTC 布局修复后，g248 和已安装 watermark 桥接库的 g249 在 DeviceSupportsASTC=1 时自动打开天气 App；各 6 张分段截图均记录完整 135/135 列，主屏与天气画面横跨整屏。g251 时钟和 g252 设置也记录到完整宽度的 App 画面。", "g253、g254 的 GPU 时间线分别完整完成 592/592 和 403/403 笔提交；deadline 看到的 submitted/retired 差 1 是 backboardd 在复位前 26 ms 正常提交的在途工作，不是持续 fence 停滞。", "Photos 的零尺寸断言来自 Tungsten 以 0x0 调用 PXCreateContext；Photos 专用运行时钩子把零轴收敛为 1，g262、g263 和最终内核 g264 均成功进入 Photos，ASTC 开关两组都没有再崩溃。"]
 completion = ["主屏和应用由 GPU 渲染，长时间滑动没有 GPU 丢失"]
-limits = ["壁纸扩展不能用 GPU；metal2vulkan 每次提交仍有约 10–20 ms 的 CPU 开销。", "ASTC 修复已自动验证主屏、天气、时钟和设置整幅采样截图；多任务、触摸动画仍待人工确认，默认仍关闭 ASTC。早先确认过的整机 GPU 丢失仍有 stuck-copy 和 poison 检测。", "g250 照片 App 反复启动后以零尺寸断言退出；SharedEvent 监听此前报错，根因尚未定位。"]
-next_action = ["定位照片 App 的零尺寸断言与 IOSurfaceSharedEvent 监听失败。", "支持 IOSurfaceSharedEvent 监听，让壁纸扩展重新使用 GPU。", "同镜像验证 fairplayd，再测试 display-link WIP，随后按调研顺序处理 nopreamble、BO 缓存、壁纸和截图清晰度。"]
+limits = ["壁纸扩展不能用 GPU；metal2vulkan 每次提交仍有约 10–20 ms 的 CPU 开销。", "ASTC 修复已自动验证主屏、天气、时钟、设置和 Photos 整幅采样截图；多任务、触摸动画和 Photos 的相册/搜索/编辑路径仍待人工确认，默认仍关闭 ASTC。早先确认过的整机 GPU 丢失仍有 stuck-copy 和 poison 检测。", "Photos 启动与相册首页已自动验证，但首次提示后的网格、搜索、编辑和图片浏览仍需人工操作；IOSurfaceSharedEvent 监听仍缺失。"]
+next_action = ["支持 IOSurfaceSharedEvent 监听，让壁纸扩展和依赖监听的服务重新使用 GPU 事件。", "同镜像验证 fairplayd，再测试 display-link WIP，随后按调研顺序处理 nopreamble、BO 缓存、壁纸和截图清晰度。"]
 evidence = [
   {kind = "source", reference = "docs/progress/2026-10-30-root-and-autoloop.md", result = "GPU bring-up、GPU 丢失的诊断和拒绝壁纸扩展的对照实验。"},
   {kind = "source", reference = "docs/progress/2026-10-31-frame-timeline.md", result = "逐帧 GPU 提交时间线。"},
@@ -125,6 +125,7 @@ evidence = [
   {kind = "device", command = "cycle.sh g250–g252", reference = "docs/progress/2026-11-02-shot-and-watermark.md", result = "时钟、设置成功启动且整幅截图完整；照片启动后反复以 PXPixelSizeAreaIsZero 断言退出。每轮均自动返回 Android。"},
   {kind = "device", command = "cycle.sh g253、g254；pong_gtrace_delay、pong_gtrace、pong_gtrace_ib", reference = "docs/progress/2026-11-02-fence-diagnostics.md", result = "两轮时间线无丢失，提交全部完成，零拷贝 fence 无超时；deadline fence 是复位前 26 ms 的正常在途提交。"},
   {kind = "source", reference = "docs/progress/2026-11-02-gpu-astc-and-fairplayd.md", result = "记录 ASTC 后续工作、fairplayd 当前镜像状态和 display-link WIP 的未验证边界。"},
+  {kind = "device", command = "cycle.sh g262–g264；pong_astc=0/1；Photos PXCreateContext 兼容钩子", reference = "docs/progress/2026-11-03-photos-context.md", result = "钩子把 Tungsten 的 0x0 收敛为 1x1；Photos 不再触发零尺寸断言或退出，最终 ASTC=1 轮次保持运行并自动返回 Android。"},
 ]
 
 [[area]]

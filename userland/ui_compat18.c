@@ -13,6 +13,7 @@
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <math.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <signal.h>
@@ -36,6 +37,7 @@ static bool format_installed;
 static bool personas_installed;
 static bool springboard_process;
 static bool phone_ui_process;
+static bool photos_process;
 /* Processes whose MobileGestalt answers this file adjusts: the phone UI processes and the render server (backboardd). */
 static bool gestalt_process;
 static bool skip_setup;
@@ -1064,6 +1066,88 @@ static bool boot_option(const char *key)
     return false;
 }
 
+typedef CGContextRef (*PhotosContextFn)(CGSize,BOOL,uintptr_t,BOOL);
+typedef CGContextRef (*PhotosAutomaticFormatFn)(CGSize,BOOL,uintptr_t);
+static void *photos_context_original;
+static void *photos_automatic_format_original;
+static bool photos_context_installed,photos_automatic_format_installed;
+static unsigned photos_zero_size_reports;
+
+static CGSize photos_context_size(CGSize size,const char *name,const void *return_address)
+{
+    const double width=round(size.width),height=round(size.height);
+    if(width>=1 && height>=1)return size;
+    const CGSize original=size;
+    if(!(width>=1))size.width=1;
+    if(!(height>=1))size.height=1;
+    if(__atomic_fetch_add(&photos_zero_size_reports,1,__ATOMIC_RELAXED)<8) {
+        Dl_info caller={};
+        const char *image=dladdr(return_address,&caller) && caller.dli_fname?caller.dli_fname:"unknown";
+        fprintf(stderr,"Pong UI18: Photos %s size=%.3fx%.3f clamped to %.3fx%.3f caller=%p %s\n",
+            name,original.width,original.height,size.width,size.height,return_address,image);
+    }
+    return size;
+}
+
+static CGContextRef photos_create_context(CGSize size,BOOL opaque,uintptr_t color_space,BOOL extended)
+{
+    return ((PhotosContextFn)photos_context_original)(
+        photos_context_size(size,"PXCreateContext",__builtin_return_address(0)),opaque,color_space,extended);
+}
+
+static CGContextRef photos_create_context_automatic(CGSize size,BOOL opaque,uintptr_t format_range)
+{
+    return ((PhotosAutomaticFormatFn)photos_automatic_format_original)(
+        photos_context_size(size,"PXCreateContextWithAutomaticFormat",__builtin_return_address(0)),opaque,format_range);
+}
+
+static bool photos_context_entry(const struct mach_header *header,intptr_t slide,const char *symbol,
+    IMP replacement,void **original,const uint32_t expected[4],const char *label)
+{
+    void *entry=dlsym(RTLD_DEFAULT,symbol);
+    Dl_info caller={};
+    if(!entry || !dladdr(entry,&caller) || caller.dli_fbase!=header)return false;
+    if(original && *original)return true;
+    if(!executable_image_range((const void *)header,slide,(uintptr_t)entry,16) ||
+       memcmp(entry,expected,16)) {
+        fprintf(stderr,"Pong UI18: Photos %s entry differs; keep native code\n",label);
+        return false;
+    }
+    vm_address_t trampoline=0;
+    if(vm_allocate(mach_task_self(),&trampoline,vm_page_size,VM_FLAGS_ANYWHERE)!=KERN_SUCCESS)return false;
+    uint32_t back[]={0x58000050,0xd61f0200,(uint32_t)((uintptr_t)entry+16),(uint32_t)(((uintptr_t)entry+16)>>32)};
+    memcpy((void *)trampoline,expected,16);
+    memcpy((void *)(trampoline+16),back,sizeof(back));
+    sys_icache_invalidate((void *)trampoline,32);
+    if(vm_protect(mach_task_self(),trampoline,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_EXECUTE)!=KERN_SUCCESS) {
+        (void)vm_deallocate(mach_task_self(),trampoline,vm_page_size);
+        return false;
+    }
+    const uintptr_t patch=(uintptr_t)replacement;
+    uint32_t jump[]={0x58000050,0xd61f0200,(uint32_t)patch,(uint32_t)(patch>>32)};
+    if(!install_compositor_code(header,slide,(uintptr_t)entry-(uintptr_t)header,
+        expected,jump,sizeof(jump),label)) {
+        (void)vm_deallocate(mach_task_self(),trampoline,vm_page_size);
+        return false;
+    }
+    if(original)*original=(void *)trampoline;
+    return true;
+}
+
+static void photos_context_image(const struct mach_header *header,intptr_t slide)
+{
+    static const uint32_t automatic_expected[]={0xd10283ff,0x6d0523e9,0xa9065ff8,0xa90757f6};
+    static const uint32_t context_expected[]={0xd10183ff,0x6d0123e9,0xa9025ff8,0xa90357f6};
+    if(!photos_automatic_format_installed)
+        photos_automatic_format_installed=photos_context_entry(header,slide,
+            "PXCreateContextWithAutomaticFormat",(IMP)photos_create_context_automatic,
+            &photos_automatic_format_original,automatic_expected,"Photos automatic context size");
+    if(!photos_context_installed)
+        photos_context_installed=photos_context_entry(header,slide,
+            "PXCreateContext",(IMP)photos_create_context,
+            &photos_context_original,context_expected,"Photos context size");
+}
+
 /* 22H374 QuartzCore, UUID FAF7D7EA-18F0-3C2D-816C-AC56D16C40A3.
  * Its AccelServer::render_update calls renderer(), and on nullptr branches
  * to Server::render_update -> sw_renderer() -> the original SWContext.
@@ -1841,6 +1925,14 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     const char *name=getprogname();
     if(!name)return;
     phone_ui_process=!strcmp(name,"Preferences") || !strcmp(name,"SpringBoard");
+    photos_process=!strcmp(name,"Photos");
+    if(photos_process) {
+        fprintf(stderr,"Pong UI18: Photos adapter loaded\n");
+        for(uint32_t i=0,n=_dyld_image_count();i<n;i++)
+            photos_context_image(_dyld_get_image_header(i),_dyld_get_image_vmaddr_slide(i));
+        _dyld_register_func_for_add_image(photos_context_image);
+        return;
+    }
     gestalt_process=phone_ui_process || !strcmp(name,"backboardd");
     // Install the capability answer before status-provider +initialize can
     // cache it during the regular all-images callback below.

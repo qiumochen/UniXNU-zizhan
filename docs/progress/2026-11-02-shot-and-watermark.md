@@ -16,7 +16,7 @@
 
 g249 使用已安装的 watermark 版桥接库和分段截图内核，临时启动且显式启用 ASTC。backboardd、SpringBoard 回答 `DeviceSupportsASTC 1`，Weather 成功启动；6 张截图均为完整的 135×120 采样图。`shot1` 的图标横跨主屏，`shot4`–`shot6` 的天气蓝色画面横跨整幅图。21:31 自动回到 Android，ADB 已确认。截止快照里的 1 个未完成 fence 后来由 g253、g254 证明是自动复位截断的正常在途提交，详见 `docs/progress/2026-11-02-fence-diagnostics.md`。
 
-g250 把合成触控移到主屏照片图标（`tsa=6436`）。6 张截图仍完整；`shot4` 捕获到横跨整屏的照片白色启动页，之后回到主屏。日志显示 Photos 反复启动、约 1.5 秒后以 `NSInternalInconsistencyException` / `!PXPixelSizeAreaIsZero(roundedSize)` 退出；此前有 `IOSurfaceSharedEventAddEventListener failed: e00002c7`。这轮**没有通过照片 App 验收**，也不能单凭这些日志断定崩溃由 watermark 或 ASTC 引起。21:34 自动回到 Android，ADB 已确认。
+g250 把合成触控移到主屏照片图标（`tsa=6436`）。6 张截图仍完整；`shot4` 捕获到横跨整屏的照片白色启动页，之后回到主屏。日志显示 Photos 反复启动、约 1.5 秒后以 `NSInternalInconsistencyException` / `!PXPixelSizeAreaIsZero(roundedSize)` 退出；此前有 `IOSurfaceSharedEventAddEventListener failed: e00002c7`。这轮没有通过照片 App 验收，也不能单凭这些日志断定崩溃由 watermark 或 ASTC 引起。后续根因和修复见 `docs/progress/2026-11-03-photos-context.md`。21:34 自动回到 Android，ADB 已确认。
 
 g251 原计划点设置，但 `tsa=6547` 实际落在时钟图标。日志确认 MobileTimer 启动，`shot4`–`shot6` 记录到横跨整幅图的世界时钟地图；6 张截图均完整。21:38 自动回到 Android，ADB 已确认。此轮只算时钟 App 的自动验证，不能算设置。
 
@@ -25,5 +25,5 @@ g252 把合成触控改为 `tsa=3669`，日志确认 Preferences 启动。6 张�
 ## 累积的设备验收
 
 1. 主屏、天气、时钟、设置的整幅自动截图已由 g248–g252 验证；多任务截图尚未自动化。
-2. 照片 App 自动打开后崩溃，后续需要定位零尺寸断言与 SharedEvent 失败。
+2. 照片 App 的零尺寸断言已修复并由 g262–g264 验证；SharedEvent 能力仍缺失。
 3. 人工确认多任务、打开/返回动画与触摸体验；项目见 `docs/progress/HUMAN_CHECKLIST.md`。

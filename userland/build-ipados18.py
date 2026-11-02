@@ -841,7 +841,7 @@ def compile_init(out, developer, destination):
            '-I' + str(PROJECT / 'userland/libmini'), '-DPONG_SYSTEM_VERSION="18.7.10"', '-DPONG_SYSTEM_BUILD="22H374"',
            '-DPONG_NATIVE_APFS18=1',
            '-DPONG_UI_LIBRARY_PATH="/pong/libpong-ui18.dylib"',
-           '-DPONG_UI_EXTRA_PROCESSES=" usermanagerd lsd installd pkd runningboardd PosterBoard"', '-Wl,-e,_start',
+           '-DPONG_UI_EXTRA_PROCESSES=" usermanagerd lsd installd pkd runningboardd PosterBoard Photos"', '-Wl,-e,_start',
            '-Wl,-pagezero_size,0x100000000', '-Wl,-no_fixup_chains',
            str(PROJECT / 'userland/libmini/start.S'), str(PROJECT / 'userland/libmini/mini.c'),
            str(PROJECT / 'userland/init.c'), '-o', str(destination)]

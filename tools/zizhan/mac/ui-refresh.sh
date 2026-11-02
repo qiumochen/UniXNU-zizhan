@@ -28,6 +28,13 @@ dev=$(sudo -n hdiutil attach -readwrite -nobrowse -noverify -owners on -mountpoi
 [ -f $M/pong/libpong-ui18.dylib ] || { st "MOUNT_FAIL (no /pong/libpong-ui18.dylib)"; sudo -n hdiutil detach $dev; exit 1; }
 sudo -n cp $P/libpong-ui.dylib $M/pong/libpong-ui18.dylib && sudo -n chown 0:0 $M/pong/libpong-ui18.dylib && sudo -n chmod 755 $M/pong/libpong-ui18.dylib
 ls -la $M/pong/libpong-ui18.dylib | sed 's/^/   /'
+# Photos ignores the inherited DYLD_INSERT_LIBRARIES environment in this runtime.
+# A direct load command is needed so its PXCreateContext compatibility hook runs.
+photos=$M/Applications/Photos.app/Photos
+if [ -f "$photos" ]; then
+  sudo -n python3 $SRC/UniXNU-zizhan/tools/zizhan/mac/add-load-command.py "$photos" /pong/libpong-ui18.dylib || \
+    { st "PHOTOS_LOAD_COMMAND_FAIL"; sudo -n hdiutil detach $dev; exit 1; }
+fi
 sudo -n hdiutil detach $dev || { st DETACH_FAIL; exit 1; }
 
 st "layout (hashing the three images)"

@@ -35,6 +35,6 @@
 
 当时把 g239–g247 截止日志里的 1 个未完成 fence 理解为 GPU 停滞。g253、g254 增加了时间线记录窗口和 fence 年龄后确认：提交均全部完成，未完成项是自动复位前 26 ms 刚发出的正常在途工作。详见 `docs/progress/2026-11-02-fence-diagnostics.md`。这些数据仍不能当作本次修复的性能收益；早先有直接证据的整机 GPU 丢失继续由 stuck-copy 和 poison 检测跟踪。
 
-需要人工集中确认：多任务画面及实际打开/返回动画是否正确。照片 App 崩溃另需定位。确认前保持 `pong_astc` 默认关闭；本轮只在 boot-arg 中显式设 1。
+需要人工集中确认：多任务画面及实际打开/返回动画是否正确。照片 App 的零尺寸断言已经修复，见 `docs/progress/2026-11-03-photos-context.md`。确认前保持 `pong_astc` 默认关闭；本轮只在 boot-arg 中显式设 1。
 
 已在本地重新打包 `$ZIZHAN_SRC/out/boot-astc-manual/pong-xnu-initial.img` 供集中验收：触摸开启、ASTC=1，无合成触摸；`pong_autoreset=600 pong_autoreset_sb=240`，命令行 907 B。此镜像使用分段截图内核和当前已安装的 watermark 版 OS，尚未临时启动。用已有 `cycle.sh` 临时启动时可在手机上依次检查多任务、设置、天气和动画，结束后脚本会取回日志并让手机返回 Android。

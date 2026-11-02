@@ -16,8 +16,9 @@ def main():
  p.add_argument('--firmware',type=Path,default=pong_paths.wifi_firmware())
  a=p.parse_args();out=a.tree/'build/pong-wifi';out.mkdir(parents=True,exist_ok=True)
  shared=pong_paths.sheng_root()
- profile=json.loads((ROOT/'configs/pong-wifi-sm8475.json').read_text())
- if profile['soc']!='SM8475' or profile['pci']['device']!=0x1103:raise RuntimeError('Pong QCA6490 profile required')
+ profile=json.loads((ROOT/'configs/zizhan-wifi-sm8475.json').read_text())
+ if profile['board']!='zizhan' or profile['soc']!='SM8475' or profile['pci']!={'vendor':0x17cb,'device':0x1103}:
+  raise RuntimeError('zizhan QCA6490 profile required')
  hardware=os.environ.get('PONG_WIFI_DTB') or os.environ.get('PONG_HARDWARE_DTB')
  if hardware:
   spec=importlib.util.spec_from_file_location('pong_fdt',ROOT/'scripts/prepare-pong-wifi.py')
@@ -28,22 +29,17 @@ def main():
   if not full:
    if os.environ.get('PONG_WIFI_DTB'):
     raise RuntimeError('PONG_WIFI_DTB is not a full live Wi-Fi DT')
-   print('Wi-Fi: ADT hardware DTB omits live Wi-Fi fields; using the verified board profile')
+   print('Wi-Fi: ADT hardware DTB omits live Wi-Fi fields; using the zizhan live-DT board profile')
   else:
-   phy=fdt.cells(host,'qcom,phy-sequence')
-   if len(phy)%3:raise RuntimeError('Malformed selected Pong PHY sequence')
-   profile['pcie']['phy_sequence']=[phy[i:i+3] for i in range(0,len(phy),3)]
-   for field,key in (('phy_status_offset','qcom,phy-status-offset'),('phy_status_bit','qcom,phy-status-bit'),
-                     ('phy_power_down_offset','qcom,phy-power-down-offset'),('aux_clock_mhz','qcom,aux-clk-freq'),
-                     ('endpoint_latency_ms','qcom,ep-latency')):
-    profile['pcie'][field]=fdt.cells(host,key)[0]
-   profile['pcie']['max_clock_frequency_hz']=fdt.cells(host,'max-clock-frequency-hz')
-   wlan=next(v for v in nodes.values() if v.get('compatible')==b'qcom,cnss-qca6490\0')
-   # The register implementation is specific to the confirmed Cape wiring.
-   for key,pin in (('wlan-en-gpio',80),('qcom,xo-clk-gpio',204)):
-    if fdt.cells(wlan,key)[1]!=pin:raise RuntimeError('Selected DTS needs a new Pong pin mapping: '+key)
-   for key,pin in (('perst-gpio',94),('wake-gpio',96)):
-    if fdt.cells(host,key)[1]!=pin:raise RuntimeError('Selected DTS needs a new Pong pin mapping: '+key)
+   live=fdt.describe(Path(hardware).read_bytes(),profile['pci'])
+   for area in ('pcie','dma','msi'):
+    for key,value in profile[area].items():
+     if key=='target_link_speed':continue # Observed from Android PCIe runtime, not DT.
+     if live[area][key]!=value:raise RuntimeError('zizhan live DT changed: '+area+'.'+key)
+   fields=('supply','resource','regulator','request')
+   expected=[{key:r[key] for key in fields} for r in profile['rails']]
+   actual=[{key:r[key] for key in fields} for r in live['rails']]
+   if expected!=actual:raise RuntimeError('zizhan live DT changed: WLAN rail requests')
  header='struct PongWifiPhyEntry {unsigned off,value,delay;};\nstatic constexpr PongWifiPhyEntry kPongWifiPhy[]={\n'+''.join('{%d,%d,%d},\n'%tuple(e) for e in profile['pcie']['phy_sequence'])+'};\n'
  header+='struct PongWifiRail {const char *name;unsigned mv,maxMv,ppid,type,subtype;};\nstatic constexpr PongWifiRail kPongWifiRails[]={\n'
  for e in profile['rails']:
@@ -57,8 +53,8 @@ def main():
  if (domain['control'],domain['collapse_vote'],domain['collapse_bit'])!=(0x17b004,0x162128,0):raise RuntimeError('Pong PCIe0 power domain required')
  header+='static constexpr unsigned kPongPcieCollapseVote=%du,kPongPcieCollapseMask=%du;\n'%(domain['collapse_vote']-0x100000,1<<domain['collapse_bit'])
  pcie=profile['pcie']
- if pcie['clock_names'][8]!='pcie_phy_refgen_clk' or pcie['max_clock_frequency_hz'][11]!=100000000:
-  raise RuntimeError('Pong pci-msm refgen clock plan changed; adapt its RCG before building')
+ if pcie['clock_names'][8]!='pcie_phy_refgen_clk' or pcie['max_clock_frequency_hz'][10]!=100000000:
+  raise RuntimeError('zizhan pci-msm refgen clock plan changed; adapt its RCG before building')
  for name,value in (('kPongPciePhyStatus',pcie['phy_status_offset']),
                     ('kPongPciePhyStatusMask',1<<pcie['phy_status_bit']),
                     ('kPongPciePhyPowerDown',pcie['phy_power_down_offset']),
@@ -121,6 +117,6 @@ def main():
  obj=out/'PongQcomRpmh.o';subprocess.run(['xcrun','clang',*flags[:flags.index('-std=gnu++17')],'-O2','-I'+str(shared/'package'),'-c',str(shared/'package/QcomRpmh.c'),'-o',str(obj)],env=env,check=True);objects.append(obj)
  archive=out/'libPongWifiNative.a';archive.unlink(missing_ok=True)
  subprocess.run(['xcrun','libtool','-static','-o',str(archive),str(a.ath11k),*map(str,objects)],env=env,check=True)
- (out/'build-report.json').write_text(json.dumps(dict(board='Pong SM8475 QCA6490',guest='22H374',backend='Linux v7.0.14 ath11k',archive=str(archive),firmware_from_REC=str(a.firmware),firmware_files=len(entries),firmware_bytes=pack.stat().st_size,image_verification='skipped by request',runtime_observed=False),indent=2)+'\n')
+ (out/'build-report.json').write_text(json.dumps(dict(board='zizhan SM8475 QCA6490',guest='22H374',backend='Linux v7.0.14 ath11k',archive=str(archive),firmware_from_local=str(a.firmware),firmware_files=len(entries),firmware_bytes=pack.stat().st_size,image_verification='skipped by request',runtime_observed=False),indent=2)+'\n')
  print(archive)
 if __name__=='__main__':main()

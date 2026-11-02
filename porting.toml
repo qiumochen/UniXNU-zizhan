@@ -14,7 +14,7 @@ paths = ["board.toml", "proprietary-files.txt", "feeds.toml", "unixnu.lock", "co
 inputs = ["zizhan（22061218C）实机 /sys/firmware/fdt，MIUI V14.0.15.0.TLRCNXM（Android 13，内核 5.10.136）", "UniXNU-pong 的 SM8475 公共层与 PongPlatform24（Nothing Phone (2)，同为 SM8475）", "iPad7,11 的 iPadOS 18.7.10 22H374 restore"]
 configuration = ["board.toml：name = zizhan，device_tree = dts/zizhan.dts，kernel.defconfig = zizhan_ipados18_gpu_defconfig", "configs/zizhan_ipados18_gpu_defconfig：CONFIG_XNU_PONG_ADRENO_PLATFORM=y、CONFIG_XNU_PONG_POWER=y、CONFIG_XNU_PONG_WIFI=n、CONFIG_XNU_PONG_BACKLIGHT=n", "patches/xnu-ipados18/series：0001–0006、0008–0014，按序号应用"]
 procedure = ["tools/gen_reserved.py 按 pong.dts 的布局从实机 DT 生成 dts/zizhan.dts：model、compatible、DRAM 区间和 reserved-memory 换成 zizhan 的值。", "固件段指向 uefi-zizhan 的 Platforms/Xiaomi/zizhanPkg/zizhan.dsc。", "其余沿用 Pong 的四层选择（ARM64、SM8475、22H374、板级）。"]
-findings = ["zizhan 与 Pong 的 DRAM 第二段不同（0xf4600000+0xba00000，Pong 为 0xf1400000+0xec00000），ADSP carveout 为 0x9fd00000+0x3100000（Pong 为 0x85700000+0x2800000）；其余 SMEM、IPCC、AOSS、cmd-db 地址相同。", "构建脚本不读取 board 名，改名 zizhan 不影响 Pong 脚本。", "新增隔离的 zizhan_ipados18_wifi_defconfig，默认 GPU 配置继续关闭 Wi-Fi；试验配置在主机上构建成功，设备尚未启动。"]
+findings = ["zizhan 与 Pong 的 DRAM 第二段不同（0xf4600000+0xba00000，Pong 为 0xf1400000+0xec00000），ADSP carveout 为 0x9fd00000+0x3100000（Pong 为 0x85700000+0x2800000）；其余 SMEM、IPCC、AOSS、cmd-db 地址相同。", "构建脚本不读取 board 名，改名 zizhan 不影响 Pong 脚本。", "新增隔离的 zizhan_ipados18_wifi_defconfig 与 zizhan-wifi-sm8475.json；默认 GPU 配置继续关闭 Wi-Fi。实机 WLAN PHY 和供电参数不同于 Pong，已用本机 live DT 逐项核验新 profile。"]
 completion = ["dts/zizhan.dts 能编译，内核与启动镜像能构建，手机能进入 iPadOS 主屏"]
 limits = ["外屏（DSI-2，1080x2520）、Wi-Fi、音频没有接入，配置里关闭。"]
 next_action = ["用发布的版本打包启动镜像并上机跑一轮，记录设备结果。"]
@@ -132,15 +132,15 @@ evidence = [
 id = "network"
 status = "host-verified"
 components = ["PongPlatform24"]
-paths = ["drivers/PongWifi/**", "configs/pong-wifi-sm8475.json", "configs/zizhan_ipados18_wifi_defconfig", "scripts/*wifi*", "scripts/*ath11k*", "tools/zizhan/mac/ci_boot_ufs.sh"]
+paths = ["drivers/PongWifi/**", "configs/pong-wifi-sm8475.json", "configs/zizhan-wifi-sm8475.json", "configs/zizhan_ipados18_wifi_defconfig", "scripts/*wifi*", "scripts/*ath11k*", "tools/zizhan/mac/ci_boot_ufs.sh"]
 inputs = ["QCA6490（PCI 17cb:1103）；本机只读导出的固件与 Linux v7.0.14 ath11k 源码，不入仓库"]
 configuration = ["默认 GPU 配置仍为 CONFIG_XNU_PONG_WIFI=n、pong_wifi=0；试验配置 zizhan_ipados18_wifi_defconfig 为 CONFIG_XNU_PONG_WIFI=y，镜像需 WIFI=1 写入 pong_wifi=1"]
 procedure = ["从实机 Android live DT 核对 PCIe0、WLAN GPIO、SID；在隔离试验配置中构建并打包 Wi-Fi 镜像。", "USB 恢复后临时 fastboot boot，按 PCIe、供电、MHI、固件、MSI、扫描顺序定位首个失败阶段。"]
-findings = ["实机 DT 确认 PCIe0、GPIO 80/94/95/96/204、SID 0x1c00/0x1c01；Android 链路为 Gen2 x1。", "Wi-Fi 试验配置、约定的 CI 与 GPU 配置均已在主机构建成功；g265 因 USB 无枚举未启动，不能算设备结果。"]
+findings = ["实机 DT 确认 PCIe0、GPIO 80/94/95/96/204、SID 0x1c00/0x1c01；Android 链路为 Gen2 x1。", "旧 Pong profile 与 zizhan live DT 的 PHY 表有 6 条差异，多出一条本机没有的 WLAN 供电请求；g266 监视已撤下，未启动设备。", "zizhan profile 经完整 live DT 核验，试验配置和约定 CI/GPU 配置均重新构建成功；g267 镜像含自动返回参数，尚待设备轮次。"]
 completion = ["扫描到网络并完成关联"]
 limits = ["尚无 Wi-Fi 试验配置的设备启动日志、扫描或关联证据；USB 当前不可见。默认镜像继续关闭 Wi-Fi。"]
 next_action = ["恢复 USB 枚举，执行试验镜像的临时启动和自动返回轮次，取回日志后处理首个失败阶段。"]
-evidence = [{kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了 Wi-Fi 芯片型号。"}, {kind = "host", command = "ci_kernel.sh：zizhan_ipados18_wifi_defconfig、pong_ipados18_ci_defconfig、zizhan_ipados18_gpu_defconfig", revision = "79ae5b1d7b92f621ac549aec80e73e30e404d649", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "三种配置均构建成功；试验启动镜像打包完成，g265 未启动。"}]
+evidence = [{kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了 Wi-Fi 芯片型号。"}, {kind = "host", command = "ci_kernel.sh：zizhan_ipados18_wifi_defconfig、pong_ipados18_ci_defconfig、zizhan_ipados18_gpu_defconfig", revision = "79ae5b1d7b92f621ac549aec80e73e30e404d649", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "旧 profile 的三配置构建通过，但试验镜像已因板级输入不符撤下，g265/g266 均未启动。"}, {kind = "source", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "记录 zizhan live DT 差异、修正后的三配置构建与 g267 镜像；尚无设备结果。"}]
 
 [[area]]
 id = "audio"

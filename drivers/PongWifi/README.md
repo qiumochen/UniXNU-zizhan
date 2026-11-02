@@ -5,6 +5,7 @@ Pong 的 SM8475 / QCA6490 使用 PCIe0、MHI 和 ath11k。(https://unixnu.com/zh
 ## 接入
 
 - `configs/pong-wifi-sm8475.json`：从本机 REC DT、PCI sysfs 捕获的板级输入。
+- `configs/zizhan-wifi-sm8475.json`：MIX Fold 2 自己的 live DT 板级输入；zizhan 构建使用它。Pong 的 PHY 表、WLAN 供电列表和时钟数组不能直接用于 zizhan。
 - `PongWifiPlatform.cpp`：Pong 的供电、PCIe/PHY、BAR、独立 SID `0x1c01`、
   native 4 KiB 页表和 MSI；UFS 就绪后再取得独立 context bank，保留 UFS 的 SID/队列。
 - `ath11k/PongAth11k.c`：实际 Linux v7.0.14 ath11k PCI/MHI/QMI，连接 UniXNU 的 station ABI。

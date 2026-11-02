@@ -2,7 +2,7 @@
 
 ## 2026-11-03：恢复手机 USB 连接以继续自动轮次
 
-- 轮次/镜像：g265 尚未启动；g266 待运行 `$ZIZHAN_SRC/out/boot-wifi-probe/pong-xnu-initial.img`。
+- 轮次/镜像：g265、g266 均未启动；待自动运行 g267 镜像 `$ZIZHAN_SRC/out/boot-g267/pong-xnu-initial.img`。
 - 操作：在方便时确认手机有电并重新插接手机端 USB 线；停在 Android 或 fastboot 界面即可。此项只需恢复物理连接，无需观察 iPadOS 的 Wi-Fi 页面。
 - 期望：主机重新枚举手机，`adb devices` 或 `fastboot devices` 能看到设备；后续 Wi-Fi 轮次由脚本自动启动、取日志并返回 Android。
 

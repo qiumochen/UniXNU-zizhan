@@ -8,6 +8,8 @@ Photos 零尺寸断言修复已在 g262–g264 上机验证，g264 的截图、�
 
 Wi-Fi 试验配置 `zizhan_ipados18_wifi_defconfig` 已构建，约定的 CI/GPU 两配置也已构建；试验镜像含 `pong_wifi=1` 和自动返回。g265 因主机 USB 无枚举，**没有进入 fastboot boot**，不能作为设备结果。设备连接恢复后从 PCIe、供电、MHI、固件、MSI、扫描逐段验证。细节见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)，需物理恢复连接的事项见 [待人工清单](docs/progress/HUMAN_CHECKLIST.md)。
 
+后续核对本机 live DT，发现旧试验镜像使用的 Pong PHY 表和一条额外 WLAN 供电请求不适合 zizhan；g266 的 USB 监视已撤下，设备未启动。`configs/zizhan-wifi-sm8475.json` 和 g267 试验镜像已按 zizhan 数据重建，双配置回归成功；仍需 USB 恢复后的自动设备轮次。旧镜像不得当作 Wi-Fi 验证输入。
+
 ## 目标与当前状态
 
 Xiaomi MIX Fold 2（zizhan / SM8475）运行 iPadOS 18.7.10 / 22H374，Darwin 24.6.0 / XNU 11417.140.69，Apple 系统输入为 iPad7,11。基于 UniXNU-pong（同 SoC 的 Nothing Phone (2)）和 uefi-pong；保留公共组件身份 **PongPlatform24**，zizhan 的硬件差异留在设备层。

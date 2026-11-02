@@ -19,6 +19,7 @@ current="$P/pong-ipados18-system.cdr"
 backup="$P/pong-ipados18-system.$TAG.cdr"
 [ -f "$old" ] && [ -f "$current" ] && [ -f "$U/ufs-layout.json" ]
 [ ! -e "$backup" ] && [ ! -e "$U/ufs-layout.$TAG.json" ] || { echo 'backup tag already exists' >&2; exit 1; }
+bash "$SRC/UniXNU-zizhan/tools/zizhan/mac/adb-visible.sh" || { echo 'Android adb device required before editing the OS image' >&2; exit 1; }
 mkdir -p "$W/logs"
 cp -c "$current" "$backup"
 cp "$U/ufs-layout.json" "$U/ufs-layout.$TAG.json"

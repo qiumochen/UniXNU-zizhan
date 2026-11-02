@@ -22,6 +22,8 @@
 
 `pong_ipados18_ci_defconfig` 和 `zizhan_ipados18_gpu_defconfig` 均完成 `ci_kernel.sh` 构建，日志分别在本机 `$ZIZHAN_SRC/ci_kernel-fairplay-guard-ci.log` 与 `ci_kernel-fairplay-guard-gpu.log`，末尾均为 `KERNEL_DONE`。本轮没有修改内核；构建结果只验证工作树仍可构建。g268 等待器继续由 launchd 托管，截至本次记录 adb/fastboot 无枚举，没有本轮设备日志或截图。
 
+B2 使用的 `job-restore.sh` 也在复制当前 OS 镜像前检查 Android adb。无设备的主机检查提前拒绝，未创建新标签备份；脚本语法通过。实际恢复服务的效果仍需设备轮次验证。
+
 ## 下一步
 
 优先完成 g268 的临时 Wi-Fi 启动、自动返回和日志/截图取证。随后按 B1–A–B2 顺序执行 fairplayd 对照，分别核对 OS layout 与安装结果；依据实际退出、同步请求与 UI 证据决定是否修改 `EXCLUDED18`。

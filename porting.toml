@@ -102,7 +102,7 @@ findings = ["用触摸在主屏上打开了「设置」（t4）。", "长按电�
 completion = ["触摸能点开应用、滑动页面"]
 limits = ["外屏触摸（spi2.0 fts-sec）没有驱动；音量键没有核对。"]
 next_action = ["核对音量键的 PMIC 外设地址。"]
-evidence = [{kind = "source", reference = "docs/evidence/2026-10-30-t4-settings-by-touch.jpg", result = "用触摸打开了「设置」。"}, {kind = "source", reference = "docs/progress/2026-10-30-root-and-autoloop.md", result = "触摸驱动的轮次记录。"}]
+evidence = [{kind = "source", reference = "docs/evidence/2026-10-30-t4-settings-by-touch.jpg", result = "用触摸打开了「设置」。"}, {kind = "source", reference = "docs/progress/2026-10-30-root-and-autoloop.md", result = "触摸驱动的轮次记录。"}, {kind = "source", reference = "docs/progress/2026-11-02-gpu-astc-and-fairplayd.md", result = "ui_compat18.c 新增 zizhan display-link 速率 WIP；未构建、未上机，触摸与动画体验需要独立回归，未改变输入区域验证等级。"}]
 
 [[area]]
 id = "gpu"

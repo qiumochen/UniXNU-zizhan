@@ -11,6 +11,7 @@ Paths in the notes refer to the author's workspace:
 
 ## 最新交接
 
+- [2026-11-03 音频板级审查](2026-11-03-audio-board-audit.md)（公开 zizhan DT 与 Pong 音频常量对照；未上机）。
 - [2026-11-03 Wi-Fi 首轮准备](2026-11-03-wifi-bringup.md)（三配置已构建；g268 等 USB 恢复，尚未上机）。
 - [2026-11-03 Photos 零尺寸断言](2026-11-03-photos-context.md)（最终 g264 已上机）。
 - [2026-11-02 GPU：ASTC 布局与 fairplayd 回填](2026-11-02-gpu-astc-and-fairplayd.md)（含六项 GPU 工作状态、未验证项和下一步）。

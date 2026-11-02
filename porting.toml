@@ -154,14 +154,14 @@ id = "audio"
 status = "planned"
 components = ["PongPlatform24"]
 paths = ["drivers/PongPower/PongAudio*", "drivers/PongPower/ShengAudioReach*", "userland/PongAudioPlugIn.c", "scripts/*audio*"]
-inputs = ["2 个 CS35L41 功放（I2C 2-0040、2-0042）；Pong 用的是 TFA9873"]
+inputs = ["2 个 CS35L41 功放（地址 0x40、0x42）；公开 zizhan Android DT 给出 SE15 I²C（0x880000）、SDA/SCL（GPIO56/57）和 IRQ（GPIO88/118），共用 GPIO1 复位；启用前须与本机 live DT 核对。Pong 音频代码使用 TFA9873，总线/引脚/地址均不同。"]
 configuration = ["boot-arg pong_audio=0；没有 tfa98xx.cnt 时构建一张空功放表"]
-procedure = ["暂不启动音频。"]
-findings = ["功放型号与 Pong 不同，Pong 的 TFA9873 路径不能直接用。"]
+procedure = ["保持 pong_audio=0；先核对本机 live DT 和 I²C 前置条件，再以隔离配置做只读身份探针，最后实现 CS35L41 初始化与 ADSP 播放路由。"]
+findings = ["功放型号与 Pong 不同，Pong 的 TFA9873 路径不能直接用。", "公开 zizhan Android DT 的两颗 CS35L41 位于 SE15 I²C 0x880000，SDA/SCL 为 GPIO56/57，地址 0x40/0x42，共用 GPIO1 复位；PongAudio.cpp 使用 SE13 0xa94000、GPIO48/49、TFA 地址 0x34/0x35。", "GeniI2c 底层有多字节收发入口，但现有功放包装和寄存器写入是 TFA9873 专用，不能仅改地址。"]
 completion = ["扬声器能出声"]
-limits = ["没有 CS35L41 驱动。"]
-next_action = ["参照 Linux cs35l41 驱动写 I2C 初始化序列。"]
-evidence = [{kind = "source", reference = "docs/progress/2026-11-01-battery.md", result = "记录了音频不启动的原因和空功放表。"}]
+limits = ["没有 CS35L41 驱动；公开提取 DT 尚未与本机 live DT 再核对，未有音频设备启动或声音证据。"]
+next_action = ["先核对本机 live DT 的 SE15 时钟、引脚、复位与 IRQ；隔离配置只读 CS35L41 身份，再核对调音/固件与 ADSP 路由，逐段上机验证。"]
+evidence = [{kind = "source", reference = "docs/progress/2026-11-01-battery.md", result = "记录了音频不启动的原因和空功放表。"}, {kind = "source", reference = "https://github.com/sm8450-mainline/fdt/blob/3e347601d9e91dd2f1f48e51499823225f7bc0bc/zizhan.dts", result = "公开提取的 zizhan Android DT 给出 SE15、GPIO56/57、CS35L41 地址和复位/IRQ；本机尚待 live DT 复核。"}, {kind = "source", reference = "docs/progress/2026-11-03-audio-board-audit.md", result = "逐项对照 PongAudio.cpp，列出隔离探针的前置条件和未验证边界。"}]
 
 [[area]]
 id = "power"

@@ -14,6 +14,8 @@ Wi-Fi 试验配置 `zizhan_ipados18_wifi_defconfig` 已构建，约定的 CI/GPU
 
 g268 自动轮次工具已补上有界 adb 探测和 `fastboot boot` 的真实退出码传递；约定三配置再次构建通过。已重启 12 小时 USB 恢复等待器，手机仍未枚举，g268 尚无设备日志、截图或自动返回结果。连接恢复后的第一轮仍以 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md) 为准。
 
+并行的音频板级审查从公开 zizhan Android DT 确认 CS35L41 所在 SE15 I²C 与 Pong TFA9873 路径的总线、引脚、地址均不同；只能作为待本机 live DT 复核的主机输入，默认音频仍关闭。见 [音频审查](docs/progress/2026-11-03-audio-board-audit.md)。
+
 ## 目标与当前状态
 
 Xiaomi MIX Fold 2（zizhan / SM8475）运行 iPadOS 18.7.10 / 22H374，Darwin 24.6.0 / XNU 11417.140.69，Apple 系统输入为 iPad7,11。基于 UniXNU-pong（同 SoC 的 Nothing Phone (2)）和 uefi-pong；保留公共组件身份 **PongPlatform24**，zizhan 的硬件差异留在设备层。

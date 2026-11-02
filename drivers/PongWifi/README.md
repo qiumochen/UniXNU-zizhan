@@ -24,6 +24,8 @@ Normal-NC，页表独立保留。使用 DesignWare 控制器的 MSI 接收器，
 固件来自本机 modem 中 `image/qca6490`，仅嵌入忽略的本地构建产物。
 BDF 按 QMI chip/board ID 使用 Nothing CNSS2 的文件命名规则，AMSS 按
 实际硬件 major 选择；不将 PCI revision 当成固件 major，不随机选择 board-data。
+高位 board ID 组合文件名时保留 QMI chip ID 决定的 `bdwlan`/`bdwlang` 前缀；
+本机实际选中了哪一个文件仍以设备日志为准。
 无线地址使用固件报告的地址，不伪造出厂 MAC。WPA nonce 使用 XNU `read_random`。
 
 ## 当前证据

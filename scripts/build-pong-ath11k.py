@@ -63,7 +63,7 @@ def main():
         const char *prefix = (ab->qmi.target.chip_id & 0x10) ? "bdwlang" : "bdwlan";
         if (id == 0xff) snprintf(pong_bdf, sizeof pong_bdf, "%s.elf", prefix);
         else if (id < 0xff) snprintf(pong_bdf, sizeof pong_bdf, "%s.e%02x", prefix, id);
-        else snprintf(pong_bdf, sizeof pong_bdf, "bdwlan%02x.e%02x", (id >> 8) & 255, id & 255);
+        else snprintf(pong_bdf, sizeof pong_bdf, "%s%02x.e%02x", prefix, (id >> 8) & 255, id & 255);
         name = pong_bdf;
         ath11k_info(ab, "Pong: actual QMI board firmware %s\n", name);
     }

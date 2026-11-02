@@ -38,6 +38,14 @@ g266 的 USB 恢复监视曾启动；随后发现旧镜像引用了 Pong 板级 
 
 本机已启动最多 12 小时的 g267 USB 恢复监视，输出留在 `$ZIZHAN_SRC/logs/g267-when-back.log`；当前 adb 和 fastboot 均未枚举手机。只有日志显示 `fastboot boot` 执行后，才能把 g267 计为设备轮次。
 
+## QMI 板数据命名修正
+
+离线审查发现 ath11k 的 board-data 选择在 QMI `chip_id` 要求 `bdwlang` 前缀、且 `board_id > 0xff` 时，原生成代码把前缀固定写成了 `bdwlan`。现统一使用实际选出的前缀，仍只按 QMI 返回的 ID 取文件；没有为本机猜测 board ID。g267 的监视在未启动设备时撤下，因此 g267 也没有设备结果。
+
+Wi-Fi 配置和约定的 CI/GPU 两配置重新构建通过；生成的 ath11k `core.c` 已包含高位 board ID 的正确前缀。主机日志为 `$ZIZHAN_SRC/ci_kernel-wifi-bdf-final2.log`、`ci_kernel-wifi-bdf-ci.log`、`ci_kernel-wifi-bdf-gpu.log`。打包器在 GPU 配置占用共用构建树时拒绝打包旧 Wi-Fi 导出；把 Wi-Fi 配置最后重建后，g268 镜像打包成功。`$ZIZHAN_SRC/out/boot-g268/pong-xnu-initial.img` 的命令行 912 字节，Wi-Fi 开关出现一次，两个自动返回参数均在。QMI 实际 ID、所选文件和扫描结果仍需要设备日志。
+
+本机已为 g268 启动最多 12 小时的 USB 恢复监视，日志留在 `$ZIZHAN_SRC/logs/g268-when-back.log`。监视进程存活，手机仍未枚举；这不构成 g268 设备验证。
+
 ## 下一步
 
-USB 恢复后先确认 Android 或 fastboot 可见，再用 g267 镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。
+USB 恢复后先确认 Android 或 fastboot 可见，再用 g268 镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。

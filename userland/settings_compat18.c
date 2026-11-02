@@ -21,6 +21,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 static bool icons_installed,radios_installed;
@@ -466,6 +468,46 @@ static void ui_dump(void *context)
     if(can)((void(*)(id,SEL,id,id))objc_msgSend)(delegate,select,table,path);
     fprintf(stderr,"Pong Settings18 ui %u: selected the health row %d\n",pass,can);
 }
+/* pong_url rounds: when Settings' first screen has cells, against its exec and the boot (11-02: the first launch after boot showed a
+ * long white screen). The probe polls on the main queue every 100 ms, so a busy main thread delays it as it delays the screen. */
+static uint64_t launch_exec_us;
+static uint64_t wall_us(void)
+{
+    struct timeval t;gettimeofday(&t,NULL);
+    return (uint64_t)t.tv_sec*1000000+(uint64_t)t.tv_usec;
+}
+static void launch_note(const char *stage,unsigned long cells)
+{
+    fprintf(stderr,"Pong Settings18 launch: %s at +%llu ms after exec (uptime %llu ms), %lu cells\n",stage,
+        (unsigned long long)((wall_us()-launch_exec_us)/1000),(unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1000000),cells);
+}
+static unsigned long ui_cells(id view,unsigned depth)
+{
+    if(!view || depth>40 || ((BOOL(*)(id,SEL))objc_msgSend)(view,sel_registerName("isHidden")))return 0;
+    BOOL (*is)(id,SEL,Class)=(BOOL(*)(id,SEL,Class))objc_msgSend;SEL kind=sel_registerName("isKindOfClass:");
+    Class table=objc_lookUpClass("UITableView"),collection=objc_lookUpClass("UICollectionView");
+    if((table && is(view,kind,table)) || (collection && is(view,kind,collection))) {
+        id cells=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("visibleCells"));
+        if(cells)return ((unsigned long(*)(id,SEL))objc_msgSend)(cells,sel_registerName("count"));
+    }
+    id children=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
+    const unsigned long count=children?((unsigned long(*)(id,SEL))objc_msgSend)(children,sel_registerName("count")):0;
+    unsigned long cells=0;
+    for(unsigned long i=0;i<count;i++)cells+=ui_cells(((id(*)(id,SEL,unsigned long))objc_msgSend)(children,sel_registerName("objectAtIndex:"),i),depth+1);
+    return cells;
+}
+static void launch_poll(void *context)
+{
+    const unsigned polls=(unsigned)(uintptr_t)context;
+    if(!polls)launch_note("main queue running",0);
+    id app=((id(*)(id,SEL))objc_msgSend)((id)objc_lookUpClass("UIApplication"),sel_registerName("sharedApplication"));
+    id windows=app?((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("windows")):nil;
+    const unsigned long count=windows?((unsigned long(*)(id,SEL))objc_msgSend)(windows,sel_registerName("count")):0;
+    unsigned long cells=0;
+    for(unsigned long i=0;i<count;i++)cells+=ui_cells(((id(*)(id,SEL,unsigned long))objc_msgSend)(windows,sel_registerName("objectAtIndex:"),i),0);
+    if(cells || polls>=300) {launch_note(cells?"first screen":"no screen after 30 s",cells);return;}
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),dispatch_get_main_queue(),(void *)(uintptr_t)(polls+1),launch_poll);
+}
 static bool opened_by_round(void)
 {
     char args[2048];size_t size=sizeof(args)-1;
@@ -477,6 +519,11 @@ static bool opened_by_round(void)
 void pong_settings18_start(void)
 {
     if(opened_by_round()) {
+        struct kinfo_proc proc;size_t bytes=sizeof(proc);int name[]={CTL_KERN,KERN_PROC,KERN_PROC_PID,getpid()};
+        launch_exec_us=sysctl(name,4,&proc,&bytes,NULL,0)?wall_us():
+            (uint64_t)proc.kp_proc.p_starttime.tv_sec*1000000+(uint64_t)proc.kp_proc.p_starttime.tv_usec;
+        launch_note("constructor",0);
+        dispatch_async_f(dispatch_get_main_queue(),NULL,launch_poll);
         static const unsigned at[]={6,12,20,30};
         for(unsigned i=0;i<4;i++)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)at[i]*NSEC_PER_SEC),dispatch_get_main_queue(),
             (void *)(uintptr_t)(i+1),ui_dump);

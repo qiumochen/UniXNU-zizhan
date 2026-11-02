@@ -266,13 +266,15 @@ if [ "${XNU_PONG_WIFI:-0}" = 1 ]; then
   # The Wi-Fi stack needs inputs that are not part of any public restore.
   # Point PONG_WIFI_SOURCE/PONG_WIFI_BUILD/PONG_WIFI_FIRMWARE (or the flags
   # below) at them; refuse rather than silently building without a backend.
-  WIFI_SOURCE=${PONG_WIFI_SOURCE:-/Volumes/Untitled/Pong-iPadOS18/wifi-source-7.0.14}
-  WIFI_BUILD=${PONG_WIFI_BUILD:-/Volumes/Untitled/Pong-iPadOS18/wifi-ath11k-build}
+  WIFI_INPUTS=${PONG_INPUTS:?PONG_INPUTS is required for Wi-Fi inputs}
+  WIFI_SOURCE=${PONG_WIFI_SOURCE:-$WIFI_INPUTS/wifi-source-7.0.14}
+  WIFI_BUILD=${PONG_WIFI_BUILD:-$WIFI_INPUTS/wifi-ath11k-build}
+  WIFI_FIRMWARE=${PONG_WIFI_FIRMWARE:-$WIFI_INPUTS/pong-wifi-firmware}
   python3 "$PONG_NATIVE_DRIVER_SOURCE/scripts/build-pong-ath11k.py" \
     --linux "$WIFI_SOURCE" \
     --output-dir "$WIFI_BUILD"
   python3 "$PONG_NATIVE_DRIVER_SOURCE/scripts/build-pong-wifi-native.py" --tree "$ROOT" \
-    --ath11k "$WIFI_BUILD/libPongAth11k.a"
+    --ath11k "$WIFI_BUILD/libPongAth11k.a" --firmware "$WIFI_FIRMWARE"
 fi
 if [ "${XNU_PONG_WIFI:-0}" = 1 ] || [ "${XNU_PONG_BACKLIGHT:-0}" = 1 ] || [ "${XNU_PONG_POWER:-0}" = 1 ]; then
   python3 "$PONG_NATIVE_DRIVER_SOURCE/scripts/build-pong-power-native.py" --tree "$ROOT"

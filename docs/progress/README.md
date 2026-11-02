@@ -11,6 +11,8 @@ Paths in the notes refer to the author's workspace:
 
 ## 最新交接
 
+- [2026-11-03 Wi-Fi 首轮准备](2026-11-03-wifi-bringup.md)（构建已通过；g265 因 USB 无枚举未启动）。
+- [2026-11-03 Photos 零尺寸断言](2026-11-03-photos-context.md)（最终 g264 已上机）。
 - [2026-11-02 GPU：ASTC 布局与 fairplayd 回填](2026-11-02-gpu-astc-and-fairplayd.md)（含六项 GPU 工作状态、未验证项和下一步）。
 - [2026-11-02 设置首次启动](2026-11-02-settings-launch.md)。
 - [2026-11-01 电池](2026-11-01-battery.md)。

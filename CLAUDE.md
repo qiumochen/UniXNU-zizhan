@@ -1,6 +1,12 @@
 # zizhan 开发交接
 
-本文件是从旧项目记忆整理的公开交接，更新至 **2026-11-02 09:39（UTC+8）**。先读 [AGENTS.md](AGENTS.md)、[porting.toml](porting.toml) 和 [最新 GPU 记录](docs/progress/2026-11-02-gpu-astc-and-fairplayd.md)。历史轮次以对应进度文档为准；本文件不保存机器身份或设备标识。
+本文件是从旧项目记忆整理的公开交接，基础内容更新至 **2026-11-02 09:39（UTC+8）**；2026-11-03 的接续见下段。先读 [AGENTS.md](AGENTS.md)、[porting.toml](porting.toml) 和 [最新进度](docs/progress/README.md)。历史轮次以对应进度文档为准；本文件不保存机器身份或设备标识。
+
+## 2026-11-03 接续
+
+Photos 零尺寸断言修复已在 g262–g264 上机验证，g264 的截图、双配置构建和自动返回记录见 [Photos 记录](docs/progress/2026-11-03-photos-context.md)。GPU fence g253/g254 的时间线全部完成；deadline 最后一笔仅在途 26 ms，见 [fence 记录](docs/progress/2026-11-02-fence-diagnostics.md)。下方 11-02 的 GPU WIP 描述保留为历史状态。
+
+Wi-Fi 试验配置 `zizhan_ipados18_wifi_defconfig` 已构建，约定的 CI/GPU 两配置也已构建；试验镜像含 `pong_wifi=1` 和自动返回。g265 因主机 USB 无枚举，**没有进入 fastboot boot**，不能作为设备结果。设备连接恢复后从 PCIe、供电、MHI、固件、MSI、扫描逐段验证。细节见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)，需物理恢复连接的事项见 [待人工清单](docs/progress/HUMAN_CHECKLIST.md)。
 
 ## 目标与当前状态
 

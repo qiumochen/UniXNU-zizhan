@@ -18,24 +18,32 @@ def main():
  shared=pong_paths.sheng_root()
  profile=json.loads((ROOT/'configs/pong-wifi-sm8475.json').read_text())
  if profile['soc']!='SM8475' or profile['pci']['device']!=0x1103:raise RuntimeError('Pong QCA6490 profile required')
- hardware=os.environ.get('PONG_HARDWARE_DTB')
+ hardware=os.environ.get('PONG_WIFI_DTB') or os.environ.get('PONG_HARDWARE_DTB')
  if hardware:
   spec=importlib.util.spec_from_file_location('pong_fdt',ROOT/'scripts/prepare-pong-wifi.py')
   fdt=importlib.util.module_from_spec(spec);spec.loader.exec_module(fdt)
   nodes=fdt.fdt_nodes(Path(hardware).read_bytes())
-  host=next(v for v in nodes.values() if v.get('compatible')==b'qcom,pci-msm\0')
-  phy=fdt.cells(host,'qcom,phy-sequence')
-  if len(phy)%3:raise RuntimeError('Malformed selected Pong PHY sequence')
-  profile['pcie']['phy_sequence']=[phy[i:i+3] for i in range(0,len(phy),3)]
-  for field,key in (('phy_status_offset','qcom,phy-status-offset'),('phy_status_bit','qcom,phy-status-bit'),
-                    ('phy_power_down_offset','qcom,phy-power-down-offset'),('aux_clock_mhz','qcom,aux-clk-freq'),
-                    ('endpoint_latency_ms','qcom,ep-latency')):
-   profile['pcie'][field]=fdt.cells(host,key)[0]
-  profile['pcie']['max_clock_frequency_hz']=fdt.cells(host,'max-clock-frequency-hz')
-  # The pinmux/register implementation is specific to the confirmed Cape
-  # wiring. Refuse a different DTS instead of silently using stale pins.
-  for key,pin in (('wlan-enable-gpios',80),('reset-gpios',94),('clkreq-gpios',95),('wake-gpios',96),('xo-clk-gpios',204)):
-   if fdt.cells(host,key)[1]!=pin:raise RuntimeError('Selected DTS needs a new Pong pin mapping: '+key)
+  host=next((v for v in nodes.values() if v.get('compatible')==b'qcom,pci-msm\0'),None)
+  full=host is not None and 'qcom,phy-sequence' in host
+  if not full:
+   if os.environ.get('PONG_WIFI_DTB'):
+    raise RuntimeError('PONG_WIFI_DTB is not a full live Wi-Fi DT')
+   print('Wi-Fi: ADT hardware DTB omits live Wi-Fi fields; using the verified board profile')
+  else:
+   phy=fdt.cells(host,'qcom,phy-sequence')
+   if len(phy)%3:raise RuntimeError('Malformed selected Pong PHY sequence')
+   profile['pcie']['phy_sequence']=[phy[i:i+3] for i in range(0,len(phy),3)]
+   for field,key in (('phy_status_offset','qcom,phy-status-offset'),('phy_status_bit','qcom,phy-status-bit'),
+                     ('phy_power_down_offset','qcom,phy-power-down-offset'),('aux_clock_mhz','qcom,aux-clk-freq'),
+                     ('endpoint_latency_ms','qcom,ep-latency')):
+    profile['pcie'][field]=fdt.cells(host,key)[0]
+   profile['pcie']['max_clock_frequency_hz']=fdt.cells(host,'max-clock-frequency-hz')
+   wlan=next(v for v in nodes.values() if v.get('compatible')==b'qcom,cnss-qca6490\0')
+   # The register implementation is specific to the confirmed Cape wiring.
+   for key,pin in (('wlan-en-gpio',80),('qcom,xo-clk-gpio',204)):
+    if fdt.cells(wlan,key)[1]!=pin:raise RuntimeError('Selected DTS needs a new Pong pin mapping: '+key)
+   for key,pin in (('perst-gpio',94),('wake-gpio',96)):
+    if fdt.cells(host,key)[1]!=pin:raise RuntimeError('Selected DTS needs a new Pong pin mapping: '+key)
  header='struct PongWifiPhyEntry {unsigned off,value,delay;};\nstatic constexpr PongWifiPhyEntry kPongWifiPhy[]={\n'+''.join('{%d,%d,%d},\n'%tuple(e) for e in profile['pcie']['phy_sequence'])+'};\n'
  header+='struct PongWifiRail {const char *name;unsigned mv,maxMv,ppid,type,subtype;};\nstatic constexpr PongWifiRail kPongWifiRails[]={\n'
  for e in profile['rails']:

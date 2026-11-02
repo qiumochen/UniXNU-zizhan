@@ -20,7 +20,7 @@ OUT=$SRC/out/$NAME; rm -rf $OUT
 # records (interrupt-masked-debug-mode=1, SCHED_HYGIENE_MODE_TRACE) instead of panicking.
 # pong_klog_4k (klog.py setup): the kernel copies the ramoops zones to a pinned file before resetting; KLOG=0 leaves it out.
 KLOGARG=$( [ "${KLOG:-1}" != 1 ] || python3 $SRC/klog.py arg )
-ARGS=($KLOGARG pong_shngroot_4k=$BLK pong_touch=0 pong_wifi=0 pong_audio=0 pong_adsp=${ADSP:-0} ml-timeout-lock-panic-scale=40 interrupt-masked-debug-mode=1 "$@")
+ARGS=($KLOGARG pong_shngroot_4k=$BLK pong_touch=0 pong_wifi=${WIFI:-0} pong_audio=0 pong_adsp=${ADSP:-0} ml-timeout-lock-panic-scale=40 interrupt-masked-debug-mode=1 "$@")
 # The kernel is built with E/P clusters (patches/xnu-ipados18/0008) and hangs early without cluster-type in the ADT (g97).
 export PONG_ADT_CLUSTERS=${PONG_ADT_CLUSTERS:-1}
 KA=(); for x in "${ARGS[@]}"; do KA+=(--kernel-arg "$x"); done

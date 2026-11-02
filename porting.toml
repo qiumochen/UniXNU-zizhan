@@ -88,7 +88,7 @@ findings = ["display-scale 为 3 时 1916/3 不是整数，SpringBoard 的状态
 completion = ["内屏显示 iPadOS 主屏，120 Hz 下滑动帧率稳定"]
 limits = ["外屏没有驱动；背光沿用 bootloader 的状态，系统里不能调节亮度。", "旧内核截图日志每行被截断，只保留左侧约 39/135 个采样列；新分段格式已在 g248、g249 上机验证，但采样截图不能代替像素级面板检查。"]
 next_action = ["接入面板背光的 DCS 命令。"]
-evidence = [{kind = "source", reference = "docs/evidence/2026-10-30-u3-ipados-homescreen.jpg", result = "内屏显示 iPadOS 主屏（u3）。"}, {kind = "source", reference = "docs/progress/2026-11-01-120hz-and-cadence.md", result = "120 Hz 切换和帧率测量。"}, {kind = "source", reference = "docs/progress/2026-11-01-zero-copy-and-return-paths.md", result = "DPU 翻页零拷贝三缓冲的实现和测量。"}, {kind = "device", command = "cycle.sh g248、g249；tools/zizhan/mac/shot.py", reference = "docs/progress/2026-11-02-shot-and-watermark.md", result = "每轮 6 张截图均完整解出 135/135 列、120/120 行；主屏及天气画面横跨整幅图，旧右侧黑区确为缺失数据补黑。"}]
+evidence = [{kind = "source", reference = "docs/evidence/2026-10-30-u3-ipados-homescreen.jpg", result = "内屏显示 iPadOS 主屏（u3）。"}, {kind = "source", reference = "docs/progress/2026-11-01-120hz-and-cadence.md", result = "120 Hz 切换和帧率测量。"}, {kind = "source", reference = "docs/progress/2026-11-01-zero-copy-and-return-paths.md", result = "DPU 翻页零拷贝三缓冲的实现和测量。"}, {kind = "device", command = "cycle.sh g248、g249；tools/zizhan/mac/shot.py", revision = "c9c8fd274c279a8571b525a1e1dbdf8eddf84d9d", reference = "docs/progress/2026-11-02-shot-and-watermark.md", result = "每轮 6 张截图均完整解出 135/135 列、120/120 行；主屏及天气画面横跨整幅图，旧右侧黑区确为缺失数据补黑。"}]
 
 [[area]]
 id = "input"
@@ -119,28 +119,28 @@ next_action = ["支持 IOSurfaceSharedEvent 监听，让壁纸扩展和依赖监
 evidence = [
   {kind = "source", reference = "docs/progress/2026-10-30-root-and-autoloop.md", result = "GPU bring-up、GPU 丢失的诊断和拒绝壁纸扩展的对照实验。"},
   {kind = "source", reference = "docs/progress/2026-10-31-frame-timeline.md", result = "逐帧 GPU 提交时间线。"},
-  {kind = "host", command = "metal-refresh.sh astc-final 的 bridge / plugin 构建", reference = "docs/progress/2026-11-02-astc-layout.md", result = "最终 Metal 桥接库和插件构建成功；源码里的 ASTC 格式编号与 iPhoneOS SDK 核对。"},
-  {kind = "device", command = "round.sh g247 pong_touch_synth=3 tsa=1118 touch_lat=1 pong_shot=60 pong_shot_ms=1000 pong_astc=1", reference = "docs/progress/2026-11-02-astc-layout.md", result = "ASTC=1，天气 App 在连续 3 张旧格式截图的左侧区域有画面，自动返回 Android；右侧数据缺失。"},
-  {kind = "device", command = "metal-refresh.sh watermark；cycle.sh g249", reference = "docs/progress/2026-11-02-shot-and-watermark.md", result = "watermark 桥接库安装后 ASTC=1，天气启动，主屏与天气 6 张截图完整，自动返回 Android；GPU fence 停滞仍在。"},
-  {kind = "device", command = "cycle.sh g250–g252", reference = "docs/progress/2026-11-02-shot-and-watermark.md", result = "时钟、设置成功启动且整幅截图完整；照片启动后反复以 PXPixelSizeAreaIsZero 断言退出。每轮均自动返回 Android。"},
-  {kind = "device", command = "cycle.sh g253、g254；pong_gtrace_delay、pong_gtrace、pong_gtrace_ib", reference = "docs/progress/2026-11-02-fence-diagnostics.md", result = "两轮时间线无丢失，提交全部完成，零拷贝 fence 无超时；deadline fence 是复位前 26 ms 的正常在途提交。"},
+  {kind = "host", command = "metal-refresh.sh astc-final 的 bridge / plugin 构建", revision = "e3be89264924267a610e472e559c9d4d8a66b803", reference = "docs/progress/2026-11-02-astc-layout.md", result = "最终 Metal 桥接库和插件构建成功；源码里的 ASTC 格式编号与 iPhoneOS SDK 核对。"},
+  {kind = "device", command = "round.sh g247 pong_touch_synth=3 tsa=1118 touch_lat=1 pong_shot=60 pong_shot_ms=1000 pong_astc=1", revision = "e3be89264924267a610e472e559c9d4d8a66b803", reference = "docs/progress/2026-11-02-astc-layout.md", result = "ASTC=1，天气 App 在连续 3 张旧格式截图的左侧区域有画面，自动返回 Android；右侧数据缺失。"},
+  {kind = "device", command = "metal-refresh.sh watermark；cycle.sh g249", revision = "c9c8fd274c279a8571b525a1e1dbdf8eddf84d9d", reference = "docs/progress/2026-11-02-shot-and-watermark.md", result = "watermark 桥接库安装后 ASTC=1，天气启动，主屏与天气 6 张截图完整，自动返回 Android；GPU fence 停滞仍在。"},
+  {kind = "device", command = "cycle.sh g250–g252", revision = "caa3a06b6b809be46146fc890995b16d51c8a99c", reference = "docs/progress/2026-11-02-shot-and-watermark.md", result = "时钟、设置成功启动且整幅截图完整；照片启动后反复以 PXPixelSizeAreaIsZero 断言退出。每轮均自动返回 Android。"},
+  {kind = "device", command = "cycle.sh g253、g254；pong_gtrace_delay、pong_gtrace、pong_gtrace_ib", revision = "a0eb276866aee06a31189f182335760d5a39d4a9", reference = "docs/progress/2026-11-02-fence-diagnostics.md", result = "两轮时间线无丢失，提交全部完成，零拷贝 fence 无超时；deadline fence 是复位前 26 ms 的正常在途提交。"},
   {kind = "source", reference = "docs/progress/2026-11-02-gpu-astc-and-fairplayd.md", result = "记录 ASTC 后续工作、fairplayd 当前镜像状态和 display-link WIP 的未验证边界。"},
-  {kind = "device", command = "cycle.sh g262–g264；pong_astc=0/1；Photos PXCreateContext 兼容钩子", reference = "docs/progress/2026-11-03-photos-context.md", result = "钩子把 Tungsten 的 0x0 收敛为 1x1；Photos 不再触发零尺寸断言或退出，最终 ASTC=1 轮次保持运行并自动返回 Android。"},
+  {kind = "device", command = "cycle.sh g262–g264；pong_astc=0/1；Photos PXCreateContext 兼容钩子", revision = "1ebf568205630bc5fa25737ae95392d2908f0e8a", reference = "docs/progress/2026-11-03-photos-context.md", result = "钩子把 Tungsten 的 0x0 收敛为 1x1；Photos 不再触发零尺寸断言或退出，最终 ASTC=1 轮次保持运行并自动返回 Android。"},
 ]
 
 [[area]]
 id = "network"
 status = "planned"
 components = ["PongPlatform24"]
-paths = ["drivers/PongWifi/**", "configs/pong-wifi-sm8475.json", "scripts/*wifi*", "scripts/*ath11k*"]
-inputs = ["QCA6490（与 Nothing Phone (2) 相同），zizhan 自己的 board data"]
-configuration = ["CONFIG_XNU_PONG_WIFI=n，boot-arg pong_wifi=0"]
-procedure = ["暂不启动 Pong 的 Wi-Fi 栈。"]
-findings = ["zizhan 的 PCIe、GPIO 和 board data 还没有与 Pong 核对。"]
+paths = ["drivers/PongWifi/**", "configs/pong-wifi-sm8475.json", "configs/zizhan_ipados18_wifi_defconfig", "scripts/*wifi*", "scripts/*ath11k*", "tools/zizhan/mac/ci_boot_ufs.sh"]
+inputs = ["QCA6490（PCI 17cb:1103）；本机只读导出的固件与 Linux v7.0.14 ath11k 源码，不入仓库"]
+configuration = ["默认 GPU 配置仍为 CONFIG_XNU_PONG_WIFI=n、pong_wifi=0；试验配置 zizhan_ipados18_wifi_defconfig 为 CONFIG_XNU_PONG_WIFI=y，镜像需 WIFI=1 写入 pong_wifi=1"]
+procedure = ["从实机 Android live DT 核对 PCIe0、WLAN GPIO、SID；在隔离试验配置中构建并打包 Wi-Fi 镜像。", "USB 恢复后临时 fastboot boot，按 PCIe、供电、MHI、固件、MSI、扫描顺序定位首个失败阶段。"]
+findings = ["实机 DT 确认 PCIe0、GPIO 80/94/95/96/204、SID 0x1c00/0x1c01；Android 链路为 Gen2 x1。", "Wi-Fi 试验配置、约定的 CI 与 GPU 配置均已在主机构建成功；g265 因 USB 无枚举未启动，不能算设备结果。"]
 completion = ["扫描到网络并完成关联"]
-limits = ["没有接入。"]
-next_action = ["从实机 DT 核对 PCIe0 和 WLAN 使能 GPIO，再打开 CONFIG_XNU_PONG_WIFI。"]
-evidence = [{kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了 Wi-Fi 芯片型号。"}]
+limits = ["尚无 Wi-Fi 试验配置的设备启动日志、扫描或关联证据；USB 当前不可见。默认镜像继续关闭 Wi-Fi。"]
+next_action = ["恢复 USB 枚举，执行试验镜像的临时启动和自动返回轮次，取回日志后处理首个失败阶段。"]
+evidence = [{kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了 Wi-Fi 芯片型号。"}, {kind = "source", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "实机 DT 核对与主机构建准备；g265 因 USB 无枚举而未启动。"}]
 
 [[area]]
 id = "audio"

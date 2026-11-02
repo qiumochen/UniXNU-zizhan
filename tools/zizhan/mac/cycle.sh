@@ -12,7 +12,7 @@ S=${ZIZHAN_SRC:-$HOME/zizhan}
 IMG=$1; RUN=$2; WAIT=${3:-600}
 L=${ZIZHAN_SRC:-$HOME/zizhan}/logs; mkdir -p $L
 ts() { date '+%H:%M:%S'; }
-in_fastboot() { fastboot devices | grep -q fastboot; }
+in_fastboot() { bash "$S/fastboot-visible.sh"; }
 in_adb() { adb devices | grep -q 'device$'; }
 
 # Cool down in Android first (battery below COOL tenths of a degree, default 35.0 C, at most 20 min). This port has no thermal

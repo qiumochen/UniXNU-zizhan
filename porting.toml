@@ -140,7 +140,7 @@ findings = ["实机 DT 确认 PCIe0、GPIO 80/94/95/96/204、SID 0x1c00/0x1c01�
 completion = ["扫描到网络并完成关联"]
 limits = ["尚无 Wi-Fi 试验配置的设备启动日志、扫描或关联证据；USB 当前不可见。默认镜像继续关闭 Wi-Fi。"]
 next_action = ["恢复 USB 枚举，执行试验镜像的临时启动和自动返回轮次，取回日志后处理首个失败阶段。"]
-evidence = [{kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了 Wi-Fi 芯片型号。"}, {kind = "host", command = "ci_kernel.sh：zizhan_ipados18_wifi_defconfig、pong_ipados18_ci_defconfig、zizhan_ipados18_gpu_defconfig", revision = "79ae5b1d7b92f621ac549aec80e73e30e404d649", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "旧 profile 的三配置构建通过，但试验镜像已因板级输入不符撤下，g265/g266 均未启动。"}, {kind = "source", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "记录 zizhan live DT 差异、修正后的三配置构建与 g267 镜像；尚无设备结果。"}]
+evidence = [{kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了 Wi-Fi 芯片型号。"}, {kind = "host", command = "ci_kernel.sh：zizhan_ipados18_wifi_defconfig、pong_ipados18_ci_defconfig、zizhan_ipados18_gpu_defconfig", revision = "79ae5b1d7b92f621ac549aec80e73e30e404d649", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "旧 profile 的三配置构建通过，但试验镜像已因板级输入不符撤下，g265/g266 均未启动。"}, {kind = "host", command = "PONG_WIFI_DTB=<local live DT> ci_kernel.sh：zizhan_ipados18_wifi_defconfig；另构建 pong_ipados18_ci_defconfig、zizhan_ipados18_gpu_defconfig；ci_boot_ufs.sh boot-g267", revision = "ae24f8a89f41fe2864d997ea3b8005fb1824ae89", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "zizhan profile 完整核验；三配置成功，g267 命令行含唯一 Wi-Fi 开关和自动返回；设备尚未启动。"}]
 
 [[area]]
 id = "audio"

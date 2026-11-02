@@ -13,14 +13,16 @@ usage: klog.py setup            create /data/hackios/klog.pin (pinned, contiguou
 Header block: "PONGKLOG", le64 own 4 KiB block, le32 data blocks (1024), le32 state (0 armed, 1 written, 2 write failed),
 le64 flushes, le64 mach time, le32 reason (1 deadline, 2 panic), le32 IOReturn.
 """
-import json, struct, sys
+import json, os, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from install_pinned import su, extents, contiguous, PIN, DEV, SECTION, ADB
 import subprocess
 
 FILE = '/data/hackios/klog.pin'
-STATE = Path(__file__).resolve().parent / 'klog.json'
+# State lives in the work directory (ZIZHAN_SRC), not beside this script, which may be a symlink into the git checkout.
+WORK = Path(os.environ.get('ZIZHAN_SRC', Path.home() / 'zizhan'))
+STATE = WORK / 'klog.json'
 DATA_BLOCKS = 1024                      # both 2 MiB ramoops zones
 FILE_BYTES = (4096 * (1 + DATA_BLOCKS) + SECTION - 1) // SECTION * SECTION
 ZONE = 0x200000
@@ -48,8 +50,8 @@ def setup():
     base = contiguous(extents(FILE), FILE_BYTES)
     if base is None or base % 4096:
         raise SystemExit(f'{FILE} is not one contiguous, block-aligned run; delete it and retry')
-    root = json.loads((Path(__file__).resolve().parent / 'install-pinned.json').read_text()) \
-        if (Path(__file__).resolve().parent / 'install-pinned.json').exists() else None
+    pinned = WORK / 'install-pinned.json'
+    root = json.loads(pinned.read_text()) if pinned.exists() else None
     if root and base < root['base'] + root['file_bytes'] and root['base'] < base + FILE_BYTES:
         raise SystemExit(f'{FILE} at {base:#x} overlaps the root image')
     STATE.write_text(json.dumps({'file': FILE, 'base': base, 'bytes': FILE_BYTES}) + '\n')

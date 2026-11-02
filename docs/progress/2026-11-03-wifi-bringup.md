@@ -115,3 +115,11 @@ g268 镜像已有 `pong_shot=60`，但原轮次脚本只取回文本日志，PNG
 `boot.sh` 原先在看不到 fastboot 时直接执行无时限的 `adb reboot bootloader`。现在先确认 Android 为 `device` 状态，校验镜像存在，并将重启命令限制为 30 秒；设备消失、重启失败或超时都会让轮次明确失败。`fastboot-visible.sh` 同时检查命令退出码，避免工具报错却仍输出旧设备文本时误判可见。隔离模拟覆盖无设备、adb 重启失败、adb 阻塞、正常转入 fastboot、缺失镜像，以及 fastboot 非零退出码附带设备文本；结果均符合预期。脚本语法和 `git diff --check` 通过。
 
 约定的 CI、GPU 两配置构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-adb-guard-ci.log` 与 `ci_kernel-adb-guard-gpu.log`，均以 `KERNEL_DONE` 结束。这次只改自动轮次工具，不改变 g268 镜像；真实 USB 重连、临时启动、自动返回、klog/ramoops 与截图仍待设备可见后核实。
+
+## 接续：logfs 拉取的断线超时
+
+现有 `pull-logfs.sh` 会先清理同名本机旧镜像，但 Android 侧 `dd` 或随后的 `adb pull` 若在 USB 断线后不返回，整个自动轮次仍可能无限等待。现在导出限制为 60 秒、拉取限制为 120 秒；失败、超时、空文件都会删除本机副本，保留原有的失败退出码。8 MiB logfs 的历史轮次说明这些默认时限足以覆盖正常传输，真实设备耗时仍待下一轮确认。
+
+主机隔离模拟覆盖导出失败/超时、拉取失败/超时、空文件和成功六种情况。前五种均明确失败且没有旧或部分本机镜像；成功只保留新内容。脚本语法和 `git diff --check` 通过。g268 等待器仍只有 USB 等待心跳，未发生设备启动；因此本次没有新的 klog、ramoops 或截图证据。
+
+CI、GPU 两套内核配置再次构建通过，本机日志为 `$ZIZHAN_SRC/ci_kernel-logfs-timeout-ci.log`、`ci_kernel-logfs-timeout-gpu.log`，均以 `KERNEL_DONE` 结束。此项不改变 g268 镜像。

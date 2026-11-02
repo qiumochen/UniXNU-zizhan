@@ -137,10 +137,10 @@ paths = ["drivers/PongWifi/**", "configs/pong-wifi-sm8475.json", "configs/zizhan
 inputs = ["QCA6490（PCI 17cb:1103）；本机只读导出的固件与 Linux v7.0.14 ath11k 源码，不入仓库"]
 configuration = ["默认 GPU 配置仍为 CONFIG_XNU_PONG_WIFI=n、pong_wifi=0；试验配置 zizhan_ipados18_wifi_defconfig 为 CONFIG_XNU_PONG_WIFI=y，镜像需 WIFI=1 写入 pong_wifi=1"]
 procedure = ["从实机 Android live DT 核对 PCIe0、WLAN GPIO、SID；在隔离试验配置中构建并打包 Wi-Fi 镜像。", "USB 恢复后临时 fastboot boot，按 PCIe、供电、MHI、固件、MSI、扫描顺序定位首个失败阶段。"]
-findings = ["实机 DT 确认 PCIe0、GPIO 80/94/95/96/204、SID 0x1c00/0x1c01；Android 链路为 Gen2 x1。", "旧 Pong profile 与 zizhan live DT 的 PHY 表有 6 条差异，多出一条本机没有的 WLAN 供电请求；g265/g266 均未启动。", "zizhan profile 经完整 live DT 核验；g267 镜像虽已打包，监视在设备未出现时撤下，未有设备结果。", "高位 QMI board ID 分支已保留 chip ID 决定的 bdwlan/bdwlang 前缀；三配置重新构建成功，g268 镜像含自动返回参数，实际 QMI ID 仍待设备日志。", "g268 自动轮次的 USB 工具已修正启动失败误报并限制 adb/fastboot 阻塞；CI、GPU、Wi-Fi 三配置再构建通过，仍无设备启动证据。", "g268 镜像内 PWF2 与本机 213 个原始固件文件逐项一致；包内没有高位 board ID 文件，实际 QMI ID 待设备日志。", "Wi-Fi 日志摘要只列已出现的供电、PCIe、DMA、MSI、固件文件、station 和扫描里程碑及首条错误；不据此宣称关联或联网。"]
+findings = ["实机 DT 确认 PCIe0、GPIO 80/94/95/96/204、SID 0x1c00/0x1c01；Android 链路为 Gen2 x1。", "旧 Pong profile 与 zizhan live DT 的 PHY 表有 6 条差异，多出一条本机没有的 WLAN 供电请求；g265/g266 均未启动。", "zizhan profile 经完整 live DT 核验；g267 镜像虽已打包，监视在设备未出现时撤下，未有设备结果。", "高位 QMI board ID 分支已保留 chip ID 决定的 bdwlan/bdwlang 前缀；三配置重新构建成功，g268 镜像含自动返回参数，实际 QMI ID 仍待设备日志。", "g268 自动轮次的 USB 工具已修正启动失败误报并限制 adb/fastboot 阻塞；CI、GPU、Wi-Fi 三配置再构建通过，仍无设备启动证据。", "g268 镜像内 PWF2 与本机 213 个原始固件文件逐项一致；包内没有高位 board ID 文件，实际 QMI ID 待设备日志。", "Wi-Fi 日志摘要只列已出现的供电、PCIe、DMA、MSI、固件文件、station 和扫描里程碑及首条错误；不据此宣称关联或联网。", "zizhan 输入尚无 PCI subsystem ID，已去掉 Pong 的 subsystem 硬门槛，仅验证主 ID 并在 g269 打印实测值；g269 尚未上机。"]
 completion = ["扫描到网络并完成关联"]
 limits = ["尚无 Wi-Fi 试验配置的设备启动日志、实际 QMI board ID、扫描或关联证据；USB 当前不可见。默认镜像继续关闭 Wi-Fi。", "若实际 QMI board ID 超过 0xff，本机导出的固件包没有对应高位命名文件；需先看实际请求名，不能猜测替代。"]
-next_action = ["恢复 USB 枚举，执行 g268 试验镜像的临时启动和自动返回轮次，取回日志后处理首个失败阶段。"]
+next_action = ["恢复 USB 枚举，执行 g269 试验镜像的临时启动和自动返回轮次，核对 PCI subsystem、取回日志及截图后处理首个失败阶段。"]
 evidence = [
   {kind = "source", reference = "docs/progress/2026-10-28-device-prep.md", result = "记录了 Wi-Fi 芯片型号。"},
   {kind = "host", command = "ci_kernel.sh：zizhan_ipados18_wifi_defconfig、pong_ipados18_ci_defconfig、zizhan_ipados18_gpu_defconfig", revision = "79ae5b1d7b92f621ac549aec80e73e30e404d649", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "旧 profile 的三配置构建通过，但试验镜像已因板级输入不符撤下，g265/g266 均未启动。"},
@@ -149,6 +149,7 @@ evidence = [
   {kind = "host", command = "ci_kernel.sh：CI、GPU、Wi-Fi 三配置；USB 工具模拟", revision = "890ec93c136a23bbc0e857d0879c3119bf945b83", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "三配置再次成功；adb 可见、未授权、阻塞和 fastboot boot 成败模拟通过；g268 仍未启动设备。"},
   {kind = "host", command = "解析 PWF2 目录并逐项 SHA-256 比对本机导出，核对 g268 镜像内嵌固件包", revision = "0949ebe471d258965f2ef2ae21b44cd1eda13576", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "213/213 文件一致；内核和最终镜像均含完整包；无高位 board ID 文件，实际 QMI ID 未知。"},
   {kind = "host", command = "wifi-stage.py 五组隔离日志与 g264 非 Wi-Fi 日志；ci_kernel.sh CI/GPU 双配置", revision = "eb2fe973a6611582c6ad31f45d7c8b9389094a6a", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "可区分无日志、供电失败、PCIe 后 ath11k 失败、多次启动与扫描记录；双配置构建成功，g268 仍无设备结果。"},
+  {kind = "host", command = "ci_kernel.sh：CI/GPU/Wi-Fi 三配置；ci_boot_ufs.sh boot-g269；镜像命令行与固件包核对", revision = "5b695938a42495d517be09d43b3ecaa2cb4eb59c", reference = "docs/progress/2026-11-03-wifi-bringup.md", result = "三配置通过；g269 命令行 913 字节，含唯一 Wi-Fi 开关、截图及自动返回参数，镜像含新 PCI subsystem 日志标记与 PWF2 固件包。手机未枚举，没有设备结果。"},
 ]
 
 [[area]]

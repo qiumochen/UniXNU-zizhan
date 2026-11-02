@@ -26,6 +26,8 @@ Android live DT 显示 WLAN 为 QCA6490（PCI `17cb:1103`），走 PCIe0；使�
 
 无人值守恢复脚本 `when-back.sh` 也改用有界探测；设置 `WHEN_BACK_IMAGE` 后，不论手机先回到 Android 还是 fastboot，都会用指定的已打包镜像调用 `cycle.sh`。主机模拟 fastboot 恢复时，g266 选择了正确试验镜像和 420 秒等待参数；设备端结果仍待取回。
 
+本机已为 g266 启动最多 12 小时的 USB 恢复监视，输出留在 `$ZIZHAN_SRC/logs/g266-when-back.log`。当前主机工作根目录也已链接新探测脚本；监视进程存活，adb 和 fastboot 仍不可见。这个等待状态不算 g266 已启动设备。
+
 ## 下一步
 
 USB 恢复后先确认 Android 或 fastboot 可见，再用现有试验镜像执行 g266 临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。

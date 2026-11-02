@@ -16,6 +16,8 @@ Wi-Fi 试验配置 `zizhan_ipados18_wifi_defconfig` 已构建，约定的 CI/GPU
 
 g268 自动轮次工具已补上有界 adb 探测和 `fastboot boot` 的真实退出码传递；约定三配置再次构建通过。已重启 12 小时 USB 恢复等待器，手机仍未枚举，g268 尚无设备日志、截图或自动返回结果。连接恢复后的第一轮仍以 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md) 为准。
 
+随后修正自动轮次的 adb 重启和 logfs 拉取无时限问题，并去掉未由 zizhan 输入证实的 Pong PCI subsystem 硬门槛；CI/GPU/Wi-Fi 三配置构建及 g269 镜像检查通过。g268 未启动即撤下，当前 launchd 等待器针对 g269。手机仍未枚举，g269 没有设备日志、截图或返回结果；下次先看 g269 等待器，再按 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md) 接续。
+
 并行的音频板级审查从公开 zizhan Android DT 确认 CS35L41 所在 SE15 I²C 与 Pong TFA9873 路径的总线、引脚、地址均不同；只能作为待本机 live DT 复核的主机输入，默认音频仍关闭。见 [音频审查](docs/progress/2026-11-03-audio-board-audit.md)。
 
 ## 目标与当前状态
@@ -109,7 +111,7 @@ DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh
 - `ADSP=2 bash round.sh RUN [args…]` 构建 GPU 内核、打包、运行 cycle；首次先核实 ZIZHAN_ROOT_4K、klog 状态和真实 volume layout。
 - `cycle.sh IMG RUN [WAIT]`：临时 fastboot boot → deadline 回 fastboot → RamoopsDump 把 ramoops 写到已备份的 logfs → Android / adb 取日志。它涉及日志写入；不是无写入测试。禁止 fastboot flash。
 - 中断时用 `cycle-resume.sh IMG RUN` 接后半段；USB 掉线时 `when-back.sh RUN [args…]` 等恢复再跑。`usbkick.sh remember` 在手机可见时记端口；换口后重记。先判断端口枚举，不能把 USB 不可见直接当内核冻结。
-- 无人值守等待器如果由临时工具会话直接启动，会随会话结束而退出。要跨会话等待，使用当前用户图形域的 `launchctl submit` 托管 `when-back.sh`，设置 `ZIZHAN_SRC` 和 `WHEN_BACK_IMAGE`，将输出写入本机日志；用 `launchctl list` 和日志心跳核对存活。已运行的 g268 任务见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)。
+- 无人值守等待器如果由临时工具会话直接启动，会随会话结束而退出。要跨会话等待，使用当前用户图形域的 `launchctl submit` 托管 `when-back.sh`，设置 `ZIZHAN_SRC` 和 `WHEN_BACK_IMAGE`，将输出写入本机日志；用 `launchctl list` 和日志心跳核对存活。当前 g269 任务见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)。
 - `klog.py` 把状态保存在工作目录；干净 UFS klog 优先于热机后位翻转严重的 DRAM ramoops。每轮日志保留参数、源码版本、镜像 / plugin / UI 版本、结果和下一步。
 - `cycle.sh` 和 `cycle-resume.sh` 经 `pull-logfs.sh` 导出 logfs；导出或拉取失败会清掉本机同名旧副本并停止轮次。只有真实取回的新镜像才能继续提取 `XNULOG.TXT`。
 

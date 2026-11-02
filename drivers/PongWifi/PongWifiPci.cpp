@@ -114,7 +114,9 @@ PongWifiPciResult PongWifiPciOpen(PongWifiPci **out)
     /* This opens an existing root-port handoff; it does not silently change
      * the iATU while another controller owner could have outstanding access. */
     if (!p->config.open(0x60100000, 0x1000)) return fail(PongWifiPciMemory);
-    if (p->config.read32(0) != 0x110317cb || p->config.read32(0x2c) != 0x010817cb)
+    /* Only the primary ID is verified for zizhan. The Pong subsystem ID is
+     * not a safe board requirement until this phone's PCI config is logged. */
+    if (p->config.read32(0) != 0x110317cb)
         return fail(PongWifiPciIdentity);
     uint32_t bar = p->config.read32(0x10);
     if ((bar & 0xfffffff0) != 0x60200000 || (bar & 1) || (bar & 6) != 4 ||

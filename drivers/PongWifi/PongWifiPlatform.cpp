@@ -342,7 +342,9 @@ bool coldLink() {
  // DesignWare unrolled outbound region0 CFG0 to endpoint BDF01:00.0.
  atu.w(0,4);atu.w(8,0x60100000);atu.w(12,0);atu.w(16,0x60100fff);atu.w(20,0x01000000);atu.w(24,0);atu.w(4,0x80000000);
  if(!wait(atu,4,0x80000000,0x80000000,20)||!cfg.open(0x60100000,0x1000))return false;
- if(cfg.r(0)!=0x110317cb||cfg.r(0x2c)!=0x010817cb)return fail("QCA6490 endpoint identity mismatch");
+ if(cfg.r(0)!=0x110317cb)return fail("QCA6490 endpoint identity mismatch");
+ // The subsystem ID in Pong's capture has not been verified on zizhan.
+ IOLog("PongWifi: QCA6490 PCI subsystem=%x\n",cfg.r(0x2c));
  // Disable bus mastering while host isolation and interrupts are established.
  *reinterpret_cast<volatile uint16_t *>(cfg.v+4)=2;
  cfg.w(0x10,0x60200004);cfg.w(0x14,0);

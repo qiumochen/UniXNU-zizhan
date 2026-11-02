@@ -123,3 +123,11 @@ g268 镜像已有 `pong_shot=60`，但原轮次脚本只取回文本日志，PNG
 主机隔离模拟覆盖导出失败/超时、拉取失败/超时、空文件和成功六种情况。前五种均明确失败且没有旧或部分本机镜像；成功只保留新内容。脚本语法和 `git diff --check` 通过。g268 等待器仍只有 USB 等待心跳，未发生设备启动；因此本次没有新的 klog、ramoops 或截图证据。
 
 CI、GPU 两套内核配置再次构建通过，本机日志为 `$ZIZHAN_SRC/ci_kernel-logfs-timeout-ci.log`、`ci_kernel-logfs-timeout-gpu.log`，均以 `KERNEL_DONE` 结束。此项不改变 g268 镜像。
+
+## 接续：zizhan PCI subsystem 识别范围
+
+驱动原先在 QCA6490 主 ID `17cb:1103` 之外，还要求 PCI subsystem ID 等于 Pong 捕获的 `0x010817cb`。现有 zizhan 板级 profile 和保存的输入只证实主 ID，没有证实这个 subsystem 值；把 Pong 的值作为硬门槛可能在真实硬件已经正确枚举时提前退出。两个 PCI 入口现在都保留主 ID 检查，运行时的 `PongWifiPlatform` 还会打印读取到的 subsystem 寄存器值，供首轮日志核对。公开 zizhan DT 的 PCIe0 `int_global_int` 仍映射 SPI140，这项硬编码与当前板级来源一致。
+
+`pong_ipados18_ci_defconfig`、`zizhan_ipados18_gpu_defconfig`、最后构建的 `zizhan_ipados18_wifi_defconfig` 均成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-wifi-subsystem-ci.log`、`ci_kernel-wifi-subsystem-gpu.log`、`ci_kernel-wifi-subsystem-wifi.log`。在 Wi-Fi 配置占用共用构建树时打包的 g269 镜像，命令行 913 字节，含唯一 `pong_wifi=1`、`pong_autoreset=300`、`pong_autoreset_sb=60` 与定时截图参数。只读核对确认新日志标记、PWF2 固件包和 `amss20.bin` 均在 g269 镜像中，且镜像与 g268 不同。
+
+g268 等待器在未启动设备时撤下；g269 等待器已由 launchd 托管，启动日志为 `$ZIZHAN_SRC/logs/g269-when-back.log`。目前手机仍无 USB 枚举，g269 **没有执行 `fastboot boot`**，没有自动返回、内核日志或截图结果。恢复后先核实实际 PCI subsystem 值，再沿供电、PCIe、DMA、MSI、固件、station、扫描找首个失败阶段。

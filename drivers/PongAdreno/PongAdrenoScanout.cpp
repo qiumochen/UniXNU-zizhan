@@ -53,6 +53,9 @@ extern "C" volatile uint32_t native_adreno_submit_poison[2];
 extern "C" volatile uint32_t native_adreno_ib_log[4][4+28];
 extern "C" volatile uint32_t native_adreno_ib_log_count;
 extern "C" char native_adreno_ib_log_who[4][16];
+extern "C" volatile uint32_t native_adreno_last_submit_fence;
+extern "C" volatile uint64_t native_adreno_last_submit_us;
+uint64_t us(uint64_t a);
 void fenceReport(const char *why,bool ibs=false)
 {
     char text[300];
@@ -62,6 +65,11 @@ void fenceReport(const char *why,bool ibs=false)
     if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
     n=snprintf(text,sizeof(text),"PONG POISON %s: ring %u from %08x (fence in memory %u, seqno %u, next %u, rptr %u), submit cores %u from %08x\n",
         why,r[0],r[1],r[2],r[3],r[4],r[5],c[0],c[1]);
+    if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
+    const uint32_t lastFence=native_adreno_last_submit_fence;
+    const uint64_t lastUs=native_adreno_last_submit_us,nowUs=us(mach_absolute_time());
+    n=snprintf(text,sizeof(text),"PONG FENCE age %s: newest submit %u, %llu ms ago\n",
+        why,lastFence,(unsigned long long)(lastUs && nowUs>=lastUs?(nowUs-lastUs)/1000:0));
     if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
     /* the last four submissions, oldest first: fence, process, first IB address and size, its first 12 dwords */
     for(unsigned k=0;ibs && k<4;++k) {
@@ -1140,7 +1148,7 @@ extern "C" void pong_scanout_summary(void)
         if(IOLockTryLock(scanout_gate)){dbRestore();dbStats("deadline");IOLockUnlock(scanout_gate);}
         else if(dbN){char text[160];dpuLine(text,snprintf(text,sizeof text,"PONG DBUF deadline: gate held (a frame stuck?), MDSS not touched; flips %llu taken %llu shown %d flipped %d\n",dbFlips,dbTaken,dbShown,dbFlipped));}
     }
-    fenceReport("at the deadline");pong_scanout_summary_copies(8);if(dpuProbeMode&1)dpuProbe("deadline");
+    fenceReport("at the deadline",true);pong_scanout_summary_copies(8);if(dpuProbeMode&1)dpuProbe("deadline");
 }
 /* MiniIOMobileFramebuffer, before it composes a frame on the CPU into the panel memory (patches/xnu-ipados18/0009): the pipes fetch the
  * panel memory again. Written before the CPU's copy, so that frame may tear once, as every CPU frame did before. */

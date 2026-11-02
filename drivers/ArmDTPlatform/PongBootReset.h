@@ -93,7 +93,7 @@ static int markBootloader(char *text, unsigned cap) {
   return rc;
 }
 
-static uint32_t gDeadline, gAfterSpringBoard, gPanicHold = 2, pong_reset_warm = 1, gSampleSeconds, gTraceSeconds;
+static uint32_t gDeadline, gAfterSpringBoard, gPanicHold = 2, pong_reset_warm = 1, gSampleSeconds, gTraceSeconds, gTraceDelay = 20;
 // g152/g152b (2026-10-31): the pinger reached its deadline and then hung inside pong_scanout_summary (a display-register access that
 // never answered, or the klog flush behind a lock a stuck thread held); the Gunyah watchdog did not bite in 7 minutes without pings.
 // So a second thread, the guard, watches the pinger: once the pinger has passed its deadline (gPingerEnd) or the absolute deadline
@@ -158,7 +158,7 @@ static void pinger(void *, wait_result_t) {
       sampled = true;
       pong_thread_sampler_start(gSampleProc, gSampleSeconds);
     }
-    if (seen && !traced && gTraceSeconds && now - seenAt >= 20 * f && pong_gtrace_start) {
+    if (seen && !traced && gTraceSeconds && now - seenAt >= (uint64_t)gTraceDelay * f && pong_gtrace_start) {
       traced = true;
       pong_gtrace_start(gTraceSeconds);
     }
@@ -254,6 +254,7 @@ static void start(void) {
   PE_parse_boot_argn("pong_tsample", &gSampleSeconds, sizeof(gSampleSeconds));
   PE_parse_boot_argn("pong_tsample_proc", gSampleProc, sizeof(gSampleProc));
   PE_parse_boot_argn("pong_gtrace", &gTraceSeconds, sizeof(gTraceSeconds));
+  PE_parse_boot_argn("pong_gtrace_delay", &gTraceDelay, sizeof(gTraceDelay));
   gWarmReset = (int64_t)smc2(PsciFeatures, PsciSystemReset2, 0, nullptr);
   if (armWatchdog(deadline, text, sizeof(text)) == 0) pong_panic_reset_hook = panicReset;
   IOLog("PONG_AUTORESET: %s; after SpringBoard %us, panic reset after %us; PSCI SYSTEM_RESET2 %s (%lld), warm reset %s\n", text,

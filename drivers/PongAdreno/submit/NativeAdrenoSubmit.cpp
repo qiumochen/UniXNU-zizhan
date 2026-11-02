@@ -25,13 +25,14 @@ extern "C" {volatile uint32_t native_adreno_wc_audit[6];}
 extern "C" {volatile uint32_t native_adreno_fence_wait[8];}
 /* The IBs of the last submissions: [slot] fence, iova low/high, bytes, then the first 28 dwords of the first IB (read as the kernel maps it). */
 extern "C" {volatile uint32_t native_adreno_ib_log[4][4+28];volatile uint32_t native_adreno_ib_log_count;}
+extern "C" {volatile uint32_t native_adreno_last_submit_fence;volatile uint64_t native_adreno_last_submit_us;}
 /* ... and the submitting process of each slot (zizhan: which client's job a stuck ring is on, PongAdrenoScanout.cpp fenceReport). */
 extern "C" {char native_adreno_ib_log_who[4][16];}
 extern "C" void proc_selfname(char *buf, int size);
 /* [0] submit-core poisonings, [1] the caller's return address (low 32 bits); with native_adreno_ring_poison (NativeAdrenoRing.cpp). */
 extern "C" {volatile uint32_t native_adreno_submit_poison[2];}
 /* zizhan GPU timeline (docs/plan/2026-10-31-frame-timeline.md): boot-arg pong_gtrace=<s>; ArmDTPlatform/PongBootReset.h starts it
- * 20 s after SpringBoard, with the synthetic swipes. While on, every submission is recorded (fence, process, IB count, context change,
+ * pong_gtrace_delay seconds after SpringBoard (default 20). While on, every submission is recorded (fence, process, IB count, context change,
  * time in us of mach_absolute_time, the clock of MiniIOMobileFramebuffer's touch_lat=1 "tl:" lines) and a kernel thread polls the
  * CP-written timestamp every 200 us for when fences completed; PongAdrenoScanout.cpp adds each scanout copy (offer, pickup, done).
  * At the end the events go to the DIAG region as "GT" lines (tools/mac/gtrace.py joins them with the tl: lines per frame). */
@@ -404,6 +405,8 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         while(handle_count) {vm_->retireJobAfterCompletion(handles[--handle_count]);++stats_.references_retired;}
         return status;
     }
+    native_adreno_last_submit_us=gtNow();
+    native_adreno_last_submit_fence=value;
     for(size_t i=0;i<handle_count;++i)job->handles[i]=handles[i];
     job->count=handle_count;job->fence=value;job->queue=queue;job->active=true;
     job->window_start=window_start;job->window_bytes=window_bytes;

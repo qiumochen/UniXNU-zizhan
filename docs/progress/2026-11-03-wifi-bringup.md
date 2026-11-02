@@ -137,3 +137,5 @@ g268 等待器在未启动设备时撤下；g269 等待器已由 launchd 托管�
 g269 驱动会打印读到的 PCI subsystem 值，但先前的 `wifi-stage.py` 摘要只列阶段标签。摘要现在提取这一条完整的十六进制值及行号，保留原始日志作为核对依据。用两次冷启动的隔离日志确认只报告最后一次的值；损坏值不被误读，g264 非 Wi-Fi 日志仍输出 `NO_WIFI_LOG`。这项修改只影响回收日志后的主机分析，不改变已打包的 g269 镜像或设备行为。
 
 约定的 CI、GPU 两配置构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-wifi-subsystem-summary-ci.log`、`ci_kernel-wifi-subsystem-summary-gpu.log`，末尾均为 `KERNEL_DONE`。g269 等待器继续记录 USB 心跳，仍无设备日志或截图。
+
+再次确认已记录的主机 USB 端口空闲后，执行一次主机侧端口断电重连。随后有界 adb/fastboot 探测仍均不可见，hub 也没有手机枚举；g269 等待器保持运行。这是物理连接状态，不能归因于 g269 内核，因为镜像尚未启动。实体重连操作仍见 `HUMAN_CHECKLIST.md`。

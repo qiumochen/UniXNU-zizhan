@@ -12,6 +12,8 @@ Wi-Fi 试验配置 `zizhan_ipados18_wifi_defconfig` 已构建，约定的 CI/GPU
 
 后续修正了 ath11k 在高位 QMI board ID 分支丢失 `bdwlang` 前缀的问题；g267 未启动即撤下，g268 已重新完成三配置构建与镜像打包。实际 QMI board ID 尚无本机 iPadOS 日志，功能状态保持未验证。
 
+g268 自动轮次工具已补上有界 adb 探测和 `fastboot boot` 的真实退出码传递；约定三配置再次构建通过。已重启 12 小时 USB 恢复等待器，手机仍未枚举，g268 尚无设备日志、截图或自动返回结果。连接恢复后的第一轮仍以 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md) 为准。
+
 ## 目标与当前状态
 
 Xiaomi MIX Fold 2（zizhan / SM8475）运行 iPadOS 18.7.10 / 22H374，Darwin 24.6.0 / XNU 11417.140.69，Apple 系统输入为 iPad7,11。基于 UniXNU-pong（同 SoC 的 Nothing Phone (2)）和 uefi-pong；保留公共组件身份 **PongPlatform24**，zizhan 的硬件差异留在设备层。

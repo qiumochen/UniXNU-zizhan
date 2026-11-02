@@ -46,6 +46,14 @@ Wi-Fi 配置和约定的 CI/GPU 两配置重新构建通过；生成的 ath11k `
 
 本机已为 g268 启动最多 12 小时的 USB 恢复监视，日志留在 `$ZIZHAN_SRC/logs/g268-when-back.log`。监视进程存活，手机仍未枚举；这不构成 g268 设备验证。
 
+## 自动轮次工具加固
+
+复查发现 `boot.sh` 曾把 `fastboot boot` 的输出接给 `tail`，因此启动命令失败时仍可能打印 `booted` 并让 `cycle.sh` 继续等候；RamoopsDump 启动也有同样的退出码问题。现在用 180 秒有界的 `fastboot-boot.sh` 保留真实退出码，`boot.sh`、`cycle.sh` 和 `cycle-resume.sh` 在传输失败时停止。`adb-visible.sh` 把 Android 枚举检查限制在 6 秒内，只有 `device` 状态才算可见；等待器每 5 分钟记录一次仍在等待，12 小时到期明确报错。
+
+主机模拟覆盖 adb 的可见、未授权、阻塞，以及 fastboot boot 的成功、失败；阻塞 adb 在 6 秒内退出，失败的 fastboot boot 不再产生 `booted` 消息。脚本语法和 `git diff --check` 均通过。约定的 CI、GPU、Wi-Fi 三套配置重新构建通过，本地日志分别为 `$ZIZHAN_SRC/ci_kernel-g268-usbguard-ci.log`、`ci_kernel-g268-usbguard-gpu.log`、`ci_kernel-g268-usbguard-wifi.log`。内核源码未变，设备恢复时仍使用已打包的 g268 镜像；镜像含 `pong_shot=60`、`pong_shot_ms=1000`，便于取得首轮屏幕采样。
+
+按已记录端口执行一次 USB 断电重连后，adb 和 fastboot 仍未枚举。旧等待进程已停止，新版 g268 等待器已启动，首行写入 `$ZIZHAN_SRC/logs/g268-when-back.log`。截至本次记录，没有执行 `fastboot boot`，因此没有 g268 内核日志、截图或自动返回证据。
+
 ## 下一步
 
 USB 恢复后先确认 Android 或 fastboot 可见，再用 g268 镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。

@@ -6,14 +6,14 @@
 #   4. read logfs over adb and save the log to logs/RUN.txt
 # usage: cycle.sh IMG RUN [MAX_WAIT_SECONDS]
 # When the phone stays invisible on USB (the bootloader's attach failed, usbkick.sh), the waits in 2 and 3 power-cycle its port.
-set -u
+set -uo pipefail
 export PATH=/opt/homebrew/bin:$PATH MTOOLS_SKIP_CHECK=1
 S=${ZIZHAN_SRC:-$HOME/zizhan}
 IMG=$1; RUN=$2; WAIT=${3:-600}
 L=${ZIZHAN_SRC:-$HOME/zizhan}/logs; mkdir -p $L
 ts() { date '+%H:%M:%S'; }
 in_fastboot() { bash "$S/fastboot-visible.sh"; }
-in_adb() { adb devices | grep -q 'device$'; }
+in_adb() { bash "$S/adb-visible.sh"; }
 
 # Cool down in Android first (battery below COOL tenths of a degree, default 35.0 C, at most 20 min). This port has no thermal
 # management, and back-to-back rounds heated the phone until nearly every ramoops line had flipped bits (g40 84% clean after a
@@ -41,7 +41,7 @@ until in_fastboot; do
   sleep 3
 done
 echo "$(ts) fastboot is back after $(( $(date +%s) - start + 20 ))s; saving the ramoops to logfs"
-fastboot boot $S/out/ramoops-dump.img 2>&1 | tail -1
+bash "$S/fastboot-boot.sh" "$S/out/ramoops-dump.img" 2>&1 | tail -1 || exit 7
 start=$(date +%s); nextkick=60
 until in_adb; do
   el=$(( $(date +%s) - start ))

@@ -6,12 +6,28 @@
 set -uo pipefail
 export PATH=/opt/homebrew/bin:$PATH
 IMG=$1
+[ -f "$IMG" ] || { echo "NO_IMAGE"; exit 2; }
 ASK=${ZIZHAN_ASK_FILE:-}   # optional: file a phone-side photo page shows as the current request
 S=${ZIZHAN_SRC:-$HOME/zizhan}
 in_fastboot() { bash "$S/fastboot-visible.sh"; }
 if ! in_fastboot; then
+  bash "$S/adb-visible.sh" || { echo "NO_DEVICE"; exit 2; }
   bash $S/usbkick.sh remember >/dev/null 2>&1
-  adb reboot bootloader >/dev/null 2>&1
+  python3 - <<'PY' || { echo "ADB_REBOOT_FAILED"; exit 2; }
+import os
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        [os.environ.get("ADB_BIN", "adb"), "reboot", "bootloader"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=max(1, int(os.environ.get("ADB_REBOOT_TIMEOUT", "30"))),
+    )
+except (subprocess.TimeoutExpired, OSError):
+    sys.exit(1)
+sys.exit(result.returncode)
+PY
   for kick in 0 1 2 3; do
     deadline=$((SECONDS + 20))
     while [ "$SECONDS" -lt "$deadline" ]; do in_fastboot && break 2; sleep 1; done

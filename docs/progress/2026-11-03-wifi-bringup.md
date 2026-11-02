@@ -107,3 +107,11 @@ g268 镜像已有 `pong_shot=60`，但原轮次脚本只取回文本日志，PNG
 主机用五组隔离日志覆盖无 Wi-Fi、供电失败、PCIe 后 ath11k 失败、重复启动只取最后一轮、扫描结果；已有的 g264 非 Wi-Fi 日志输出 `NO_WIFI_LOG`。语法和差异检查通过。g268 仍没有设备日志，此摘要尚未通过真机 Wi-Fi 输出验证。
 
 `pong_ipados18_ci_defconfig` 与 `zizhan_ipados18_gpu_defconfig` 构建通过，本机日志为 `$ZIZHAN_SRC/ci_kernel-wifi-stage-ci.log`、`ci_kernel-wifi-stage-gpu.log`，均以 `KERNEL_DONE` 结束。本次只改 Mac 取证脚本，不改变 g268 内核或镜像。
+
+## 接续：自动启动的 adb 卡住保护
+
+检查 g268 等待器时，手机仍未出现在系统 USB、adb 或 fastboot 列表；`fastboot devices` 在主机上实际阻塞。等待器由 launchd 托管，日志持续只有 `still waiting for USB`，没有执行 `fastboot boot`。已结束本次手动检查中阻塞的进程，等待器继续运行。
+
+`boot.sh` 原先在看不到 fastboot 时直接执行无时限的 `adb reboot bootloader`。现在先确认 Android 为 `device` 状态，校验镜像存在，并将重启命令限制为 30 秒；设备消失、重启失败或超时都会让轮次明确失败。`fastboot-visible.sh` 同时检查命令退出码，避免工具报错却仍输出旧设备文本时误判可见。隔离模拟覆盖无设备、adb 重启失败、adb 阻塞、正常转入 fastboot、缺失镜像，以及 fastboot 非零退出码附带设备文本；结果均符合预期。脚本语法和 `git diff --check` 通过。
+
+约定的 CI、GPU 两配置构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-adb-guard-ci.log` 与 `ci_kernel-adb-guard-gpu.log`，均以 `KERNEL_DONE` 结束。这次只改自动轮次工具，不改变 g268 镜像；真实 USB 重连、临时启动、自动返回、klog/ramoops 与截图仍待设备可见后核实。

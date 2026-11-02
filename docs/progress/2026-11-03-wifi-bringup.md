@@ -54,6 +54,8 @@ Wi-Fi 配置和约定的 CI/GPU 两配置重新构建通过；生成的 ath11k `
 
 按已记录端口执行一次 USB 断电重连后，adb 和 fastboot 仍未枚举。旧等待进程已停止，新版 g268 等待器已启动，首行写入 `$ZIZHAN_SRC/logs/g268-when-back.log`。截至本次记录，没有执行 `fastboot boot`，因此没有 g268 内核日志、截图或自动返回证据。
 
+`porting-record.py check --base origin/main` 对本次增量的 13 个 area 检查通过。直接用当前 `upstream/main` 作基线会因上游后来新增的 `drivers/PongBootCapture/PongBootCapture.h` 在本设备记录里无 owner 而失败；该文件未进入本设备工作树，本次没有将其误记为设备改动。
+
 ## 下一步
 
 USB 恢复后先确认 Android 或 fastboot 可见，再用 g268 镜像执行临时 `fastboot boot` 轮次。取回 klog/ramoops 并记录 PCIe、供电、MHI、固件、MSI、扫描中的首个失败阶段；随后改动、重新完成双配置构建和上机验证。不要 flash 分区。

@@ -1771,6 +1771,71 @@ static void backboard_container(void)
     fprintf(stderr,"Pong UI18: backboardd container uses writable %s\n",path);
 }
 
+/* zizhan WIP: not built or tested on device; pong_dl_full=0 preserves requested rates.
+ * SpringBoard's own animations at the panel's rate. UIKit's UIViewInProcessAnimationManager (the animations an app runs in its own
+ * process, a home-screen page settling among them) asks its CADisplayLink for 20..30 a second: the frames after a swipe came 33.3 ms
+ * apart (g136-g143 gap p90 33.2 ms). On a ProMotion iPhone the low rate saves power; this panel refreshes at 120 whatever is drawn. The
+ * rates asked of that display link are dropped, other display links keep theirs (the clock's, the motion effects'): run at 120 they woke
+ * SpringBoard for nothing. Ported from hakios 7caa457 (right swipe 78 -> 115 fps there). pong_dl_full=0 keeps every rate; touch_lat=1
+ * prints each display link made and each rate asked. */
+typedef struct {float minimum,maximum,preferred;} frame_rate_range;
+static id (*original_link_with)(id,SEL,id,SEL);
+static void (*original_link_fps)(id,SEL,long);
+static void (*original_link_range)(id,SEL,frame_rate_range);
+static bool link_say,link_full;
+static unsigned link_said;
+static char link_full_key;
+static bool link_at_full_rate(id link) {return link_full && objc_getAssociatedObject(link,&link_full_key)!=nil;}
+static const char *link_caller(const void *address,char *out,size_t size)
+{
+    Dl_info info;
+    if(!dladdr(address,&info) || !info.dli_fname) {snprintf(out,size,"%p",address);return out;}
+    const char *image=strrchr(info.dli_fname,'/')?strrchr(info.dli_fname,'/')+1:info.dli_fname;
+    snprintf(out,size,"%s+%#lx",image,(unsigned long)((uintptr_t)address-(uintptr_t)info.dli_fbase));
+    return out;
+}
+static id link_with(id self,SEL selector,id target,SEL action)
+{
+    id link=original_link_with(self,selector,target,action);
+    char who[160];
+    if(link && target && !strcmp(object_getClassName(target),"UIViewInProcessAnimationManager"))
+        objc_setAssociatedObject(link,&link_full_key,(id)kCFBooleanTrue,OBJC_ASSOCIATION_ASSIGN);
+    if(link_say && link_said++<300)
+        fprintf(stderr,"Pong UI18: display link %p made for -[%s %s] by %s\n",(void *)link,target?object_getClassName(target):"nil",
+            action?sel_getName(action):"",link_caller(__builtin_return_address(0),who,sizeof(who)));
+    return link;
+}
+static void link_fps(id self,SEL selector,long fps)
+{
+    char who[160];
+    if(link_say && link_said++<300)
+        fprintf(stderr,"Pong UI18: display link %p asked for %ld a second%s by %s\n",(void *)self,fps,link_at_full_rate(self)?" (dropped)":"",
+            link_caller(__builtin_return_address(0),who,sizeof(who)));
+    original_link_fps(self,selector,link_at_full_rate(self)?0:fps);
+}
+static void link_range(id self,SEL selector,frame_rate_range range)
+{
+    char who[160];
+    if(link_say && link_said++<300)
+        fprintf(stderr,"Pong UI18: display link %p asked for %.0f..%.0f, %.0f a second%s by %s\n",(void *)self,range.minimum,range.maximum,
+            range.preferred,link_at_full_rate(self)?" (dropped)":"",link_caller(__builtin_return_address(0),who,sizeof(who)));
+    if(link_at_full_rate(self))range=(frame_rate_range){0,0,0};
+    original_link_range(self,selector,range);
+}
+static void display_link_rates(void)
+{
+    link_say=boot_option("touch_lat=1");link_full=!boot_option("pong_dl_full=0");
+    Class link=objc_getClass("CADisplayLink");
+    if(!link || (!link_say && !link_full))return;
+    Method made=class_getClassMethod(link,sel_registerName("displayLinkWithTarget:selector:"));
+    Method fps=class_getInstanceMethod(link,sel_registerName("setPreferredFramesPerSecond:"));
+    Method range=class_getInstanceMethod(link,sel_registerName("setPreferredFrameRateRange:"));
+    if(made)original_link_with=(id(*)(id,SEL,id,SEL))method_setImplementation(made,(IMP)link_with);
+    if(fps)original_link_fps=(void(*)(id,SEL,long))method_setImplementation(fps,(IMP)link_fps);
+    if(range)original_link_range=(void(*)(id,SEL,frame_rate_range))method_setImplementation(range,(IMP)link_range);
+    fprintf(stderr,"Pong UI18: display links: made %d fps %d range %d, in-process animations at the panel's rate %d\n",
+        made!=NULL,fps!=NULL,range!=NULL,link_full);
+}
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
     const char *name=getprogname();
@@ -1820,6 +1885,7 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     }
     if(strcmp(name,"SpringBoard")==0) {
         springboard_process=true;
+        display_link_rates();
         // The consumer reports are accepted but physical volume remains
         // unresponsive on this imported iPad board. Route those transitions
         // to the existing 22H374 controller after checking its actual ABI.

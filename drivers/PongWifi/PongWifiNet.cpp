@@ -479,6 +479,22 @@ void log_traffic() {
 
 }  // namespace
 
+extern "C" void pong_wifi_net_diagnostics(void) { log_traffic(); }
+extern "C" bool pong_wifi_net_has_ipv4(void) {
+  if (!gIf) return false;
+  ifaddr_t *list = nullptr; bool valid = false;
+  if (!ifnet_get_address_list_family(gIf, &list, AF_INET) && list) {
+    for (unsigned i = 0; list[i]; ++i) {
+      struct sockaddr_in a; memset(&a, 0, sizeof a);
+      if (ifaddr_address(list[i], reinterpret_cast<struct sockaddr *>(&a), sizeof a)) continue;
+      const uint8_t *b = reinterpret_cast<const uint8_t *>(&a.sin_addr);
+      if (b[0] && b[0] != 127 && b[0] < 224 && !(b[0] == 169 && b[1] == 254)) valid = true;
+    }
+    ifnet_free_address_list(list);
+  }
+  return valid;
+}
+
 // Install worker callbacks before nw_wifi_start. The interface and its MAC
 // are published only after the real station is ready. RX already drops
 // frames before gIf exists; those buffers remain owned by the station.

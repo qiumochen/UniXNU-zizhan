@@ -65,6 +65,23 @@ def main():
   header+='static constexpr unsigned %s=%du;\n'%(name,value)
 
  (out/'PongWifiInputs.h').write_text(header)
+ # Optional unattended association fixture. Only a local private file may
+ # provide credentials; never put them in boot args, logs or source control.
+ test_path=os.environ.get('PONG_WIFI_TEST_CONFIG')
+ ssid=key=b''
+ if test_path:
+  test=json.loads(Path(test_path).read_text())
+  ssid=test['ssid'].encode('utf-8');key=test['psk'].encode('utf-8')
+  if not 1<=len(ssid)<=32 or not 8<=len(key)<=64 or b'\0' in ssid+key:
+   raise RuntimeError('Wi-Fi test requires a valid SSID and WPA2 PSK')
+  if len(key)==64 and any(c not in b'0123456789abcdefABCDEF' for c in key):
+   raise RuntimeError('64-byte Wi-Fi test PSK must be hexadecimal')
+ test_header='static constexpr unsigned kWifiTestSsidBytes=%d,kWifiTestKeyBytes=%d;\n'%(len(ssid),len(key))
+ for name,data in [('kWifiTestSsid',ssid),('kWifiTestKey',key)]:
+  test_header+='static const unsigned char %s[]={%s};\n'%(name,','.join(str(v) for v in data) or '0')
+ test_file=out/'PongWifiTestInputs.h'
+ fd=os.open(test_file,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+ with os.fdopen(fd,'w') as f:f.write(test_header)
  fw=sorted(f for f in a.firmware.iterdir() if f.is_file())
  if not all((a.firmware/n).is_file() for n in ('amss.bin','amss20.bin','m3.bin','regdb.bin')):raise RuntimeError('Actual Pong modem firmware required')
  entries=[];at=(8+len(fw)*40+4095)&~4095

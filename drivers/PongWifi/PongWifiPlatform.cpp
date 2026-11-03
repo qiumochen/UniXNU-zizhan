@@ -14,12 +14,15 @@
 #include "nw_abi.h"
 #include "../PongAdreno/ArmSmmu4K/ArmSmmu4KProgram.h"
 #include "PongWifiInputs.h"
+#include "PongWifiTestInputs.h"
 #include "QcomRpmh.h"
 extern "C" {
 int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 void pong11_lx_irq_raise_all(void);
 void pong_wifi_net_start(const uint8_t mac[6]);
 bool pong_wifi_net_prepare(void);
+bool pong_wifi_net_has_ipv4(void);
+void pong_wifi_net_diagnostics(void);
 void PongWifiNetStaticInit(void);
 bool pong_ufs_ready(void);
 bool pong_rpmh_vote(uint32_t,uint32_t);
@@ -509,6 +512,41 @@ int cfgWrite(int o,int n,uint32_t v) {unsigned off=unsigned(o);if(off&0x80000000
 int msiTarget(uint32_t *lo,uint32_t *hi,uint32_t *data) {if(!dmaOwned)return -1;*lo=uint32_t(Iova+0x40);*hi=0;*data=0;return 0;}
 void *mapPhys(uint64_t pa,size_t n) {if(pa>=0x60200000&&pa<0x60400000&&n<=0x60400000-pa)return const_cast<uint8_t *>(bar.v)+pa-0x60200000;return nullptr;}
 volatile uint32_t msiArrivals;
+// Opt-in bring-up fixture: join only the exact locally supplied network,
+// after real scanning, and report protocol results without credentials.
+void testNetwork(const nw_wifi_status &st) {
+ static bool checked=false,enabled=false,attempted=false,finished=false;
+ static uint64_t deadline=0;
+ if(!checked) {
+  checked=true;uint32_t flag=0;
+  enabled=PE_parse_boot_argn("pong_wifi_test",&flag,sizeof flag)&&flag==1;
+  if(enabled&&(!kWifiTestSsidBytes||!kWifiTestKeyBytes)) {
+   log(6,"WiFi association test SKIP: no private network fixture");enabled=false;
+  }
+  deadline=now()+60000;
+ }
+ if(!enabled||finished)return;
+ if(!attempted&&st.state==NW_STA_IDLE) {
+  nw_bss_info b={};
+  for(int i=0,n=nw_wifi_bss_count();i<n;++i) {
+   if(nw_wifi_bss_get(i,&b)||b.ssid_len!=kWifiTestSsidBytes||memcmp(b.ssid,kWifiTestSsid,kWifiTestSsidBytes))continue;
+   int result=nw_wifi_connect(kWifiTestSsid,kWifiTestSsidBytes,b.bssid,
+    reinterpret_cast<const char *>(kWifiTestKey),kWifiTestKeyBytes);
+   attempted=true;deadline=now()+60000;
+   IOLog("PongWifi: association test RUNNING: scanned target, request=%d\n",result);
+   if(result){finished=true;log(3,"WiFi association test FAIL: station refused request");}
+   break;
+  }
+ }
+ if(attempted&&st.state==NW_STA_UP&&pong_wifi_net_has_ipv4()) {
+  finished=true;log(6,"WiFi association test PASS: authenticated link and IPv4 address");
+  pong_wifi_net_diagnostics();
+ } else if(now()>=deadline) {
+  finished=true;
+  IOLog("PongWifi: association test FAIL: target_found=%u state=%u result=%d IPv4=%u\n",
+   attempted,st.state,st.result,pong_wifi_net_has_ipv4());
+ }
+}
 void signalWorker() {__atomic_store_n(&wake,1,__ATOMIC_RELEASE);thread_wakeup(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)));}
 void irq(void *) {
  unsigned pending=dbi.r(MsiStatus);
@@ -543,13 +581,23 @@ void worker(void *,wait_result_t) {
   if(cfgWrite(4,2,6))goto done;
   initDeadline=now()+90000;int r=nw_wifi_start(&platform,&board);if(r){IOLog("PongWifi: ath11k start failed=%d\n",r);goto done;}
  }
- {bool net=false,irqSeen=false;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}poll();int busy=nw_wifi_step();nw_wifi_status st={};nw_wifi_status_get(&st);
+ {bool net=false,irqSeen=false;uint64_t diagnosticsAt=0;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}poll();int busy=nw_wifi_step();nw_wifi_status st={};nw_wifi_status_get(&st);
    if(!net&&st.channels){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
      auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);if(chosen){chosen->setProperty("mac-address-wifi0",st.mac,6);chosen->release();}
      void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);if(!handle)goto done;
      PongWifiNetStaticInit();if(OSMetaClass::postModLoad(handle)!=kIOReturnSuccess)goto done;
      pong_wifi_net_start(st.mac);log(6,"QCA6490 station ready; starting actual scan");nw_wifi_scan(nullptr,0);
    }}
+   if(net) {
+    testNetwork(st);
+    if(now()>=diagnosticsAt) {
+     diagnosticsAt=now()+15000;
+     IOLog("PongWifi: runtime state=%u scans=%u BSS=%u frames=%u MSI=%u receiver=%x\n",
+      st.state,nw_wifi_stats.scans,nw_wifi_stats.bss_seen,nw_wifi_stats.frames,
+      __atomic_load_n(&msiArrivals,__ATOMIC_RELAXED),dbi.r(MsiStatus));
+     pong_wifi_net_diagnostics();
+    }
+   }
    IOSleep(busy?1:5);
  }}
  done: stopped=1;

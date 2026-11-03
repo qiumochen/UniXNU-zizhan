@@ -22,6 +22,7 @@ MILESTONES = (
 START = 'PCIe0 cold start; power and bus clocks precede host MMIO'
 ERROR = re.compile(r'PongWifi\[3\]: (.+)|PongWifi: (ath11k start failed=.+|owned SMMU fault=.+)')
 SUBSYSTEM = re.compile(r'PongWifi: QCA6490 PCI subsystem=([0-9a-fA-F]{1,8})(?![0-9A-Za-z])')
+SCAN_FINISHED = re.compile(r'\bwifi: scan \d+ finished, ([0-9]+) networks\b')
 TERMINAL = 'WiFi initialization stopped; normal iOS boot continues, DMA retained'
 
 
@@ -48,6 +49,9 @@ def summarize(raw):
         for label, message in MILESTONES:
             if message in line and label not in {item[0] for item in observed}:
                 observed.append((label, number))
+        scan = SCAN_FINISHED.search(line)
+        if scan and int(scan.group(1)) > 0 and 'scan_bss' not in {item[0] for item in observed}:
+            observed.append(('scan_bss', number))
         match = ERROR.search(line)
         if match and TERMINAL not in line and failure is None:
             detail = (match.group(1) or match.group(2)).strip()

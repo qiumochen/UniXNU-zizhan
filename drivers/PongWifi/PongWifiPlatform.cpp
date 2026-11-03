@@ -427,6 +427,12 @@ bool isolation() {
  IOLog("PongWifi: 128MiB wired DMA mapped from %lu spans, %lu native4K table pages\n",(unsigned long)(count-1),(unsigned long)br.table_pages);
 
  ArmSmmu4KContextConfig cc={};cc.lower=&bc;cc.lower_tables=&br;cc.id0=smmu.r(0x20);cc.id2=smmu.r(0x28);cc.asid=0x1c01;cc.coherent_walk=1;cc.polled_faults=1;
+ // zizhan g272: TCR2 reads back 0x38071, including TBI0/TBI1, while
+ // the untagged policy encoded 0x38011. As in the native GPU context,
+ // explicitly request TBI for this lower-only 32-bit IOVA aperture.
+ // Every admitted DMA address has a zero top byte; keep exact readback
+ // validation rather than masking an unexpected translation policy.
+ cc.ignore_top_byte=1;
  clean(tv,br.table_pages*4096);__asm__ volatile("dsb sy":::"memory");
  // Nothing's arm_smmu_write_context_bank requires TCR2/TCR BEFORE TTBR:
  // TCR2.AS controls access to ASID[15:8]. The old adapter wrote SID1c01's

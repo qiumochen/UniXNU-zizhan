@@ -70,6 +70,16 @@ def main():
 """ + needle
     if core.count(needle) != 1: raise RuntimeError('ath11k BDF request ABI differs')
     (gen / 'core.c').unlink(); (gen / 'core.c').write_text(core.replace(needle, replacement))
+    # WMI's wait condition sends and transfers ownership of an skb on
+    # success. The shared shim's generic wait evaluates that condition
+    # again on exit, sending the same skb twice and replacing success with
+    # -EAGAIN when the single HTC credit has already been consumed (g274).
+    # Use its side-effect-safe wait for both WMI credit/descriptor paths.
+    wmi = (source / 'wmi.c').read_text()
+    if wmi.count('wait_event_timeout(') != 2:
+        raise RuntimeError('ath11k WMI command wait ABI differs')
+    (gen / 'wmi.c').unlink()
+    (gen / 'wmi.c').write_text(wmi.replace('wait_event_timeout(', 'wait_event_timeout_once('))
     mac = (shared / 'src/nw_mac80211.c').read_text()
     mac += r"""
 /* Linux ath11k still uses these mac80211 APIs; the shared station has one

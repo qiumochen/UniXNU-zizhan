@@ -433,6 +433,21 @@ bool isolation() {
  // Every admitted DMA address has a zero top byte; keep exact readback
  // validation rather than masking an unexpected translation policy.
  cc.ignore_top_byte=1;
+ // g273 reaches activation but SCTLR.ASIDPNE reads zero. Coordinate a
+ // shared ASID instead: UFS/Wi-Fi context changes hold the same lease,
+ // and no other enabled APPSSMMU stage-1 bank may use this ASID.
+ const unsigned banks=smmu.r(0x24)&255;
+ for(unsigned bank=0;bank<banks;++bank) {
+  if(bank==plan.bank)continue;
+  const size_t cb=(plan.pages+bank)*4096;
+  if(!(smmu.r(cb)&1)||!((smmu.r(0x1000+4*bank)>>16)&3))continue;
+  uint64_t ttbr0=0,ttbr1=0;
+  if(smmuRead64(nullptr,cb+0x20,&ttbr0)||smmuRead64(nullptr,cb+0x28,&ttbr1))
+   return fail("WiFi shared ASID lease read failed");
+  if((ttbr0>>48)==cc.asid||(ttbr1>>48)==cc.asid)
+   return fail("WiFi shared ASID conflicts with active context");
+ }
+ cc.shared_asid=1;
  clean(tv,br.table_pages*4096);__asm__ volatile("dsb sy":::"memory");
  // Nothing's arm_smmu_write_context_bank requires TCR2/TCR BEFORE TTBR:
  // TCR2.AS controls access to ASID[15:8]. The old adapter wrote SID1c01's

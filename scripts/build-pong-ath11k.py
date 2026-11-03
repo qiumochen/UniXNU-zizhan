@@ -80,6 +80,30 @@ def main():
         raise RuntimeError('ath11k WMI command wait ABI differs')
     (gen / 'wmi.c').unlink()
     (gen / 'wmi.c').write_text(wmi.replace('wait_event_timeout(', 'wait_event_timeout_once('))
+    # The shared station uses mac80211's split link/vif notifications.
+    # ath11k still implements the unified bss_info_changed callback.
+    # Route both notifications to that real implementation; a NULL split
+    # callback caused g277's instruction-fetch panic on the first join.
+    ath_mac = (source / 'mac.c').read_text()
+    ops = 'static const struct ieee80211_ops ath11k_ops = {'
+    bridge = '''static void pong_ath11k_vif_cfg_changed(struct ieee80211_hw *hw,
+        struct ieee80211_vif *vif, u64 changed)
+{
+    ath11k_mac_op_bss_info_changed(hw, vif, &vif->bss_conf, changed);
+}
+
+'''
+    if ath_mac.count(ops) != 1:
+        raise RuntimeError('ath11k mac80211 operations ABI differs')
+    ath_mac = ath_mac.replace(ops, bridge + ops)
+    ath_mac, changes = re.subn(
+        r'(\t\.bss_info_changed\s*= ath11k_mac_op_bss_info_changed,)',
+        r'\1\n\t.link_info_changed = ath11k_mac_op_bss_info_changed,\n'
+        r'\t.vif_cfg_changed = pong_ath11k_vif_cfg_changed,', ath_mac)
+    if changes != 1:
+        raise RuntimeError('ath11k BSS callback ABI differs')
+    (gen / 'mac.c').unlink()
+    (gen / 'mac.c').write_text(ath_mac)
     mac = (shared / 'src/nw_mac80211.c').read_text()
     mac += r"""
 /* Linux ath11k still uses these mac80211 APIs; the shared station has one

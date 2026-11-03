@@ -6,6 +6,8 @@ Does not access a phone, firmware or network credentials.
 """
 import argparse
 import os
+import plistlib
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -30,5 +32,28 @@ def main():
             subprocess.run([args.cc, "-std=gnu11", "-Wno-macro-redefined", "-Wno-unused-function",
                 "-I", str(include), *map(str, inputs), "-o", str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
+        # Test the real probe script with isolated USB/tool processes.
+        usb = Path(td) / "usb.plist"
+        called = Path(td) / "fastboot-called"
+        ioreg = Path(td) / "ioreg"
+        fastboot = Path(td) / "fastboot"
+        ioreg.write_text("#!/bin/sh\ncat " + shlex.quote(str(usb)) + "\n")
+        fastboot.write_text("#!/bin/sh\necho called >> " + shlex.quote(str(called)) +
+            "\nprintf 'test\t fastboot\n'\nexit ${TEST_FASTBOOT_STATUS:-0}\n")
+        ioreg.chmod(0o700)
+        fastboot.chmod(0o700)
+        env = dict(os.environ, IOREG_BIN=str(ioreg), FASTBOOT_BIN=str(fastboot))
+        for product, status, expected_called, expected_status in [
+            (0x4ee7, "0", False, 1), (None, "0", False, 1),
+            (0xd00d, "0", True, 0), (0xd00d, "3", True, 1),
+        ]:
+            usb.write_bytes(plistlib.dumps([] if product is None else [
+                {"idVendor": 0x18d1, "idProduct": product}]))
+            called.unlink(missing_ok=True)
+            result = subprocess.run(["bash", str(ROOT / "tools/zizhan/mac/fastboot-visible.sh")],
+                env=dict(env, TEST_FASTBOOT_STATUS=status))
+            assert called.exists() == expected_called
+            assert result.returncode == expected_status
+        print("PASS: USB guard excludes Android/missing devices; real fastboot identity and tool status required")
 if __name__ == "__main__":
     main()

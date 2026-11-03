@@ -437,14 +437,21 @@ bool isolation() {
  ArmSmmu4KProgramResult programmed={};
  const auto status=ArmSmmu4KProgramDisabledContext(&io,plan.bank,&cc,20000,&programmed);
  if(status!=ArmSmmu4KSuccess) {
-  IOLog("PongWifi: SMMU program status=%u bank=%u phase=%u TTBR0=%llx TCR=%x TCR2=%x SCTLR=%x FSR=%x\n",
-   unsigned(status),plan.bank,programmed.phase,programmed.readback.ttbr0,programmed.readback.tcr,
-   programmed.readback.tcr2,programmed.readback.sctlr,programmed.fault_status);
+  IOLog("PongWifi: SMMU program status=%u bank=%u phase=%u TTBR0=%llx TTBR1=%llx TCR=%x TCR2=%x CBAR=%x CBA2R=%x MAIR=%llx SCTLR=%x FSR=%x writes=%u polls=%u\n",
+   unsigned(status),plan.bank,programmed.phase,programmed.readback.ttbr0,programmed.readback.ttbr1,
+   programmed.readback.tcr,programmed.readback.tcr2,programmed.readback.cbar,programmed.readback.cba2r,
+   (uint64_t(programmed.readback.mair1)<<32)|programmed.readback.mair0,programmed.readback.sctlr,
+   programmed.fault_status,programmed.writes,programmed.poll_reads);
   return fail("WiFi SMMU context programming failed; SID remains detached");
  }
  cbOffset=programmed.context_offset;
- smmu.w(0xc00+4*plan.slot,plan.bank);if(!plan.migrate&&!plan.reuse)smmu.w(0x800+4*plan.slot,0x80001c01);
- if(smmu.r(0xc00+4*plan.slot)!=plan.bank||smmu.r(0x800+4*plan.slot)!=0x80001c01)return fail("WiFi SID routing failed");
+ const bool exids=(cc.id0>>8)&1;
+ const uint32_t validSmr=exids?0:UINT32_C(1)<<31;
+ const uint32_t validS2cr=exids?UINT32_C(1)<<10:0;
+ smmu.w(0xc00+4*plan.slot,plan.bank);
+ smmu.w(0x800+4*plan.slot,validSmr|0x1c01);
+ if(exids)smmu.w(0xc00+4*plan.slot,plan.bank|validS2cr);
+ if(smmu.r(0xc00+4*plan.slot)!=(plan.bank|validS2cr)||smmu.r(0x800+4*plan.slot)!=(validSmr|0x1c01))return fail("WiFi SID routing failed");
  dmaOwned=true;log(6,"exclusive SID1c01 native4K DMA and retained MSI landing page established");return true;
 }
 struct Block {uint32_t at,bytes;bool used;};Block blocks[16384];unsigned blockCount;

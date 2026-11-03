@@ -14,6 +14,6 @@ try:
 except (subprocess.TimeoutExpired, OSError):
     sys.exit(1)
 sys.exit(0 if result.returncode == 0 and any(
-    line.rstrip().endswith("\tfastboot") for line in result.stdout.splitlines()
+    "fastboot" in line.split() for line in result.stdout.splitlines()
 ) else 1)
 PY

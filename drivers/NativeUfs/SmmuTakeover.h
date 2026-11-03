@@ -24,6 +24,10 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
 {
   UfsSmmuPlan p;
   uint32_t idr0 = read(0x20), idr2 = read(0x28);
+  const bool exids = (idr0 >> 8) & 1;
+  const uint32_t validSmr = exids ? 0 : UINT32_C(1) << 31;
+  const uint32_t validS2cr = exids ? UINT32_C(1) << 10 : 0;
+  const uint32_t sidMask = exids ? 0xffffu : (1u << ((idr0 >> 9) & 15)) - 1;
   unsigned count = idr0 & 255;
   if (!(idr0 & (1U << 30)) || !(idr2 & (1U << 12))) {
     p.error = "SMMU AArch64 stage 1 unsupported"; return p;
@@ -55,13 +59,13 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
   unsigned matches = 0;
   for (unsigned i = 0; i < count; ++i) {
     uint32_t smr = read(0x800 + 4 * i);
-    if (!(smr & 0x80000000U)) {
+    uint32_t s2cr = read(0xc00 + 4 * i);
+    if (!((exids ? s2cr & validS2cr : smr & validSmr))) {
       if (!p.reuse && !p.migrate) p.slot = i;
       continue;
     }
-    uint32_t s2cr = read(0xc00 + 4 * i);
-    uint32_t mask = (smr >> 16) & 0x7fff;
-    bool match = ((smr ^ stream) & 0xffff & ~mask) == 0;
+    uint32_t mask = (smr >> 16) & (exids ? 0xffffu : 0x7fffu);
+    bool match = ((smr ^ stream) & sidMask & ~mask) == 0;
     bool translate = ((s2cr >> 16) & 3) == 0;
     unsigned mappedBank = s2cr & 255;
     bool ourBank = translate && mappedBank == p.bank;
@@ -122,6 +126,10 @@ template <class Read, class Write>
 static const char *configureUfsSmmu(const UfsSmmuPlan &p, uint16_t stream, Read read, Write write)
 {
   if (p.error) return p.error;
+  uint32_t idr0 = read(0x20);
+  const bool exids = (idr0 >> 8) & 1;
+  const uint32_t validSmr = exids ? 0 : UINT32_C(1) << 31;
+  const uint32_t validS2cr = exids ? UINT32_C(1) << 10 : 0;
   unsigned cb = (p.pages + p.bank) * 4096;
   if (!p.reuse) write(cb, 0);
   if (read(cb) != 0) return "SMMU bypass disable readback";
@@ -136,10 +144,11 @@ static const char *configureUfsSmmu(const UfsSmmuPlan &p, uint16_t stream, Read 
     // the new bank first, then atomically change only this slot's S2CR.
     write(0xc00 + 4 * p.slot, p.bank);
     if (read(0xc00 + 4 * p.slot) != p.bank) return "SMMU stream context readback";
-    if (!p.migrate) write(0x800 + 4 * p.slot, 0x80000000U | stream);
+    if (!p.migrate) write(0x800 + 4 * p.slot, validSmr | stream);
+    if (exids) write(0xc00 + 4 * p.slot, p.bank | validS2cr);
   }
-  if (read(0x800 + 4 * p.slot) != (0x80000000U | stream) ||
-      read(0xc00 + 4 * p.slot) != p.bank)
+  if (read(0x800 + 4 * p.slot) != (validSmr | stream) ||
+      read(0xc00 + 4 * p.slot) != (p.bank | validS2cr))
     return "SMMU stream mapping readback";
   return nullptr;
 }

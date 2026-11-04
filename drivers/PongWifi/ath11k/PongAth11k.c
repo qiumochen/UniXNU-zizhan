@@ -120,6 +120,19 @@ void ath11k_warn(struct ath11k_base *ab, const char *format, ...)
 void ath11k_err(struct ath11k_base *ab, const char *format, ...)
 { (void)ab; va_list a; va_start(a, format); says(3, format, a); va_end(a); }
 
+int nw_wifi_rssi_limits(int *minimum, int *maximum)
+{
+ struct ieee80211_hw *hw=nw_wifi_hw();
+ if(!hw || !minimum || !maximum || !ieee80211_hw_check(hw,SIGNAL_DBM))return -1;
+ /* These are the actual decoder's signed signal representation limits,
+  * not a claim about RF sensitivity or a fabricated signal measurement. */
+ _Static_assert(sizeof(((struct ieee80211_rx_status *)0)->signal)==1,"RSSI signal width");
+ _Static_assert(((__typeof__(((struct ieee80211_rx_status *)0)->signal))-1)<0,"signed RSSI signal");
+ const unsigned bits=8*sizeof(((struct ieee80211_rx_status *)0)->signal);
+ *minimum=-(1<<(bits-1));*maximum=(1<<(bits-1))-1;
+ return 0;
+}
+
 /* The framework's supported channels come from firmware/regulatory state. */
 unsigned nw_wifi_channel_list(unsigned *out, unsigned capacity)
 {

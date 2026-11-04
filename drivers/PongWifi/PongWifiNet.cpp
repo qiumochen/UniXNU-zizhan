@@ -41,6 +41,7 @@ extern "C" {
 
 extern "C" bool pong_wifi_test_reconnect(void);
 extern "C" unsigned nw_wifi_channel_list(unsigned *, unsigned);
+extern "C" int nw_wifi_rssi_limits(int *,int *);
 extern "C" void native_wifi_logf(int level, const char *fmt, ...);
 extern "C" void pong_wifi_wake(void);   // WifiProbe.cpp: the WiFi thread sends the queued frame now
 
@@ -65,10 +66,10 @@ enum {
   kSsid = 1, kAuthType = 2, kCipherKey = 3, kChannel = 4, kPowerSave = 5, kTxPower = 7, kRate = 8, kBssid = 9, kScanReq = 10, kScanResult = 11,
   kCardCaps = 12, kState = 13, kPhyMode = 14, kOpMode = 15, kRssi = 16, kNoise = 17, kPower = 19, kAssociate = 20, kAssociateResult = 21,
   kDisassociate = 22, kSupportedChannels = 27, kLocale = 28, kDeauth = 29, kDriverVersion = 43, kHardwareVersion = 44, kCountryCode = 51,
-  kRadioInfo = 54, kWowEnabled = 70, kVirtualRole = 96, kVirtualParent = 97, kScanReqMultiple = 86, kScanCacheClear = 90, kCurrentNetwork = 103, kChannelsInfo = 207, kHwSupportedChannels = 254,
+  kRadioInfo = 54, kWowEnabled = 70, kVirtualRole = 96, kVirtualParent = 97, kScanReqMultiple = 86, kScanCacheClear = 90, kCurrentNetwork = 103, kRssiBounds = 106, kChannelsInfo = 207, kHwSupportedChannels = 254,
 };
 // events
-enum { kEvPowerChanged = 1, kEvSsidChanged = 2, kEvBssidChanged = 3, kEvLinkChanged = 4, kEvAssocDone = 9, kEvScanDone = 10 };
+enum { kEvPowerChanged = 1, kEvSsidChanged = 2, kEvBssidChanged = 3, kEvLinkChanged = 4, kEvAssocDone = 9, kEvScanDone = 10, kEvRsnHandshakeDone = 20 };
 // results of an association, as the framework numbers them
 enum { kAssocOk = 1, kAssocFailed = 2, kAssocTimeout = 9, kAssocBadKey = 21 };
 
@@ -79,6 +80,16 @@ struct scan_result {                                                            
   uint8_t rate_count, unused0; uint32_t rates[15]; uint8_t ssid_length, ssid[32], unused1[3]; uint32_t age_ms; uint8_t flags, unused2;
   uint16_t elements_length; uint8_t elements[1024];
 };
+// 22H374 retains the legacy prefix, but reads a separate monotonic-raw
+// nanosecond observation timestamp at +0x8d0. Returning only the prefix
+// leaves TIMESTAMP zero and breaks native scan freshness filtering.
+struct scan_result24 {
+  scan_result legacy;
+  uint8_t reserved[0x8d0-sizeof(scan_result)];
+  uint64_t timestamp_ns;
+};
+static_assert(sizeof(scan_result24)==2264 &&
+  __builtin_offsetof(scan_result24,timestamp_ns)==0x8d0,"22H374 scan timestamp ABI");
 struct assoc_request {                                                                            // 592 bytes
   uint32_t version; uint16_t mode, auth_lower, auth_upper, unused0; uint32_t ssid_length; uint8_t ssid[32]; uint8_t bssid[6], unused1[2];
   uint32_t key_version, key_length, key_cipher; uint16_t key_flags, key_index; uint8_t key[64]; uint8_t rest[0x250 - 0x88];
@@ -189,6 +200,7 @@ void cached_scan_done(thread_call_param_t, thread_call_param_t) { on_scan_done()
 void on_connect_done(int result) {
   lck_mtx_lock(gLock);
   gAssocResult = result == NW_RES_OK ? kAssocOk : result == NW_RES_BAD_KEY ? kAssocBadKey : result == NW_RES_TIMEOUT ? kAssocTimeout : kAssocFailed;
+  const bool keyed=gKeyed;
   lck_mtx_unlock(gLock);
   log(6, "wifi-net: join finished: module result %d", result);
   if (result == NW_RES_OK) { post_link(true); }
@@ -198,6 +210,10 @@ void on_connect_done(int result) {
     nw_wifi_status st; nw_wifi_status_get(&st);
     link_event ev; memset(&ev, 0, sizeof ev); ev.rssi = st.signal_dbm; ev.noise = static_cast<uint16_t>(-95); ev.snr = static_cast<uint16_t>(st.signal_dbm + 95);
     post_event(kEvLinkChanged, &ev, sizeof ev);
+    // NW_RES_OK follows actual key installation/STA_AUTHORIZED for WPA2.
+    // Native wifid also waits for this event; association alone does not
+    // finish its RSN state machine. Do not notify on failed or open joins.
+    if(keyed)post_event(kEvRsnHandshakeDone,nullptr,0);
   }
 }
 void on_link_lost(int reason) {
@@ -300,11 +316,20 @@ void fill_channel(channel &c, uint32_t mhz) {
   c.version = 1;
   if (mhz >= 4900) { c.channel = (mhz - 5000) / 5; c.flags = 0x2 | 0x10; } else { c.channel = mhz == 2484 ? 14 : (mhz - 2407) / 5; c.flags = 0x2 | 0x8; }
 }
-void fill_result(scan_result &r, const nw_bss_info &b) {
-  memset(&r, 0, sizeof r); r.version = 1; fill_channel(r.ch, b.freq_mhz); r.noise_known = 1; r.noise = -95; r.rssi = b.signal_dbm; r.snr = b.signal_dbm + 95;
+uint64_t scan_clock_ns() {
+  uint64_t ns=0;absolutetime_to_nanoseconds(mach_continuous_time(),&ns);return ns;
+}
+void fill_result(scan_result24 &record, const nw_bss_info &b,uint64_t sampled_ns) {
+  memset(&record, 0, sizeof record);scan_result &r=record.legacy;
+  r.version = 1; fill_channel(r.ch, b.freq_mhz); r.noise_known = 1; r.noise = -95; r.rssi = b.signal_dbm; r.snr = b.signal_dbm + 95;
   r.beacon_interval = b.beacon_int; r.capability = b.caps; memcpy(r.bssid, b.bssid, 6); r.ssid_length = b.ssid_len; memcpy(r.ssid, b.ssid, 32);
   r.age_ms = b.age_ms; r.elements_length = b.ie_len > sizeof r.elements ? sizeof r.elements : b.ie_len; memcpy(r.elements, b.ie, r.elements_length);
   r.rate_count = 0;
+  // The station exposes real frame age at millisecond resolution. Sample
+  // the clock BEFORE querying it and round age upward, so this estimate
+  // never makes an old cached observation newer than the actual frame.
+  const uint64_t age_ns=(uint64_t(b.age_ms)+1)*1000000ull;
+  record.timestamp_ns=sampled_ns>age_ns?sampled_ns-age_ns:0;
 }
 int copy_out(const apple80211req &rq, const void *src, size_t size, bool kernel = false) {
   if (rq.req_len == 0 || !rq.req_data) return EINVAL;
@@ -357,7 +382,7 @@ int apple80211(bool set, apple80211req &rq, bool kernel = false) {
   nw_wifi_status st; nw_wifi_status_get(&st);
   const int type = rq.req_type;
   // (not on the stack: the largest answer is 4824 bytes)
-  union Out { uint8_t raw[5120]; channels_list chans; scan_result res; };
+  union Out { uint8_t raw[5120]; channels_list chans; scan_result24 res; };
   Out *outp = static_cast<Out *>(IOMallocData(sizeof(Out)));
   if (!outp) return ENOMEM;
   memset(outp, 0, sizeof(Out));
@@ -448,6 +473,18 @@ int apple80211(bool set, apple80211req &rq, bool kernel = false) {
   case kSsid: if (st.state < NW_STA_ASSOC) return ENOENT; return answer_bytes(rq, st.ssid, st.ssid_len, kernel);
   case kBssid: if (st.state < NW_STA_ASSOC) return ENOENT; return answer_bytes(rq, st.bssid, 6, kernel);
   case kChannel: if (st.state < NW_STA_AUTH) return ENOENT; w[0] = 1; fill_channel(*reinterpret_cast<channel *>(out.raw + 4), st.freq_mhz); return copy_out(rq, w, 16, kernel);
+  case kRssiBounds: {
+    static_assert(sizeof(int)==4,"Apple80211 signed RSSI words");
+    int bounds[4]={1,0,0,0};
+    if(nw_wifi_rssi_limits(&bounds[1],&bounds[2]))return EOPNOTSUPP;
+    // The station imposes no additional RSSI admission policy. Use its
+    // representable floor for this legacy gate; CoreWiFi retains its own
+    // -80/-90 dBm candidate quality policy and actual RSSI measurements.
+    // Refusing this query leaves wifid's threshold at zero and rejects
+    // every ordinary negative-dBm result before issuing an association.
+    bounds[3]=bounds[1];
+    return copy_out(rq,bounds,sizeof(bounds),kernel);
+  }
   case kRssi: case kNoise: {   // {version, radios, unit (0: dBm), per chain[4], aggregate, extension per chain[4], its aggregate}
     if (type == kRssi && st.state != NW_STA_UP) return ENOENT;
     const uint32_t v = static_cast<uint32_t>(type == kRssi ? static_cast<int32_t>(st.signal_dbm) : -95);
@@ -460,18 +497,28 @@ int apple80211(bool set, apple80211req &rq, bool kernel = false) {
   case kSupportedChannels: case kHwSupportedChannels: {
     out.chans.version = 1; unsigned n = 0;
     uint32_t frequencies[401];unsigned actual=nw_wifi_channel_list(frequencies,401);
-    for(unsigned i=0;i<actual && n<401;i++){fill_channel(out.chans.list[n],frequencies[i]);out.chans.list[n].flags|=0x80;n++;}
+    // CWFChannel compares the complete flag word for supported membership.
+    // Keep the band/width representation consistent with scan/current/
+    // history channels rather than adding ACTIVE only to this answer.
+    for(unsigned i=0;i<actual && n<401;i++){fill_channel(out.chans.list[n],frequencies[i]);n++;}
     out.chans.count = n; return copy_out(rq, &out.chans, sizeof out.chans, kernel); }
   case kScanResult: {
     nw_bss_info b; const int count = nw_wifi_bss_count();
+    const uint64_t sampled_ns=scan_clock_ns();
     if (gScanCursor >= static_cast<unsigned>(count) || nw_wifi_bss_get(static_cast<int>(gScanCursor), &b)) { gScanCursor = 0; return EIO; }   // after the last record
-    gScanCursor++; fill_result(out.res, b);
+    gScanCursor++; fill_result(out.res, b,sampled_ns);
     if (gResultsShown < 3) { ++gResultsShown; log(6, "wifi-net: scan result %u: %u MHz, %d dBm, %.*s", gScanCursor, b.freq_mhz, b.signal_dbm, b.ssid_len, reinterpret_cast<const char *>(b.ssid)); }
-    return copy_out(rq, &out.res, sizeof out.res, kernel); }
+    return copy_out(rq, &out.res, rq.req_len>=sizeof(out.res)?sizeof(out.res):sizeof(out.res.legacy), kernel); }
   case kCurrentNetwork: {
     if (st.state < NW_STA_ASSOC) return ENOENT;
     nw_bss_info b; const int count = nw_wifi_bss_count();
-    for (int i = 0; i < count; i++) if (!nw_wifi_bss_get(i, &b) && !memcmp(b.bssid, st.bssid, 6)) { fill_result(out.res, b); return copy_out(rq, &out.res, sizeof out.res, kernel); }
+    for (int i = 0; i < count; i++) {
+      const uint64_t sampled_ns=scan_clock_ns();
+      if (!nw_wifi_bss_get(i, &b) && !memcmp(b.bssid, st.bssid, 6)) {
+        fill_result(out.res, b,sampled_ns);
+        return copy_out(rq, &out.res, rq.req_len>=sizeof(out.res)?sizeof(out.res):sizeof(out.res.legacy), kernel);
+      }
+    }
     return ENOENT; }
   default: return EOPNOTSUPP;
   }

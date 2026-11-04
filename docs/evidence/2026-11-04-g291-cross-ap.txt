@@ -1,0 +1,46 @@
+Device: Xiaomi MIX Fold 2, iPadOS 18 22H374, temporary g291 boot.
+Image: g291, epoch 1793763208; pong_wifi_test=1 pong_wifi_cycle=1 pong_wifi_alt=1.
+Kernel source includes 616bb5eb8d5d622b90c51c06d10486063ecb3bcd.
+UFS log: 1271732 bytes, reason deadline, image epoch matched.
+Interrupted host collection resumed from fastboot; Android sys.boot_completed=1 after retrieval.
+Private SSID, BSSIDs, client address and DHCP transaction values omitted.
+
+Initial scanned BSSID A: 5220 MHz. Reconnection selected BSSID B: 2452 MHz.
+Raw connection records confirm A != B; both completed WPA2 handshake and key installation.
+Two distinct initial/renewal DHCP REQUEST transaction IDs matched their ACKs.
+Pong WiFi18: live lease sequence=1 link=1
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: DHCP renewal request RUNNING status=0
+Pong WiFi18: live lease sequence=2 link=1
+Pong WiFi18: DHCP renewal ACK PASS
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PongWifi[6]: WiFi lifecycle test RUNNING: disconnecting station
+Pong WiFi18: supplemental route removed (link ended)
+Pong WiFi18: disconnect cleanup PASS
+PongWifi[6]: WiFi lifecycle test RUNNING: reconnecting to scanned network
+PongWifi[6]: wifi: link width 20 (2452 MHz centre), capabilities HT yes, VHT no
+PongWifi[6]: wifi: associated, waiting for the key handshake
+PongWifi[6]: wifi: handshake message 4 acknowledged
+PongWifi[6]: wifi: connected
+PongWifi[6]: wifi-net: join finished: module result 0
+Pong WiFi18: existing en0 network setup; waiting for system DHCP
+Post-switch DHCP REQUEST and Discover packets were logged, with no incoming Offer/ACK.
+No third HTTPS success, distinct-AP test PASS, or network lifecycle PASS was logged.
+Result: distinct-BSSID authentication observed; cross-AP IP/HTTPS verification did not pass.
+The absence of replies does not by itself distinguish an AP/server issue from a driver data-path issue.
+
+Same-image control: g291-retry, temporary boot and fresh klog arm.
+UFS log: 2107152 bytes, reason deadline; returned to Android, sys.boot_completed=1.
+The console ring wrapped: boot arguments and early association/HTTPS messages are absent.
+33582 firmware-crash messages remain in the retrieved log.
+PongWifi[4]: ath11k: firmware crashed: MHI_CB_EE_RDDM
+PongWifi[4]: ath11k: failed to submit WMI_VDEV_STOP cmd
+PongWifi[4]: ath11k: failed to stop WMI vdev 0: -11
+PongWifi[3]: Device failed to clear MHI Reset
+PongWifi[3]: MHI did not enter READY state
+PongWifi[3]: ath11k: failed to start mhi: -110
+PongWifi: association test FAIL: target_found=1 state=1 result=2 IPv4=0
+Result: firmware/recovery failure, not a successful cross-AP control.
+The retained log cannot establish which association phase first caused the crash,
+or prove that the first run's missing DHCP replies had the same cause.
+Mac boot time unchanged across recovery and the control run.

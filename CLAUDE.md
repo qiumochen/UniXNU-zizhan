@@ -2,6 +2,8 @@
 
 本文件是从旧项目记忆整理的公开交接，基础内容更新至 **2026-11-02 09:39（UTC+8）**；2026-11-03 的接续见下段。先读 [AGENTS.md](AGENTS.md)、[porting.toml](porting.toml) 和 [最新进度](docs/progress/README.md)。历史轮次以对应进度文档为准；本文件不保存机器身份或设备标识。
 
+下一轮按 [硬件适配待办](docs/plan/2026-11-04-next-hardware-work.md) 接续：先验证 Wi-Fi 设置页入网和换网，再分别验证 GPU 首帧/回弹和内屏调光。外屏先独立出图和触控，再做折叠切换。
+
 ## 2026-11-03 接续
 
 Photos 零尺寸断言修复已在 g262–g264 上机验证，g264 的截图、双配置构建和自动返回记录见 [Photos 记录](docs/progress/2026-11-03-photos-context.md)。GPU fence g253/g254 的时间线全部完成；deadline 最后一笔仅在途 26 ms，见 [fence 记录](docs/progress/2026-11-02-fence-diagnostics.md)。下方 11-02 的 GPU WIP 描述保留为历史状态。
@@ -26,15 +28,19 @@ g268 自动轮次工具已补上有界 adb 探测和 `fastboot boot` 的真实�
 
 23:33 Wi-Fi 最新：g275 已在真机完成扫描（15 个网络），WMI 修正有效；关联、DHCP、公网和真实 GIC MSI 尚未验证。g276 在进入 fastboot 时 USB 未枚举，没有启动。g277 关联测试镜像和三配置构建已准备，当前等待用户重插直连 USB；电脑不重启。私有网络配置只留仓库外，试验输入默认关闭。恢复后继续 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md) 的 g277 轮次。
 
-2026-11-04 接续：[Wi-Fi 与 USB 记录](docs/progress/2026-11-04-wifi-usb.md)。后部 USB-A 的 10 次完整切换与稳定等待后的 100168 KB 临时启动通过，Mac 未重启。g279–g282 已验证真实 WPA2 和 DHCP；已定位到 DHCP ACK 含网关/DNS、但系统未发布可用默认网络。g290 的默认 Wi-Fi 路径使用独立租约补偿会话，真机首次联网、原生续租、断线清理与重连三次 HTTPS 均返回 200；Settings 和实际 MSI 仍待验证。以下之前的 USB 等待描述仅供回溯。
+2026-11-04 接续：[Wi-Fi 与 USB 记录](docs/progress/2026-11-04-wifi-usb.md)。后部 USB-A 的 10 次完整切换与稳定等待后的 100168 KB 临时启动通过，Mac 未重启。g279–g282 已验证真实 WPA2 和 DHCP；已定位到 DHCP ACK 含网关/DNS、但系统未发布可用默认网络。g290 的默认 Wi-Fi 路径使用独立租约补偿会话，真机首次联网、原生续租、断线清理与重连三次 HTTPS 均返回 200；Settings 和实际 MSI 仍待验证。g290 无凭据启动及扫描通过；g291 切换到不同 BSSID 后认证成功但无 DHCP 回复，跨 AP 联网未通过。同镜像重跑出现固件 RDDM/MHI 恢复失败，重复日志覆盖前半段，不能确认初始故障阶段；手机已回 Android。下一步先保留首次故障并定位 worker/固件恢复路径。以下之前的 USB 等待描述仅供回溯。
 
 ## 目标与当前状态
+
+GPU 最新完成：[g296–g298 设备对照](docs/progress/2026-11-04-displaylink-device.md)，源码 `42629e5`。g298 与 g296 使用同一个启动镜像，只改已安装 UI 库，moving 58.4 → 95.3 fps，抬手后 1–1.5 秒帧间隔约 33.2 → 8.3 ms；首帧仍约 75–80 ms。准备 OS/UI、布局和默认安装状态已同步为已验证 g298，并保留 `.pre-g298` 回退副本；完整 g295/g290 副本也在本机。当前没有设备轮次或 USB 等待器运行，手机已回 Android。
+
+2026-11-04 无人值守接续见 [原生 Wi-Fi 修正记录](docs/progress/2026-11-04-wifi-native-repair.md)。`fbac256` 补原生 IO80211 user client/22H374 加入 ABI、持续忙碌时的有界等待、首次 MHI 故障与原生 wifid manager 端口接线。g292 首次/续租两次 HTTPS 200；跨频段仍 RDDM，g294 的无效 vdev 实验已撤销。g293/g295 原生绑定查询成功，但 Settings 仍 accepted=0，不能宣称 Wi-Fi 全面完成。按用户要求转入 GPU；g296 实际日志发现 UIKit 动画类名与旧 hook 不符，后续以新的 GPU 对照记录为准。
 
 Xiaomi MIX Fold 2（zizhan / SM8475）运行 iPadOS 18.7.10 / 22H374，Darwin 24.6.0 / XNU 11417.140.69，Apple 系统输入为 iPad7,11。基于 UniXNU-pong（同 SoC 的 Nothing Phone (2)）和 uefi-pong；保留公共组件身份 **PongPlatform24**，zizhan 的硬件差异留在设备层。
 
 已验证：8 核 AMP、9728 MiB 受管内存、固定根镜像与可写 Data、内屏触摸、GPU 主屏与 App、120 Hz 面板、DPU 零拷贝三缓冲、电源键长按 3 秒回 fastboot、电池读数与充电拔插。典型合成滑动约 54 fps，120 Hz 面板不等于 App 已跑 120 fps。设置 › 电池能打开，最大容量能读到；健康度仍转圈。设置首次首屏 g237/g238 从 6436 ms 降到 1219 ms，见 [启动记录](docs/progress/2026-11-02-settings-launch.md)。
 
-最新六项 GPU 工作按顺序进行：ASTC 布局 WIP 已试跑，正确绘制未验证；display-link 速率拦截 WIP 尚未构建、未上机，中断前未同步到 Mac；nopreamble、内存池 / BO 缓存、动态壁纸、截图全宽问题尚未开始。fairplayd.A2 已从 g213 修改前镜像恢复到当前安装镜像，g245 记录 2560 帧、moving 2453 / 72.0 fps，查找失败为零，但仍 respawn，不能宣称 ASTC / Weather 已修好。**全量构建仍按 EXCLUDED18 排除它**。详细轮次、下一步和待用户验证见最新 GPU 记录。
+最新六项 GPU 工作按顺序进行：ASTC 的后续内容覆盖仍待验证；display-link 已完成 g296–g298 设备对照，修正实际 UIKit 动画类名后合成滑动 moving 从约 57 fps 升到 95.3 fps，动画尾段间隔改善，首帧仍约 80 ms；nopreamble、BO 缓存和动态壁纸保持独立后续，截图全宽已有 g248/g249 证据。fairplayd.A2 已从 g213 修改前镜像恢复到当前安装镜像，g245 记录 2560 帧、moving 2453 / 72.0 fps，查找失败为零，但仍 respawn，不能宣称 ASTC / Weather 已修好。**全量构建仍按 EXCLUDED18 排除它**。详细轮次、下一步和待用户验证见最新 GPU 记录。
 
 `c2124d5`、`f3b437b`、`610c0ca`、`67438bc` 已推送；旧记忆中的“等待批准推送”过时，研究报告也已由 `b5fc720` 推送。
 

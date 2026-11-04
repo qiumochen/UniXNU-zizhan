@@ -1,0 +1,34 @@
+Device: Xiaomi MIX Fold 2, 22H374; rear USB-A, temporary boots, automatic return to Android.
+UI source fix: 42629e5d8d86ead5c4b57d752e3b3187e702ed6f.
+g298 reuses the exact g296 kernel/boot image; the installed UI library is the changed component.
+Workload: pong_touch_synth=2, touch_lat=1, 8-second trace; Wi-Fi disabled.
+
+g296-gpu-default: 2482910 bytes, fresh UFS log, reason deadline.
+PONG FPS SUMMARY: frames 4523, moving 4393 at 58.4 fps, gaps 3199/319/768/91/16/129 (<17/<25/<34/<50/<90 ms/pause), beats 1892/1307/399/688/88/3/16 off 0 (1-7+ x 8333 us)
+PONG GTRACE: 8 s, 1203 events (402 submits, 402 completions, 399 scanout copies), 0 lost
+Every submission recorded inside the trace window completed.
+Observed runtime target: UIKit.InProcessAnimationManager.
+Legacy class-only match allowed 20..120, preferred 30 fps requests; no dropped-request record.
+Trace metrics: {"after_release_ms": {"0-250": {"n": 760, "p50_us": 8393, "p90_us": 16697}, "1000-1500": {"n": 709, "p50_us": 33155, "p90_us": 33335}, "250-500": {"n": 713, "p50_us": 8406, "p90_us": 16701}, "500-1000": {"n": 933, "p50_us": 8388, "p90_us": 33230}}, "fence_p50_us": 611, "hook_drops": 0, "idle_touch_first_frame_p50_us": 78920, "idle_touch_first_frame_p90_us": 88505, "idle_touch_first_frame_samples": 22, "latch_p50_us": 5306, "moving_panel_intervals": 391, "panel_gap_p50_us": 16585, "panel_gap_p90_us": 33258, "panel_gaps_over_2_beats": 101, "rebound_gap_p50_us": 8401, "rebound_gap_p90_us": 16700, "rebound_interval_samples": 1513, "zero_copy_flips": 399}
+
+g297-gpu-native: 2482187 bytes, fresh UFS log, reason deadline.
+PONG FPS SUMMARY: frames 4416, moving 4292 at 56.7 fps, gaps 2999/371/831/72/19/123 (<17/<25/<34/<50/<90 ms/pause), beats 1767/1232/468/734/69/3/19 off 0 (1-7+ x 8333 us)
+PONG GTRACE: 8 s, 1190 events (397 submits, 398 completions, 395 scanout copies), 0 lost
+Every submission recorded inside the trace window completed.
+Trace metrics: {"after_release_ms": {"0-250": {"n": 739, "p50_us": 8398, "p90_us": 16716}, "1000-1500": {"n": 683, "p50_us": 33186, "p90_us": 33331}, "250-500": {"n": 695, "p50_us": 8422, "p90_us": 16712}, "500-1000": {"n": 883, "p50_us": 8406, "p90_us": 33247}}, "fence_p50_us": 936, "hook_drops": 0, "idle_touch_first_frame_p50_us": 80462, "idle_touch_first_frame_p90_us": 86097, "idle_touch_first_frame_samples": 22, "latch_p50_us": 4456, "moving_panel_intervals": 388, "panel_gap_p50_us": 16610, "panel_gap_p90_us": 33269, "panel_gaps_over_2_beats": 107, "rebound_gap_p50_us": 8413, "rebound_gap_p90_us": 16713, "rebound_interval_samples": 1474, "zero_copy_flips": 395}
+
+g298-gpu-fixed: 2583926 bytes, fresh UFS log, reason deadline.
+PONG FPS SUMMARY: frames 7232, moving 7093 at 95.3 fps, gaps 6891/101/36/23/42/138 (<17/<25/<34/<50/<90 ms/pause), beats 5730/1161/117/20/10/13/42 off 0 (1-7+ x 8333 us)
+PONG GTRACE: 8 s, 1902 events (635 submits, 636 completions, 631 scanout copies), 0 lost
+Every submission recorded inside the trace window completed.
+Retained filtered-rate requests: 121
+Pong UI18: display link <object> asked for 20..120, 30 a second (dropped) by UIKitCore+0x144ab8
+Pong UI18: display link <object> asked for 20..120, 30 a second (dropped) by UIKitCore+0x7cdac
+Pong UI18: display link <object> asked for 80..120, 120 a second (dropped) by UIKitCore+0x144ab8
+Trace metrics: {"after_release_ms": {"0-250": {"n": 572, "p50_us": 8373, "p90_us": 16701}, "1000-1500": {"n": 1755, "p50_us": 8320, "p90_us": 8411}, "250-500": {"n": 639, "p50_us": 8354, "p90_us": 16677}, "500-1000": {"n": 1056, "p50_us": 8326, "p90_us": 16613}}, "fence_p50_us": 10, "hook_drops": 121, "idle_touch_first_frame_p50_us": 75483, "idle_touch_first_frame_p90_us": 89725, "idle_touch_first_frame_samples": 18, "latch_p50_us": 4587, "moving_panel_intervals": 623, "panel_gap_p50_us": 8334, "panel_gap_p90_us": 16639, "panel_gaps_over_2_beats": 15, "rebound_gap_p50_us": 8365, "rebound_gap_p90_us": 16687, "rebound_interval_samples": 1243, "zero_copy_flips": 631}
+
+Moving-frame FPS is not panel refresh rate or full-boot average FPS.
+Touch metric: earliest completed frame whose swap follows a synthetic DOWN after >=90 ms without a prior swap.
+The trace console wrapped, so g298 frame intervals use retained zero-copy latch records in DIAG; absent console stages are not inferred.
+First-frame latency did not show a material improvement; late animation intervals did.
+All three rounds returned to Android; Mac boot time unchanged.

@@ -1,0 +1,8 @@
+Device: Xiaomi MIX Fold 2, iPadOS 18 22H374, credential-free g290-default-wifi temporary boot.
+Boot arguments: Wi-Fi enabled; no association fixture, lifecycle test, alternate AP, or lease-repair flag.
+UFS log: 898441 bytes, deadline, image epoch matched; returned to Android.
+PongWifi[6]: QCA6490 station ready; starting actual scan
+PongWifi[6]: wifi: scan starts on 42 channels
+PongWifi[6]: wifi: scan 1 finished, 11 networks
+Pong WiFi18: waiting for en0 link
+No automatic association test, public HTTPS probe, or reconnect test ran.

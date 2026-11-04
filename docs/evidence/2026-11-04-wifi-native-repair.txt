@@ -1,0 +1,73 @@
+Device: Xiaomi MIX Fold 2, 22H374. Temporary boots on the recorded rear USB-A port.
+Host source: 3ca641b plus the Wi-Fi native repair working changes.
+PongWifi reference: d2e33ca6e0f6a3b3e7881a45ab36c6920e7afb07.
+Private SSID, BSSIDs, client addresses and DHCP transaction values omitted.
+
+g292: 1166084 bytes, fresh UFS log, reason deadline; returned to Android.
+PongWifi[6]: zizhan QCA6490 Ethernet TX/RX offload selected
+Pong UI18: display links: made 1 fps 1 range 1, in-process animations at the panel's rate 1
+PongWifi[6]: WiFi association test PASS: authenticated link and IPv4 address
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: DHCP renewal ACK PASS
+Pong WiFi18: supplemental route removed (link ended)
+Pong WiFi18: disconnect cleanup PASS
+PongWifi[3]: zizhan QCA6490 firmware FAIL: MHI reason=4, WMI submitted=350
+PongWifi[3]: WMI before firmware stop: #343 command=0x5003
+PongWifi[3]: WMI before firmware stop: #344 command=0x5008
+PongWifi[3]: WMI before firmware stop: #345 command=0x5008
+PongWifi[3]: WMI before firmware stop: #346 command=0x5008
+PongWifi[3]: WMI before firmware stop: #347 command=0x5008
+PongWifi[3]: WMI before firmware stop: #348 command=0x7008
+PongWifi[3]: WMI before firmware stop: #349 command=0x7008
+PongWifi[3]: WMI before firmware stop: #350 command=0x7008
+PongWifi[3]: QCA6490 firmware FAIL; stopping optional worker, normal iOS boot continues
+PongWifi: worker stopped; DMA retained until reset
+Observed HTTPS successes: 2
+
+g293: 1207480 bytes, fresh UFS log, reason deadline; returned to Android.
+PongWifi[6]: zizhan QCA6490 Ethernet TX/RX offload selected
+Pong UI18: display links: made 1 fps 1 range 1, in-process animations at the panel's rate 1
+PongWifi[6]: wifi-net: native client type 43 get bytes=0 -> 0
+PongWifi[6]: wifi-net: native client type 12 get bytes=19 -> 0
+PongWifi[6]: wifi-net: native client type 254 get bytes=4824 -> 0
+Pong UI18: open prefs:root=WIFI accepted=0 (workspace 1)
+No private association fixture. Initial driver scan found 12 networks.
+Native client binding/queries succeeded; no native scan/join SET or Settings acceptance was observed.
+Observed HTTPS successes: 0
+
+g294: 1121358 bytes, fresh UFS log, reason deadline; returned to Android.
+PongWifi[6]: zizhan QCA6490 Ethernet TX/RX offload selected
+Pong UI18: display links: made 1 fps 1 range 1, in-process animations at the panel's rate 1
+PongWifi[6]: wifi-net: native client type 43 get bytes=0 -> 0
+PongWifi[6]: wifi-net: native client type 12 get bytes=19 -> 0
+PongWifi[6]: wifi-net: native client type 254 get bytes=4824 -> 0
+PongWifi[6]: WiFi association test PASS: authenticated link and IPv4 address
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: DHCP renewal ACK PASS
+Pong WiFi18: supplemental route removed (link ended)
+Pong WiFi18: disconnect cleanup PASS
+PongWifi[3]: zizhan QCA6490 firmware FAIL: MHI reason=4, WMI submitted=410
+PongWifi[3]: WMI before firmware stop: #403 command=0x7008
+PongWifi[3]: WMI before firmware stop: #404 command=0x7008
+PongWifi[3]: WMI before firmware stop: #405 command=0x7008
+PongWifi[3]: WMI before firmware stop: #406 command=0x7008
+PongWifi[3]: WMI before firmware stop: #407 command=0x7008
+PongWifi[3]: WMI before firmware stop: #408 command=0x7008
+PongWifi[3]: WMI before firmware stop: #409 command=0x7008
+PongWifi[3]: WMI before firmware stop: #410 command=0x7008
+PongWifi[3]: QCA6490 firmware FAIL; stopping optional worker, normal iOS boot continues
+PongWifi: worker stopped; DMA retained until reset
+PongWifi[6]: wifi-net: native client type 43 get bytes=0 -> 50
+Cross-band station-vdev recreation did not prevent RDDM; experiment removed from final source.
+Observed HTTPS successes: 2
+
+g295: 1077305 bytes, fresh UFS log, reason deadline; returned to Android.
+PongWifi[6]: zizhan QCA6490 Ethernet TX/RX offload selected
+Pong UI18: display links: made 1 fps 1 range 1, in-process animations at the panel's rate 1
+PongWifi[6]: wifi-net: native client type 43 get bytes=0 -> 0
+PongWifi[6]: wifi-net: native client type 12 get bytes=19 -> 0
+PongWifi[6]: wifi-net: native client type 254 get bytes=4824 -> 0
+Pong UI18: open prefs:root=WIFI accepted=0 (workspace 1)
+Stock wifid legacy manager receive right installed, with HideUntilCheckIn, in its canonical job and launchd cache.
+No missing com.apple.wifi.manager lookup was logged; no native scan/join SET, accepted Settings URL, or displayed frame was observed.
+Observed HTTPS successes: 0

@@ -12,11 +12,12 @@
 
 typedef CFTypeRef (*CreateService)(CFStringRef, CFDictionaryRef);
 typedef CFDictionaryRef (*CopyInformation)(CFTypeRef);
+typedef CFPropertyListRef (*CopyStoreValue)(CFTypeRef, CFStringRef);
 static CreateService create_service;
 static CopyInformation copy_information;
 static CFTypeRef service;
-static bool test_mode, reported, test_finished;
-static unsigned retry_ticks, test_ticks;
+static bool test_mode, reported, test_finished, probe_running;
+static unsigned retry_ticks, test_ticks, next_probe, probe_attempts;
 
 static bool boot_option(const char *key)
 {
@@ -45,6 +46,16 @@ static bool link_active(bool *ipv4)
 
 static void test_https(void)
 {
+    probe_running = true;
+    unsigned attempt = ++probe_attempts;
+    void *sc = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_NOW);
+    CopyStoreValue copy_value = sc ? (CopyStoreValue)dlsym(sc, "SCDynamicStoreCopyValue") : NULL;
+    NSDictionary *ipv4 = copy_value ? CFBridgingRelease(copy_value(NULL, CFSTR("State:/Network/Global/IPv4"))) : nil;
+    NSDictionary *dns = copy_value ? CFBridgingRelease(copy_value(NULL, CFSTR("State:/Network/Global/DNS"))) : nil;
+    fprintf(stderr, "Pong WiFi18: HTTPS probe %u store=%d primary-en0=%d router=%d dns=%d\n",
+            attempt, copy_value != NULL, [ipv4[@"PrimaryInterface"] isEqual:@"en0"], ipv4[@"Router"] != nil,
+            [dns[@"ServerAddresses"] count] != 0);
+    if (sc) dlclose(sc);
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     cfg.timeoutIntervalForRequest = 12;
     cfg.timeoutIntervalForResource = 20;
@@ -53,8 +64,15 @@ static void test_https(void)
     [[session dataTaskWithURL:url completionHandler:^(NSData *body, NSURLResponse *response, NSError *error) {
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
         bool ok = !error && status >= 200 && status < 300 && body.length;
-        fprintf(stderr, "Pong WiFi18: HTTPS test %s status=%ld bytes=%lu error=%ld\n",
-                ok ? "PASS" : "FAIL", (long)status, (unsigned long)body.length, (long)error.code);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            bool final = ok || attempt >= 4;
+            fprintf(stderr, "Pong WiFi18: HTTPS %s status=%ld bytes=%lu error=%ld attempt=%u\n",
+                    ok ? "test PASS" : final ? "test FAIL" : "probe failed; retrying",
+                    (long)status, (unsigned long)body.length, (long)error.code, attempt);
+            test_finished = final;
+            probe_running = false;
+            next_probe = test_ticks + 4;
+        });
         [session finishTasksAndInvalidate];
     }] resume];
 }
@@ -77,11 +95,14 @@ static void tick(void)
         if (!service || info) {
             fprintf(stderr, "Pong WiFi18: IPv4 %s\n", info ? "DHCP lease observed" : "already configured by system");
             reported = true;
-            if (test_mode && !test_finished) { test_finished = true; test_https(); }
+            if (test_mode && !probe_attempts) next_probe = test_ticks + 4;
         }
         if (info) CFRelease(info);
     }
-    if (test_mode && !test_finished && ++test_ticks >= 45) {
+    if (!test_mode || test_finished) return;
+    ++test_ticks;
+    if (reported && !probe_running && test_ticks >= next_probe) test_https();
+    if (!reported && !probe_running && test_ticks >= 45) {
         fprintf(stderr, "Pong WiFi18: address test FAIL: no usable IPv4 within 90 seconds\n");
         test_finished = true;
     }

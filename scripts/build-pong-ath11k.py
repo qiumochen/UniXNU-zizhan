@@ -201,6 +201,20 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     sta = sta.replace(leave, '''else if (kind == REQ_DISCONNECT && C.state >= NW_STA_AUTH) {
       lx_cancel_delayed(&g_timer); teardown(C.state == NW_STA_UP, -1); C.state = NW_STA_IDLE;
     }''')
+    # ath11k caches the management rate after association, then reapplies it
+    # when the next vdev starts (mac.c: ath11k_start_vdev). Rejoining from
+    # 2.4 to 5 GHz must not carry a CCK rate into that start/authentication.
+    # Use the same AP basic-rate selection as the shared station's later
+    # association notification, but publish it before assign_vif_chanctx.
+    rates_begin = '    const u8 *e = find_ie(C.ap.ie, C.ap.ie_len, WLAN_EID_SUPP_RATES);'
+    rates_end = '    g_vif->bss_conf.assoc_capability = C.ap.caps;'
+    assign = '  r = g_ops->assign_vif_chanctx(g_hw, g_vif, &g_vif->bss_conf, C.ctx);'
+    if sta.count(rates_begin) != 1 or sta.count(rates_end) != 1 or sta.count(assign) != 1:
+        raise RuntimeError('shared station basic-rate/channel-start ABI differs')
+    rate_selection = sta[sta.index(rates_begin):sta.index(rates_end)]
+    sta = sta.replace(assign, rate_selection +
+        '  lx_log(6, "zizhan station: pre-start band=%u basic_rates=0x%x", band, g_vif->bss_conf.basic_rates);\n'
+        '  g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BASIC_RATES);\n' + assign)
     (out / 'nw_sta_pong.c').write_text(sta)
     common_sources = ['src/nw_crypto.c', 'src/nw_mac80211.c', 'src/nw_net.c', 'src/nw_pci.c',
         'src/nw_qrtr.c', 'src/nw_qrtr_mhi.c', 'src/nw_sta.c', 'shim/src/lx_rt.c', 'shim/src/mhi_hook.c']

@@ -522,12 +522,17 @@ unsigned testReconnectState;
 void testNetwork(const nw_wifi_status &st) {
  static bool checked=false,enabled=false,attempted=false,finished=false;
  static bool alternate=false,reconnecting=false,rescanned=false;
+ static uint32_t firstBand=0;
  static uint8_t firstBssid[6];
  static uint64_t deadline=0, reconnectAt=0;
  if(!checked) {
   checked=true;uint32_t flag=0;
   enabled=PE_parse_boot_argn("pong_wifi_test",&flag,sizeof flag)&&flag==1;
   alternate=enabled&&PE_parse_boot_argn("pong_wifi_alt",&flag,sizeof flag)&&flag==1;
+  if(enabled&&PE_parse_boot_argn("pong_wifi_band",&firstBand,sizeof firstBand)&&
+     firstBand!=0&&firstBand!=2&&firstBand!=5) {
+   log(6,"WiFi association test SKIP: band must be 0, 2 or 5");enabled=false;
+  }
   if(enabled&&(!kWifiTestSsidBytes||!kWifiTestKeyBytes)) {
    log(6,"WiFi association test SKIP: no private network fixture");enabled=false;
   }
@@ -549,6 +554,13 @@ void testNetwork(const nw_wifi_status &st) {
   nw_bss_info b={};
   for(int i=0,n=nw_wifi_bss_count();i<n;++i) {
    if(nw_wifi_bss_get(i,&b)||b.ssid_len!=kWifiTestSsidBytes||memcmp(b.ssid,kWifiTestSsid,kWifiTestSsidBytes))continue;
+   // Optional fixture control: scanner order must not decide which direction
+   // a cross-band regression exercises. Only admit the same private SSID.
+   const unsigned band=b.freq_mhz>=2400&&b.freq_mhz<2500?2:
+    b.freq_mhz>=4900&&b.freq_mhz<5925?5:0;
+   const unsigned wanted=alternate&&reconnecting&&firstBand?
+    (firstBand==2?5:2):firstBand;
+   if(wanted&&band!=wanted)continue;
    if(alternate&&reconnecting&&!memcmp(b.bssid,firstBssid,sizeof firstBssid))continue;
    int result=nw_wifi_connect(kWifiTestSsid,kWifiTestSsidBytes,b.bssid,
     reinterpret_cast<const char *>(kWifiTestKey),kWifiTestKeyBytes);

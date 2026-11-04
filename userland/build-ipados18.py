@@ -24,6 +24,7 @@ import stat
 import struct
 import subprocess
 import sys
+from wifi_service_stage import compile_service as compile_wifi_service, stage_service as stage_wifi_service
 
 VERIFY_IMAGES = False
 BUILD_PLAN_FORMAT = 'pong-userland-22H374-v1'
@@ -973,6 +974,9 @@ def prepare(a):
     (overlay / 'sbin').mkdir(exist_ok=True)
     init_signature = compile_init(out, a.developer, overlay / 'sbin/launchd')
     counts = jobs(root, cryptex, overlay, out, a.app_cryptex)
+    wifi_service = out / 'wifi-service18'
+    compile_wifi_service(wifi_service, a.developer)
+    stage_wifi_service(overlay, wifi_service)
     if a.app_cryptex:
         install_app_cryptex(a.app_cryptex, overlay, numeric_owners=False)
     dump(out / 'phone-artwork.json', phone_wallpaper_resources(root, overlay))

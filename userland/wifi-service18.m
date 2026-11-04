@@ -24,6 +24,10 @@ static CFTypeRef setup_session;
 static CopyStoreValue copy_value;
 static NotificationKey notification_key;
 static NSString *setup_ipv4_key;
+static NSString *setup_dns_key;
+static NSDate *setup_started;
+static SetStoreMultiple set_store;
+static bool lease_repaired, lease_repair_enabled;
 static bool system_setup;
 static bool test_mode, reported, test_finished, probe_running;
 static unsigned retry_ticks, test_ticks, next_probe, probe_attempts;
@@ -83,15 +87,73 @@ static bool configure_en0(void)
         }
     base = [@"Setup:/Network/Service/" stringByAppendingString:NSUUID.UUID.UUIDString];
     setup_ipv4_key = [base stringByAppendingString:@"/IPv4"];
+    setup_dns_key = [base stringByAppendingString:@"/DNS"];
     keys = @{[base stringByAppendingString:@"/Interface"]:
                                @{@"DeviceName": @"en0", @"Type": @"Ethernet", @"Hardware": @"AirPort"},
                            setup_ipv4_key: @{@"ConfigMethod": @"DHCP"}};
+    setup_started = NSDate.date;
     ok = set(setup_session, (__bridge CFDictionaryRef)keys, NULL, NULL);
+    if (ok) set_store = set;
     fprintf(stderr, "Pong WiFi18: en0 network setup %s\n", ok ? "RUNNING" : "rejected");
 done:
     if (!ok && setup_session) { CFRelease(setup_session); setup_session = NULL; }
     dlclose(sc);
     return ok;
+}
+
+static NSString *ipv4_text(const uint8_t *bytes)
+{
+    char text[INET_ADDRSTRLEN];
+    if (!bytes[0] || bytes[0] == 127 || bytes[0] >= 224) return nil;
+    return inet_ntop(AF_INET, bytes, text, sizeof text) ? @(text) : nil;
+}
+
+/* Native IPConfiguration owns the lease and address. Recover omitted route
+ * and resolver options only from its current, matching DHCP ACK. */
+static void recover_lease_options(NSDictionary *state)
+{
+    if (!setup_session || !set_store || lease_repaired || !state ||
+        state[@"Router"] || ![state[@"InterfaceName"] isEqual:@"en0"]) return;
+    NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:@"/var/db/dhcpclient/leases/en0.plist"];
+    NSDate *start = saved[@"LeaseStartDate"];
+    NSData *packet = saved[@"PacketData"];
+    if (![start isKindOfClass:NSDate.class] || [start compare:setup_started] == NSOrderedAscending ||
+        ![packet isKindOfClass:NSData.class] || packet.length < 241 || packet.length > 4096) return;
+    const uint8_t *b = packet.bytes;
+    if (b[0] != 2 || memcmp(b + 236, "\x63\x82\x53\x63", 4)) return;
+    NSString *address = ipv4_text(b + 16);
+    if (!address || ![state[@"Addresses"] containsObject:address]) return;
+    bool ack = false, end = false, classless = false;
+    NSString *router = nil;
+    NSMutableArray *dns = [NSMutableArray array];
+    for (NSUInteger i = 240; i < packet.length;) {
+        unsigned code = b[i++];
+        if (!code) continue;
+        if (code == 255) { end = true; break; }
+        if (i == packet.length) return;
+        unsigned n = b[i++];
+        if (n > packet.length - i) return;
+        if (code == 53 && n == 1) ack = b[i] == 5;
+        if (code == 121) classless = true; // preserve native classless-route policy
+        if (code == 3 && n >= 4 && n % 4 == 0) router = ipv4_text(b + i);
+        if (code == 6 && n % 4 == 0)
+            for (unsigned j = 0; j < n; j += 4) {
+                NSString *server = ipv4_text(b + i + j);
+                if (server) [dns addObject:server];
+            }
+        i += n;
+    }
+    if (!end || !ack || classless || !router || !dns.count || [router isEqual:address]) return;
+    struct in_addr local, gateway, mask;
+    NSString *subnet = [state[@"SubnetMasks"] firstObject];
+    if (!subnet || inet_pton(AF_INET, subnet.UTF8String, &mask) != 1 ||
+        inet_pton(AF_INET, address.UTF8String, &local) != 1 ||
+        inet_pton(AF_INET, router.UTF8String, &gateway) != 1 ||
+        (gateway.s_addr & mask.s_addr) != (local.s_addr & mask.s_addr)) return;
+    NSDictionary *options = @{setup_ipv4_key: @{@"ConfigMethod": @"DHCP", @"Router": router},
+                              setup_dns_key: @{@"ServerAddresses": dns}};
+    lease_repaired = set_store(setup_session, (__bridge CFDictionaryRef)options, NULL, NULL);
+    fprintf(stderr, "Pong WiFi18: current DHCP ACK route and DNS %s\n", lease_repaired ? "APPLIED" : "rejected");
 }
 
 static void test_https(void)
@@ -130,7 +192,7 @@ static void tick(void)
     if (!link_active(&ipv4)) {
         if (service) { CFRelease(service); service = NULL; }
         if (setup_session) { CFRelease(setup_session); setup_session = NULL; }
-        retry_ticks = 0; reported = false; system_setup = false;
+        retry_ticks = 0; reported = false; system_setup = false; lease_repaired = false;
     } else if (!ipv4 && !service && ++retry_ticks == 1) {
         configure_en0();
     } else if (!ipv4 && setup_session && retry_ticks == 25) {
@@ -158,6 +220,11 @@ static void tick(void)
         }
         if (info) CFRelease(info);
     }
+    if (ipv4 && setup_session && lease_repair_enabled && !lease_repaired && copy_value) {
+        NSString *key = [setup_ipv4_key stringByReplacingCharactersInRange:NSMakeRange(0, 5) withString:@"State"];
+        NSDictionary *state = CFBridgingRelease(copy_value(NULL, (__bridge CFStringRef)key));
+        recover_lease_options(state);
+    }
     if (!test_mode || test_finished) return;
     ++test_ticks;
     if (reported && !probe_running && test_ticks >= next_probe) test_https();
@@ -172,6 +239,7 @@ int main(void)
     @autoreleasepool {
         if (!boot_option("pong_wifi=1")) return 0;
         test_mode = boot_option("pong_wifi_test=1");
+        lease_repair_enabled = boot_option("pong_wifi_lease_repair=1");
         void *framework = dlopen("/System/Library/PrivateFrameworks/IPConfiguration.framework/IPConfiguration", RTLD_NOW);
         create_service = framework ? (CreateService)dlsym(framework, "IPConfigurationServiceCreate") : NULL;
         copy_information = framework ? (CopyInformation)dlsym(framework, "IPConfigurationServiceCopyInformation") : NULL;

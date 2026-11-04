@@ -32,6 +32,10 @@ python3 <checker>/scripts/porting-record.py check --device <device> --base b8734
 
 原始推送的记录检查：[41816187641](https://github.com/qiumochen/UniXNU-zizhan/actions/runs/41816187641) 已通过；内核 CI：[41816187280](https://github.com/qiumochen/UniXNU-zizhan/actions/runs/41816187280)。本轮修订后还需在最终提交跟进记录、Wi-Fi 主机回归和 macOS 内核三项结果。
 
+## 新增 Linux 回归发现的主机兼容问题
+
+首轮 [Wi-Fi host regressions](https://github.com/qiumochen/UniXNU-zizhan/actions/runs/41817919354) 的 SMMU 用例通过，但 WMI 用例编译失败：glibc 的 `<errno.h>` 经 `<linux/errno.h>` 取常量时，被 `-I` 加入的 Darwin shim 同名包装遮住，`EAGAIN` 未定义。将测试脚本的本地头搜索改为 `-iquote`，只处理用引号引用的驱动/shim 头；系统尖括号头仍由系统提供。不改共享驱动、不硬编码 errno 常量、不跳过用例。修正后 macOS/clang 回归通过，Linux hosted 结果随新提交跟进。
+
 ## 尚未满足的最新打包要求
 
 - [ ] 从上游 `templates/package.sh` 原样采用统一 `scripts/package.sh`。

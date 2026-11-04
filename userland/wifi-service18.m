@@ -34,7 +34,7 @@ static int (*store_error)(void);
 static NotificationKey notification_key;
 static NSString *setup_ipv4_key;
 static SetStoreMultiple set_store;
-static uint64_t applied_sequence, last_link, observed_sequence, refresh_sequence;
+static uint64_t applied_sequence, last_link, observed_sequence, refresh_sequence, reconnect_sequence;
 static bool cycle_test, cleanup_seen;
 static unsigned phase;
 static NSString *retired_setup, *retired_native, *retired_ipv4, *retired_dns;
@@ -296,11 +296,17 @@ static void test_https(void)
             if (!cycle_test || !ok) return;
             if (phase == 0) {
                 refresh_sequence = observed_sequence;
-                bool sent = setup_session && notify_store && notify_store(setup_session,
+                CFTypeRef test_store = setup_session ?: repair_session;
+                CFTypeRef temporary = !test_store && create_store ?
+                    create_store(NULL, CFSTR("Pong WiFi lifecycle test"), NULL, NULL, NULL) : NULL;
+                bool sent = (test_store || temporary) && notify_store && notify_store(test_store ?: temporary,
                     CFSTR("State:/Network/Interface/en0/RefreshConfiguration"));
-                fprintf(stderr, "Pong WiFi18: DHCP renewal request %s\n", sent ? "RUNNING" : "FAIL");
+                fprintf(stderr, "Pong WiFi18: DHCP renewal request %s status=%d\n",
+                        sent ? "RUNNING" : "FAIL", !sent && store_error ? store_error() : 0);
+                if (temporary) CFRelease(temporary);
                 if (sent) { phase = 1; test_finished = false; }
             } else if (phase == 2) {
+                reconnect_sequence = observed_sequence;
                 int e = wifi_ioctl(PONG_WIFI_TEST_RECONNECT, NULL);
                 fprintf(stderr, "Pong WiFi18: reconnect request %s errno=%d\n", e ? "FAIL" : "RUNNING", e);
                 if (!e) { phase = 3; test_finished = false; }
@@ -332,7 +338,7 @@ static void tick(void)
         if (setup_session) { CFRelease(setup_session); setup_session = NULL; }
         retry_ticks = 0; reported = false; system_setup = false;
     }
-    if (!up && phase == 3 && (retired_setup || retired_ipv4) && !cleanup_seen) {
+    if (!up && phase == 3 && !cleanup_seen) {
         NSDictionary *global = read_state(@"State:/Network/Global/IPv4");
         cleanup_seen = !read_state(retired_setup) && !read_state(retired_native) &&
                        !read_state(retired_ipv4) && !read_state(retired_dns) &&
@@ -383,7 +389,7 @@ static void tick(void)
         fprintf(stderr, "Pong WiFi18: DHCP renewal ACK PASS\n");
         phase = 2; probe_attempts = 0; next_probe = test_ticks + 2;
     }
-    if (phase == 3 && cleanup_seen && up && ipv4 && observed_sequence > refresh_sequence + 1) {
+    if (phase == 3 && cleanup_seen && up && ipv4 && observed_sequence > reconnect_sequence) {
         phase = 4; probe_attempts = 0; next_probe = test_ticks + 2;
     }
     if ((phase == 0 || phase == 2 || phase == 4) && reported && !probe_running && test_ticks >= next_probe) test_https();

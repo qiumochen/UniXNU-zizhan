@@ -39,7 +39,8 @@ namespace {
 constexpr uint64_t Iova=0xa0000000;
 constexpr unsigned MsiAddressLo=0x820, MsiAddressHi=0x824, MsiEnable=0x828, MsiMask=0x82c, MsiStatus=0x830;
 constexpr unsigned PcieGlobalIntid=32+140, ParfMsi0=1u<<23;
-constexpr size_t ArenaBytes=128*1024*1024, TableBytes=512*1024;
+constexpr size_t TableBytes=512*1024;
+size_t ArenaBytes;
 struct Window {
  IOMemoryMap *map=nullptr; volatile uint8_t *v=nullptr; size_t n=0;
  bool open(uint64_t pa,size_t bytes) {
@@ -374,13 +375,25 @@ bool allocateArena() {
  // QCA6490 needs contiguous DMA addresses, not 128 MiB of adjacent RAM.
  // Wire ordinary pages and let this SID's native4K SMMU provide the IOVA
  // extent. A large physically contiguous allocation fails after UI startup.
- arena=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
-  IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryMapperNone)|IOOptionBits(kIOMapWriteCombineCache),ArenaBytes,4096);
- if(!arena)return fail("WiFi wired DMA arena allocation failed");
- if(arena->prepare()!=kIOReturnSuccess)return fail("WiFi DMA arena wiring failed");
- arenaVa=static_cast<uint8_t *>(arena->getBytesNoCopy());
- if(!arenaVa||(reinterpret_cast<uintptr_t>(arenaVa)&4095)||arena->getLength()!=ArenaBytes)return fail("WiFi DMA arena mapping invalid");
- bzero(arenaVa,ArenaBytes);return true;
+ uint32_t preferred=128;
+ if(PE_parse_boot_argn("pong_wifi_dma_mib",&preferred,sizeof preferred)&&preferred!=64&&preferred!=128)
+  return fail("WiFi DMA budget must be 64 or 128 MiB");
+ const uint32_t budgets[]={preferred,64};
+ for(unsigned attempt=0;attempt<(preferred==64?1u:2u);++attempt) {
+  const size_t bytes=size_t(budgets[attempt])*1024*1024;
+  arena=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+   IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryMapperNone)|IOOptionBits(kIOMapWriteCombineCache),bytes,4096);
+  if(!arena){IOLog("PongWifi: DMA allocation SKIP %u MiB; trying smaller actual budget\n",budgets[attempt]);continue;}
+  const bool prepared=arena->prepare()==kIOReturnSuccess;
+  arenaVa=prepared?static_cast<uint8_t *>(arena->getBytesNoCopy()):nullptr;
+  if(!arenaVa||(reinterpret_cast<uintptr_t>(arenaVa)&4095)||arena->getLength()!=bytes) {
+   if(prepared)arena->complete();arena->release();arena=nullptr;arenaVa=nullptr;
+   IOLog("PongWifi: DMA wiring/mapping SKIP %u MiB\n",budgets[attempt]);continue;
+  }
+  ArenaBytes=bytes;bzero(arenaVa,ArenaBytes);
+  IOLog("PongWifi: actual wired DMA budget %u MiB\n",budgets[attempt]);return true;
+ }
+ return fail("WiFi wired DMA arena allocation failed at all budgets");
 }
 int smmuRead32(void *,size_t off,uint32_t *out) {
  if(!out||(off&3)||off>smmu.n-4)return -1;
@@ -414,7 +427,7 @@ bool isolation() {
  auto plan=planUfsSmmu(0x1c01,Iova,ArenaBytes+4096,[](unsigned o){return smmu.r(o);},78,120);
  if(plan.error)return fail(plan.error);
  ArmSmmu4KConfig bc={32,36,tablePa,(ArenaBytes/4096)+1};
- constexpr size_t capacity=ArenaBytes/4096+1;
+ const size_t capacity=ArenaBytes/4096+1;
  auto ranges=IONewData(ArmSmmu4KRange,capacity);
  if(!ranges)return fail("WiFi DMA span metadata allocation failed");
  size_t count=1;ranges[0]={Iova,msiPa,4096,3,0,2};
@@ -431,7 +444,7 @@ bool isolation() {
  const auto built=ArmSmmu4KBuild(&bc,ranges,count,tv,TableBytes/4096,&br);
  IODeleteData(ranges,ArmSmmu4KRange,capacity);
  if(built!=ArmSmmu4KSuccess)return fail("WiFi native4K page tables failed");
- IOLog("PongWifi: 128MiB wired DMA mapped from %lu spans, %lu native4K table pages\n",(unsigned long)(count-1),(unsigned long)br.table_pages);
+ IOLog("PongWifi: %luMiB wired DMA mapped from %lu spans, %lu native4K table pages\n",(unsigned long)(ArenaBytes>>20),(unsigned long)(count-1),(unsigned long)br.table_pages);
 
  ArmSmmu4KContextConfig cc={};cc.lower=&bc;cc.lower_tables=&br;cc.id0=smmu.r(0x20);cc.id2=smmu.r(0x28);cc.asid=0x1c01;cc.coherent_walk=1;cc.polled_faults=1;
  // zizhan g272: TCR2 reads back 0x38071, including TBI0/TBI1, while
@@ -634,9 +647,9 @@ void worker(void *,wait_result_t) {
     testNetwork(st);
     if(now()>=diagnosticsAt) {
      diagnosticsAt=now()+15000;
-     IOLog("PongWifi: runtime state=%u scans=%u BSS=%u frames=%u MSI=%u receiver=%x\n",
+     IOLog("PongWifi: runtime state=%u scans=%u BSS=%u frames=%u MSI=%u receiver=%x dma-mib=%lu\n",
       st.state,nw_wifi_stats.scans,nw_wifi_stats.bss_seen,nw_wifi_stats.frames,
-      __atomic_load_n(&msiArrivals,__ATOMIC_RELAXED),dbi.r(MsiStatus));
+      __atomic_load_n(&msiArrivals,__ATOMIC_RELAXED),dbi.r(MsiStatus),(unsigned long)(ArenaBytes>>20));
      pong_wifi_net_diagnostics();
     }
    }

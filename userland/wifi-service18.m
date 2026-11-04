@@ -27,7 +27,7 @@ static CopyInformation copy_information;
 static CFTypeRef service;
 static CFTypeRef setup_session, repair_session;
 static CreateStore create_store;
-static NSString *session_option, *repair_ipv4_key, *repair_dns_key;
+static NSString *session_option, *repair_ipv4_key, *repair_dns_key, *repair_interface_key;
 static CopyStoreValue copy_value;
 static CopyStoreMultiple copy_multiple;
 static int (*store_error)(void);
@@ -37,7 +37,7 @@ static SetStoreMultiple set_store;
 static uint64_t applied_sequence, last_link, observed_sequence, refresh_sequence, reconnect_sequence;
 static bool cycle_test, cleanup_seen;
 static unsigned phase;
-static NSString *retired_setup, *retired_native, *retired_ipv4, *retired_dns;
+static NSString *retired_setup, *retired_native, *retired_ipv4, *retired_dns, *retired_repair_interface;
 static Boolean (*notify_store)(CFTypeRef, CFStringRef);
 static bool system_setup;
 static bool test_mode, ui_test_mode, reported, test_finished, probe_running;
@@ -209,7 +209,7 @@ static void clear_repair(const char *reason)
 {
     if (!repair_session) return;
     CFRelease(repair_session); repair_session = NULL;
-    repair_ipv4_key = nil; repair_dns_key = nil;
+    repair_ipv4_key = nil; repair_dns_key = nil; repair_interface_key = nil;
     applied_sequence = 0;
     fprintf(stderr, "Pong WiFi18: supplemental route removed (%s)\n", reason);
 }
@@ -261,16 +261,37 @@ static void recover_lease_options(struct pong_wifi_lease lease)
         repair_session = create_store(NULL, CFSTR("Pong WiFi DHCP options"),
                                      (__bridge CFDictionaryRef)options, NULL, NULL);
         if (!repair_session) return;
-        NSString *base = [@"State:/Network/Service/" stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSString *identifier = NSUUID.UUID.UUIDString;
+        NSString *base = [@"State:/Network/Service/" stringByAppendingString:identifier];
         repair_ipv4_key = [base stringByAppendingString:@"/IPv4"];
         repair_dns_key = [base stringByAppendingString:@"/DNS"];
+        repair_interface_key = [NSString stringWithFormat:@"Setup:/Network/Service/%@/Interface", identifier];
+    }
+    // wifid maps State service notifications through their Setup interface
+    // entity. Bind this supplemental IP service to the existing REAL en0;
+    // an anonymous State-only service can route packets while wifid times
+    // out waiting for its interface to become routable. No new DHCP client
+    // or hardware interface is created, and all keys share session lifetime.
+    NSArray *interface_patterns = @[@"Setup:/Network/Service/[^/]+/Interface"];
+    NSDictionary *bindings = CFBridgingRelease(copy_multiple(repair_session, NULL, (__bridge CFArrayRef)interface_patterns));
+    NSDictionary *interface = nil;
+    for (NSString *key in bindings) {
+        id candidate = bindings[key];
+        if (![key isEqual:repair_interface_key] && [candidate isKindOfClass:NSDictionary.class] &&
+            [candidate[@"DeviceName"] isEqual:@"en0"]) { interface = candidate; break; }
+    }
+    if (!interface) {
+        lease_skip = "no live en0 setup binding";
+        clear_repair("interface binding disappeared");
+        return;
     }
     char netmask[INET_ADDRSTRLEN];
     if (!inet_ntop(AF_INET, lease.mask, netmask, sizeof netmask)) return;
     NSDictionary *state = @{@"Addresses": @[address], @"SubnetMasks": @[@(netmask)],
                             @"Router": router, @"InterfaceName": @"en0",
                             @"ConfirmedInterfaceName": @"en0"};
-    NSDictionary *options = @{repair_ipv4_key: state, repair_dns_key: @{@"ServerAddresses": dns}};
+    NSDictionary *options = @{repair_interface_key: interface, repair_ipv4_key: state,
+                              repair_dns_key: @{@"ServerAddresses": dns}};
     bool ok = set_store(repair_session, (__bridge CFDictionaryRef)options, NULL, NULL);
     lease_skip = ok ? "applied" : "store rejected options";
     if (!ok) { clear_repair("store rejected options"); return; }
@@ -383,6 +404,7 @@ static void tick(void)
             retired_native = setup_session ? state_key(setup_ipv4_key) : nil;
             retired_ipv4 = repair_ipv4_key;
             retired_dns = repair_dns_key;
+            retired_repair_interface = repair_interface_key;
         }
         clear_repair("link ended");
         if (setup_session) { CFRelease(setup_session); setup_session = NULL; }
@@ -392,6 +414,7 @@ static void tick(void)
         NSDictionary *global = read_state(@"State:/Network/Global/IPv4");
         cleanup_seen = !read_state(retired_setup) && !read_state(retired_native) &&
                        !read_state(retired_ipv4) && !read_state(retired_dns) &&
+                       !read_state(retired_repair_interface) &&
                        ![global[@"PrimaryInterface"] isEqual:@"en0"];
         if (cleanup_seen) fprintf(stderr, "Pong WiFi18: disconnect cleanup PASS\n");
     }

@@ -126,7 +126,7 @@ static NSString *ipv4_text(const uint8_t *bytes)
     return inet_ntop(AF_INET, bytes, text, sizeof text) ? @(text) : nil;
 }
 
-static bool kernel_lease_matches(const struct pong_wifi_lease *lease)
+static bool kernel_lease_matches(const struct pong_wifi_lease *lease, bool *mask_matches)
 {
     struct ifaddrs *list = NULL;
     if (getifaddrs(&list) != 0) return false;
@@ -137,8 +137,9 @@ static bool kernel_lease_matches(const struct pong_wifi_lease *lease)
             !a->ifa_addr || !a->ifa_netmask || a->ifa_addr->sa_family != AF_INET) continue;
         const struct sockaddr_in *local = (const struct sockaddr_in *)a->ifa_addr;
         const struct sockaddr_in *mask = (const struct sockaddr_in *)a->ifa_netmask;
-        if (!memcmp(&local->sin_addr, lease->address, 4) && !memcmp(&mask->sin_addr, lease->mask, 4)) {
+        if (!memcmp(&local->sin_addr, lease->address, 4)) {
             match = true;
+            *mask_matches = !memcmp(&mask->sin_addr, lease->mask, 4);
             break;
         }
     }
@@ -176,32 +177,38 @@ static void recover_lease_options(NSDictionary *state)
         NSString *server = ipv4_text(lease.dns[i]);
         if (server) [dns addObject:server];
     }
-    lease_skip = "ACK address, subnet or options mismatch";
-    if (!address || !router || !dns.count || [router isEqual:address] ||
-        (state && ![state[@"Addresses"] containsObject:address]) || !kernel_lease_matches(&lease)) return;
+    lease_skip = "ACK missing usable address or route options";
+    if (!address || !router || !dns.count || [router isEqual:address]) return;
+    lease_skip = "live ACK address not installed in kernel";
+    bool mask_matches = false;
+    if (!kernel_lease_matches(&lease, &mask_matches)) return;
+    bool state_matches = [state[@"Addresses"] containsObject:address];
+    lease_skip = "ACK router is outside the lease subnet";
     struct in_addr local, gateway, mask;
     memcpy(&mask, lease.mask, 4); memcpy(&local, lease.address, 4); memcpy(&gateway, lease.router, 4);
     if (!mask.s_addr || (gateway.s_addr & mask.s_addr) != (local.s_addr & mask.s_addr)) return;
     NSMutableDictionary *options = [@{setup_ipv4_key: @{@"ConfigMethod": @"DHCP", @"Router": router},
                                      setup_dns_key: @{@"ServerAddresses": dns}} mutableCopy];
-    if (!state) {
+    if (!state || !state_matches || !mask_matches) {
         // This setup and its keys belong only to our current SC session.
         // Do not create a second IPv4 service if configd published another.
         NSArray *patterns = @[@"^State:/Network/Service/[^/]+/IPv4$"];
         NSDictionary *all = copy_multiple ? CFBridgingRelease(copy_multiple(setup_session, NULL, (__bridge CFArrayRef)patterns)) : nil;
         lease_skip = "cannot establish ownership of en0 state";
         if (!all) return;
-        for (NSDictionary *entity in all.allValues)
-            if ([entity[@"InterfaceName"] isEqual:@"en0"]) return;
+        NSString *owned = state_key(setup_ipv4_key);
+        for (NSString *key in all)
+            if (![key isEqual:owned] && [all[key][@"InterfaceName"] isEqual:@"en0"]) return;
         char netmask[INET_ADDRSTRLEN];
         if (!inet_ntop(AF_INET, lease.mask, netmask, sizeof netmask)) return;
-        options[state_key(setup_ipv4_key)] = @{@"Addresses": @[address], @"SubnetMasks": @[@(netmask)],
+        options[owned] = @{@"Addresses": @[address], @"SubnetMasks": @[@(netmask)],
                                               @"Router": router, @"InterfaceName": @"en0",
                                               @"ConfirmedInterfaceName": @"en0"};
     }
     lease_repaired = set_store(setup_session, (__bridge CFDictionaryRef)options, NULL, NULL);
     lease_skip = lease_repaired ? "applied" : "store rejected options";
     fprintf(stderr, "Pong WiFi18: live DHCP ACK route and DNS %s\n", lease_repaired ? "APPLIED" : "rejected");
+    fprintf(stderr, "Pong WiFi18: live ACK kernel-mask-match=%d state-address-match=%d\n", mask_matches, state_matches);
 }
 
 static int kernel_route_error(void)

@@ -1,0 +1,115 @@
+Device: Xiaomi MIX Fold 2 (zizhan), iPadOS 18.7.10 / 22H374.
+Temporary fastboot boot, rear USB-A, autoreset; no partition flash.
+Private network names, BSSIDs, client addresses, DHCP IDs and credentials omitted.
+Loader: 03363797d9ffb10fd35ad5823331e89b4bb3c624.
+Station rate fix: 9cc393829e0cc631012de6f0c8c1a0aa54b8e840.
+Native startup and UI probe: 92ef6d2de5419ce5c5aa8bfe36ab25a9fadeffb7.
+g299-g309 were local snapshots forming those commits; each comparison is described in the progress note.
+
+
+g300-loader-radio-off: 1300806 fresh UFS log bytes; reason deadline; returned to Android.
+PONG SHOT: pool 0xac000000 + 96 MiB mapped uncached
+PONG DBUF: panel pool 0xac000000 (96 MiB from the loader): 2 buffers, 3 canvas slots (pong_zc=2)
+Pong UI18: open prefs:root=WIFI accepted=1 (workspace 1)
+PONG DBUF deadline: on, flips 1289 taken 1288 (latch max 8426 us) waits 0 (max 0 us) in-place 0 cpu-flips 0, shown 5 flipped 0, CTL_FLUSH 0x0
+
+g304-rate-crossband: 1106571 fresh UFS log bytes; reason deadline; returned to Android.
+Observed connection frequencies (MHz): 5220, 2452
+Firmware FAIL/RDDM marker: False
+PongWifi[6]: zizhan station: pre-start band=1 basic_rates=0x15
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: DHCP renewal ACK PASS
+Pong WiFi18: disconnect cleanup PASS
+PongWifi[6]: zizhan station: pre-start band=0 basic_rates=0xf
+PongWifi[6]: WiFi lifecycle test AP switch PASS: associated to distinct BSSID
+Pong WiFi18: network lifecycle PASS
+
+g306-rate-2g-to-5g: 1600894 fresh UFS log bytes; reason deadline; returned to Android.
+Observed connection frequencies (MHz): 2452, 5220
+Firmware FAIL/RDDM marker: False
+PongWifi[6]: zizhan station: pre-start band=0 basic_rates=0xf
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: DHCP renewal ACK PASS
+Pong WiFi18: disconnect cleanup PASS
+PongWifi[6]: zizhan station: pre-start band=1 basic_rates=0x15
+PongWifi[6]: WiFi lifecycle test AP switch PASS: associated to distinct BSSID
+Pong WiFi18: network lifecycle PASS
+
+g307-native-settings-join: 1953302 fresh UFS log bytes; reason deadline; returned to Android.
+Pong WiFi18: native InterfaceNamer state present=1 quiet=0 complete=1 timeout=1
+Pong UI18: open prefs:root=WIFI accepted=1 (workspace 1)
+Pong WiFi UI test: FAIL: control deadline (selected=0 password-field=0)
+
+g308-native-settings-join: 1967122 fresh UFS log bytes; reason deadline; returned to Android.
+Pong WiFi UI test: RUNNING bounded network-list scroll 1
+Pong WiFi UI test: RUNNING selected exact private fixture row
+Pong WiFi UI test: RUNNING populated native secure field
+Pong WiFi UI test: FAIL: control deadline (selected=1 password-field=1)
+
+g309-native-settings-join: 2152617 fresh UFS log bytes; reason deadline; returned to Android.
+Pong WiFi18: native InterfaceNamer state present=1 quiet=0 complete=1 timeout=1
+Pong WiFi UI test: RUNNING bounded network-list scroll 1
+Pong WiFi UI test: RUNNING selected exact private fixture row
+Pong WiFi UI test: RUNNING inserted text through native secure field
+Pong WiFi UI test: RUNNING native navigation Join action sent; verify driver and HTTPS separately (selected=1 password-field=1)
+PongWifi[6]: wifi-net: join: ssid length 10, bssid given 0, key length 32 cipher 6
+PongWifi[6]: wifi-net: native client type 20 set bytes=900 -> 0
+PongWifi[6]: wifi: associated, waiting for the key handshake
+PongWifi[6]: wifi: keys installed after message 4 completed (tx acked 2, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: supplemental route removed (native route and DNS)
+
+Host: Wi-Fi, CI and GPU configurations ended KERNEL_DONE.
+Host: LLVM 18 DarwinBoot24 build, UI compile/codesign --verify --strict, native helper compile/sign passed.
+Host: macOS and Ubuntu 24.04 replay passed native InterfaceNamer root/overlay staging and wifid endpoint/OS checks, SMMU readback, WMI deadlines/ownership, DHCP ACK/lease and USB guards/retry.
+No host build is presented as device function evidence.
+
+2026-11-05 native automatic-join continuation.
+Source snapshot: 718f73ce424d427c2ecdc757b9c64eb7cd4f3dca.
+RSSI bounds describe the signed decoder format, not RF calibration. Actual RSSI and native quality policy remain unchanged.
+
+g312-remembered-64m:
+wifi-net: native client type 20 set bytes=900 -> 0
+wifi: keys installed after message 4 completed (tx acked 2, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+wifi-net: join finished: module result 0
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Native association requests: 1; explicit leave requests: 0.
+
+g314-native-policy:
+wifi-net: native client type 106 get bytes=16 -> 102
+Pong WiFi UI test: SKIP no private fixture
+Native association requests: 0; explicit leave requests: 1.
+
+g331-rssi-format:
+wifi-net: native client type 106 get bytes=16 -> 0
+wifi-net: native client type 20 set bytes=900 -> 0
+wifi: keys installed after message 4 completed (tx acked 2, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+wifi-net: join finished: module result 0
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi UI test: SKIP no private fixture
+Pong WiFi UI test: native known readers=1 array=1 count=1 enabled=1 autojoin-pref=1 first-join-block=0 future-block=0
+wifi-net: native client type 20 set bytes=900 -> 0
+wifi: keys installed after message 4 completed (tx acked 4, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+wifi-net: join finished: module result 0
+wifi-net: native client type 20 set bytes=900 -> 0
+wifi: keys installed after message 4 completed (tx acked 6, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+wifi-net: join finished: module result 0
+Native association requests: 3; explicit leave requests: 3.
+
+g332-stock-rsn:
+wifi-net: native client type 106 get bytes=16 -> 0
+wifi-net: native client type 20 set bytes=900 -> 0
+wifi: keys installed after message 4 completed (tx acked 2, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+wifi-net: join finished: module result 0
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+wifi-net: native client type 20 set bytes=900 -> 0
+wifi: keys installed after message 4 completed (tx acked 4, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+wifi-net: join finished: module result 0
+wifi-net: native client type 20 set bytes=900 -> 0
+wifi: keys installed after message 4 completed (tx acked 6, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+wifi-net: join finished: module result 0
+Native association requests: 3; explicit leave requests: 3.
+
+g332 used the exact original wifid, no Settings launch, no fixture and an actual 128 MiB arena. HTTPS passed; three association/leave requests mean sustained connectivity did not pass.
+g333-retry failed before userland: shared-cache check_signature ENOMEM, PID 1 could not load libSystem without its cache; genuine panic was preserved and Android returned. No Wi-Fi success inferred.
+Current Wi-Fi/CI/GPU builds ended KERNEL_DONE. check-wifi-host.py replay and UI/helper compile/strict signatures passed.

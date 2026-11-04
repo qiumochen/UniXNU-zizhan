@@ -6,12 +6,18 @@
 
 ## 1. Wi-Fi：设置页入网和换网
 
-- [ ] 用无凭据、无自动关联的 Wi-Fi 启用镜像，从设置扫描、选择网络并加入。核对 wifid 的加入结果、en0 服务、默认路由和 DNS，再用原生 HTTPS 验收。若设置不能接管，先对照 Pong 的 Apple80211 桥；若 en0 出现但没有原生配置，再对照 K90 的 InterfaceNamer 建服务时序。
+11-04 晚间接续：[g299–g309](../progress/2026-11-04-wifi-settings-and-roaming.md) 已恢复大内核镜像的真实显示池，定位并缩短原生 InterfaceNamer 的 240 秒回退等待；g309 用真实 Settings 行、secure text field 和导航栏 Join 完成原生 Apple80211 加入、WPA2、DHCP 与 HTTPS 200。g304/g306 的 2.4↔5 GHz 两个方向、不同 BSSID 均通过首次/主动续租/重连三次 HTTPS 和断线清理。不同 SSID/子网、自然 T1 和真实 MSI 仍独立待验收。
+
+- [x] 无内核自动关联的 Settings 扫描、选择私有测试网络并加入；核对原生加入、DHCP 和 HTTPS（g309）。
+- [x] 2.4 GHz 与 5 GHz 两个方向切换到不同 BSSID，核对旧路由/DNS 清除和新租约 HTTPS（g304/g306）。
+
+- [x] 无 UI 私有配置/内核凭据的重启自动入网及 HTTPS（g331/g332），原始 wifid、无设置页启动的对照也通过。
+- [ ] 修正周期主动断开并验收保持；随后清理诊断并推广已验证镜像/manifest。
 - [ ] 验证从一个 SSID/子网切到另一个后，旧路由和 DNS 清除，新网重新取得租约并能访问 HTTPS；另测自然 T1 续租。记录原生路由何时接手、补偿何时退出。保留 g290 的租约补偿作为回退；真实 GIC MSI 到达另行验证。
 
 [g290 基线](../progress/2026-11-04-wifi-usb.md)：测试轮已通过首次联网、主动触发的续租、断开清理和同网重连；无凭据轮只验证了扫描。上述待办不用重做已通过的同网测试。
 
-11-04 无人值守接续：[g292–g295](../progress/2026-11-04-wifi-native-repair.md) 已补原生 IO80211 user client、22H374 加入结构、持续忙碌时的等待期限和首次固件故障回收。2.4 GHz 首次联网/主动续租 HTTPS 通过，跨频段重连仍触发 RDDM；重建 vdev 的无效实验已撤销。wifid 缺失 manager 端口的查找消失，但原生扫描/加入和 Settings 仍未通过。Wi-Fi 暂留待办，按授权转到下节 GPU；后续先补首次固件诊断与原生管理链证据，不重复同条件盲跑。
+历史 11-04 无人值守接续：[g292–g295](../progress/2026-11-04-wifi-native-repair.md) 已补原生 IO80211 user client、22H374 加入结构、持续忙碌时的等待期限和首次固件故障回收。2.4 GHz 首次联网/主动续租 HTTPS 通过，跨频段重连仍触发 RDDM；重建 vdev 的无效实验已撤销。wifid 缺失 manager 端口的查找消失，但原生扫描/加入和 Settings 仍未通过。Wi-Fi 暂留待办，按授权转到下节 GPU；后续先补首次固件诊断与原生管理链证据，不重复同条件盲跑。
 
 ## 2. GPU：先测首帧和回弹，再选优化
 

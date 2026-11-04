@@ -4,6 +4,16 @@
 
 下一轮按 [硬件适配待办](docs/plan/2026-11-04-next-hardware-work.md) 接续：先验证 Wi-Fi 设置页入网和换网，再分别验证 GPU 首帧/回弹和内屏调光。外屏先独立出图和触控，再做折叠切换。
 
+## 2026-11-04 晚间 Wi-Fi 接续
+
+最新结果以 [Wi-Fi 设置与跨频段记录](docs/progress/2026-11-04-wifi-settings-and-roaming.md) 为准。`0336379` 在释放临时内核输入后再申请显示池，解决较大 Wi-Fi 内核使 96 MiB 低地址池申请失败的问题。`9cc3938` 在 channel assign 前按目标 AP 更新基础速率，g304/g306 两个方向 2.4↔5 GHz 的首次、主动续租、不同 BSSID 重连三次 HTTPS 200，清理通过且无 RDDM。
+
+`92ef6d2` 从 SpringBoard/wifid/configd 栈确认了原生 InterfaceNamer 的 240 秒等待，镜像配置使用它已有的 30/10 秒 stack/quiet 超时，由 configd 实际发布 Timeout/Complete；没有伪造 Quiet。g309 使用 Settings 的真实选网行、secure text input 和导航栏 Join，收到 900 字节原生 Apple80211 请求，WPA2、DHCP、HTTPS 200 通过。内核自动关联关闭，测试 UI 仅在 `pong_wifi_ui_test=1` 且存在本地权限受限文件时运行；默认不启用。测试文件不提交，默认准备镜像推广前必须移除。
+
+11 月 5 日凌晨接续：`718f73c` 补原生扫描时间戳、RSSI_BOUNDS 和真实授权后的 RSN 通知。g312 证明无测试密码的保存凭据复用；g331/g332 证明系统自动关联和 HTTPS 200，后者使用原始 wifid、无设置页启动及实际默认 128 MiB DMA。但仍周期主动断开，保持问题尚未解决。默认准备镜像尚未推广到试验状态，继续安装必须使用本机实际 manifest。
+
+Wi-Fi 仍单独使用 `zizhan_ipados18_wifi_defconfig`；GPU 默认配置保持 Wi-Fi 关闭。不同 SSID/子网、自然 T1、长时间稳定性及真实 GIC MSI 尚未通过。下文 g292–g295 的 RDDM/Settings 失败是历史证据，不能作为当前结论。每次安装以实际已写入的 manifest/state 为准，不把旧准备 OS 直接当手机当前版本。
+
 ## 2026-11-03 接续
 
 Photos 零尺寸断言修复已在 g262–g264 上机验证，g264 的截图、双配置构建和自动返回记录见 [Photos 记录](docs/progress/2026-11-03-photos-context.md)。GPU fence g253/g254 的时间线全部完成；deadline 最后一笔仅在途 26 ms，见 [fence 记录](docs/progress/2026-11-02-fence-diagnostics.md)。下方 11-02 的 GPU WIP 描述保留为历史状态。

@@ -24,7 +24,7 @@ This repository is derived from [UniXNU-pong](https://github.com/Chengdong-Yu/Un
 | GPU | Adreno 730 with Turnip and metal2vulkan. Correct UIKit class matching in g298 yielded 95.3 moving fps in synthetic scrolling (56.7–58.4 baseline); first frame still about 75–80 ms. Wallpaper GPU access stays disabled; no global 120 fps claim |
 | Battery | ADSP and PMIC GLINK readings match Android. Status bar and charging changes are confirmed; Settings Battery opens, but Battery Health still spins |
 | Buttons | Holding power for 3 s warm-resets to fastboot; other keys not checked |
-| Wi-Fi | Experimental QCA6490 config verifies scan, WPA2, DHCP, requested renewal and same-network reconnect with HTTPS 200. Disabled by default; native Settings join, cross-AP DHCP and cross-band reconnect remain unresolved |
+| Wi-Fi | Experimental QCA6490 config verifies native Settings selection/join, WPA2, DHCP and HTTPS 200; requested renewal, cleanup and distinct-BSSID reconnects pass in both 2.4↔5 GHz directions. Default GPU config keeps Wi-Fi off. Real MSI, natural T1 and different subnets remain unqualified; see the [latest record](docs/progress/2026-11-04-wifi-settings-and-roaming.md) |
 | Cellular / audio | Cellular is unimplemented; CS35L41 amplifiers are not integrated (Pong uses TFA9873) |
 
 ## Hardware differences from Pong

@@ -1,0 +1,15 @@
+g273 partial device diagnostics; real UFS klog, automatic return to Android.
+PongWifi[6]: PCIe0 cold start; power and bus clocks precede host MMIO
+PongWifi: rail smpe2 physical ready PPID=49e 1012mV status=8f enable=80
+PongWifi: rail smpb11 physical ready PPID=1b9 966mV status=97 enable=80
+PongWifi: rail smpb10 physical ready PPID=1b6 1800mV status=9f enable=80
+PongWifi: rail smpc1 physical ready PPID=29b 1900mV status=97 enable=80
+PongWifi: rail smpb12 physical ready PPID=1bc 1350mV status=97 enable=80
+PongWifi[6]: SM8475 WLAN rail requests acknowledged
+PongWifi: cold REFCLK PHY_CTRL=900->900 mux=2 CLKREF=1
+PongWifi: QCA6490 PCI subsystem=10817cb
+PongWifi[6]: QCA6490 PCIe0 link and BAR established, bus master held off
+PongWifi: 128MiB wired DMA mapped from 2049 spans, 67 native4K table pages
+PongWifi: SMMU program status=7 bank=73 phase=6 TTBR0=1c0100086b0a8000 TTBR1=1c01000000000000 TCR=80803520 TCR2=38071 CBAR=1f300 CBA2R=1 MAIR=ff44 SCTLR=27 FSR=400 writes=16 polls=11
+PongWifi[3]: WiFi SMMU context programming failed; SID remains detached
+PongWifi[3]: WiFi initialization stopped; normal iOS boot continues, DMA retained

@@ -139,3 +139,52 @@ g269 驱动会打印读到的 PCI subsystem 值，但先前的 `wifi-stage.py` �
 约定的 CI、GPU 两配置构建成功，本机日志为 `$ZIZHAN_SRC/ci_kernel-wifi-subsystem-summary-ci.log`、`ci_kernel-wifi-subsystem-summary-gpu.log`，末尾均为 `KERNEL_DONE`。g269 等待器继续记录 USB 心跳，仍无设备日志或截图。
 
 再次确认已记录的主机 USB 端口空闲后，执行一次主机侧端口断电重连。随后有界 adb/fastboot 探测仍均不可见，hub 也没有手机枚举；g269 等待器保持运行。这是物理连接状态，不能归因于 g269 内核，因为镜像尚未启动。实体重连操作仍见 `HUMAN_CHECKLIST.md`。
+
+
+## 22:55 接续：g272-retry 设备轮次
+
+用户重插 USB 后，Android 枚举恢复。先完成一次 Android → fastboot → Android 模式切换：出现短暂枚举失败，随后自行恢复；本次没有复现必须重启电脑的持续断联。此结果只覆盖一次切换，不排除间歇性故障。
+
+待跑的最新本机轮次是 g272，原日志仅有 `NO_DEVICE`。本次使用原有 `out/g272/pong-xnu-initial.img`，新轮次名 `g272-retry`；未重编或修改驱动。源码为 `0888864` 加已有本地 SMMU/USB 工具 WIP，不能把这份镜像归为纯 `0888864` 构建。镜像命令行 881 字节，含 `pong_wifi=1`、`pong_autoreset=300`、`pong_autoreset_sb=60` 和本机核对过的 klog/root 块号。已有完整分区备份记录、logfs 备份及两份文件的实际 extent 均已检查；未移动根镜像。
+
+22:52:39 临时 `fastboot boot` 成功，22:54:26 自动回到 fastboot（107 秒），随后 RamoopsDump 导出日志并回 Android。22:54:57 已取回 995985 字节的新 UFS klog，header 原因为 deadline；22:55 再次确认 Android `sys.boot_completed=1`。电脑启动时间前后一致；未重启电脑、未 flash 分区。当前手机在直连端口，旧 hub/port 记录已归档，未执行端口断电恢复。
+
+设备证据见 [脱敏日志摘录](../evidence/2026-11-03-g272-retry-wifi.txt)。本机原始文件为 `logs/g272-retry.txt`、`g272-retry.ramoops.txt`、`g272-retry-cycle.txt` 和 `g272-retry.wifi-summary.txt`。
+
+- 供电请求已确认；QCA6490 PCIe0 link/BAR 建立，subsystem 实测 `0x010817cb`，bus master 保持关闭。
+- 128 MiB DMA 页表已构建，但尚未完成可用 DMA 隔离：SMMU 编程返回 `status=7`（`ArmSmmu4KStateMismatch`）、`bank=73`、`phase=6`、`SCTLR=0`、`FSR=0`。
+- 驱动报告 SID 保持 detached，Wi-Fi 初始化停止，正常 iOS 启动继续。没有固件启动、MSI、station、扫描、关联或 DHCP 成功证据。`phase=6` 是失败清理路径，不能把它解释为具体寄存器已通过验证。
+- 本镜像没有截图参数，解码得到 0 PNG；不能据此做画面或交互结论。
+
+下一步先逐项比较 SMMU context 的期望编码与设备读回（包括 TTBR1 的 ASID 位），定位 `StateMismatch`；保留严格校验和失败后不接通 SID 的行为。若修改共享 SMMU/UFS 或 Wi-Fi 驱动，再完成约定的 CI/GPU 双配置及 Wi-Fi 配置构建，打包新轮次并验证。当前仅完成设备失败定位，Wi-Fi 功能仍未通过。
+
+
+## 23:18 接续：SMMU 已接通，追踪 WMI 初始化
+
+- g273 显式设置低 32 位 IOVA 的 TBI 策略，保持全部寄存器严格校验。设备越过原 TCR2 差异，启用时读回 `SCTLR=0x27`，与请求的 `0x1027` 相差 ASIDPNE；仍返回 StateMismatch。该轮取得 1133944 字节新 UFS klog，169 秒后回 fastboot，最终回 Android。
+- g274 显式使用共享 ASID，持有 UFS/Wi-Fi 公共 lease，并在配置前拒绝与其他启用的 APPSSMMU stage-1 bank 的 ASID 冲突。供电、PCIe 和 SMMU 成功，SID1c01 DMA 建立；MSI receiver 已配置，但此时还没有真实 GIC MSI 到达日志，不能把 receiver 配置记作中断验证。
+- g274 实际启动到 WCN6855 hw2.1 / QMI：chip_id `0x12`、chip_family `0xb`、board_id `0xff`、soc_id `0x400c1211`。读取 `amss20.bin`、`regdb.bin`、`bdwlang.elf`、`m3.bin`；固件报告 `WLAN.HSP.2.0.c2-00057-QCAHSPSWPL_V1_V2_SILICONZ-1.542333.7.549995.6`。无需猜测或替换 board ID。
+- g274 首个错误变为 `wmi command 1 timeout` / `failed to send wmi init cmd: -11`。取得 1105249 字节新 UFS klog，168 秒后回 fastboot，最终回 Android。尚无 station、扫描、关联或地址配置成功证据。
+- 检查共享 shim，发现通用 `wait_event_timeout` 在循环成功后会再次执行带发送副作用的条件。主机回归复现：仅一个 HTC credit 时首发成功、出口二次发送返回 EAGAIN，使 WMI 把成功当失败。g275 的构建适配只将 WMI 两个发送等待点改用已有 `wait_event_timeout_once`，不改公共输入库或跳过流控。回归同时覆盖即时成功、credit 补充后成功、真实超时；三配置构建通过。g275 已在设备运行，结果待取回。
+
+SMMU 策略依据为 [Arm SMMUv2 规范](https://documentation-service.arm.com/static/5f900d34f86e16515cdc08fb) §16.5.39、§16.5.36，以及本机实际读回；TBI 对本驱动只接收的未标记 32 位地址不改变寻址，ASIDPNE 则改为明确协调的共享空间。保持完整读回检查，不对未知差异作掩码。主机仅回放已采得寄存器，不能替代设备 DMA 验证。
+
+设备摘录：[g273](../evidence/2026-11-03-g273-wifi.txt)、[g274](../evidence/2026-11-03-g274-wifi.txt)。本机保存逐轮源码差异、镜像 hash、原始 klog/ramoops、构建和 cycle 日志。g273/g274 各自 CI、GPU、Wi-Fi 构建均以 `KERNEL_DONE` 结束；电脑未重启，未 flash。
+
+
+## 23:33 接续：g275 扫描通过；g276 被 USB 阻塞
+
+WMI 两个发送等待点改用 side-effect-safe wait 后，g275 在真机成功注册无线硬件（102 个可用信道），station 就绪；扫描使用 42 个信道，收到真实 beacon，完成后报告 **15 个网络**。驱动发布 en0，系统开始发出 Apple80211 查询。此轮没有关联、DHCP 或公网流量证据，不能记作 Wi-Fi 完成。脱敏证据见 [g275](../evidence/2026-11-03-g275-wifi.txt)。941005 字节新 UFS klog 已取回，168 秒后回 fastboot，最终回 Android，电脑没有重启。
+
+`wifi-stage.py` 现在识别 station 层的非空完成扫描，不再只等 OS 读取 scan-result ioctl；空结果和 aborted 扫描不提升为 scan_bss。主机以三种输入验证，并回放真实 g275。
+
+g276 使用同一份 g275 内核，计划自动打开 Wi-Fi 设置并截图，但在 `adb reboot bootloader` 后手机没有重新枚举，`boot.sh` 最终返回 `NO_FASTBOOT`；**没有执行 fastboot boot**。无 g276 设备/UI 结果。主机只见 USB 连接终止和端口自动掉电/上电，随后系统 USB、adb、fastboot 一直没有手机。当前直连口不在 uhubctl 的可控 hub 中；对该端口执行一次 IOServiceRequestProbe(0) 返回 Unsupported，不能软件重插。没有重启电脑，也没有重置其他 USB 端口。用户已被请求重插 USB，当前设备结果待恢复。
+
+g277 已准备好后续关联轮次：默认关闭的 `pong_wifi_test=1` 配合构建时 `PONG_WIFI_TEST_CONFIG` 私有输入，仅加入明确指定且实际扫描到的网络；驱动记录认证状态、真实 IPv4、收发/DHCP 与 MSI 计数。配置不进入启动参数或公开源码，生成头文件和试验镜像仅留本机。无配置时 SKIP，找不到网络、拒绝请求或超时则 FAIL 并继续正常启动；只有 NW_STA_UP 且有有效非链路本地 IPv4 才记关联测试 PASS，不能据此宣称公网连通。三配置构建通过；g277 尚未上机。
+
+新增 `tools/zizhan/mac/check-wifi-host.py` 和两个 C 回归：g272/g273 context 读回、WMI skb 单次发送/credit 恢复/真实超时。使用 ci-env.sh 的 PONG_SHENG_ROOT 或显式 --shared 运行，两项均通过。记录和源码差异检查通过。恢复连接后先完成 g277 关联与地址验证，再处理系统 Wi-Fi 页面和真实 MSI 的剩余问题。
+
+
+设备轮次对应的源码版本已按启动前保存的差异补作提交（没有重跑设备或改写既有发布历史）：g272 `4927a4b459c6`，g273 `0acd5e0f55cf`，g274 `239d5403defd`，g275 `32ee207bd5b5`。g277 的可选关联测试与回归源码为 `70d0db3e93dd`，其设备状态仍为未运行。当前均为本地提交，未推送。
+
+11 月 4 日已恢复后部 USB-A 并继续上机；上述等待事项是当晚历史状态，后续结果见 [Wi-Fi 与 USB 记录](2026-11-04-wifi-usb.md)。

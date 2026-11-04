@@ -1,0 +1,27 @@
+g272-retry / 2026-11-03 / Wi-Fi partial device result
+Input: existing g272 Wi-Fi image; baseline 0888864 plus pre-existing local WIP.
+This trial did not change or rebuild driver code.
+Temporary fastboot boot succeeded; automatic return observed after 107 s.
+Fresh UFS klog: 995985 bytes; reason deadline. Android returned.
+Computer was not rebooted; no fastboot flash was used.
+No screenshot payload was present in this image/run.
+
+Selected device log lines:
+PONG_AUTORESET: mark bootloader: spmi v70000000 apids=768 apid=412 owner=0 cell 04 -> 04 rc=0
+PONG_AUTORESET: watchdog enable=0, pings until 300s, bite 60 s later (last ping 2381 ms ago); after SpringBoard 60s, panic reset after 2s; PSCI SYSTEM_RESET2 supported (0), warm reset on
+PongWifi[6]: PCIe0 cold start; power and bus clocks precede host MMIO
+PongWifi: rail smpe2 physical ready PPID=49e 1012mV status=8f enable=80
+PongWifi: rail smpb11 physical ready PPID=1b9 966mV status=97 enable=80
+PongWifi: rail smpb10 physical ready PPID=1b6 1800mV status=97 enable=80
+PongWifi: rail smpc1 physical ready PPID=29b 1900mV status=97 enable=80
+PongWifi: rail smpb12 physical ready PPID=1bc 1350mV status=97 enable=80
+PongWifi[6]: SM8475 WLAN rail requests acknowledged
+PongWifi: cold REFCLK PHY_CTRL=900->900 mux=2 CLKREF=1
+PongWifi: QCA6490 PCI subsystem=10817cb
+PongWifi[6]: QCA6490 PCIe0 link and BAR established, bus master held off
+PongWifi: 128MiB wired DMA mapped from 2049 spans, 67 native4K table pages
+PongWifi: SMMU program status=7 bank=73 phase=6 TTBR0=1c0100086b8a9000 TTBR1=1c01000000000000 TCR=80803520 TCR2=38071 CBAR=1f300 CBA2R=1 MAIR=ff44 SCTLR=0 FSR=0 writes=15 polls=12
+PongWifi[3]: WiFi SMMU context programming failed; SID remains detached
+PongWifi[3]: WiFi initialization stopped; normal iOS boot continues, DMA retained
+PONG_AUTORESET: SpringBoard up at 16s; resetting 60s later
+PONG_AUTORESET: deadline reached after 76 pings; watchdog bites in 1 s

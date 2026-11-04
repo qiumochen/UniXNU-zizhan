@@ -1,0 +1,86 @@
+g275 real device result: station ready and scan completed with 15 networks. No association or DHCP evidence.
+PongWifi[6]: PCIe0 cold start; power and bus clocks precede host MMIO
+PongWifi: rail smpe2 physical ready PPID=49e 1012mV status=8f enable=80
+PongWifi: rail smpb11 physical ready PPID=1b9 966mV status=97 enable=80
+PongWifi: rail smpb10 physical ready PPID=1b6 1800mV status=9f enable=80
+PongWifi: rail smpc1 physical ready PPID=29b 1900mV status=97 enable=80
+PongWifi: rail smpb12 physical ready PPID=1bc 1350mV status=97 enable=80
+PongWifi[6]: SM8475 WLAN rail requests acknowledged
+PongWifi: cold REFCLK PHY_CTRL=900->900 mux=2 CLKREF=1
+PongWifi: QCA6490 PCI subsystem=10817cb
+PongWifi[6]: QCA6490 PCIe0 link and BAR established, bus master held off
+PongWifi: 128MiB wired DMA mapped from 2049 spans, 67 native4K table pages
+PongWifi[6]: exclusive SID1c01 native4K DMA and retained MSI landing page established
+PongWifi[6]: DesignWare MSI receiver armed on Pong PCIe0 SPI140
+PongWifi[6]: pci: device control 2810 -> 0810
+PongWifi[6]: ath11k: MSI vectors: 32
+PongWifi[6]: ath11k: wcn6855 hw2.1
+PongWifi[6]: Requested to power ON
+PongWifi[6]: Power on setup success
+PongWifi: firmware amss20.bin bytes=5296128
+PongWifi[6]: firmware ath11k/WCN6855/hw2.1/amss.bin: 5296128 bytes, sum of the first 512 KiB 57da4435, first word 464c457f
+PongWifi[6]: Wait for device to enter SBL or Mission mode
+PongWifi[6]: ath11k: chip_id 0x12 chip_family 0xb board_id 0xff soc_id 0x400c1211
+PongWifi[6]: ath11k: fw_version 0x200c0039 fw_build_timestamp 2022-11-24 13:02 fw_build_id WLAN.HSP.2.0.c2-00057-QCAHSPSWPL_V1_V2_SILICONZ-1.542333.7.549995.6
+PongWifi: firmware regdb.bin bytes=24278
+PongWifi[6]: ath11k: Pong: actual QMI board firmware bdwlang.elf
+PongWifi: firmware bdwlang.elf bytes=59936
+PongWifi: firmware m3.bin bytes=266668
+PongWifi[6]: wifi: hardware registered, 102 channels
+PongWifi[6]: wifi: scan starts on 42 channels
+PongWifi[6]: QCA6490 station ready; starting actual scan
+PongWifi[6]: wifi: frame 1 to the station code, 308 bytes
+PongWifi[6]: wifi: beacon 1: 308 bytes
+PongWifi[6]: wifi: frame 1 handled
+PongWifi[6]: wifi: frame 2 to the station code, 597 bytes
+PongWifi[6]: wifi: beacon 2: 597 bytes
+PongWifi[6]: wifi: frame 2 handled
+PongWifi[6]: wifi: frame 3 to the station code, 463 bytes
+PongWifi[6]: wifi: beacon 3: 463 bytes
+PongWifi[6]: wifi: frame 3 handled
+PongWifi[6]: wifi: frame 4 to the station code, 296 bytes
+PongWifi[6]: wifi: beacon 4: 296 bytes
+PongWifi[6]: wifi: frame 4 handled
+PongWifi[6]: wifi: frame 5 to the station code, 426 bytes
+PongWifi[6]: wifi: beacon 5: 426 bytes
+PongWifi[6]: wifi: frame 5 handled
+PongWifi[6]: wifi: frame 6 to the station code, 327 bytes
+PongWifi[6]: wifi: beacon 6: 327 bytes
+PongWifi[6]: wifi: frame 6 handled
+PongWifi[6]: wifi: frame 7 to the station code, 231 bytes
+PongWifi[6]: wifi: beacon 7: 231 bytes
+PongWifi[6]: wifi: frame 7 handled
+PongWifi[6]: wifi: frame 8 to the station code, 454 bytes
+PongWifi[6]: wifi: beacon 8: 454 bytes
+PongWifi[6]: wifi: frame 8 handled
+PongWifi[6]: wifi: frame 9 to the station code, 326 bytes
+PongWifi[6]: wifi: beacon 9: 326 bytes
+PongWifi[6]: wifi: frame 9 handled
+PongWifi[6]: wifi: frame 10 to the station code, 332 bytes
+PongWifi[6]: wifi: beacon 10: 332 bytes
+PongWifi[6]: wifi: frame 10 handled
+PongWifi[6]: wifi: frame 11 to the station code, 236 bytes
+PongWifi[6]: wifi: beacon 11: 236 bytes
+PongWifi[6]: wifi: frame 11 handled
+PongWifi[6]: wifi: frame 12 to the station code, 374 bytes
+PongWifi[6]: wifi: beacon 12: 374 bytes
+PongWifi[6]: wifi: frame 12 handled
+PongWifi[6]: wifi: scan 1 finished, 15 networks
+PongWifi[6]: wifi-net: the network stack was opened (type 0)
+PongWifi[6]: wifi-net: a user client of type 0 was asked for: none offered (ioctl path)
+PongWifi[6]: wifi-net: request 1: type 12 get len 19 val 0 -> 0 (len 12 val 0)
+PongWifi[6]: wifi-net: request 2: type 96 get len 0 val 0 -> 102 (len 0 val 0)
+PongWifi[6]: wifi-net: request 3: type 97 get len 16 val 0 -> 102 (len 16 val 0)
+PongWifi[6]: wifi-net: request 4: type 19 get len 24 val 0 -> 0 (len 24 val 0)
+PongWifi[6]: wifi-net: request 5: type 19 get len 24 val 0 -> 0 (len 24 val 0)
+PongWifi[6]: wifi-net: a user client of type 0 was asked for: none offered (ioctl path)
+PongWifi[6]: wifi-net: request 7: type 19 get len 24 val 0 -> 0 (len 24 val 0)
+PongWifi[6]: wifi-net: request 8: type 106 get len 16 val 0 -> 102 (len 16 val 0)
+PongWifi[6]: wifi-net: request 9: type 12 get len 19 val 0 -> 0 (len 12 val 0)
+PongWifi[6]: wifi-net: request 10: type 254 get len 4824 val 0 -> 0 (len 4824 val 0)
+PongWifi[6]: wifi-net: request 11: type 207 get len 10016 val 0 -> 102 (len 10016 val 0)
+PongWifi[6]: wifi-net: request 12: type 19 get len 24 val 0 -> 0 (len 24 val 0)
+PongWifi[6]: wifi-net: request 13: type 70 get len 0 val 0 -> 102 (len 0 val 0)
+PongWifi[6]: wifi-net: request 14: type 19 get len 24 val 0 -> 0 (len 24 val 0)
+PongWifi[6]: wifi-net: request 15: type 1 get len 32 val 0 -> 2 (len 32 val 0)
+PongWifi[6]: wifi-net: request 16: type 1 get len 32 val 0 -> 2 (len 32 val 0)

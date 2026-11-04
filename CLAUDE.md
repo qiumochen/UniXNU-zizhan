@@ -20,6 +20,14 @@ g268 自动轮次工具已补上有界 adb 探测和 `fastboot boot` 的真实�
 
 并行的音频板级审查从公开 zizhan Android DT 确认 CS35L41 所在 SE15 I²C 与 Pong TFA9873 路径的总线、引脚、地址均不同；只能作为待本机 live DT 复核的主机输入，默认音频仍关闭。见 [音频审查](docs/progress/2026-11-03-audio-board-audit.md)。
 
+22:55 最新设备接续：用户重插后 USB 恢复，原先未启动的 g272 镜像已以 `g272-retry` 临时启动，107 秒后自动回 fastboot，取得新 UFS klog 并返回 Android。供电和 PCIe link/BAR 成功，subsystem 为 `0x010817cb`；Wi-Fi 停在 SMMU context `StateMismatch`（status=7），SID 未接通，没有扫描或联网证据。电脑没有重启；本次只运行原有含本地 WIP 的镜像，没有修改驱动。下一步逐项核对 context 读回，详见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)。上述 g269 等待与 USB 不可见描述保留为历史状态；当前没有运行中的 USB 等待器。
+
+23:18 Wi-Fi 继续：g273/g274 已完成设备轮次；显式 TBI 和共享 ASID 策略使 g274 通过 SMMU，实际固件/QMI 已启动，board ID=0xff 选择 bdwlang.elf。新失败为 WMI_INIT 返回 -11；已复现 shim 等待宏在成功后重复发送的问题，g275 使用安全等待宏，三配置构建通过，正在上机。当前细节与原始证据见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)，仍未验证扫描或联网。
+
+23:33 Wi-Fi 最新：g275 已在真机完成扫描（15 个网络），WMI 修正有效；关联、DHCP、公网和真实 GIC MSI 尚未验证。g276 在进入 fastboot 时 USB 未枚举，没有启动。g277 关联测试镜像和三配置构建已准备，当前等待用户重插直连 USB；电脑不重启。私有网络配置只留仓库外，试验输入默认关闭。恢复后继续 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md) 的 g277 轮次。
+
+2026-11-04 接续：[Wi-Fi 与 USB 记录](docs/progress/2026-11-04-wifi-usb.md)。后部 USB-A 的 10 次完整切换与稳定等待后的 100168 KB 临时启动通过，Mac 未重启。g279 已验证真实 WPA2 和 DHCP；仍在核对公网及 Settings。以下之前的 USB 等待描述仅供回溯。
+
 ## 目标与当前状态
 
 Xiaomi MIX Fold 2（zizhan / SM8475）运行 iPadOS 18.7.10 / 22H374，Darwin 24.6.0 / XNU 11417.140.69，Apple 系统输入为 iPad7,11。基于 UniXNU-pong（同 SoC 的 Nothing Phone (2)）和 uefi-pong；保留公共组件身份 **PongPlatform24**，zizhan 的硬件差异留在设备层。

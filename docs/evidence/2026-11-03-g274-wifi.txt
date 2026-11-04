@@ -1,0 +1,36 @@
+g274 partial device diagnostics; real UFS klog, automatic return to Android.
+PongWifi[6]: PCIe0 cold start; power and bus clocks precede host MMIO
+PongWifi: rail smpe2 physical ready PPID=49e 1012mV status=8f enable=80
+PongWifi: rail smpb11 physical ready PPID=1b9 966mV status=97 enable=80
+PongWifi: rail smpb10 physical ready PPID=1b6 1800mV status=9f enable=80
+PongWifi: rail smpc1 physical ready PPID=29b 1900mV status=9f enable=80
+PongWifi: rail smpb12 physical ready PPID=1bc 1350mV status=97 enable=80
+PongWifi[6]: SM8475 WLAN rail requests acknowledged
+PongWifi: cold REFCLK PHY_CTRL=900->900 mux=2 CLKREF=1
+PongWifi: QCA6490 PCI subsystem=10817cb
+PongWifi[6]: QCA6490 PCIe0 link and BAR established, bus master held off
+PongWifi: 128MiB wired DMA mapped from 2049 spans, 67 native4K table pages
+PongWifi[6]: exclusive SID1c01 native4K DMA and retained MSI landing page established
+PongWifi[6]: DesignWare MSI receiver armed on Pong PCIe0 SPI140
+PongWifi[6]: pci: device control 2810 -> 0810
+PongWifi[6]: ath11k: MSI vectors: 32
+PongWifi[6]: ath11k: wcn6855 hw2.1
+PongWifi[6]: Requested to power ON
+PongWifi[6]: Power on setup success
+PongWifi: firmware amss20.bin bytes=5296128
+PongWifi[6]: firmware ath11k/WCN6855/hw2.1/amss.bin: 5296128 bytes, sum of the first 512 KiB 57da4435, first word 464c457f
+PongWifi[6]: Wait for device to enter SBL or Mission mode
+PongWifi[6]: ath11k: chip_id 0x12 chip_family 0xb board_id 0xff soc_id 0x400c1211
+PongWifi[6]: ath11k: fw_version 0x200c0039 fw_build_timestamp 2022-11-24 13:02 fw_build_id WLAN.HSP.2.0.c2-00057-QCAHSPSWPL_V1_V2_SILICONZ-1.542333.7.549995.6
+PongWifi: firmware regdb.bin bytes=24278
+PongWifi[6]: ath11k: Pong: actual QMI board firmware bdwlang.elf
+PongWifi: firmware bdwlang.elf bytes=59936
+PongWifi: firmware m3.bin bytes=266668
+PongWifi[4]: ath11k: wmi command 1 timeout
+PongWifi[4]: ath11k: failed to send WMI_INIT_CMDID
+PongWifi[3]: ath11k: failed to send wmi init cmd: -11
+PongWifi[3]: ath11k: failed to start core: -11
+PongWifi[4]: ath11k: failed to wait wlan mode request (mode 4): -110
+PongWifi[4]: ath11k: qmi failed to send wlan mode off: -110
+PongWifi[3]: firmware initialization exceeded deadline
+PongWifi: worker stopped; DMA retained until reset

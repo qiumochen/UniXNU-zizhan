@@ -43,6 +43,8 @@ extern "C" {
 extern "C" bool pong_wifi_test_reconnect(void);
 extern "C" unsigned nw_wifi_channel_list(unsigned *, unsigned);
 extern "C" int nw_wifi_rssi_limits(int *,int *);
+extern "C" volatile uint64_t pong_wifi_progress[3];
+static bool gProgressDiagnostic;
 extern "C" void native_wifi_logf(int level, const char *fmt, ...);
 extern "C" void pong_wifi_wake(void);   // WifiProbe.cpp: the WiFi thread sends the queued frame now
 
@@ -403,6 +405,13 @@ int apple80211(bool set, apple80211req &rq, bool kernel = false) {
     return set && gCycleTest && pong_wifi_test_reconnect() ? 0 : EOPNOTSUPP;
   if (rq.req_type == PONG_WIFI_GET_LEASE) {
     if (set) return EOPNOTSUPP;
+    if(gProgressDiagnostic) {
+      static unsigned queries;
+      if((queries++%5)==0) {
+        uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+        log(6,"wifi-net: dispatcher phase=%llu age-ms=%llu generation=%llu where=%llu fn-offset=%llx depth=%llu",pong_wifi_progress[0],ns/1000000ull-pong_wifi_progress[1],pong_wifi_progress[2],nw_wifi_where[0],nw_wifi_where[1],nw_wifi_where[2]);
+      }
+    }
     const auto lease = pong_wifi_lease_snapshot(&gLease, lease_clock());
     return answer_bytes(rq, &lease, sizeof(lease), kernel);
   }
@@ -878,6 +887,7 @@ extern "C" void pong_wifi_net_start(const uint8_t mac[6]) {
   if (gIf) return;
   if (!pong_wifi_net_prepare()) { log(3, "wifi-net: event setup unavailable"); return; }
   memcpy(gMac, mac, 6);
+  uint32_t diagnostic=0;gProgressDiagnostic=PE_parse_boot_argn("pong_wifi_diag",&diagnostic,sizeof diagnostic)&&diagnostic==1;
   uint32_t test = 0, cycle = 0;
   gCycleTest = PE_parse_boot_argn("pong_wifi_test", &test, sizeof(test)) && test == 1 &&
       PE_parse_boot_argn("pong_wifi_cycle", &cycle, sizeof(cycle)) && cycle == 1;

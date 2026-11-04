@@ -24,6 +24,8 @@ def main():
     args = p.parse_args()
     tests = ROOT / "tools/zizhan/tests"
     subprocess.run([sys.executable, str(tests / "wifi-service-stage.py")], check=True)
+    subprocess.run([sys.executable, str(tests / "wifi-dispatcher.py"),
+                    "--shared", str(args.shared), "--cc", args.cc], check=True)
     smmu = ROOT / "drivers/PongAdreno/ArmSmmu4K"
     with tempfile.TemporaryDirectory(prefix="zizhan-wifi-host-") as td:
         for name, inputs, include in [

@@ -18,6 +18,36 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 import pong_paths
 
+def adapt_dispatcher_timers(source):
+    """Do not retain intrusive-list successors across reentrant callbacks."""
+    old = """  u64 now = lx_now_ms();
+  struct list_head *p, *n;
+  for (p = g_timers.next; p != &g_timers; p = n) {
+    n = p->next; struct delayed_work *d = container_of(p, struct delayed_work, work.entry);
+    if (d->armed && now >= d->due && !is_running(&d->work)) {
+      d->armed = 0; list_del_init(p); ran = 1; where(2, (const void *)d->work.func);
+      g_running[g_nrunning++] = &d->work; d->work.func(&d->work); g_nrunning--; }
+  }
+"""
+    new = """  u64 now = lx_now_ms();
+  /* A callback may wait/pump recursively and remove any later timer. Never
+   * keep next across that callback: list_del_init makes removed nodes self
+   * linked. Restart selection after each callback and bound zero-delay work. */
+  for (unsigned timer_budget = 256; timer_budget; --timer_budget) {
+    struct delayed_work *d = 0; struct list_head *p;
+    for (p = g_timers.next; p != &g_timers; p = p->next) {
+      struct delayed_work *candidate = container_of(p, struct delayed_work, work.entry);
+      if (candidate->armed && now >= candidate->due && !is_running(&candidate->work)) { d = candidate; break; }
+    }
+    if (!d) break;
+    d->armed = 0; list_del_init(&d->work.entry); ran = 1; where(2, (const void *)d->work.func);
+    g_running[g_nrunning++] = &d->work; d->work.func(&d->work); g_nrunning--;
+  }
+"""
+    if source.count(old) != 1:
+        raise RuntimeError('shared dispatcher timer ABI differs')
+    return source.replace(old, new)
+
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -216,9 +246,10 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
         '  lx_log(6, "zizhan station: pre-start band=%u basic_rates=0x%x", band, g_vif->bss_conf.basic_rates);\n'
         '  g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BASIC_RATES);\n' + assign)
     (out / 'nw_sta_pong.c').write_text(sta)
+    (out / 'lx_rt_pong.c').write_text(adapt_dispatcher_timers((shared / 'shim/src/lx_rt.c').read_text()))
     common_sources = ['src/nw_crypto.c', 'src/nw_mac80211.c', 'src/nw_net.c', 'src/nw_pci.c',
         'src/nw_qrtr.c', 'src/nw_qrtr_mhi.c', 'src/nw_sta.c', 'shim/src/lx_rt.c', 'shim/src/mhi_hook.c']
-    jobs += [((out / 'nw_sta_pong.c') if n == 'src/nw_sta.c' else (out / 'nw_mac80211_pong.c') if n == 'src/nw_mac80211.c' else shared / n, out / ('shared_' + Path(n).stem + '.o'), []) for n in common_sources]
+    jobs += [((out / 'nw_sta_pong.c') if n == 'src/nw_sta.c' else (out / 'nw_mac80211_pong.c') if n == 'src/nw_mac80211.c' else (out / 'lx_rt_pong.c') if n == 'shim/src/lx_rt.c' else shared / n, out / ('shared_' + Path(n).stem + '.o'), []) for n in common_sources]
     jobs += [(linux / ('drivers/soc/qcom/' + n + '.c'), out / (n + '.o'), []) for n in ('qmi_interface', 'qmi_encdec')]
     jobs += [(ROOT / 'drivers/PongWifi/ath11k/PongAth11k.c', out / 'PongAth11k.o', [])]
     commands = []

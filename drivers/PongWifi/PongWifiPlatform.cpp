@@ -34,6 +34,7 @@ void pong_rpmh_init(void);
 extern const uint8_t pong_wifi_firmware[], pong_wifi_firmware_end[];
 }
 extern kmod_info_t g_kernel_kmod_info;
+extern "C" { volatile uint64_t pong_wifi_progress[3]={}; }
 namespace {
 #include "../NativeUfs/SmmuTakeover.h"
 constexpr uint64_t Iova=0xa0000000;
@@ -59,6 +60,8 @@ uint8_t *arenaVa; uint64_t tablePa,msiPa; uint64_t cbOffset;
 unsigned pcieCap,msiCap; volatile uint32_t stopped,wake; bool dmaOwned,hostMmioReady;
 uint64_t initDeadline;
 uint64_t now() {uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;}
+bool progressDiagnostic;
+void progress(unsigned phase) {if(progressDiagnostic){pong_wifi_progress[0]=phase;pong_wifi_progress[1]=now();pong_wifi_progress[2]++;}}
 void log(int level,const char *s) {if(level<7)IOLog("PongWifi[%d]: %s\n",level,s);}
 bool fail(const char *s) {log(3,s);return false;}
 void clean(void *p,size_t n) {uintptr_t a=reinterpret_cast<uintptr_t>(p)&~uintptr_t(63),e=reinterpret_cast<uintptr_t>(p)+n;for(;a<e;a+=64)__asm__ volatile("dc civac,%0"::"r"(a):"memory");__asm__ volatile("dsb sy":::"memory");}
@@ -615,6 +618,7 @@ void irq(void *) {
  signalWorker();
 }
 void worker(void *,wait_result_t) {
+ uint32_t diagnostic=0;progressDiagnostic=PE_parse_boot_argn("pong_wifi_diag",&diagnostic,sizeof diagnostic)&&diagnostic==1;
  // UFS owns another SID on the same APPSSMMU: serialize initial bank lease.
  unsigned n=0;for(;n<180&&!pong_ufs_ready();n++)IOSleep(500);
  if(n==180){fail("UFS prerequisites absent; WiFi skipped");goto done;}
@@ -636,7 +640,7 @@ void worker(void *,wait_result_t) {
   if(cfgWrite(4,2,6))goto done;
   initDeadline=now()+90000;int r=nw_wifi_start(&platform,&board);if(r){IOLog("PongWifi: ath11k start failed=%d\n",r);goto done;}
  }
- {bool net=false,irqSeen=false;uint64_t diagnosticsAt=0;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}poll();int busy=nw_wifi_step();nw_wifi_status st={};nw_wifi_status_get(&st);
+ {bool net=false,irqSeen=false;uint64_t diagnosticsAt=0;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}progress(1);poll();progress(2);int busy=nw_wifi_step();progress(3);nw_wifi_status st={};nw_wifi_status_get(&st);progress(4);
    if(!net&&st.channels&&st.state!=NW_STA_OFF&&nw_wifi_stats.stage>=4&&!nw_wifi_stats.last_err){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
      auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);if(chosen){chosen->setProperty("mac-address-wifi0",st.mac,6);chosen->release();}
      void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);if(!handle)goto done;
@@ -644,16 +648,16 @@ void worker(void *,wait_result_t) {
      pong_wifi_net_start(st.mac);log(6,"QCA6490 station ready; starting actual scan");nw_wifi_scan(nullptr,0);
    }}
    if(net) {
-    testNetwork(st);
+    progress(5);testNetwork(st);
     if(now()>=diagnosticsAt) {
      diagnosticsAt=now()+15000;
      IOLog("PongWifi: runtime state=%u scans=%u BSS=%u frames=%u MSI=%u receiver=%x dma-mib=%lu\n",
       st.state,nw_wifi_stats.scans,nw_wifi_stats.bss_seen,nw_wifi_stats.frames,
       __atomic_load_n(&msiArrivals,__ATOMIC_RELAXED),dbi.r(MsiStatus),(unsigned long)(ArenaBytes>>20));
-     pong_wifi_net_diagnostics();
+     progress(6);pong_wifi_net_diagnostics();
     }
    }
-   IOSleep(busy?1:5);
+   progress(7);IOSleep(busy?1:5);
  }}
  done: stopped=1;
  // A mapped address does not prove a powered device. Failed GDSC/clock

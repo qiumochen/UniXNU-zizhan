@@ -31,8 +31,11 @@ def main():
             ("dhcp-ack", [tests / "wifi-dhcp-ack.c"], ROOT / "drivers/PongWifi"),
         ]:
             binary = Path(td) / name
+            # Only our quoted includes belong to the driver/shim. On glibc,
+            # <errno.h> includes <linux/errno.h>; -I would shadow that system
+            # header with the Darwin shim and leave EAGAIN undefined.
             subprocess.run([args.cc, "-std=gnu11", "-Wno-macro-redefined", "-Wno-unused-function",
-                "-I", str(include), *map(str, inputs), "-o", str(binary)], check=True)
+                "-iquote", str(include), *map(str, inputs), "-o", str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
         # Test the real probe script with isolated USB/tool processes.
         usb = Path(td) / "usb.plist"

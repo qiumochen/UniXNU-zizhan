@@ -516,9 +516,10 @@ void *mapPhys(uint64_t pa,size_t n) {if(pa>=0x60200000&&pa<0x60400000&&n<=0x6040
 volatile uint32_t msiArrivals;
 // Opt-in bring-up fixture: join only the exact locally supplied network,
 // after real scanning, and report protocol results without credentials.
+unsigned testReconnectState;
 void testNetwork(const nw_wifi_status &st) {
  static bool checked=false,enabled=false,attempted=false,finished=false;
- static uint64_t deadline=0;
+ static uint64_t deadline=0, reconnectAt=0;
  if(!checked) {
   checked=true;uint32_t flag=0;
   enabled=PE_parse_boot_argn("pong_wifi_test",&flag,sizeof flag)&&flag==1;
@@ -527,7 +528,18 @@ void testNetwork(const nw_wifi_status &st) {
   }
   deadline=now()+60000;
  }
- if(!enabled||finished)return;
+ if(!enabled)return;
+ if(__atomic_load_n(&testReconnectState,__ATOMIC_ACQUIRE)==2) {
+  __atomic_store_n(&testReconnectState,3,__ATOMIC_RELEASE);
+  log(6,"WiFi lifecycle test RUNNING: disconnecting station");
+  nw_wifi_disconnect(); reconnectAt=now()+10000;
+ }
+ if(reconnectAt) {
+  if(now()<reconnectAt)return;
+  reconnectAt=0;attempted=false;finished=false;deadline=now()+60000;
+  log(6,"WiFi lifecycle test RUNNING: reconnecting to scanned network");
+ }
+ if(finished)return;
  if(!attempted&&st.state==NW_STA_IDLE) {
   nw_bss_info b={};
   for(int i=0,n=nw_wifi_bss_count();i<n;++i) {
@@ -542,6 +554,8 @@ void testNetwork(const nw_wifi_status &st) {
  }
  if(attempted&&st.state==NW_STA_UP&&pong_wifi_net_has_ipv4()) {
   finished=true;log(6,"WiFi association test PASS: authenticated link and IPv4 address");
+  unsigned idle=0;
+  __atomic_compare_exchange_n(&testReconnectState,&idle,1,false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
   pong_wifi_net_diagnostics();
  } else if(now()>=deadline) {
   finished=true;
@@ -611,6 +625,10 @@ void worker(void *,wait_result_t) {
 }
 }
 extern "C" void PongWifiRandom(void *p,size_t n) {while(n){unsigned part=n>4096?4096:unsigned(n);read_random(p,part);p=static_cast<uint8_t *>(p)+part;n-=part;}}
+extern "C" bool pong_wifi_test_reconnect(void) {
+ unsigned ready=1;
+ return __atomic_compare_exchange_n(&testReconnectState,&ready,2,false,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED);
+}
 extern "C" void pong_wifi_wake(void) {signalWorker();}
 extern "C" void native_wifi_logf(int level,const char *fmt,...) {char line[256];va_list a;va_start(a,fmt);vsnprintf(line,sizeof line,fmt,a);va_end(a);log(level,line);}
 extern "C" void pong_wifi_start_optional(void) {

@@ -162,6 +162,25 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     begin = sta.index('static void make_nonce(u8 *out) {')
     end = sta.index('static void derive_ptk(void)', begin)
     sta = sta[:begin] + 'extern void PongWifiRandom(void *, size_t);\nstatic void make_nonce(u8 *out) { PongWifiRandom(out, 32); }\n' + sta[end:]
+    # Darwin must see a real link-down for an explicit leave and for a
+    # replacement join, including when down/up occurs within one daemon tick.
+    join = 'static void start_connect(void) {\n  if (C.state != NW_STA_IDLE && C.state != NW_STA_SCANNING) return;'
+    leave = 'else if (kind == REQ_DISCONNECT && C.state >= NW_STA_AUTH) { teardown(0, 0); C.state = NW_STA_IDLE; }'
+    if sta.count(join) != 1 or sta.count(leave) != 1:
+        raise RuntimeError('shared station transition ABI differs')
+    sta = sta.replace(join, '''static void start_connect(void) {
+  if (C.state == NW_STA_UP && C.ssid_len == g_req.ssid_len &&
+      !memcmp(C.ssid, g_req.ssid, C.ssid_len) &&
+      (!g_req.has_bssid || !memcmp(C.ap.bssid, g_req.bssid, 6))) return;
+  if (C.state >= NW_STA_AUTH) {
+    lx_cancel_delayed(&g_timer);
+    teardown(C.state == NW_STA_UP, -1);
+    C.state = NW_STA_IDLE;
+  }
+  if (C.state != NW_STA_IDLE && C.state != NW_STA_SCANNING) return;''')
+    sta = sta.replace(leave, '''else if (kind == REQ_DISCONNECT && C.state >= NW_STA_AUTH) {
+      lx_cancel_delayed(&g_timer); teardown(C.state == NW_STA_UP, -1); C.state = NW_STA_IDLE;
+    }''')
     (out / 'nw_sta_pong.c').write_text(sta)
     common_sources = ['src/nw_crypto.c', 'src/nw_mac80211.c', 'src/nw_net.c', 'src/nw_pci.c',
         'src/nw_qrtr.c', 'src/nw_qrtr_mhi.c', 'src/nw_sta.c', 'shim/src/lx_rt.c', 'shim/src/mhi_hook.c']

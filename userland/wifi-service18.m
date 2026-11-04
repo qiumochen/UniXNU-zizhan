@@ -25,15 +25,20 @@ typedef CFStringRef (*NotificationKey)(CFTypeRef);
 static CreateService create_service;
 static CopyInformation copy_information;
 static CFTypeRef service;
-static CFTypeRef setup_session;
+static CFTypeRef setup_session, repair_session;
+static CreateStore create_store;
+static NSString *session_option, *repair_ipv4_key, *repair_dns_key;
 static CopyStoreValue copy_value;
 static CopyStoreMultiple copy_multiple;
 static int (*store_error)(void);
 static NotificationKey notification_key;
 static NSString *setup_ipv4_key;
-static NSString *setup_dns_key;
 static SetStoreMultiple set_store;
-static bool lease_repaired, lease_repair_enabled;
+static uint64_t applied_sequence, last_link, observed_sequence, refresh_sequence;
+static bool cycle_test, cleanup_seen;
+static unsigned phase;
+static NSString *retired_setup, *retired_native, *retired_ipv4, *retired_dns;
+static Boolean (*notify_store)(CFTypeRef, CFStringRef);
 static bool system_setup;
 static bool test_mode, reported, test_finished, probe_running;
 static unsigned retry_ticks, test_ticks, next_probe, probe_attempts;
@@ -42,7 +47,7 @@ static const char *lease_skip;
 static NSDictionary *read_state(NSString *key)
 {
     if (!copy_value || !key) return nil;
-    id value = CFBridgingRelease(copy_value(setup_session, (__bridge CFStringRef)key));
+    id value = CFBridgingRelease(copy_value(setup_session ?: repair_session, (__bridge CFStringRef)key));
     return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
 
@@ -83,7 +88,7 @@ static bool configure_en0(void)
 {
     void *sc = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_NOW);
     if (!sc) return false;
-    CreateStore create = (CreateStore)dlsym(sc, "SCDynamicStoreCreateWithOptions");
+    create_store = (CreateStore)dlsym(sc, "SCDynamicStoreCreateWithOptions");
     CopyStoreMultiple copy = (CopyStoreMultiple)dlsym(sc, "SCDynamicStoreCopyMultiple");
     SetStoreMultiple set = (SetStoreMultiple)dlsym(sc, "SCDynamicStoreSetMultiple");
     const CFStringRef *session_keys = dlsym(sc, "kSCDynamicStoreUseSessionKeys");
@@ -91,9 +96,11 @@ static bool configure_en0(void)
     NSDictionary *options, *interfaces, *keys;
     NSArray *patterns;
     NSString *base;
-    if (!create || !copy || !set || !session_keys) goto done;
-    options = @{(__bridge NSString *)*session_keys: @YES};
-    setup_session = create(NULL, CFSTR("Pong WiFi"), (__bridge CFDictionaryRef)options, NULL, NULL);
+    if (!create_store || !copy || !set || !session_keys || !*session_keys) goto done;
+    session_option = (__bridge NSString *)*session_keys;
+    set_store = set;
+    options = @{session_option: @YES};
+    setup_session = create_store(NULL, CFSTR("Pong WiFi"), (__bridge CFDictionaryRef)options, NULL, NULL);
     if (!setup_session) goto done;
     patterns = @[@"Setup:/Network/Service/[^/]+/Interface"];
     interfaces = CFBridgingRelease(copy(setup_session, NULL, (__bridge CFArrayRef)patterns));
@@ -106,12 +113,10 @@ static bool configure_en0(void)
         }
     base = [@"Setup:/Network/Service/" stringByAppendingString:NSUUID.UUID.UUIDString];
     setup_ipv4_key = [base stringByAppendingString:@"/IPv4"];
-    setup_dns_key = [base stringByAppendingString:@"/DNS"];
     keys = @{[base stringByAppendingString:@"/Interface"]:
                                @{@"DeviceName": @"en0", @"Type": @"Ethernet", @"Hardware": @"AirPort"},
                            setup_ipv4_key: @{@"ConfigMethod": @"DHCP"}};
     ok = set(setup_session, (__bridge CFDictionaryRef)keys, NULL, NULL);
-    if (ok) set_store = set;
     fprintf(stderr, "Pong WiFi18: en0 network setup %s\n", ok ? "RUNNING" : "rejected");
 done:
     if (!ok && setup_session) { CFRelease(setup_session); setup_session = NULL; }
@@ -147,30 +152,40 @@ static bool kernel_lease_matches(const struct pong_wifi_lease *lease, bool *mask
     return match;
 }
 
-/* Native IPConfiguration owns the lease and address. Recover omitted route
- * and resolver options only from its current, matching DHCP ACK captured at en0. */
-static void recover_lease_options(NSDictionary *state)
+static int wifi_ioctl(int32_t type, struct pong_wifi_lease *lease)
 {
-    lease_skip = "no owned en0 configuration";
-    if (!setup_session || !set_store || lease_repaired ||
-        (state && ![state[@"InterfaceName"] isEqual:@"en0"])) return;
-    lease_skip = "native router present";
-    if (state[@"Router"]) return;
-    struct pong_wifi_lease lease = {};
     struct {
         char ifname[16];
         int32_t type, value;
         uint32_t length;
         uint64_t data __attribute__((aligned(8)));
-    } request = {"en0", PONG_WIFI_GET_LEASE, 0, sizeof(lease), (uintptr_t)&lease};
+    } request = {"en0", type, 0, lease ? sizeof(*lease) : 0, (uintptr_t)lease};
     _Static_assert(sizeof(request) == 40, "Apple80211 request ABI");
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) { lease_skip = "witness socket unavailable"; return; }
-    int status = ioctl(fd, 0xc02869c9UL, &request);
+    if (fd < 0) return errno;
+    int result = ioctl(fd, lease ? 0xc02869c9UL : 0x802869c8UL, &request) ? errno : 0;
     close(fd);
+    if (!result && lease && request.length != sizeof(*lease)) return EINVAL;
+    return result;
+}
+
+static void clear_repair(const char *reason)
+{
+    if (!repair_session) return;
+    CFRelease(repair_session); repair_session = NULL;
+    repair_ipv4_key = nil; repair_dns_key = nil;
+    applied_sequence = 0;
+    fprintf(stderr, "Pong WiFi18: supplemental route removed (%s)\n", reason);
+}
+
+/* Native IPConfiguration owns the lease and address. Recover omitted route
+ * and resolver options only from its current, matching DHCP ACK captured at en0. */
+static void recover_lease_options(struct pong_wifi_lease lease)
+{
+    lease_skip = "no dynamic store session support";
+    if (!create_store || !session_option || !set_store || !copy_multiple) return;
     lease_skip = "no matching live DHCP ACK";
-    if (status || request.length != sizeof(lease) || lease.version != PONG_WIFI_LEASE_VERSION ||
-        lease.dns_count > PONG_WIFI_LEASE_DNS_MAX) return;
+    if (lease.version != PONG_WIFI_LEASE_VERSION || lease.dns_count > PONG_WIFI_LEASE_DNS_MAX) return;
     NSString *address = ipv4_text(lease.address), *router = ipv4_text(lease.router);
     NSMutableArray *dns = [NSMutableArray array];
     for (unsigned i = 0; i < lease.dns_count; ++i) {
@@ -182,33 +197,51 @@ static void recover_lease_options(NSDictionary *state)
     lease_skip = "live ACK address not installed in kernel";
     bool mask_matches = false;
     if (!kernel_lease_matches(&lease, &mask_matches)) return;
-    bool state_matches = [state[@"Addresses"] containsObject:address];
     lease_skip = "ACK router is outside the lease subnet";
     struct in_addr local, gateway, mask;
     memcpy(&mask, lease.mask, 4); memcpy(&local, lease.address, 4); memcpy(&gateway, lease.router, 4);
     if (!mask.s_addr || (gateway.s_addr & mask.s_addr) != (local.s_addr & mask.s_addr)) return;
-    NSMutableDictionary *options = [@{setup_ipv4_key: @{@"ConfigMethod": @"DHCP", @"Router": router},
-                                     setup_dns_key: @{@"ServerAddresses": dns}} mutableCopy];
-    if (!state || !state_matches || !mask_matches) {
-        // This setup and its keys belong only to our current SC session.
-        // Do not create a second IPv4 service if configd published another.
-        NSArray *patterns = @[@"^State:/Network/Service/[^/]+/IPv4$"];
-        NSDictionary *all = copy_multiple ? CFBridgingRelease(copy_multiple(setup_session, NULL, (__bridge CFArrayRef)patterns)) : nil;
-        lease_skip = "cannot establish ownership of en0 state";
-        if (!all) return;
-        NSString *owned = state_key(setup_ipv4_key);
-        for (NSString *key in all)
-            if (![key isEqual:owned] && [all[key][@"InterfaceName"] isEqual:@"en0"]) return;
-        char netmask[INET_ADDRSTRLEN];
-        if (!inet_ntop(AF_INET, lease.mask, netmask, sizeof netmask)) return;
-        options[owned] = @{@"Addresses": @[address], @"SubnetMasks": @[@(netmask)],
-                                              @"Router": router, @"InterfaceName": @"en0",
-                                              @"ConfirmedInterfaceName": @"en0"};
+    NSDictionary *global = read_state(@"State:/Network/Global/IPv4");
+    NSDictionary *global_dns = read_state(@"State:/Network/Global/DNS");
+    NSString *primary = global[@"PrimaryService"];
+    bool own_primary = primary && [[NSString stringWithFormat:@"State:/Network/Service/%@/IPv4", primary] isEqual:repair_ipv4_key];
+    if (!own_primary && global[@"Router"] && [global_dns[@"ServerAddresses"] count]) {
+        clear_repair("native route and DNS");
+        lease_skip = "native route and DNS";
+        return;
     }
-    lease_repaired = set_store(setup_session, (__bridge CFDictionaryRef)options, NULL, NULL);
-    lease_skip = lease_repaired ? "applied" : "store rejected options";
-    fprintf(stderr, "Pong WiFi18: live DHCP ACK route and DNS %s\n", lease_repaired ? "APPLIED" : "rejected");
-    fprintf(stderr, "Pong WiFi18: live ACK kernel-mask-match=%d state-address-match=%d\n", mask_matches, state_matches);
+    // Never demote a real primary service on another interface.
+    if (global[@"PrimaryInterface"] && ![global[@"PrimaryInterface"] isEqual:@"en0"]) {
+        clear_repair("another interface is primary");
+        return;
+    }
+    if (applied_sequence == lease.sequence && own_primary &&
+        [global[@"Router"] isEqual:router] && [global_dns[@"ServerAddresses"] count]) {
+        lease_skip = "applied";
+        return;
+    }
+    if (!repair_session) {
+        NSDictionary *options = @{session_option: @YES};
+        repair_session = create_store(NULL, CFSTR("Pong WiFi DHCP options"),
+                                     (__bridge CFDictionaryRef)options, NULL, NULL);
+        if (!repair_session) return;
+        NSString *base = [@"State:/Network/Service/" stringByAppendingString:NSUUID.UUID.UUIDString];
+        repair_ipv4_key = [base stringByAppendingString:@"/IPv4"];
+        repair_dns_key = [base stringByAppendingString:@"/DNS"];
+    }
+    char netmask[INET_ADDRSTRLEN];
+    if (!inet_ntop(AF_INET, lease.mask, netmask, sizeof netmask)) return;
+    NSDictionary *state = @{@"Addresses": @[address], @"SubnetMasks": @[@(netmask)],
+                            @"Router": router, @"InterfaceName": @"en0",
+                            @"ConfirmedInterfaceName": @"en0"};
+    NSDictionary *options = @{repair_ipv4_key: state, repair_dns_key: @{@"ServerAddresses": dns}};
+    bool ok = set_store(repair_session, (__bridge CFDictionaryRef)options, NULL, NULL);
+    lease_skip = ok ? "applied" : "store rejected options";
+    if (!ok) { clear_repair("store rejected options"); return; }
+    if (applied_sequence != lease.sequence)
+        fprintf(stderr, "Pong WiFi18: live DHCP ACK route and DNS APPLIED sequence=%llu kernel-mask-match=%d\n",
+                (unsigned long long)lease.sequence, mask_matches);
+    applied_sequence = lease.sequence;
 }
 
 static int kernel_route_error(void)
@@ -260,6 +293,20 @@ static void test_https(void)
             test_finished = final;
             probe_running = false;
             next_probe = test_ticks + 4;
+            if (!cycle_test || !ok) return;
+            if (phase == 0) {
+                refresh_sequence = observed_sequence;
+                bool sent = setup_session && notify_store && notify_store(setup_session,
+                    CFSTR("State:/Network/Interface/en0/RefreshConfiguration"));
+                fprintf(stderr, "Pong WiFi18: DHCP renewal request %s\n", sent ? "RUNNING" : "FAIL");
+                if (sent) { phase = 1; test_finished = false; }
+            } else if (phase == 2) {
+                int e = wifi_ioctl(PONG_WIFI_TEST_RECONNECT, NULL);
+                fprintf(stderr, "Pong WiFi18: reconnect request %s errno=%d\n", e ? "FAIL" : "RUNNING", e);
+                if (!e) { phase = 3; test_finished = false; }
+            } else if (phase == 4) {
+                fprintf(stderr, "Pong WiFi18: network lifecycle %s\n", cleanup_seen ? "PASS" : "FAIL: cleanup not observed");
+            }
         });
         [session finishTasksAndInvalidate];
     }] resume];
@@ -268,22 +315,47 @@ static void test_https(void)
 static void tick(void)
 {
     bool ipv4 = false;
-    if (!link_active(&ipv4)) {
+    bool up = link_active(&ipv4);
+    struct pong_wifi_lease lease = {};
+    bool witness = wifi_ioctl(PONG_WIFI_GET_LEASE, &lease) == 0;
+    bool changed_link = witness && last_link && lease.link != last_link;
+    if (witness) last_link = lease.link;
+    if (!up || changed_link) {
         if (service) { CFRelease(service); service = NULL; }
+        if (phase == 3 && (setup_session || repair_session)) {
+            retired_setup = setup_session ? setup_ipv4_key : nil;
+            retired_native = setup_session ? state_key(setup_ipv4_key) : nil;
+            retired_ipv4 = repair_ipv4_key;
+            retired_dns = repair_dns_key;
+        }
+        clear_repair("link ended");
         if (setup_session) { CFRelease(setup_session); setup_session = NULL; }
-        retry_ticks = 0; reported = false; system_setup = false; lease_repaired = false;
-    } else if (!ipv4 && !service && ++retry_ticks == 1) {
+        retry_ticks = 0; reported = false; system_setup = false;
+    }
+    if (!up && phase == 3 && (retired_setup || retired_ipv4) && !cleanup_seen) {
+        NSDictionary *global = read_state(@"State:/Network/Global/IPv4");
+        cleanup_seen = !read_state(retired_setup) && !read_state(retired_native) &&
+                       !read_state(retired_ipv4) && !read_state(retired_dns) &&
+                       ![global[@"PrimaryInterface"] isEqual:@"en0"];
+        if (cleanup_seen) fprintf(stderr, "Pong WiFi18: disconnect cleanup PASS\n");
+    }
+    if (up && !service && !setup_session && !system_setup && retry_ticks++ == 0) {
         configure_en0();
-    } else if (!ipv4 && setup_session && retry_ticks == 25) {
-        CFRelease(setup_session); setup_session = NULL;
+    } else if (up && !ipv4 && setup_session && ++retry_ticks >= 25) {
+        clear_repair("IPv4 lost");
+        if (setup_session) { CFRelease(setup_session); setup_session = NULL; }
         fprintf(stderr, "Pong WiFi18: configured DHCP timed out; releasing session\n");
-    } else if (!ipv4 && !service && !setup_session && !system_setup && retry_ticks >= 10 && retry_ticks % 5 == 0) {
-        // IPConfiguration owns the DHCP exchange and publishes its actual
-        // lease. This service exists only for an active real en0 link.
+    } else if (up && !ipv4 && !service && !setup_session && !system_setup && retry_ticks >= 10 && retry_ticks % 5 == 0) {
+        // IPConfiguration owns the DHCP exchange and publishes its actual lease.
         NSDictionary *options = @{@"IPv4Entity": @{@"ConfigMethod": @"DHCP"}, @"NoPublish": @NO};
         service = create_service(CFSTR("en0"), (__bridge CFDictionaryRef)options);
         fprintf(stderr, "Pong WiFi18: DHCP service %s\n", service ? "RUNNING" : "create failed");
     }
+    if (up && ipv4) retry_ticks = 1;
+    bool mask_matches = false;
+    if (applied_sequence && (!up || !ipv4 || !witness || lease.version != PONG_WIFI_LEASE_VERSION ||
+                            !kernel_lease_matches(&lease, &mask_matches)))
+        clear_repair("lease invalidated");
     if (ipv4 && !reported) {
         CFDictionaryRef info = service ? copy_information(service) : NULL;
         if (!service || info) {
@@ -299,14 +371,24 @@ static void tick(void)
         }
         if (info) CFRelease(info);
     }
-    if (ipv4 && setup_session && lease_repair_enabled && !lease_repaired && copy_value) {
-        recover_lease_options(read_state(state_key(setup_ipv4_key)));
+    if (up && ipv4 && copy_value) recover_lease_options(lease);
+    if (witness && lease.version == PONG_WIFI_LEASE_VERSION && lease.sequence != observed_sequence) {
+        observed_sequence = lease.sequence;
+        if (test_mode) fprintf(stderr, "Pong WiFi18: live lease sequence=%llu link=%llu\n",
+            (unsigned long long)lease.sequence, (unsigned long long)lease.link);
     }
     if (!test_mode || test_finished) return;
     ++test_ticks;
-    if (reported && !probe_running && test_ticks >= next_probe) test_https();
-    if (!reported && !probe_running && test_ticks >= 45) {
-        fprintf(stderr, "Pong WiFi18: address test FAIL: no usable IPv4 within 90 seconds\n");
+    if (phase == 1 && observed_sequence > refresh_sequence && ipv4) {
+        fprintf(stderr, "Pong WiFi18: DHCP renewal ACK PASS\n");
+        phase = 2; probe_attempts = 0; next_probe = test_ticks + 2;
+    }
+    if (phase == 3 && cleanup_seen && up && ipv4 && observed_sequence > refresh_sequence + 1) {
+        phase = 4; probe_attempts = 0; next_probe = test_ticks + 2;
+    }
+    if ((phase == 0 || phase == 2 || phase == 4) && reported && !probe_running && test_ticks >= next_probe) test_https();
+    if (!probe_running && test_ticks >= (cycle_test ? 130u : 45u)) {
+        fprintf(stderr, "Pong WiFi18: network lifecycle FAIL: deadline phase=%u\n", phase);
         test_finished = true;
     }
 }
@@ -316,7 +398,7 @@ int main(void)
     @autoreleasepool {
         if (!boot_option("pong_wifi=1")) return 0;
         test_mode = boot_option("pong_wifi_test=1");
-        lease_repair_enabled = boot_option("pong_wifi_lease_repair=1");
+        cycle_test = test_mode && boot_option("pong_wifi_cycle=1");
         void *framework = dlopen("/System/Library/PrivateFrameworks/IPConfiguration.framework/IPConfiguration", RTLD_NOW);
         create_service = framework ? (CreateService)dlsym(framework, "IPConfigurationServiceCreate") : NULL;
         copy_information = framework ? (CopyInformation)dlsym(framework, "IPConfigurationServiceCopyInformation") : NULL;
@@ -324,6 +406,7 @@ int main(void)
         void *sc = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_NOW);
         copy_value = sc ? (CopyStoreValue)dlsym(sc, "SCDynamicStoreCopyValue") : NULL;
         copy_multiple = sc ? (CopyStoreMultiple)dlsym(sc, "SCDynamicStoreCopyMultiple") : NULL;
+        notify_store = sc ? (Boolean (*)(CFTypeRef, CFStringRef))dlsym(sc, "SCDynamicStoreNotifyValue") : NULL;
         store_error = sc ? (int (*)(void))dlsym(sc, "SCError") : NULL;
         if (!create_service || !copy_information) {
             fprintf(stderr, "Pong WiFi18: DHCP service SKIP: native IPConfiguration unavailable\n");

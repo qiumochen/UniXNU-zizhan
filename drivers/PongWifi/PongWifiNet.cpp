@@ -37,9 +37,11 @@ extern "C" {
 #include "nw_abi.h"
 #include "PongWifiLease.h"
 #include <pexpert/pexpert.h>
+#include <kern/clock.h>
 
 extern "C" unsigned nw_wifi_channel_list(unsigned *, unsigned);
 extern "C" void native_wifi_logf(int level, const char *fmt, ...);
+extern "C" bool pong_wifi_test_reconnect(void);
 extern "C" void pong_wifi_wake(void);   // WifiProbe.cpp: the WiFi thread sends the queued frame now
 
 #define SIOCSA80211 0x802869c8UL   // _IOW('i', 200, struct apple80211req)
@@ -92,9 +94,14 @@ ifnet_t gIf;
 uint8_t gMac[6];
 lck_grp_t *gGrp;
 lck_mtx_t *gLock;
-bool gWitnessEnabled, gLeaseActive, gRequest;
-uint8_t gLeaseXid[4];
-struct pong_wifi_lease gLease;
+bool gCycleTest;
+struct pong_wifi_lease_tracker gLease;
+
+uint64_t lease_clock() {
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds(mach_continuous_time(), &ns);
+  return ns / 1000000000ull;
+}
 
 bool gPower = true;
 bool gKeyed;   // the last join used a passphrase
@@ -124,13 +131,9 @@ void post_event(uint32_t code, const void *payload, size_t length) {
 // link state for the network configuration: the interface's flags and the stack's own link events
 void post_link(bool up) {
   if (!gIf) return;
-  if (gWitnessEnabled) {
-    lck_mtx_lock(gLock);
-    gLeaseActive = up;
-    gRequest = false;
-    memset(&gLease, 0, sizeof(gLease));
-    lck_mtx_unlock(gLock);
-  }
+  lck_mtx_lock(gLock);
+  if (gLease.up != up) pong_wifi_lease_link(&gLease, up);
+  lck_mtx_unlock(gLock);
   ifnet_set_flags(gIf, up ? IFF_RUNNING : 0, IFF_RUNNING);
   struct { struct net_event_data data; } payload; memset(&payload, 0, sizeof payload);
   payload.data.if_family = IFNET_FAMILY_ETHERNET; payload.data.if_unit = 0; snprintf(payload.data.if_name, sizeof payload.data.if_name, "en");
@@ -160,7 +163,7 @@ void on_connect_done(int result) {
 void on_link_lost(int reason) {
   log(6, "wifi-net: link lost: reason %d", reason);
   post_link(false);
-  link_event ev; memset(&ev, 0, sizeof ev); ev.down = 1; ev.involuntary = 1; ev.reason = static_cast<uint32_t>(reason);
+  link_event ev; memset(&ev, 0, sizeof ev); ev.down = 1; ev.involuntary = reason >= 0; ev.reason = reason < 0 ? 0 : static_cast<uint32_t>(reason);
   post_event(kEvLinkChanged, &ev, sizeof ev);
 }
 // What the address configuration exchanges, as it crosses the interface: DHCP messages (type, transaction, offered address) and ARP, the first
@@ -179,21 +182,16 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
   const uint8_t *udp = ip + ihl; const unsigned sp = udp[0] << 8 | udp[1], dp = udp[2] << 8 | udp[3];
   if (!((sp == 67 || sp == 68) && (dp == 67 || dp == 68))) return;
   k.dhcp++; const uint8_t *b = udp + 8; const size_t bl = n - (b - e); unsigned msg = 0;
-  if (gWitnessEnabled && ihl >= 20 && !(pong_wifi_be16(ip + 6) & 0x3fff)) {
+  if (ihl >= 20 && !(pong_wifi_be16(ip + 6) & 0x3fff)) {
     const unsigned udpLen = pong_wifi_be16(udp + 4), ipLen = pong_wifi_be16(ip + 2);
     if (udpLen >= 8 + 241 && udpLen - 8 <= bl && ipLen >= ihl + udpLen && ipLen <= n - 14) {
       struct pong_wifi_lease lease = {};
       const unsigned mt = pong_wifi_dhcp_fields(b, udpLen - 8, gMac, &lease);
-      lck_mtx_lock(gLock);
-      if (gLeaseActive && out && sp == 68 && dp == 67 && mt == 3 && b[0] == 1) {
-        memcpy(gLeaseXid, b + 4, sizeof(gLeaseXid));
-        gRequest = true;
-      } else if (gLeaseActive && !out && sp == 67 && dp == 68 && gRequest &&
-                 !memcmp(gLeaseXid, b + 4, sizeof(gLeaseXid))) {
-        if (lease.version) gLease = lease;
-        if (mt == 6 && b[0] == 2) { memset(&gLease, 0, sizeof(gLease)); gRequest = false; }
+      if (mt && ((out && sp == 68 && dp == 67) || (!out && sp == 67 && dp == 68))) {
+        lck_mtx_lock(gLock);
+        pong_wifi_lease_packet(&gLease, out, mt, b, &lease, lease_clock());
+        lck_mtx_unlock(gLock);
       }
-      lck_mtx_unlock(gLock);
     }
   }
   for (size_t o = 240; bl >= 240 && o + 2 <= bl && b[o] != 255; o += b[o] ? 2 + b[o + 1] : 1) if (b[o] == 53 && o + 2 < bl) { msg = b[o + 2]; break; }
@@ -303,12 +301,14 @@ int map_state(unsigned s) { switch (s) { case NW_STA_SCANNING: return 1; case NW
 int apple80211(bool set, apple80211req &rq) {
   nw_wifi_status st; nw_wifi_status_get(&st);
   const int type = rq.req_type;
+  if (type == PONG_WIFI_TEST_RECONNECT)
+    return set && gCycleTest && pong_wifi_test_reconnect() ? 0 : EOPNOTSUPP;
   if (type == PONG_WIFI_GET_LEASE) {
-    if (set || !gWitnessEnabled) return EOPNOTSUPP;
+    if (set) return EOPNOTSUPP;
     lck_mtx_lock(gLock);
-    const auto lease = gLease;
+    const auto lease = pong_wifi_lease_snapshot(&gLease, lease_clock());
     lck_mtx_unlock(gLock);
-    return lease.version ? answer_bytes(rq, &lease, sizeof(lease)) : ENOENT;
+    return answer_bytes(rq, &lease, sizeof(lease));
   }
   // (not on the stack: the largest answer is 4824 bytes)
   union Out { uint8_t raw[5120]; channels_list chans; scan_result res; };
@@ -344,7 +344,7 @@ int apple80211(bool set, apple80211req &rq) {
       gKeyed = hasKey; int r = nw_wifi_connect(a.ssid, a.ssid_length, hasBssid ? a.bssid : nullptr, hasKey ? pass : nullptr, hasKey ? keyLength : 0);
       memset(pass, 0, sizeof pass); memset(&a, 0, sizeof a);
       return r ? EINVAL : 0; }
-    case kDisassociate: case kDeauth: gUserJoin = true; log(6, "wifi-net: leave"); nw_wifi_disconnect(); post_link(false); return 0;
+    case kDisassociate: case kDeauth: gUserJoin = true; log(6, "wifi-net: leave"); nw_wifi_disconnect(); return 0;
     case kScanCacheClear: case kLocale: case kCountryCode: case kPowerSave: case kAuthType: case kCipherKey: return 0;
     default: return EOPNOTSUPP;
     }
@@ -549,8 +549,9 @@ extern "C" void pong_wifi_net_start(const uint8_t mac[6]) {
   if (gIf) return;
   if (!pong_wifi_net_prepare()) { log(3, "wifi-net: event setup unavailable"); return; }
   memcpy(gMac, mac, 6);
-  uint32_t witness = 0;
-  gWitnessEnabled = PE_parse_boot_argn("pong_wifi_lease_repair", &witness, sizeof(witness)) && witness == 1;
+  uint32_t test = 0, cycle = 0;
+  gCycleTest = PE_parse_boot_argn("pong_wifi_test", &test, sizeof(test)) && test == 1 &&
+      PE_parse_boot_argn("pong_wifi_cycle", &cycle, sizeof(cycle)) && cycle == 1;
   struct ifnet_init_eparams p; memset(&p, 0, sizeof p);
   p.ver = IFNET_INIT_CURRENT_VERSION; p.len = sizeof p; p.flags = IFNET_INIT_LEGACY | IFNET_INIT_NX_NOAUTO; p.name = "en"; p.unit = 0; p.family = IFNET_FAMILY_ETHERNET; p.subfamily = IFNET_SUBFAMILY_WIFI; p.type = IFT_ETHER;
   p.output = if_output; p.demux = ether_demux; p.add_proto = ether_add_proto; p.del_proto = ether_del_proto; p.check_multi = ether_check_multi; p.framer = ether_frameout;

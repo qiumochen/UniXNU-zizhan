@@ -36,6 +36,7 @@ extern "C" {
 #include <stdarg.h>
 #include "nw_abi.h"
 #include "PongWifiLease.h"
+#include "PongWifiNotify.h"
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
 
@@ -136,7 +137,8 @@ struct { unsigned count, kicks, cleared, longest; bool kicked; } gStall;   // in
 int gAssocResult = kAssocOk;
 unsigned gScanCursor, gScanning;
 thread_call_t gNotifications;
-unsigned gPendingNotifications;
+pong_wifi_notification_queue gNotificationQueue;
+enum { NotifyControl=1, NotifyScan, NotifyAssociate, NotifyLost, NotifyFailed };
 enum { NotifyPower=1, NotifyLinkDown=2 };
 bool gUserJoin;   // the wireless daemon joined, left or switched the radio itself: the unattended test join steps aside
 uint32_t gLogged[256 / 32];
@@ -171,57 +173,82 @@ void post_link(bool up) {
   pong_kev_post(&msg);
 }
 
-// Apple80211 commands own gLock. Network/socket event delivery may reenter
-// interface queries and must run after that lock has been released. Keep
-// only coalescible state notifications here; scan/join completions retain
-// their existing explicit callbacks outside gLock.
+// Socket/ifnet delivery can synchronously cause output or interface queries.
+// The cooperative firmware dispatcher must remain free to drain that work.
+// Queue bounded FIFO transitions under gLock, then deliver outside both the
+// network lock and dispatcher context. Never coalesce a real down/up edge.
+void queue_notification_locked(pong_wifi_notification event) {
+  if(__atomic_load_n(&gFailed,__ATOMIC_ACQUIRE) && event.kind!=NotifyFailed)return;
+  if(!pong_wifi_notification_push(&gNotificationQueue,event)) {
+    log(3,"wifi-net: notification queue overflow; interface failed");
+    __atomic_store_n(&gFailed,true,__ATOMIC_RELEASE);gPower=false;
+    gAssocResult=kAssocFailed;gScanning=0;
+    pong_wifi_notification_reset(&gNotificationQueue);
+    pong_wifi_notification failure={NotifyFailed,1,0,0};
+    pong_wifi_notification_push(&gNotificationQueue,failure);
+  }
+  thread_call_enter(gNotifications);
+}
 void deliver_notifications(thread_call_param_t,thread_call_param_t) {
   for(;;) {
+    pong_wifi_notification event={};
     lck_mtx_lock(gLock);
-    const unsigned pending=gPendingNotifications;gPendingNotifications=0;
+    bool available=pong_wifi_notification_pop(&gNotificationQueue,&event);
     lck_mtx_unlock(gLock);
-    if(!pending)return;
-    if(pending&NotifyLinkDown)post_link(false);
-    if(pending&NotifyPower)post_event(kEvPowerChanged,nullptr,0);
+    if(!available)return;
+    switch(event.kind) {
+    case NotifyControl:
+      if(event.result&NotifyLinkDown)post_link(false);
+      if(event.result&NotifyPower)post_event(kEvPowerChanged,nullptr,0);
+      break;
+    case NotifyScan:post_event(kEvScanDone,nullptr,0);break;
+    case NotifyAssociate:
+      if(event.result==NW_RES_OK)post_link(true);
+      post_event(kEvAssocDone,nullptr,0);
+      if(event.result==NW_RES_OK) {
+        post_event(kEvSsidChanged,nullptr,0);post_event(kEvBssidChanged,nullptr,0);
+        link_event link={};link.rssi=event.rssi;link.noise=static_cast<uint16_t>(-95);link.snr=static_cast<uint16_t>(event.rssi+95);
+        post_event(kEvLinkChanged,&link,sizeof link);
+        if(event.keyed)post_event(kEvRsnHandshakeDone,nullptr,0);
+      }
+      log(6,"wifi-net: association notifications delivered result %d",event.result);
+      break;
+    case NotifyLost: {
+      post_link(false);link_event link={};link.down=1;link.involuntary=1;link.reason=static_cast<uint32_t>(event.result);
+      post_event(kEvLinkChanged,&link,sizeof link);break;
+    }
+    case NotifyFailed:
+      post_link(false);
+      if(event.result)post_event(kEvScanDone,nullptr,0);
+      post_event(kEvAssocDone,nullptr,0);post_event(kEvPowerChanged,nullptr,0);break;
+    }
   }
 }
 void notify_locked(unsigned events) {
-  gPendingNotifications|=events;thread_call_enter(gNotifications);
+  pong_wifi_notification event={NotifyControl,static_cast<int32_t>(events),0,0};
+  queue_notification_locked(event);
 }
-
-// ---- what the module tells us ----
 void on_scan_done() {
-  lck_mtx_lock(gLock); gScanning = 0; gScanCursor = 0; lck_mtx_unlock(gLock);
-  post_event(kEvScanDone, nullptr, 0);
-}
-// A scan answered from the cache finishes after the time a short scan takes: answered at once, the daemon asks again straight away.
-thread_call_t gCachedScan;
-void cached_scan_done(thread_call_param_t, thread_call_param_t) { on_scan_done(); }
-void on_connect_done(int result) {
-  lck_mtx_lock(gLock);
-  gAssocResult = result == NW_RES_OK ? kAssocOk : result == NW_RES_BAD_KEY ? kAssocBadKey : result == NW_RES_TIMEOUT ? kAssocTimeout : kAssocFailed;
-  const bool keyed=gKeyed;
+  lck_mtx_lock(gLock);gScanning=0;gScanCursor=0;
+  pong_wifi_notification event={NotifyScan,0,0,0};queue_notification_locked(event);
   lck_mtx_unlock(gLock);
-  log(6, "wifi-net: join finished: module result %d", result);
-  if (result == NW_RES_OK) { post_link(true); }
-  post_event(kEvAssocDone, nullptr, 0);
-  if (result == NW_RES_OK) {
-    post_event(kEvSsidChanged, nullptr, 0); post_event(kEvBssidChanged, nullptr, 0);
-    nw_wifi_status st; nw_wifi_status_get(&st);
-    link_event ev; memset(&ev, 0, sizeof ev); ev.rssi = st.signal_dbm; ev.noise = static_cast<uint16_t>(-95); ev.snr = static_cast<uint16_t>(st.signal_dbm + 95);
-    post_event(kEvLinkChanged, &ev, sizeof ev);
-    // NW_RES_OK follows actual key installation/STA_AUTHORIZED for WPA2.
-    // Native wifid also waits for this event; association alone does not
-    // finish its RSN state machine. Do not notify on failed or open joins.
-    if(keyed)post_event(kEvRsnHandshakeDone,nullptr,0);
-  }
+}
+thread_call_t gCachedScan;
+void cached_scan_done(thread_call_param_t,thread_call_param_t) { on_scan_done(); }
+void on_connect_done(int result) {
+  nw_wifi_status status={};nw_wifi_status_get(&status);
+  lck_mtx_lock(gLock);
+  gAssocResult=result==NW_RES_OK?kAssocOk:result==NW_RES_BAD_KEY?kAssocBadKey:result==NW_RES_TIMEOUT?kAssocTimeout:kAssocFailed;
+  // NW_RES_OK follows actual key installation/STA_AUTHORIZED for WPA2.
+  pong_wifi_notification event={NotifyAssociate,result,status.signal_dbm,gKeyed?1u:0u};
+  queue_notification_locked(event);lck_mtx_unlock(gLock);
+  log(6,"wifi-net: join finished: module result %d",result);
 }
 void on_link_lost(int reason) {
-  log(6, "wifi-net: link lost: reason %d", reason);
-  post_link(false);
-  link_event ev; memset(&ev, 0, sizeof ev); ev.down = 1; ev.involuntary = 1; ev.reason = static_cast<uint32_t>(reason);
-  post_event(kEvLinkChanged, &ev, sizeof ev);
+  log(6,"wifi-net: link lost: reason %d",reason);
+  lck_mtx_lock(gLock);pong_wifi_notification event={NotifyLost,reason,0,0};queue_notification_locked(event);lck_mtx_unlock(gLock);
 }
+
 // What the address configuration exchanges, as it crosses the interface: DHCP messages (type, transaction, offered address) and ARP, the first
 // ones of each direction, and per-kind counts for the traffic line.
 struct Kinds { uint32_t arp, ip4, dhcp, ip6, other; } gKindsIn, gKindsOut;
@@ -841,12 +868,9 @@ extern "C" void pong_wifi_net_failed(void) {
   bool scanning = gScanning != 0;
   gScanning = 0; gScanCursor = 0; gAssocResult = kAssocFailed;
   if (gCachedScan) thread_call_cancel(gCachedScan);
+  pong_wifi_notification_reset(&gNotificationQueue);
+  if(gIf) { pong_wifi_notification event={NotifyFailed,scanning?1:0,0,0};queue_notification_locked(event); }
   lck_mtx_unlock(gLock);
-  if (!gIf) return;
-  post_link(false);
-  if (scanning) post_event(kEvScanDone, nullptr, 0);
-  post_event(kEvAssocDone, nullptr, 0);
-  post_event(kEvPowerChanged, nullptr, 0);
 }
 
 // Called once the module has a station interface and a hardware address.

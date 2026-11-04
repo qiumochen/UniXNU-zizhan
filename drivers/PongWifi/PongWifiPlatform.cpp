@@ -375,7 +375,7 @@ bool allocateArena() {
  // QCA6490 needs contiguous DMA addresses, not 128 MiB of adjacent RAM.
  // Wire ordinary pages and let this SID's native4K SMMU provide the IOVA
  // extent. A large physically contiguous allocation fails after UI startup.
- uint32_t preferred=128;
+ uint32_t preferred=64;
  if(PE_parse_boot_argn("pong_wifi_dma_mib",&preferred,sizeof preferred)&&preferred!=64&&preferred!=128)
   return fail("WiFi DMA budget must be 64 or 128 MiB");
  const uint32_t budgets[]={preferred,64};

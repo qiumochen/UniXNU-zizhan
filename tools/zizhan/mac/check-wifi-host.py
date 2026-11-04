@@ -28,6 +28,7 @@ def main():
         for name, inputs, include in [
             ("context", [tests / "wifi-context-readback.c", smmu / "ArmSmmu4KContext.c"], smmu),
             ("wmi-wait", [tests / "wifi-wmi-wait.c"], args.shared / "shim/include"),
+            ("dhcp-ack", [tests / "wifi-dhcp-ack.c"], ROOT / "drivers/PongWifi"),
         ]:
             binary = Path(td) / name
             subprocess.run([args.cc, "-std=gnu11", "-Wno-macro-redefined", "-Wno-unused-function",

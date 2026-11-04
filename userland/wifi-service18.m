@@ -10,6 +10,8 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include "../drivers/PongWifi/PongWifiLease.h"
 #include <errno.h>
 #include <unistd.h>
 
@@ -30,7 +32,6 @@ static int (*store_error)(void);
 static NotificationKey notification_key;
 static NSString *setup_ipv4_key;
 static NSString *setup_dns_key;
-static NSDate *setup_started;
 static SetStoreMultiple set_store;
 static bool lease_repaired, lease_repair_enabled;
 static bool system_setup;
@@ -109,7 +110,6 @@ static bool configure_en0(void)
     keys = @{[base stringByAppendingString:@"/Interface"]:
                                @{@"DeviceName": @"en0", @"Type": @"Ethernet", @"Hardware": @"AirPort"},
                            setup_ipv4_key: @{@"ConfigMethod": @"DHCP"}};
-    setup_started = NSDate.date;
     ok = set(setup_session, (__bridge CFDictionaryRef)keys, NULL, NULL);
     if (ok) set_store = set;
     fprintf(stderr, "Pong WiFi18: en0 network setup %s\n", ok ? "RUNNING" : "rejected");
@@ -127,7 +127,7 @@ static NSString *ipv4_text(const uint8_t *bytes)
 }
 
 /* Native IPConfiguration owns the lease and address. Recover omitted route
- * and resolver options only from its current, matching DHCP ACK. */
+ * and resolver options only from its current, matching DHCP ACK captured at en0. */
 static void recover_lease_options(NSDictionary *state)
 {
     lease_skip = "no owned en0 IPv4 state";
@@ -135,42 +135,34 @@ static void recover_lease_options(NSDictionary *state)
         ![state[@"InterfaceName"] isEqual:@"en0"]) return;
     lease_skip = "native router present";
     if (state[@"Router"]) return;
-    NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:@"/var/db/dhcpclient/leases/en0.plist"];
-    lease_skip = saved ? "saved lease predates setup or lacks packet" : "no readable en0 lease file";
-    NSDate *start = saved[@"LeaseStartDate"];
-    NSData *packet = saved[@"PacketData"];
-    if (![start isKindOfClass:NSDate.class] || [start compare:setup_started] == NSOrderedAscending ||
-        ![packet isKindOfClass:NSData.class] || packet.length < 241 || packet.length > 4096) return;
-    const uint8_t *b = packet.bytes;
-    lease_skip = "saved packet not for current IPv4";
-    if (b[0] != 2 || memcmp(b + 236, "\x63\x82\x53\x63", 4)) return;
-    NSString *address = ipv4_text(b + 16);
-    if (!address || ![state[@"Addresses"] containsObject:address]) return;
-    bool ack = false, end = false, classless = false;
-    lease_skip = "ACK options invalid or incomplete";
-    NSString *router = nil;
+    struct pong_wifi_lease lease = {};
+    struct {
+        char ifname[16];
+        int32_t type, value;
+        uint32_t length;
+        uint64_t data __attribute__((aligned(8)));
+    } request = {"en0", PONG_WIFI_GET_LEASE, 0, sizeof(lease), (uintptr_t)&lease};
+    _Static_assert(sizeof(request) == 40, "Apple80211 request ABI");
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) { lease_skip = "witness socket unavailable"; return; }
+    int status = ioctl(fd, 0xc02869c9UL, &request);
+    close(fd);
+    lease_skip = "no matching live DHCP ACK";
+    if (status || request.length != sizeof(lease) || lease.version != PONG_WIFI_LEASE_VERSION ||
+        lease.dns_count > PONG_WIFI_LEASE_DNS_MAX) return;
+    NSString *address = ipv4_text(lease.address), *router = ipv4_text(lease.router);
     NSMutableArray *dns = [NSMutableArray array];
-    for (NSUInteger i = 240; i < packet.length;) {
-        unsigned code = b[i++];
-        if (!code) continue;
-        if (code == 255) { end = true; break; }
-        if (i == packet.length) return;
-        unsigned n = b[i++];
-        if (n > packet.length - i) return;
-        if (code == 53 && n == 1) ack = b[i] == 5;
-        if (code == 121) classless = true; // preserve native classless-route policy
-        if (code == 3 && n >= 4 && n % 4 == 0) router = ipv4_text(b + i);
-        if (code == 6 && n % 4 == 0)
-            for (unsigned j = 0; j < n; j += 4) {
-                NSString *server = ipv4_text(b + i + j);
-                if (server) [dns addObject:server];
-            }
-        i += n;
+    for (unsigned i = 0; i < lease.dns_count; ++i) {
+        NSString *server = ipv4_text(lease.dns[i]);
+        if (server) [dns addObject:server];
     }
-    if (!end || !ack || classless || !router || !dns.count || [router isEqual:address]) return;
+    lease_skip = "ACK address, subnet or options mismatch";
+    if (!address || !router || !dns.count || [router isEqual:address] ||
+        ![state[@"Addresses"] containsObject:address]) return;
     struct in_addr local, gateway, mask;
     NSString *subnet = [state[@"SubnetMasks"] firstObject];
     if (!subnet || inet_pton(AF_INET, subnet.UTF8String, &mask) != 1 ||
+        memcmp(&mask, lease.mask, sizeof(mask)) ||
         inet_pton(AF_INET, address.UTF8String, &local) != 1 ||
         inet_pton(AF_INET, router.UTF8String, &gateway) != 1 ||
         (gateway.s_addr & mask.s_addr) != (local.s_addr & mask.s_addr)) return;
@@ -178,7 +170,7 @@ static void recover_lease_options(NSDictionary *state)
                               setup_dns_key: @{@"ServerAddresses": dns}};
     lease_repaired = set_store(setup_session, (__bridge CFDictionaryRef)options, NULL, NULL);
     lease_skip = lease_repaired ? "applied" : "store rejected options";
-    fprintf(stderr, "Pong WiFi18: current DHCP ACK route and DNS %s\n", lease_repaired ? "APPLIED" : "rejected");
+    fprintf(stderr, "Pong WiFi18: live DHCP ACK route and DNS %s\n", lease_repaired ? "APPLIED" : "rejected");
 }
 
 static int kernel_route_error(void)

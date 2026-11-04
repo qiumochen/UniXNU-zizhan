@@ -35,6 +35,8 @@ extern "C" {
 #include <sys/systm.h>
 #include <stdarg.h>
 #include "nw_abi.h"
+#include "PongWifiLease.h"
+#include <pexpert/pexpert.h>
 
 extern "C" unsigned nw_wifi_channel_list(unsigned *, unsigned);
 extern "C" void native_wifi_logf(int level, const char *fmt, ...);
@@ -90,6 +92,10 @@ ifnet_t gIf;
 uint8_t gMac[6];
 lck_grp_t *gGrp;
 lck_mtx_t *gLock;
+bool gWitnessEnabled, gLeaseActive, gRequest;
+uint8_t gLeaseXid[4];
+struct pong_wifi_lease gLease;
+
 bool gPower = true;
 bool gKeyed;   // the last join used a passphrase
 uint32_t gRxFrames, gRxErrors; int gRxLastError;
@@ -118,6 +124,13 @@ void post_event(uint32_t code, const void *payload, size_t length) {
 // link state for the network configuration: the interface's flags and the stack's own link events
 void post_link(bool up) {
   if (!gIf) return;
+  if (gWitnessEnabled) {
+    lck_mtx_lock(gLock);
+    gLeaseActive = up;
+    gRequest = false;
+    memset(&gLease, 0, sizeof(gLease));
+    lck_mtx_unlock(gLock);
+  }
   ifnet_set_flags(gIf, up ? IFF_RUNNING : 0, IFF_RUNNING);
   struct { struct net_event_data data; } payload; memset(&payload, 0, sizeof payload);
   payload.data.if_family = IFNET_FAMILY_ETHERNET; payload.data.if_unit = 0; snprintf(payload.data.if_name, sizeof payload.data.if_name, "en");
@@ -166,6 +179,23 @@ void note_frame(const uint8_t *e, size_t n, bool out) {
   const uint8_t *udp = ip + ihl; const unsigned sp = udp[0] << 8 | udp[1], dp = udp[2] << 8 | udp[3];
   if (!((sp == 67 || sp == 68) && (dp == 67 || dp == 68))) return;
   k.dhcp++; const uint8_t *b = udp + 8; const size_t bl = n - (b - e); unsigned msg = 0;
+  if (gWitnessEnabled && ihl >= 20 && !(pong_wifi_be16(ip + 6) & 0x3fff)) {
+    const unsigned udpLen = pong_wifi_be16(udp + 4), ipLen = pong_wifi_be16(ip + 2);
+    if (udpLen >= 8 + 241 && udpLen - 8 <= bl && ipLen >= ihl + udpLen && ipLen <= n - 14) {
+      struct pong_wifi_lease lease = {};
+      const unsigned mt = pong_wifi_dhcp_fields(b, udpLen - 8, gMac, &lease);
+      lck_mtx_lock(gLock);
+      if (gLeaseActive && out && sp == 68 && dp == 67 && mt == 3 && b[0] == 1) {
+        memcpy(gLeaseXid, b + 4, sizeof(gLeaseXid));
+        gRequest = true;
+      } else if (gLeaseActive && !out && sp == 67 && dp == 68 && gRequest &&
+                 !memcmp(gLeaseXid, b + 4, sizeof(gLeaseXid))) {
+        if (lease.version) gLease = lease;
+        if (mt == 6 && b[0] == 2) { memset(&gLease, 0, sizeof(gLease)); gRequest = false; }
+      }
+      lck_mtx_unlock(gLock);
+    }
+  }
   for (size_t o = 240; bl >= 240 && o + 2 <= bl && b[o] != 255; o += b[o] ? 2 + b[o + 1] : 1) if (b[o] == 53 && o + 2 < bl) { msg = b[o + 2]; break; }
   static unsigned shown[2]; if (shown[out]++ < 24 && bl >= 240)
     log(6, "wifi-net: dhcp %s type %u xid %02x%02x%02x%02x flags %02x%02x to %02x:%02x:%02x:%02x:%02x:%02x yiaddr %u.%u.%u.%u", dir, msg, b[4], b[5], b[6], b[7], b[10], b[11],
@@ -273,6 +303,13 @@ int map_state(unsigned s) { switch (s) { case NW_STA_SCANNING: return 1; case NW
 int apple80211(bool set, apple80211req &rq) {
   nw_wifi_status st; nw_wifi_status_get(&st);
   const int type = rq.req_type;
+  if (type == PONG_WIFI_GET_LEASE) {
+    if (set || !gWitnessEnabled) return EOPNOTSUPP;
+    lck_mtx_lock(gLock);
+    const auto lease = gLease;
+    lck_mtx_unlock(gLock);
+    return lease.version ? answer_bytes(rq, &lease, sizeof(lease)) : ENOENT;
+  }
   // (not on the stack: the largest answer is 4824 bytes)
   union Out { uint8_t raw[5120]; channels_list chans; scan_result res; };
   Out *outp = static_cast<Out *>(IOMallocData(sizeof(Out)));
@@ -512,6 +549,8 @@ extern "C" void pong_wifi_net_start(const uint8_t mac[6]) {
   if (gIf) return;
   if (!pong_wifi_net_prepare()) { log(3, "wifi-net: event setup unavailable"); return; }
   memcpy(gMac, mac, 6);
+  uint32_t witness = 0;
+  gWitnessEnabled = PE_parse_boot_argn("pong_wifi_lease_repair", &witness, sizeof(witness)) && witness == 1;
   struct ifnet_init_eparams p; memset(&p, 0, sizeof p);
   p.ver = IFNET_INIT_CURRENT_VERSION; p.len = sizeof p; p.flags = IFNET_INIT_LEGACY | IFNET_INIT_NX_NOAUTO; p.name = "en"; p.unit = 0; p.family = IFNET_FAMILY_ETHERNET; p.subfamily = IFNET_SUBFAMILY_WIFI; p.type = IFT_ETHER;
   p.output = if_output; p.demux = ether_demux; p.add_proto = ether_add_proto; p.del_proto = ether_del_proto; p.check_multi = ether_check_multi; p.framer = ether_frameout;

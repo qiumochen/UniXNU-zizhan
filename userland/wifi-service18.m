@@ -126,13 +126,33 @@ static NSString *ipv4_text(const uint8_t *bytes)
     return inet_ntop(AF_INET, bytes, text, sizeof text) ? @(text) : nil;
 }
 
+static bool kernel_lease_matches(const struct pong_wifi_lease *lease)
+{
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) != 0) return false;
+    bool match = false;
+    for (struct ifaddrs *a = list; a; a = a->ifa_next) {
+        if (strcmp(a->ifa_name, "en0") ||
+            (a->ifa_flags & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING) ||
+            !a->ifa_addr || !a->ifa_netmask || a->ifa_addr->sa_family != AF_INET) continue;
+        const struct sockaddr_in *local = (const struct sockaddr_in *)a->ifa_addr;
+        const struct sockaddr_in *mask = (const struct sockaddr_in *)a->ifa_netmask;
+        if (!memcmp(&local->sin_addr, lease->address, 4) && !memcmp(&mask->sin_addr, lease->mask, 4)) {
+            match = true;
+            break;
+        }
+    }
+    freeifaddrs(list);
+    return match;
+}
+
 /* Native IPConfiguration owns the lease and address. Recover omitted route
  * and resolver options only from its current, matching DHCP ACK captured at en0. */
 static void recover_lease_options(NSDictionary *state)
 {
-    lease_skip = "no owned en0 IPv4 state";
-    if (!setup_session || !set_store || lease_repaired || !state ||
-        ![state[@"InterfaceName"] isEqual:@"en0"]) return;
+    lease_skip = "no owned en0 configuration";
+    if (!setup_session || !set_store || lease_repaired ||
+        (state && ![state[@"InterfaceName"] isEqual:@"en0"])) return;
     lease_skip = "native router present";
     if (state[@"Router"]) return;
     struct pong_wifi_lease lease = {};
@@ -158,16 +178,27 @@ static void recover_lease_options(NSDictionary *state)
     }
     lease_skip = "ACK address, subnet or options mismatch";
     if (!address || !router || !dns.count || [router isEqual:address] ||
-        ![state[@"Addresses"] containsObject:address]) return;
+        (state && ![state[@"Addresses"] containsObject:address]) || !kernel_lease_matches(&lease)) return;
     struct in_addr local, gateway, mask;
-    NSString *subnet = [state[@"SubnetMasks"] firstObject];
-    if (!subnet || inet_pton(AF_INET, subnet.UTF8String, &mask) != 1 ||
-        memcmp(&mask, lease.mask, sizeof(mask)) ||
-        inet_pton(AF_INET, address.UTF8String, &local) != 1 ||
-        inet_pton(AF_INET, router.UTF8String, &gateway) != 1 ||
-        (gateway.s_addr & mask.s_addr) != (local.s_addr & mask.s_addr)) return;
-    NSDictionary *options = @{setup_ipv4_key: @{@"ConfigMethod": @"DHCP", @"Router": router},
-                              setup_dns_key: @{@"ServerAddresses": dns}};
+    memcpy(&mask, lease.mask, 4); memcpy(&local, lease.address, 4); memcpy(&gateway, lease.router, 4);
+    if (!mask.s_addr || (gateway.s_addr & mask.s_addr) != (local.s_addr & mask.s_addr)) return;
+    NSMutableDictionary *options = [@{setup_ipv4_key: @{@"ConfigMethod": @"DHCP", @"Router": router},
+                                     setup_dns_key: @{@"ServerAddresses": dns}} mutableCopy];
+    if (!state) {
+        // This setup and its keys belong only to our current SC session.
+        // Do not create a second IPv4 service if configd published another.
+        NSArray *patterns = @[@"^State:/Network/Service/[^/]+/IPv4$"];
+        NSDictionary *all = copy_multiple ? CFBridgingRelease(copy_multiple(setup_session, NULL, (__bridge CFArrayRef)patterns)) : nil;
+        lease_skip = "cannot establish ownership of en0 state";
+        if (!all) return;
+        for (NSDictionary *entity in all.allValues)
+            if ([entity[@"InterfaceName"] isEqual:@"en0"]) return;
+        char netmask[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, lease.mask, netmask, sizeof netmask)) return;
+        options[state_key(setup_ipv4_key)] = @{@"Addresses": @[address], @"SubnetMasks": @[@(netmask)],
+                                              @"Router": router, @"InterfaceName": @"en0",
+                                              @"ConfirmedInterfaceName": @"en0"};
+    }
     lease_repaired = set_store(setup_session, (__bridge CFDictionaryRef)options, NULL, NULL);
     lease_skip = lease_repaired ? "applied" : "store rejected options";
     fprintf(stderr, "Pong WiFi18: live DHCP ACK route and DNS %s\n", lease_repaired ? "APPLIED" : "rejected");

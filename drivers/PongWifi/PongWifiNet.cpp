@@ -633,8 +633,10 @@ public:
       struct Guard {Guard(){lck_mtx_lock(gLock);}~Guard(){lck_mtx_unlock(gLock);}} guard;
       result=apple80211(set,rq,true);
     }
-    static unsigned logged;
-    if(logged++<96 || (set && (rq.req_type==kAssociate || rq.req_type==kCipherKey || rq.req_type==kAuthType)))log(6,"wifi-net: native client type %d %s bytes=%u -> %d",
+    static unsigned logged;static uint32_t seen[2][1024/32];
+    const unsigned type=static_cast<unsigned>(rq.req_type);
+    const bool first=type<1024 && !(__atomic_fetch_or(&seen[set][type/32],1u<<(type%32),__ATOMIC_RELAXED)&(1u<<(type%32)));
+    if(__atomic_fetch_add(&logged,1u,__ATOMIC_RELAXED)<96 || first || (set && (rq.req_type==kAssociate || rq.req_type==kCipherKey || rq.req_type==kAuthType)))log(6,"wifi-net: native client type %d %s bytes=%u -> %d",
         rq.req_type,set?"set":"get",packet->length,result);
     // IO80211's wrapper preserves these errno values; do not turn an
     // unsupported request or failed association into a successful result.

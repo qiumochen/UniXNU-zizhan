@@ -778,15 +778,6 @@ BootOnce (
       FlushRange (AudioAddress, 65536);
     }
   }
-  if (mPanelPoolOffset != MAX_UINTN) {
-    PanelAddress = 0xffffffffULL;
-    Status = gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, PANEL_POOL_PAGES, &PanelAddress);
-    if (EFI_ERROR (Status)) { PanelAddress = 0; }
-    else {
-      ZeroMem ((VOID *)(UINTN)PanelAddress, EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES));
-      FlushRange (PanelAddress, EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES));
-    }
-  }
   ArgsAddress = ALIGN_VALUE (Address + Kernel.End - Kernel.Base, SIZE_16KB);
   TreeAddress = ArgsAddress + EFI_PAGE_SIZE;
   RamdiskAddress = ALIGN_VALUE (TreeAddress + TreeSize, EFI_PAGE_SIZE);
@@ -828,10 +819,6 @@ BootOnce (
     WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mAudioDmaOffset), AudioAddress);
     WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mAudioDmaOffset + 8), AudioAddress ? 65536 : 0);
   }
-  if (mPanelPoolOffset != MAX_UINTN) {
-    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mPanelPoolOffset), PanelAddress);
-    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mPanelPoolOffset + 8), PanelAddress ? EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES) : 0);
-  }
   if (Request->Ramdisk != NULL) {
     if (KeepPacked) { CopyMem ((VOID *)(UINTN)RamdiskAddress, Request->Ramdisk, Request->RamdiskSize); }
     else { CopyRamdisk ((VOID *)(UINTN)RamdiskAddress, Request->Ramdisk, Request->RamdiskSize, RamdiskPacked); }
@@ -847,6 +834,24 @@ BootOnce (
   FreePool (Image); Image = NULL;
   FreePool (Tree); Tree = NULL;
   FreePool (TreePath); TreePath = NULL;
+  // zizhan: the Wi-Fi kernel carries a larger firmware payload. Its temporary
+  // ReadFile buffer can consume the only contiguous low-memory panel extent.
+  // Reserve scanout pages after copying and freeing the input buffers, while
+  // boot services still own the map and before claiming the extra XNU banks.
+  if (mPanelPoolOffset != MAX_UINTN) {
+    PanelAddress = 0xffffffffULL;
+    Status = gBS->AllocatePages (AllocateMaxAddress, EfiReservedMemoryType, PANEL_POOL_PAGES, &PanelAddress);
+    if (EFI_ERROR (Status)) {
+      PanelAddress = 0;
+      Print (L"DARWINBOOT24: panel pool SKIP %r after input release\n", Status);
+    } else {
+      ZeroMem ((VOID *)(UINTN)PanelAddress, EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES));
+      FlushRange (PanelAddress, EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES));
+      Print (L"DARWINBOOT24: panel pool PASS 0x%lx, %u pages after input release\n", PanelAddress, PANEL_POOL_PAGES);
+    }
+    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mPanelPoolOffset), PanelAddress);
+    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + mPanelPoolOffset + 8), PanelAddress ? EFI_PAGES_TO_SIZE (PANEL_POOL_PAGES) : 0);
+  }
   Root->Close (Root); Root = NULL;
   Stage = L"MEMORY MAP";
   Status = GetMap (&Map, &Capacity, &MapSize, &Key, &Stride);

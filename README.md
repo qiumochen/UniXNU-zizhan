@@ -22,10 +22,11 @@
 | 存储 | 根镜像是 Android `/data` 里一个物理连续的 19.4 GiB 文件，含 OS、SystemOS 和可写 Data 三个卷；修好了一个概率性的 APFS 挂根死锁（0006） |
 | 显示 | 内屏 2160×1916 显示 iPadOS 主屏，面板切到 120 Hz，DPU 直接翻页（零拷贝三缓冲）；外屏未驱动，亮度不可调 |
 | 触摸 | 内屏 ST FTS（GPIO 模拟 SPI），能点开应用、滑动；外屏触摸未驱动 |
-| GPU | Adreno 730，Turnip + metal2vulkan；合成滑动约 54 fps；壁纸扩展默认不能使用 GPU（会和 backboardd 抢 GPU 导致丢失） |
+| GPU | Adreno 730，Turnip + metal2vulkan；g298 修正 UIKit 类名后，合成滑动 moving 95.3 fps（同条件基线 56.7–58.4），首帧仍约 75–80 ms；壁纸扩展默认不能使用 GPU，不能宣称全局 120 fps |
 | 电池 | ADSP 启动，经 PMIC GLINK 读到电池，读数与 Android 一致；状态栏与充电拔插已确认，设置电池页能打开；健康度仍转圈 |
 | 按键 | 长按电源键 3 秒热复位回 fastboot；其他按键未核对 |
-| Wi-Fi / 音频 | 未接入（Wi-Fi 是 QCA6490，音频功放是 CS35L41，与 Pong 的 TFA9873 不同） |
+| Wi-Fi | QCA6490 试验配置已验证扫描、WPA2、DHCP、主动续租及同网重连 HTTPS 200；默认关闭。Settings 原生入网、跨 AP DHCP 与跨频段重连尚未通过 |
+| 蜂窝 / 音频 | 蜂窝未实现；CS35L41 功放尚未接入，与 Pong 的 TFA9873 不同 |
 
 ## 与 Pong 的硬件差异
 
@@ -66,6 +67,8 @@ $ZIZHAN_SRC/
 | 诊断 | `gsym.py LOG 手势号 [TID…] --bin 二进制`（采样器 `gs_all=2` 的整条栈）、`settings-ui.py LOG`（带 `pong_url` 的轮里设置界面的打印） |
 
 `.github/workflows/macos-build.yml` 沿用 UniXNU-pong 的 GitHub Actions 内核构建，用法见 [UniXNU-pong 的 README](https://github.com/Chengdong-Yu/UniXNU-pong#用-github-actions-编译内核)。
+
+`Porting record` 检查结构与 push/PR 增量区域覆盖；`Wi-Fi host regressions` 在无固件、无凭据环境回放 SMMU、WMI、DHCP 和 USB 失败路径。默认 macOS CI 关闭 Wi-Fi、Adreno 和背光，不能代替完整配置或真机验收。仓库已被上游目录收录；最新统一 `scripts/package.sh` / package action 尚待迁移，见 [规范核对与待办](docs/progress/2026-11-04-upstream-ci-audit.md)。
 
 ## 私有输入
 

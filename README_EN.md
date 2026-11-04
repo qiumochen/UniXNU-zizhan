@@ -21,10 +21,11 @@ This repository is derived from [UniXNU-pong](https://github.com/Chengdong-Yu/Un
 | Storage | The root is a physically contiguous 19.4 GiB file in Android `/data` holding the OS, SystemOS and writable Data volumes. A probabilistic APFS root-mount deadlock is fixed (0006) |
 | Display | iPadOS home screen on the 2160×1916 inner panel at 120 Hz, DPU flips CoreAnimation's own canvases (zero-copy triple buffering). Outer panel not driven, brightness fixed |
 | Touch | Inner ST FTS over GPIO bit-banged SPI: tapping and scrolling work. Outer touch not driven |
-| GPU | Adreno 730 with Turnip and metal2vulkan, about 54 fps in a synthetic scroll. The wallpaper extension is denied the GPU by default (it caused GPU loss by competing with backboardd) |
-| Battery | ADSP boots and the battery is read over PMIC GLINK; readings match Android. Status bar display not yet confirmed by hand |
+| GPU | Adreno 730 with Turnip and metal2vulkan. Correct UIKit class matching in g298 yielded 95.3 moving fps in synthetic scrolling (56.7–58.4 baseline); first frame still about 75–80 ms. Wallpaper GPU access stays disabled; no global 120 fps claim |
+| Battery | ADSP and PMIC GLINK readings match Android. Status bar and charging changes are confirmed; Settings Battery opens, but Battery Health still spins |
 | Buttons | Holding power for 3 s warm-resets to fastboot; other keys not checked |
-| Wi-Fi / audio | Not brought up (QCA6490; CS35L41 amplifiers instead of Pong's TFA9873) |
+| Wi-Fi | Experimental QCA6490 config verifies scan, WPA2, DHCP, requested renewal and same-network reconnect with HTTPS 200. Disabled by default; native Settings join, cross-AP DHCP and cross-band reconnect remain unresolved |
+| Cellular / audio | Cellular is unimplemented; CS35L41 amplifiers are not integrated (Pong uses TFA9873) |
 
 ## Hardware differences from Pong
 
@@ -61,6 +62,8 @@ $ZIZHAN_SRC/
 | Partial refresh | `metal-refresh.sh`, `ui-refresh.sh`, `fw-refresh.sh` (rewrite only the OS window of the root image) |
 
 `.github/workflows/macos-build.yml` is UniXNU-pong's GitHub Actions kernel build; see the [UniXNU-pong README](https://github.com/Chengdong-Yu/UniXNU-pong/blob/main/README_EN.md) for its inputs.
+
+`Porting record` validates structure and changed-area ownership against the push/PR base. `Wi-Fi host regressions` replays SMMU, WMI, DHCP and USB failure paths without firmware or credentials. Default macOS CI disables Wi-Fi, Adreno and backlight; it does not qualify full configurations or hardware. The upstream catalog already lists this repository, but adoption of the latest unified `scripts/package.sh` and package action remains pending; see the [compliance audit](docs/progress/2026-11-04-upstream-ci-audit.md).
 
 ## Private inputs
 

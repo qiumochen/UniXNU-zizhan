@@ -156,8 +156,11 @@ DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh
 记录检查按 `.github/workflows/porting-record.yml` 的固定 UniXNU 版本准备检查器，在其 components.toml 加入 `migration/format2/components.toml` 后运行：
 
 ```bash
-python3 <UniXNU-checkout>/scripts/porting-record.py check --device "$ZIZHAN_SRC/UniXNU-zizhan" --base upstream/main
+python3 <UniXNU-checkout>/scripts/porting-record.py check --device "$ZIZHAN_SRC/UniXNU-zizhan"
+python3 <UniXNU-checkout>/scripts/porting-record.py check --device "$ZIZHAN_SRC/UniXNU-zizhan" --base <本轮改动前的已发布提交>
 ```
+
+`--base` 只比较已提交代码。开发分支可用 `origin/main`；main 已推送后必须使用推送前 SHA，不能用已经等于 HEAD 的 `origin/main` 得到空比较，也不使用兄弟项目 `upstream/main` 代替本仓库增量基准。CI 自动使用 push-before 或 PR-base SHA。2026-11-04 审核见 [上游与 CI 核对](docs/progress/2026-11-04-upstream-ci-audit.md)：记录检查器与构建工具分别固定版本；最新统一 package 接口尚未迁移，不能宣称最新仓库规范全部完成。
 
 ## 工作方式与教训
 

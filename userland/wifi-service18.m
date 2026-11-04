@@ -45,6 +45,41 @@ static unsigned retry_ticks, test_ticks, next_probe, probe_attempts;
 static const char *lease_skip;
 static bool namer_diagnostics;
 
+static void saved_network_diagnostics(void)
+{
+    // Read only shape/count/boolean policy, never network identities or keys.
+    NSArray *paths = @[@"/Library/Preferences/SystemConfiguration/com.apple.wifi.plist",
+                       @"/var/preferences/SystemConfiguration/com.apple.wifi.plist",
+                       @"/var/preferences/com.apple.wifi.known-networks.plist",
+                       @"/var/mobile/Library/Preferences/com.apple.wifi.plist",
+                       @"/Library/Preferences/SystemConfiguration/com.apple.wifi-networks.plist",
+                       @"/Library/Preferences/SystemConfiguration/com.apple.wifi.known-networks.plist",
+                       @"/Library/Preferences/com.apple.wifi.known-networks.plist"];
+    unsigned index = 0;
+    for (NSString *path in paths) {
+        NSDictionary *store = [NSDictionary dictionaryWithContentsOfFile:path];
+        id known = store[@"KnownNetworks"] ?: store[@"List of known networks"] ?: store[@"Networks"];
+        NSUInteger count = [known isKindOfClass:NSArray.class] || [known isKindOfClass:NSDictionary.class] ? [known count] : 0;
+        fprintf(stderr, "Pong WiFi18: saved-store %u dictionary=%d entries=%lu known=%lu allow-enable-present=%d allow-enable=%d\n",
+                index++, store != nil, (unsigned long)store.count, (unsigned long)count,
+                store[@"AllowEnable"] != nil, [store[@"AllowEnable"] boolValue]);
+        // Whitelist only scalar policy names. Do not enumerate dictionary keys:
+        // known-network keys can themselves contain the network identity.
+        for (NSString *key in @[@"AutoJoin", @"UnifiedAutoJoin", @"DisableWiFiAutoJoinUntilFirstUserJoin", @"UserAutoJoinState"])
+            if ([store[key] isKindOfClass:NSNumber.class])
+                fprintf(stderr, "Pong WiFi18: saved-policy %u %s=%ld\n", index - 1, key.UTF8String, (long)[store[key] integerValue]);
+        NSArray *records = [known isKindOfClass:NSDictionary.class] ? [known allValues] :
+                           [known isKindOfClass:NSArray.class] ? known : @[];
+        for (NSString *key in @[@"AutoJoin", @"AutoJoinEnabled", @"Disabled", @"TemporarilyDisabled"] ) {
+            unsigned present = 0, enabled = 0;
+            for (id record in records) if ([record isKindOfClass:NSDictionary.class] && [record[key] isKindOfClass:NSNumber.class]) {
+                present++; enabled += [record[key] boolValue];
+            }
+            if (present) fprintf(stderr, "Pong WiFi18: saved-record-policy %u %s present=%u true=%u\n", index - 1, key.UTF8String, present, enabled);
+        }
+    }
+}
+
 static NSDictionary *read_state(NSString *key)
 {
     if (!copy_value || !key) return nil;
@@ -323,6 +358,7 @@ static void tick(void)
 {
     if (namer_diagnostics) {
         static unsigned ticks, previous = ~0u;
+        if (ticks == 10 || ticks == 60) saved_network_diagnostics();
         if ((ticks++ % 5) == 0) {
             NSDictionary *namer = read_state(@"Plugin:InterfaceNamer");
             unsigned state = (namer ? 1u : 0u) | (namer[@"*QUIET*"] ? 2u : 0u) |

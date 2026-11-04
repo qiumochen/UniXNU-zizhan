@@ -3,12 +3,55 @@
  * fixture stays in the local test image; no SSID or password is logged. */
 static CFStringRef wifi_probe_ssid, wifi_probe_password;
 static bool wifi_probe_selected, wifi_probe_filled, wifi_probe_toggled;
-static uint64_t wifi_probe_until;
+static bool wifi_probe_remembered_only;
+static uint64_t wifi_probe_until, wifi_probe_selected_at;
 static id wifi_probe_cell, wifi_probe_field, wifi_probe_join, wifi_probe_switch;
 static id wifi_probe_table;
 static id wifi_probe_baritem;
 static unsigned long wifi_probe_section, wifi_probe_row;
 static unsigned wifi_probe_scrolls;
+
+static void wifi_probe_native_policy(void *unused)
+{
+    (void)unused;
+    void *setup=dlopen("/System/Library/PrivateFrameworks/SetupAssistant.framework/SetupAssistant",RTLD_LAZY);
+    bool (*needs)(void)=setup?dlsym(setup,"BYSetupAssistantNeedsToRun"):NULL;
+    bool (*completed)(void)=setup?dlsym(setup,"BYSetupAssistantHasCompletedInitialRun"):NULL;
+    fprintf(stderr,"Pong WiFi UI test: native setup uid=%u needs-present=%d needs=%d completed-present=%d completed=%d\n",
+            geteuid(),needs!=NULL,needs?needs():false,completed!=NULL,completed?completed():false);
+    void *wifi=dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi",RTLD_LAZY);
+    CFTypeRef (*create)(CFAllocatorRef,int)=wifi?dlsym(wifi,"WiFiManagerClientCreate"):NULL;
+    CFTypeRef (*copy)(CFTypeRef,CFStringRef)=wifi?dlsym(wifi,"WiFiManagerClientCopyProperty"):NULL;
+    CFTypeRef client=create&&copy?create(NULL,0):NULL;
+    CFStringRef keys[]={CFSTR("AutoJoin"),CFSTR("UnifiedAutoJoin"),CFSTR("AllowEnable"),CFSTR("UserAutoJoinState")};
+    for(unsigned i=0;client && i<sizeof(keys)/sizeof(keys[0]);i++) {
+        CFTypeRef value=copy(client,keys[i]);int scalar=0;bool present=false;
+        if(value && CFGetTypeID(value)==CFBooleanGetTypeID()) {present=true;scalar=CFBooleanGetValue(value);}
+        else if(value && CFGetTypeID(value)==CFNumberGetTypeID())present=CFNumberGetValue(value,kCFNumberIntType,&scalar);
+        fprintf(stderr,"Pong WiFi UI test: native policy index=%u scalar-present=%d value=%d\n",i,present,scalar);
+        if(value)CFRelease(value);
+    }
+    CFArrayRef (*networks)(CFTypeRef)=wifi?dlsym(wifi,"WiFiManagerClientCopyNetworks"):NULL;
+    bool (*enabled)(CFTypeRef)=wifi?dlsym(wifi,"WiFiNetworkIsEnabled"):NULL;
+    bool (*preference)(CFTypeRef)=wifi?dlsym(wifi,"WiFiNetworkHasAutoJoinPreference"):NULL;
+    bool (*disabled)(CFTypeRef)=wifi?dlsym(wifi,"WiFiNetworkIsAutoJoinDisabledUntilFirstUserJoin"):NULL;
+    CFDateRef (*until)(CFTypeRef)=wifi?dlsym(wifi,"WiFiNetworkGetDisabledUntilDate"):NULL;
+    CFArrayRef known=client&&networks?networks(client):NULL;
+    unsigned on=0,pref=0,blocked=0,future=0;
+    const CFIndex count=known&&CFGetTypeID(known)==CFArrayGetTypeID()?CFArrayGetCount(known):0;
+    for(CFIndex i=0;i<count;i++) {
+        CFTypeRef network=CFArrayGetValueAtIndex(known,i);
+        if(enabled)on+=enabled(network);
+        if(preference)pref+=preference(network);
+        if(disabled)blocked+=disabled(network);
+        CFDateRef date=until?until(network):NULL;
+        if(date && CFGetTypeID(date)==CFDateGetTypeID())future+=CFDateGetAbsoluteTime(date)>CFAbsoluteTimeGetCurrent();
+    }
+    fprintf(stderr,"Pong WiFi UI test: native known readers=%d array=%d count=%ld enabled=%u autojoin-pref=%u first-join-block=%u future-block=%u\n",
+            networks&&enabled&&preference&&disabled&&until,known&&CFGetTypeID(known)==CFArrayGetTypeID(),(long)count,on,pref,blocked,future);
+    if(known)CFRelease(known);
+    if(client)CFRelease(client);
+}
 
 static bool wifi_probe_is(id object, const char *class_name)
 {
@@ -113,15 +156,20 @@ static void wifi_probe_tick(void *unused)
         SEL select=sel_registerName("tableView:didSelectRowAtIndexPath:");
         if(path && delegate && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(delegate,sel_registerName("respondsToSelector:"),select)) {
             wifi_probe_selected=true;
+            wifi_probe_selected_at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
             ((void(*)(id,SEL,id,id))objc_msgSend)(delegate,select,table,path);
             fprintf(stderr,"Pong WiFi UI test: RUNNING selected exact private fixture row\n");
         }
     } else if(wifi_probe_selected && !wifi_probe_filled && wifi_probe_field) {
+        if(wifi_probe_remembered_only) {wifi_probe_finish("FAIL: saved network requested a password");return;}
         wifi_probe_filled=true;
         ((BOOL(*)(id,SEL))objc_msgSend)(wifi_probe_field,sel_registerName("becomeFirstResponder"));
         ((void(*)(id,SEL,id))objc_msgSend)(wifi_probe_field,sel_registerName("selectAll:"),nil);
         ((void(*)(id,SEL,id))objc_msgSend)(wifi_probe_field,sel_registerName("insertText:"),(id)wifi_probe_password);
         fprintf(stderr,"Pong WiFi UI test: RUNNING inserted text through native secure field\n");
+    } else if(wifi_probe_remembered_only && wifi_probe_selected &&
+              clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-wifi_probe_selected_at>=20ull*NSEC_PER_SEC) {
+        wifi_probe_finish("RUNNING remembered row selected without password prompt; verify driver and HTTPS separately");return;
     } else if(wifi_probe_filled && wifi_probe_baritem) {
         id target=((id(*)(id,SEL))objc_msgSend)(wifi_probe_baritem,sel_registerName("target"));
         SEL action=((SEL(*)(id,SEL))objc_msgSend)(wifi_probe_baritem,sel_registerName("action"));
@@ -157,6 +205,7 @@ static void wifi_ui_probe_start(void)
     if(!flag)return;
     const char next=flag[strlen(option)];
     if(next && next!=' ' && next!='\t')return;
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT,0),NULL,wifi_probe_native_policy);
     int fd=open("/pong/wifi-ui-test.plist",O_RDONLY|O_NOFOLLOW);struct stat st;
     if(fd<0) {fprintf(stderr,"Pong WiFi UI test: SKIP no private fixture\n");return;}
     if(fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&077) || st.st_size<1 || st.st_size>4096) {
@@ -169,11 +218,15 @@ static void wifi_ui_probe_start(void)
     if(data)CFRelease(data);
     if(fixture && CFGetTypeID(fixture)==CFDictionaryGetTypeID()) {
         CFTypeRef ssid=CFDictionaryGetValue(fixture,CFSTR("ssid")),password=CFDictionaryGetValue(fixture,CFSTR("psk"));
+        wifi_probe_remembered_only=CFDictionaryGetValue(fixture,CFSTR("remembered_only"))==kCFBooleanTrue;
         char s[129],p[257];
-        if(ssid && password && CFGetTypeID(ssid)==CFStringGetTypeID() && CFGetTypeID(password)==CFStringGetTypeID() &&
-           CFStringGetCString(ssid,s,sizeof(s),kCFStringEncodingUTF8) && CFStringGetCString(password,p,sizeof(p),kCFStringEncodingUTF8) &&
-           strlen(s)>=1 && strlen(s)<=32 && strlen(p)>=8 && strlen(p)<=64) {
-            wifi_probe_ssid=CFRetain(ssid);wifi_probe_password=CFRetain(password);
+        bool valid_ssid=ssid && CFGetTypeID(ssid)==CFStringGetTypeID() &&
+            CFStringGetCString(ssid,s,sizeof(s),kCFStringEncodingUTF8) && strlen(s)>=1 && strlen(s)<=32;
+        bool valid_password=password && CFGetTypeID(password)==CFStringGetTypeID() &&
+            CFStringGetCString(password,p,sizeof(p),kCFStringEncodingUTF8) && strlen(p)>=8 && strlen(p)<=64;
+        if(valid_ssid && (wifi_probe_remembered_only || valid_password)) {
+            wifi_probe_ssid=CFRetain(ssid);
+            if(valid_password && !wifi_probe_remembered_only)wifi_probe_password=CFRetain(password);
         }
         memset(s,0,sizeof(s));memset(p,0,sizeof(p));
     }

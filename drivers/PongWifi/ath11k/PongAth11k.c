@@ -10,6 +10,7 @@
 #include <net/mac80211.h>
 #include "core.h"
 #include "debug.h"
+#include <linux/mhi.h>
 
 int pong_ath11k_pci_init(void);
 void pong_ath11k_pci_exit(void);
@@ -20,7 +21,26 @@ void lx_irq_raise_all(void);
 
 struct nw_wifi_stats nw_wifi_stats;
 static int running;
-static void registered(struct ieee80211_hw *hw) { nw_sta_ready(hw); }
+static struct ieee80211_hw *registered_hw;
+static int firmware_error;
+static u32 last_wmi[8], wmi_count;
+/* Same cooperative registration ordering as PongWifi d2e33ca: let the
+ * QMI/core registration unwind before starting the station on zizhan. */
+static void registered(struct ieee80211_hw *hw) { registered_hw = hw; }
+void pong_ath11k_wmi_submitted(u32 id)
+{ last_wmi[wmi_count++ % ARRAY_SIZE(last_wmi)] = id; }
+int nw_wifi_firmware_error(void) { return firmware_error; }
+void pong_ath11k_mhi_failed(struct mhi_controller *controller, int reason)
+{
+    if (firmware_error) return;
+    firmware_error = -EIO;
+    struct ath11k_base *ab = dev_get_drvdata(controller->cntrl_dev);
+    if (ab) set_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags);
+    nw_wifi_stats.last_err = firmware_error;
+    lx_log(3, "zizhan QCA6490 firmware FAIL: MHI reason=%d, WMI submitted=%u", reason, wmi_count);
+    for (u32 i = wmi_count > ARRAY_SIZE(last_wmi) ? wmi_count - ARRAY_SIZE(last_wmi) : 0; i < wmi_count; ++i)
+        lx_log(3, "WMI before firmware stop: #%u command=0x%x", i + 1, last_wmi[i % ARRAY_SIZE(last_wmi)]);
+}
 static void receive(struct ieee80211_hw *hw, struct sk_buff *skb) { (void)hw; nw_sta_rx(skb); }
 static void scanned(struct ieee80211_hw *hw, bool aborted) { (void)hw; nw_sta_scan_done(aborted); }
 static const struct nw_wifi_hooks hooks = {
@@ -35,6 +55,10 @@ int nw_wifi_start(const struct lx_platform *p, const struct nw_board *b)
         !p->dma_alloc || !p->dma_free || !p->dma_map || !p->dma_sync || !p->fw_get ||
         !b->cfg_read || !b->cfg_write || !b->msi_target || !b->map_phys) return -EINVAL;
     lx_plat = p; nw_board = b;
+    /* nw_sta supplies Ethernet MSDUs with HW_80211_ENCAP. Match the
+     * firmware's WMI offload mode before vdev/resource creation. */
+    ath11k_frame_mode = ATH11K_HW_TXRX_ETHERNET;
+    lx_log(6, "zizhan QCA6490 Ethernet TX/RX offload selected");
     lx_root_init(); nw_qrtr_init(); nw_wifi_set_hooks(&hooks);
     int r = mhi_init_hook();
     if (r) return r;
@@ -55,7 +79,19 @@ int nw_wifi_step(void)
 {
     if (!running) return 0;
     const unsigned frames = nw_wifi_stats.frames;
-    lx_irq_raise_all(); lx_pump(); nw_sta_run();
+    if (firmware_error) return firmware_error;
+    lx_irq_raise_all(); lx_pump();
+    if (firmware_error) return firmware_error;
+    if (registered_hw && registered_hw == nw_wifi_hw()) {
+        struct ath11k *ar = registered_hw->priv;
+        if (test_bit(ATH11K_FLAG_REGISTERED, &ar->ab->dev_flags)) {
+            struct ieee80211_hw *hw = registered_hw;
+            registered_hw = NULL;
+            nw_sta_ready(hw);
+        }
+    }
+    if (firmware_error) return firmware_error;
+    nw_sta_run();
     return frames != nw_wifi_stats.frames || nw_sta_tx_pending();
 }
 void nw_wifi_stop(void)

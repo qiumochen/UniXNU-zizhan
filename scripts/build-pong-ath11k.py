@@ -79,7 +79,27 @@ def main():
     if wmi.count('wait_event_timeout(') != 2:
         raise RuntimeError('ath11k WMI command wait ABI differs')
     (gen / 'wmi.c').unlink()
-    (gen / 'wmi.c').write_text(wmi.replace('wait_event_timeout(', 'wait_event_timeout_once('))
+    wmi = wmi.replace('wait_event_timeout(', 'wait_event_timeout_once(')
+    trace = '\ttrace_ath11k_wmi_cmd(ab, cmd_id, skb->data, skb->len);'
+    if wmi.count(trace) != 1:
+        raise RuntimeError('ath11k WMI submission trace ABI differs')
+    wmi = 'extern void pong_ath11k_wmi_submitted(unsigned int);\n' + wmi.replace(
+        trace, trace + '\n\tpong_ath11k_wmi_submitted(cmd_id);')
+    (gen / 'wmi.c').write_text(wmi)
+    # The cooperative shim cannot safely reenter full Linux firmware reset
+    # work inside the failing MHI callback. Preserve the first fault and let
+    # the board stop this optional worker with DMA storage retained.
+    mhi_driver = (source / 'mhi.c').read_text()
+    status = '\tstruct ath11k_pci *ab_pci = ath11k_pci_priv(ab);\n\n\tath11k_dbg(ab, ATH11K_DBG_BOOT, "notify status reason %s\\n",'
+    if mhi_driver.count(status) != 1:
+        raise RuntimeError('ath11k MHI status callback ABI differs')
+    mhi_driver = 'struct mhi_controller;\nextern void pong_ath11k_mhi_failed(struct mhi_controller *, int);\n' + mhi_driver.replace(
+        status, '\tstruct ath11k_pci *ab_pci = ath11k_pci_priv(ab);\n\n'
+        '\tif (cb == MHI_CB_SYS_ERROR || cb == MHI_CB_FATAL_ERROR || cb == MHI_CB_EE_RDDM) {\n'
+        '\t\tpong_ath11k_mhi_failed(mhi_cntrl, cb);\n\t\treturn;\n\t}\n\n'
+        '\tath11k_dbg(ab, ATH11K_DBG_BOOT, "notify status reason %s\\n",')
+    (gen / 'mhi.c').unlink()
+    (gen / 'mhi.c').write_text(mhi_driver)
     # The shared station uses mac80211's split link/vif notifications.
     # ath11k still implements the unified bss_info_changed callback.
     # Route both notifications to that real implementation; a NULL split

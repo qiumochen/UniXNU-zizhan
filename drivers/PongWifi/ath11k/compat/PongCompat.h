@@ -2,6 +2,7 @@
 #ifndef PONG_ATH11K_COMPAT_H
 #define PONG_ATH11K_COMPAT_H
 #include "lx_pci.h"
+#include "PongWait.h"
 typedef unsigned long kernel_ulong_t;
 #undef IS_ENABLED
 #define PONG_DEFINED_1 0,

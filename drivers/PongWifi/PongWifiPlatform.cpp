@@ -23,6 +23,8 @@ void pong_wifi_net_start(const uint8_t mac[6]);
 bool pong_wifi_net_prepare(void);
 bool pong_wifi_net_has_ipv4(void);
 void pong_wifi_net_diagnostics(void);
+void pong_wifi_net_failed(void);
+int nw_wifi_firmware_error(void);
 void PongWifiNetStaticInit(void);
 bool pong_ufs_ready(void);
 bool pong_rpmh_vote(uint32_t,uint32_t);
@@ -497,8 +499,8 @@ void dmaSync(uint64_t bus,size_t n,int) {if(bus<Iova+4096||bus-(Iova+4096)>=Aren
 
 void *alloc(size_t n) {if(n>SIZE_MAX-16)return nullptr;auto p=static_cast<uint8_t *>(IOMallocData(n+16));if(!p)return nullptr;*reinterpret_cast<size_t *>(p)=n+16;return p+16;}
 void freeHeap(void *p) {if(p){auto b=static_cast<uint8_t *>(p)-16;IOFreeData(b,*reinterpret_cast<size_t *>(b));}}
-void halt() {stopped=1;pin(94,1u|1u<<9,0);IOLog("PongWifi: worker stopped; DMA retained until reset\n");thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);__builtin_unreachable();}
-void poll() {if(initDeadline&&now()>initDeadline){log(3,"firmware initialization exceeded deadline");halt();}if(dmaOwned){unsigned fs=smmu.r(cbOffset+0x58);if(fs&0xc00001fe){IOLog("PongWifi: owned SMMU fault=%x FAR=%x%08x FSYNR0=%x\n",fs,smmu.r(cbOffset+0x64),smmu.r(cbOffset+0x60),smmu.r(cbOffset+0x68));halt();}}}
+void halt() {stopped=1;if(hostMmioReady){dbi.w(MsiEnable,0);parf.w(0x22c,0);}if(tlmm.v)pin(94,1u|1u<<9,0);pong_wifi_net_failed();IOLog("PongWifi: worker stopped; DMA retained until reset\n");thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);__builtin_unreachable();}
+void poll() {if(nw_wifi_firmware_error()){log(3,"QCA6490 firmware FAIL; stopping optional worker, normal iOS boot continues");halt();}if(initDeadline&&now()>initDeadline){log(3,"firmware initialization exceeded deadline");halt();}if(dmaOwned){unsigned fs=smmu.r(cbOffset+0x58);if(fs&0xc00001fe){IOLog("PongWifi: owned SMMU fault=%x FAR=%x%08x FSYNR0=%x\n",fs,smmu.r(cbOffset+0x64),smmu.r(cbOffset+0x60),smmu.r(cbOffset+0x68));halt();}}}
 void sleep(unsigned ms) {while(ms){poll();unsigned part=ms>100?100:ms;IOSleep(part);ms-=part;}poll();}
 int fwGet(const char *path,const uint8_t **data,size_t *size) {
  const char *name=path;for(const char *p=path;*p;p++)if(*p=='/')name=p+1;
@@ -610,7 +612,7 @@ void worker(void *,wait_result_t) {
   initDeadline=now()+90000;int r=nw_wifi_start(&platform,&board);if(r){IOLog("PongWifi: ath11k start failed=%d\n",r);goto done;}
  }
  {bool net=false,irqSeen=false;uint64_t diagnosticsAt=0;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}poll();int busy=nw_wifi_step();nw_wifi_status st={};nw_wifi_status_get(&st);
-   if(!net&&st.channels){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
+   if(!net&&st.channels&&st.state!=NW_STA_OFF&&nw_wifi_stats.stage>=4&&!nw_wifi_stats.last_err){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
      auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);if(chosen){chosen->setProperty("mac-address-wifi0",st.mac,6);chosen->release();}
      void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);if(!handle)goto done;
      PongWifiNetStaticInit();if(OSMetaClass::postModLoad(handle)!=kIOReturnSuccess)goto done;

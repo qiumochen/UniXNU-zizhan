@@ -433,6 +433,15 @@ def adapt_job18(job):
         if job.pop('_LimitLoadToDeviceTree', None) is not None:
             changes.append({'key': '_LimitLoadToDeviceTree',
                             'reason': 'Pong QCA6490 native transport replaces Apple WLAN node gating'})
+        # 22H374 MobileWiFi still checks into this legacy endpoint. Its
+        # restore plist lists CoreWiFi/XPC only; route the port to the real
+        # Apple daemon and expose it after bootstrap_check_in (Pong s106).
+        services = job.setdefault('MachServices', {})
+        manager = services.get('com.apple.wifi.manager')
+        if not isinstance(manager, dict) or manager.get('HideUntilCheckIn') is not True:
+            services['com.apple.wifi.manager'] = dict(manager, HideUntilCheckIn=True) if isinstance(manager, dict) else {'HideUntilCheckIn': True}
+            changes.append({'key': 'MachServices.com.apple.wifi.manager',
+                            'reason': 'native MobileWiFi endpoint owned by stock wifid'})
     if job.get('Label') == 'com.apple.audiomxd':
         # This restore ships audiomxd instead of mediaserverd. Select its
         # real service definitions on this non-Exclaves port. Keep nested

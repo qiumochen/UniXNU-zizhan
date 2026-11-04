@@ -20,10 +20,17 @@ MILESTONES = (
     ('scan_result', 'wifi-net: scan result '),
 )
 START = 'PCIe0 cold start; power and bus clocks precede host MMIO'
-ERROR = re.compile(r'PongWifi\[3\]: (.+)|PongWifi: (ath11k start failed=.+|owned SMMU fault=.+)')
+ERROR = re.compile(r'PongWifi\[3\]: (.+)|PongWifi: (ath11k start failed=.+|owned SMMU fault=.+)|PongWifi\[4\]: (ath11k: firmware crashed: .+)')
 SUBSYSTEM = re.compile(r'PongWifi: QCA6490 PCI subsystem=([0-9a-fA-F]{1,8})(?![0-9A-Za-z])')
 SCAN_FINISHED = re.compile(r'\bwifi: scan \d+ finished, ([0-9]+) networks\b')
 TERMINAL = 'WiFi initialization stopped; normal iOS boot continues, DMA retained'
+HTTPS_PASS = re.compile(r'^Pong WiFi18: HTTPS test PASS status=(2\d\d) bytes=([1-9]\d*) error=0(?: attempt=\d+)?$')
+NETWORK_RESULTS = {
+    'Pong WiFi18: DHCP renewal ACK PASS': 'renewal_ack',
+    'Pong WiFi18: disconnect cleanup PASS': 'disconnect_cleanup',
+    'Pong WiFi18: network lifecycle PASS': 'lifecycle',
+    'PongWifi[6]: WiFi lifecycle test AP switch PASS: associated to distinct BSSID': 'distinct_ap',
+}
 
 
 def summarize(raw):
@@ -54,7 +61,7 @@ def summarize(raw):
             observed.append(('scan_bss', number))
         match = ERROR.search(line)
         if match and TERMINAL not in line and failure is None:
-            detail = (match.group(1) or match.group(2)).strip()
+            detail = next(group for group in match.groups() if group).strip()
             failure = (number, detail[:200])
     if not wifi_lines:
         status = 'NO_WIFI_LOG'
@@ -70,7 +77,8 @@ def summarize(raw):
 def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
-    status, observed, failure, start, subsystem = summarize(Path(sys.argv[1]).read_bytes())
+    raw = Path(sys.argv[1]).read_bytes()
+    status, observed, failure, start, subsystem = summarize(raw)
     print(f'Wi-Fi log status: {status}')
     if start:
         print(f'last cold-start begins at line {start}')
@@ -79,7 +87,13 @@ def main():
         print(f'PCI subsystem: 0x{subsystem[1]:08x} at line {subsystem[0]}')
     if failure:
         print(f'first logged error: line {failure[0]}: {failure[1]}')
-    print('This summary does not establish link, DHCP, or daily-use readiness.')
+    tail = raw.decode('latin-1').splitlines()[(start or 1) - 1:]
+    https = sum(HTTPS_PASS.fullmatch(line) is not None for line in tail)
+    network = dict.fromkeys(NETWORK_RESULTS[line] for line in tail if line in NETWORK_RESULTS)
+    if https or network:
+        print(f'logged HTTPS successes: {https}')
+        print('logged network checks: ' + (', '.join(network) if network else 'none'))
+    print('Use the retrieved device log to confirm the boot and each test result.')
 
 
 if __name__ == '__main__':

@@ -49,6 +49,20 @@ def stage_service(root, binary):
     job_path.write_bytes(plistlib.dumps(job, fmt=plistlib.FMT_BINARY))
     job_path.chmod(0o644)
     cache['LaunchDaemons']['/' + DAEMON] = job
+    # Preserve the stock server and all its XPC endpoints. This is the
+    # missing 22H374 MobileWiFi receive right, not a replacement server.
+    native = [(key, value) for key, value in cache['LaunchDaemons'].items()
+              if value.get('Label') == 'com.apple.wifid']
+    if len(native) != 1:
+        raise RuntimeError('expected exactly one stock wifid job')
+    native_path, native_job = native[0]
+    ports = native_job.setdefault('MachServices', {})
+    manager = ports.get('com.apple.wifi.manager')
+    ports['com.apple.wifi.manager'] = dict(manager, HideUntilCheckIn=True) if isinstance(manager, dict) else {'HideUntilCheckIn': True}
+    native_file = root / native_path.lstrip('/')
+    if not native_file.is_file():
+        raise RuntimeError('stock wifid canonical plist missing')
+    native_file.write_bytes(plistlib.dumps(native_job, fmt=plistlib.FMT_BINARY))
     cache_path.write_bytes(plistlib.dumps(cache, fmt=plistlib.FMT_BINARY))
     assert plistlib.loads(job_path.read_bytes()) == plistlib.loads(cache_path.read_bytes())['LaunchDaemons']['/' + DAEMON]
 

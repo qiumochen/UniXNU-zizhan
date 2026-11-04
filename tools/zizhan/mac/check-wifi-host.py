@@ -23,6 +23,7 @@ def main():
     p.add_argument("--shared", type=Path, default=pong_paths.sheng_root() / "drivers/Ath12kWifi")
     args = p.parse_args()
     tests = ROOT / "tools/zizhan/tests"
+    subprocess.run([sys.executable, str(tests / "wifi-service-stage.py")], check=True)
     smmu = ROOT / "drivers/PongAdreno/ArmSmmu4K"
     with tempfile.TemporaryDirectory(prefix="zizhan-wifi-host-") as td:
         for name, inputs, include in [

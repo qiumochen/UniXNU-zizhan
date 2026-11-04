@@ -392,6 +392,10 @@ static void ui_walk(id view,unsigned depth,unsigned pass)
     } else if(field && is(view,kind,field)) {
         const char *text=ui_text(view,"text");
         if(text && *text)snprintf(line,sizeof(line),"\"%s\"",ui_escape(text,escaped,sizeof(escaped)));
+    } else if(objc_lookUpClass("UISwitch") && is(view,kind,objc_lookUpClass("UISwitch"))) {
+        snprintf(line,sizeof(line),"on=%d enabled=%d",
+            ((BOOL(*)(id,SEL))objc_msgSend)(view,sel_registerName("isOn")),
+            ((BOOL(*)(id,SEL))objc_msgSend)(view,sel_registerName("isEnabled")));
     } else if(spinner && is(view,kind,spinner)) {
         snprintf(line,sizeof(line),"spinner %s",((BOOL(*)(id,SEL))objc_msgSend)(view,sel_registerName("isAnimating"))?"SPINNING":"stopped");
     } else if((table && is(view,kind,table)) || (collection && is(view,kind,collection))) {
@@ -508,6 +512,8 @@ static void launch_poll(void *context)
     if(cells || polls>=300) {launch_note(cells?"first screen":"no screen after 30 s",cells);return;}
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),dispatch_get_main_queue(),(void *)(uintptr_t)(polls+1),launch_poll);
 }
+#include "wifi_ui_probe18.h"
+
 static bool opened_by_round(void)
 {
     char args[2048];size_t size=sizeof(args)-1;
@@ -519,6 +525,7 @@ static bool opened_by_round(void)
 void pong_settings18_start(void)
 {
     if(opened_by_round()) {
+        wifi_ui_probe_start();
         struct kinfo_proc proc;size_t bytes=sizeof(proc);int name[]={CTL_KERN,KERN_PROC,KERN_PROC_PID,getpid()};
         launch_exec_us=sysctl(name,4,&proc,&bytes,NULL,0)?wall_us():
             (uint64_t)proc.kp_proc.p_starttime.tv_sec*1000000+(uint64_t)proc.kp_proc.p_starttime.tv_usec;

@@ -985,7 +985,7 @@ def prepare(a):
     counts = jobs(root, cryptex, overlay, out, a.app_cryptex)
     wifi_service = out / 'wifi-service18'
     compile_wifi_service(wifi_service, a.developer)
-    stage_wifi_service(overlay, wifi_service)
+    stage_wifi_service(overlay, wifi_service, root)
     if a.app_cryptex:
         install_app_cryptex(a.app_cryptex, overlay, numeric_owners=False)
     dump(out / 'phone-artwork.json', phone_wallpaper_resources(root, overlay))

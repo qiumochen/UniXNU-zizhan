@@ -12,6 +12,26 @@ LABEL = 'org.unixnu.zizhan.wifi-service'
 DAEMON = 'System/Library/LaunchDaemons/' + LABEL + '.plist'
 CACHE = 'System/Library/xpc/launchd.plist'
 PROGRAM = 'pong/wifi-service18'
+NAMER_INFO = 'System/Library/SystemConfiguration/InterfaceNamer.bundle/Info.plist'
+
+
+def stage_interface_namer(root, original_root=None):
+    destination = root / NAMER_INFO
+    source = destination if destination.is_file() else original_root / NAMER_INFO if original_root else None
+    if source is None or not source.is_file():
+        raise RuntimeError('stock InterfaceNamer bundle metadata required')
+    info = plistlib.loads(source.read_bytes())
+    if info.get('CFBundleIdentifier') != 'com.apple.SystemConfiguration.InterfaceNamer':
+        raise RuntimeError('unexpected InterfaceNamer bundle identity')
+    # Stock configd waits 300/240 seconds for the stack/IOKit. This port
+    # publishes its real named en0 after station readiness; other unsupported
+    # devices can keep the global registry busy. Use configd's own bounded
+    # fallback, which reports TIMEOUT rather than fabricating IOKit Quiet.
+    info['WaitStackTimeout'] = 30.0
+    info['WaitQuietTimeout'] = 10.0
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+    destination.chmod(0o644)
 
 
 def compile_service(output, developer):
@@ -26,7 +46,7 @@ def compile_service(output, developer):
     subprocess.run(['codesign', '--verify', '--strict', str(output)], check=True)
 
 
-def stage_service(root, binary):
+def stage_service(root, binary, original_root=None):
     root = root.resolve()
     cache_path = root / CACHE
     cache = plistlib.loads(cache_path.read_bytes())
@@ -35,6 +55,7 @@ def stage_service(root, binary):
     version = root / 'System/Library/CoreServices/SystemVersion.plist'
     if version.is_file() and plistlib.loads(version.read_bytes()).get('ProductBuildVersion') != '22H374':
         raise RuntimeError('refusing to stage on a different OS build')
+    stage_interface_namer(root, original_root)
     job = {'Label': LABEL, 'ProgramArguments': ['/' + PROGRAM], 'RunAtLoad': True,
            'UserName': 'root', 'GroupName': 'wheel', 'StandardErrorPath': '/dev/console',
            'ExitTimeOut': 3}
@@ -71,8 +92,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--stage', type=Path, required=True, help='mounted OS copy or prepared overlay')
     p.add_argument('--binary', type=Path, required=True, help='compiled, signed wifi-service18')
+    p.add_argument('--original-root', type=Path, help='stock 22H374 root for metadata absent from an overlay')
     a = p.parse_args()
-    stage_service(a.stage, a.binary)
+    stage_service(a.stage, a.binary, a.original_root)
 
 
 if __name__ == '__main__':

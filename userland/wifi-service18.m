@@ -40,9 +40,10 @@ static unsigned phase;
 static NSString *retired_setup, *retired_native, *retired_ipv4, *retired_dns;
 static Boolean (*notify_store)(CFTypeRef, CFStringRef);
 static bool system_setup;
-static bool test_mode, reported, test_finished, probe_running;
+static bool test_mode, ui_test_mode, reported, test_finished, probe_running;
 static unsigned retry_ticks, test_ticks, next_probe, probe_attempts;
 static const char *lease_skip;
+static bool namer_diagnostics;
 
 static NSDictionary *read_state(NSString *key)
 {
@@ -320,6 +321,19 @@ static void test_https(void)
 
 static void tick(void)
 {
+    if (namer_diagnostics) {
+        static unsigned ticks, previous = ~0u;
+        if ((ticks++ % 5) == 0) {
+            NSDictionary *namer = read_state(@"Plugin:InterfaceNamer");
+            unsigned state = (namer ? 1u : 0u) | (namer[@"*QUIET*"] ? 2u : 0u) |
+                             (namer[@"*COMPLETE*"] ? 4u : 0u) | (namer[@"*TIMEOUT*"] ? 8u : 0u);
+            if (state != previous) {
+                fprintf(stderr, "Pong WiFi18: native InterfaceNamer state present=%d quiet=%d complete=%d timeout=%d\n",
+                        !!(state & 1), !!(state & 2), !!(state & 4), !!(state & 8));
+                previous = state;
+            }
+        }
+    }
     bool ipv4 = false;
     bool up = link_active(&ipv4);
     struct pong_wifi_lease lease = {};
@@ -393,7 +407,7 @@ static void tick(void)
         phase = 4; probe_attempts = 0; next_probe = test_ticks + 2;
     }
     if ((phase == 0 || phase == 2 || phase == 4) && reported && !probe_running && test_ticks >= next_probe) test_https();
-    if (!probe_running && test_ticks >= (cycle_test ? 130u : 45u)) {
+    if (!probe_running && test_ticks >= (ui_test_mode ? 165u : cycle_test ? 130u : 45u)) {
         fprintf(stderr, "Pong WiFi18: network lifecycle FAIL: deadline phase=%u\n", phase);
         test_finished = true;
     }
@@ -403,7 +417,16 @@ int main(void)
 {
     @autoreleasepool {
         if (!boot_option("pong_wifi=1")) return 0;
-        test_mode = boot_option("pong_wifi_test=1");
+        // UI tests drive the stock Settings handlers and wifid; they must
+        // not enable the kernel's independent association fixture.
+        ui_test_mode = boot_option("pong_wifi_ui_test=1");
+        bool kernel_test = boot_option("pong_wifi_test=1");
+        if (ui_test_mode && kernel_test) {
+            fprintf(stderr, "Pong WiFi18: UI test FAIL: kernel association fixture also enabled\n");
+            return 1;
+        }
+        test_mode = kernel_test || ui_test_mode;
+        namer_diagnostics = boot_option("pong_wifi_diag=1") || boot_option("pong_wifi_ui_test=1");
         cycle_test = test_mode && boot_option("pong_wifi_cycle=1");
         void *framework = dlopen("/System/Library/PrivateFrameworks/IPConfiguration.framework/IPConfiguration", RTLD_NOW);
         create_service = framework ? (CreateService)dlsym(framework, "IPConfigurationServiceCreate") : NULL;

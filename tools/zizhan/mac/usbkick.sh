@@ -12,34 +12,45 @@ set -u
 export PATH=/opt/homebrew/bin:$PATH
 F=${ZIZHAN_SRC:-$HOME/zizhan}/logs/phone-port.txt
 PHONE_VID=${PHONE_VID:-18d1}   # Google's VID: 18d1:4ee7 adb (Xiaomi MIX Fold 2), 18d1:d00d fastboot
+UHUBCTL_BIN=${UHUBCTL_BIN:-uhubctl}
 ts() { date '+%H:%M:%S'; }
 
-# Prints "HUB PORT" for the port that currently has the phone, from uhubctl's status listing.
+# Prints "HUB PORT" for the phone's USB identity on a controllable hub.
 find_port() {
-  uhubctl 2>/dev/null | awk -v vid="$PHONE_VID" '
+  "$UHUBCTL_BIN" 2>/dev/null | awk -v vid="$PHONE_VID" '
     /^Current status for hub/ { hub=$5 }
-    /^  Port [0-9]+:/ && index($0, "[" vid ":") { sub(":", "", $2); print hub, $2; exit }'
+    /^  Port [0-9]+:/ && ($0 ~ "\\[" vid ":(4ee7|d00d)([[:space:]]|\\])") {
+      sub(":", "", $2); print hub, $2; exit }'
 }
 remember() {
   local hp; hp=$(find_port)
-  [ -n "$hp" ] || return 1
-  echo "$hp" > $F; echo "$(ts) phone on hub ${hp% *} port ${hp#* }"
+  # Explicit remember is called while Android is visible. If this is a
+  # direct port, invalidate any location left by an earlier cable setup.
+  [ -n "$hp" ] || { rm -f "$F"; return 1; }
+  echo "$hp" > "$F"; echo "$(ts) phone on hub ${hp% *} port ${hp#* }"
 }
-# Cycles the recorded port, plus the same port of the sibling hub on the same bus (a USB-C connector's USB2 and USB3 lanes sit on two
-# internal hubs, 8-3 and 8-1 here, and VBUS is switched by whichever owns it).
+# 2026-11-04: the exact rear USB2 hub port removes VBUS and fastboot
+# re-enumerates. Leave sibling hubs and other devices alone.
 kick() {
-  remember >/dev/null 2>&1
-  [ -f $F ] || { echo "$(ts) usbkick: no recorded port (run 'usbkick.sh remember' while the phone is visible)"; return 1; }
-  read -r hub port < $F
-  local bus=${hub%%-*} h
-  for h in $(uhubctl 2>/dev/null | awk -v bus="$bus" '/^Current status for hub/ && index($5, bus "-") == 1 { print $5 }'); do
-    uhubctl -l "$h" -p "$port" -a cycle -d 3 >/dev/null 2>&1
-  done
-  echo "$(ts) usbkick: power-cycled hub $hub (bus $bus siblings) port $port"
+  local hp hub port extra line
+  hp=$(find_port)
+  [ -z "$hp" ] || echo "$hp" > "$F"
+  [ -f "$F" ] || { echo "$(ts) usbkick: no recorded port (run 'usbkick.sh remember' while the phone is visible)"; return 1; }
+  read -r hub port extra < "$F"
+  [[ "$hub" =~ ^[0-9]+-[0-9]+(\.[0-9]+)*$ && "$port" =~ ^[1-9][0-9]*$ && -z "$extra" ]] || return 1
+  line=$("$UHUBCTL_BIN" -e -l "$hub" -p "$port" 2>/dev/null | awk -v p="$port:" '$1=="Port" && $2==p {print; exit}')
+  [ -n "$line" ] || { echo "$(ts) usbkick: recorded hub/port unavailable"; return 1; }
+  if [[ "$line" =~ \[[[:xdigit:]]{4}:[[:xdigit:]]{4} ]] &&
+     ! [[ "$line" =~ \[$PHONE_VID:(4ee7|d00d)([[:space:]]|\]) ]]; then
+    echo "$(ts) usbkick: refusing occupied hub $hub port $port"
+    return 1
+  fi
+  "$UHUBCTL_BIN" -e -l "$hub" -p "$port" -a cycle -d 3 >/dev/null || return $?
+  echo "$(ts) usbkick: power-cycled hub $hub port $port"
 }
 case ${1:-kick} in
   remember) remember ;;
   kick) kick ;;
-  status) uhubctl ;;
+  status) "$UHUBCTL_BIN" ;;
   *) echo "usage: usbkick.sh remember|kick|status"; exit 2 ;;
 esac

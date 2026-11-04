@@ -1,0 +1,7 @@
+Device: Xiaomi MIX Fold 2, iPadOS 18 22H374, temporary g285 boot.
+UFS log: 979901 bytes, deadline, image epoch matched; returned to Android.
+All five observed WLAN rails passed physical readback, observerErrors=0.
+PongWifi[6]: WiFi association test PASS: authenticated link and IPv4 address
+Pong WiFi18: IPv4 already configured by system; service-state=0 router=0
+Pong WiFi18: route diagnosis kernel-error=51 global-error=1004 en0-states=0 en0-routers=0 owned-state=0 lease=no owned en0 IPv4 state
+Pong WiFi18: HTTPS test FAIL status=0 bytes=0 error=-1009 attempt=4

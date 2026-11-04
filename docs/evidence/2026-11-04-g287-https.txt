@@ -1,0 +1,10 @@
+Device: Xiaomi MIX Fold 2, iPadOS 18 22H374, temporary g287 boot.
+UFS log: 990417 bytes, deadline, image epoch matched; returned to Android.
+PongWifi[6]: WiFi association test PASS: authenticated link and IPv4 address
+Pong WiFi18: IPv4 DHCP lease observed; service-state=1 router=0
+Pong WiFi18: live DHCP ACK route and DNS APPLIED
+Pong WiFi18: live ACK kernel-mask-match=1 state-address-match=0
+Pong WiFi18: HTTPS probe 1 store=1 primary-en0=1 router=1 dns=1
+Pong WiFi18: route diagnosis kernel-error=0 global-error=0 en0-states=1 en0-routers=0 owned-state=1 lease=applied
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Android sys.boot_completed=1; Mac boot time unchanged.

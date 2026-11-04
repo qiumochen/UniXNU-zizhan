@@ -1,0 +1,7 @@
+Device: Xiaomi MIX Fold 2, iPadOS 18 22H374, temporary g283 boot.
+First round: SPMI rail readback terminated cold start after the first four rails.
+Repeat, same image: 858217-byte fresh UFS klog, epoch matched, deadline return to Android.
+PongWifi[6]: WiFi association test PASS: authenticated link and IPv4 address
+Pong WiFi18: IPv4 DHCP lease observed; service-state=1 router=0
+Pong WiFi18: route diagnosis kernel-error=51 global-error=1004 en0-states=1 en0-routers=0 owned-state=1 lease=saved lease predates setup or lacks packet
+Pong WiFi18: HTTPS test FAIL status=0 bytes=0 error=-1009 attempt=4

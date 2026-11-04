@@ -59,3 +59,18 @@ Nothing 的 gcc-waipio.h/c，补齐第二路 aggregate NoC（ID9/vote bit11）�
 链路、MSI、固件和扫描结果继续以实际日志为准。
 
 services60 对照 services59 日志的 DLL 未激活，显式启用 PORT_LINK_CONTROL DLL_LINK_EN，清除 FAST_LINK，并以确定的 Gen1 target 训练；不降低实际端点或 DLL 成功条件。尚待本轮真机链路与扫描结果。
+
+## iPadOS 18 IPv4 租约与路由
+
+启用 Wi-Fi（`CONFIG_XNU_PONG_WIFI=y`、`pong_wifi=1`）时，原生
+IPConfiguration 仍负责地址、续租和 DHCP 冲突检测。若当前 en0 地址已生效而
+系统没有可用的默认路由或 DNS，`wifi-service18` 通过只读 Apple80211 请求
+读取本次连接中与 DHCPREQUEST 匹配的 ACK，只把验证过的网关和 DNS 发布到独立
+的 SystemConfiguration 会话；不会修改原生服务或设置固定地址。原生路由和
+DNS 恢复后让回系统。地址丢失、租约失效或链路代次切换后释放该会话。
+
+驱动只跟踪与本机 MAC、当前事务和当前链路一致的 ACK。拒绝的 ACK、NAK、
+RELEASE、过期和断线不会保留旧快照；有 classless 路由选项的包交给原生
+DHCP 路由策略。人工制造续租、断线和公网请求仅在本地验证镜像上开启。
+
+详细设备结果见 [Wi-Fi 与 USB 记录](../../docs/progress/2026-11-04-wifi-usb.md)。

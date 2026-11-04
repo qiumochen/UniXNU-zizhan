@@ -1,0 +1,22 @@
+Device: Xiaomi MIX Fold 2, iPadOS 18 22H374, temporary g290 boot.
+UFS log: 1264311 bytes, deadline, image epoch matched; returned to Android.
+The production Wi-Fi routing path was enabled without the old lease-repair flag.
+Three distinct DHCP REQUEST/ACK transaction IDs matched. Values omitted.
+Pong WiFi18: existing en0 network setup; waiting for system DHCP
+Pong WiFi18: live lease sequence=1 link=1
+Pong WiFi18: live DHCP ACK route and DNS APPLIED sequence=1 kernel-mask-match=1
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: DHCP renewal request RUNNING status=0
+Pong WiFi18: live lease sequence=2 link=1
+Pong WiFi18: DHCP renewal ACK PASS
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PongWifi[6]: WiFi lifecycle test RUNNING: disconnecting station
+Pong WiFi18: supplemental route removed (link ended)
+Pong WiFi18: disconnect cleanup PASS
+PongWifi[6]: WiFi lifecycle test RUNNING: reconnecting to scanned network
+Pong WiFi18: live lease sequence=3 link=3
+Pong WiFi18: live DHCP ACK route and DNS APPLIED sequence=3 kernel-mask-match=1
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: network lifecycle PASS
+Pong WiFi18: supplemental route removed (native route and DNS)
+Android sys.boot_completed=1; Mac boot time unchanged.

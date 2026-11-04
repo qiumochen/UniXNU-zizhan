@@ -1,0 +1,11 @@
+Device: Xiaomi MIX Fold 2, iPadOS 18 22H374, temporary g289 boot.
+UFS log: 1224854 bytes, deadline, image epoch matched; returned to Android.
+Pong WiFi18: existing en0 network setup; waiting for system DHCP
+Pong WiFi18: live lease sequence=1 link=1
+PongWifi[6]: WiFi association test PASS: authenticated link and IPv4 address
+Pong WiFi18: live DHCP ACK route and DNS APPLIED sequence=1 kernel-mask-match=1
+Pong WiFi18: HTTPS probe 1 store=1 primary-en0=1 router=1 dns=1
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: DHCP renewal request FAIL
+Pong WiFi18: supplemental route removed (native route and DNS)
+The g289 test trigger incorrectly required a helper-owned setup session.

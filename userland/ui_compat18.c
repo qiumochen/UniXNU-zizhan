@@ -1855,7 +1855,9 @@ static void backboard_container(void)
     fprintf(stderr,"Pong UI18: backboardd container uses writable %s\n",path);
 }
 
-/* zizhan WIP: host-built, not installed or tested on device; pong_dl_full=0 preserves requested rates.
+/* zizhan: pong_dl_full=0 preserves requested rates. g296 observed the
+ * current runtime target UIKit.InProcessAnimationManager; retain the older
+ * Objective-C class spelling for restores that still use it.
  * SpringBoard's own animations at the panel's rate. UIKit's UIViewInProcessAnimationManager (the animations an app runs in its own
  * process, a home-screen page settling among them) asks its CADisplayLink for 20..30 a second: the frames after a swipe came 33.3 ms
  * apart (g136-g143 gap p90 33.2 ms). On a ProMotion iPhone the low rate saves power; this panel refreshes at 120 whatever is drawn. The
@@ -1882,8 +1884,11 @@ static id link_with(id self,SEL selector,id target,SEL action)
 {
     id link=original_link_with(self,selector,target,action);
     char who[160];
-    if(link && target && !strcmp(object_getClassName(target),"UIViewInProcessAnimationManager"))
-        objc_setAssociatedObject(link,&link_full_key,(id)kCFBooleanTrue,OBJC_ASSOCIATION_ASSIGN);
+    if(link && target) {
+        const char *name=object_getClassName(target);
+        if(!strcmp(name,"UIViewInProcessAnimationManager") || !strcmp(name,"UIKit.InProcessAnimationManager"))
+            objc_setAssociatedObject(link,&link_full_key,(id)kCFBooleanTrue,OBJC_ASSOCIATION_ASSIGN);
+    }
     if(link_say && link_said++<300)
         fprintf(stderr,"Pong UI18: display link %p made for -[%s %s] by %s\n",(void *)link,target?object_getClassName(target):"nil",
             action?sel_getName(action):"",link_caller(__builtin_return_address(0),who,sizeof(who)));

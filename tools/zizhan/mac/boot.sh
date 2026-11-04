@@ -36,5 +36,5 @@ PY
 fi
 in_fastboot || { echo "NO_FASTBOOT"; exit 2; }
 [ $# -ge 2 ] && [ -n "$ASK" ] && printf '%s\n' "$2" > "$ASK"
-bash "$S/fastboot-boot.sh" "$IMG" 2>&1 | tail -2 || exit 3
+bash "$S/fastboot-boot.sh" "$IMG" || exit 3
 date '+booted %H:%M:%S'

@@ -86,10 +86,51 @@ print(pathlib.Path(os.environ['TEST_STATUS']).read_text(), end='')
             if expected == 1:
                 assert not called.exists() and "refusing occupied" in result.stdout
             else:
-                assert json.loads(called.read_text()) == ["-e", "-l", "8-3", "-p", "3", "-a", "cycle", "-d", "3"]
+                assert json.loads(called.read_text()) == ["-l", "8-3", "-p", "3", "-a", "cycle", "-d", "3"]
                 assert ("power-cycled" in result.stdout) == (expected == 0)
         result = subprocess.run(usbkick + ["remember"], env=env, capture_output=True)
         assert result.returncode == 1 and not recorded.exists()
+        recorded.write_text("8-3 3\n")
+        first = "Current status for hub 8-3 [05ac:8009 Apple USB2 Hub shared, USB 2.10]\n  Port 3: 0100 power\n"
+        other = "Current status for hub 8-1 [05ac:800a Apple USB3 Gen2 Hub shared, USB 3.20]\n  Port 3: "
+        for companion, expected in [("02a0 power", 0), ("0103 connect [046d:c53f Receiver]", 1)]:
+            status.write_text(first + other + companion + "\n")
+            called.unlink(missing_ok=True)
+            result = subprocess.run(usbkick + ["kick"], env=env, capture_output=True, text=True)
+            assert result.returncode == expected and called.exists() == (expected == 0)
         print("PASS: USB recovery targets only the recorded port, refuses foreign devices, propagates errors")
+        transfer = Path(td) / "fastboot-transfer"
+        transfer.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+p = pathlib.Path(os.environ['TEST_CALL'])
+calls = json.loads(p.read_text()) if p.exists() else []
+op = next(a for a in sys.argv if a in ('devices', 'getvar', 'boot'))
+calls.append(op)
+p.write_text(json.dumps(calls))
+if op == 'devices':
+    print('test\\t fastboot')
+elif op == 'getvar':
+    print('product: zizhan')
+elif os.environ['TEST_CASE'] == 'send-error' and calls.count('boot') == 1:
+    print("Sending 'boot.img' FAILED (usb_write failed with status e00002ed)")
+    sys.exit(4)
+elif os.environ['TEST_CASE'] == 'boot-refused':
+    print("Sending 'boot.img' OKAY\\nBooting FAILED (remote: refused)")
+    sys.exit(4)
+else:
+    print("Sending 'boot.img' OKAY\\nBooting OKAY")
+""")
+        transfer.chmod(0o700)
+        usb.write_bytes(plistlib.dumps([{"idVendor": 0x18d1, "idProduct": 0xd00d}]))
+        for case, result_code, sequence in [
+            ("send-error", 0, ["boot", "devices", "getvar", "boot"]),
+            ("boot-refused", 4, ["boot"]),
+        ]:
+            called.unlink(missing_ok=True)
+            result = subprocess.run(["bash", str(ROOT / "tools/zizhan/mac/fastboot-boot.sh"), "dummy.img"],
+                env=dict(os.environ, FASTBOOT_BIN=str(transfer), IOREG_BIN=str(ioreg),
+                         ANDROID_SERIAL="test", TEST_CALL=str(called), TEST_CASE=case), capture_output=True)
+            assert result.returncode == result_code and json.loads(called.read_text()) == sequence
+        print("PASS: pre-boot USB send failure retries once; a refused boot is never repeated")
 if __name__ == "__main__":
     main()

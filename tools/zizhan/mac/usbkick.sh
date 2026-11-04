@@ -29,23 +29,43 @@ remember() {
   [ -n "$hp" ] || { rm -f "$F"; return 1; }
   echo "$hp" > "$F"; echo "$(ts) phone on hub ${hp% *} port ${hp#* }"
 }
-# 2026-11-04: the exact rear USB2 hub port removes VBUS and fastboot
-# re-enumerates. Leave sibling hubs and other devices alone.
+# 2026-11-04: rear USB-A VBUS is shared by a USB2/USB3 companion pair.
+# uhubctl identifies the pair; require the same physical port on both,
+# and refuse unexpected hubs or an occupied companion before cycling.
 kick() {
-  local hp hub port extra line
+  local hp hub port extra line status lines
   hp=$(find_port)
   [ -z "$hp" ] || echo "$hp" > "$F"
   [ -f "$F" ] || { echo "$(ts) usbkick: no recorded port (run 'usbkick.sh remember' while the phone is visible)"; return 1; }
   read -r hub port extra < "$F"
   [[ "$hub" =~ ^[0-9]+-[0-9]+(\.[0-9]+)*$ && "$port" =~ ^[1-9][0-9]*$ && -z "$extra" ]] || return 1
-  line=$("$UHUBCTL_BIN" -e -l "$hub" -p "$port" 2>/dev/null | awk -v p="$port:" '$1=="Port" && $2==p {print; exit}')
-  [ -n "$line" ] || { echo "$(ts) usbkick: recorded hub/port unavailable"; return 1; }
-  if [[ "$line" =~ \[[[:xdigit:]]{4}:[[:xdigit:]]{4} ]] &&
-     ! [[ "$line" =~ \[$PHONE_VID:(4ee7|d00d)([[:space:]]|\]) ]]; then
-    echo "$(ts) usbkick: refusing occupied hub $hub port $port"
-    return 1
-  fi
-  "$UHUBCTL_BIN" -e -l "$hub" -p "$port" -a cycle -d 3 >/dev/null || return $?
+  status=$("$UHUBCTL_BIN" -l "$hub" -p "$port" 2>/dev/null) || return $?
+  lines=$(printf '%s\n' "$status" | awk -v want="$hub" -v p="$port:" '
+    /^Current status for hub/ {
+      h=$5; id[h]=$6; hubs[h]++; n++
+      if (h!=want) other=h
+      s=$0; sub(/^.* Hub /,"",s); sub(/,.*/,"",s); serial[h]=s
+    }
+    $1=="Port" { if ($2!=p || !h) bad=1; ports[h]++; print }
+    END {
+      if (bad || n<1 || n>2 || hubs[want]!=1 || ports[want]!=1) exit 1
+      if (n==2 && (ports[other]!=1 ||
+          substr(want,1,index(want,"-")-1)!=substr(other,1,index(other,"-")-1) ||
+          serial[want]!=serial[other] || !serial[want] ||
+          !((id[want]=="[05ac:8009" && id[other]=="[05ac:800a") ||
+            (id[want]=="[05ac:800a" && id[other]=="[05ac:8009")))) exit 1
+    }') || { echo "$(ts) usbkick: recorded hub/port or companion unavailable"; return 1; }
+  while IFS= read -r line; do
+    if [[ "$line" =~ \[[[:xdigit:]]{4}:[[:xdigit:]]{4} ]] &&
+       ! [[ "$line" =~ \[$PHONE_VID:(4ee7|d00d)([[:space:]]|\]) ]]; then
+      echo "$(ts) usbkick: refusing occupied hub $hub port $port or companion"
+      return 1
+    fi
+  done <<< "$lines"
+  "$UHUBCTL_BIN" -l "$hub" -p "$port" -a cycle -d 3 >/dev/null || return $?
+  # macOS can retain the old USB object after uhubctl returns. On g279
+  # it detached 1.3 s later, interrupting a transfer to that old object.
+  sleep 3
   echo "$(ts) usbkick: power-cycled hub $hub port $port"
 }
 case ${1:-kick} in

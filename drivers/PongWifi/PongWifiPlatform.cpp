@@ -519,10 +519,13 @@ volatile uint32_t msiArrivals;
 unsigned testReconnectState;
 void testNetwork(const nw_wifi_status &st) {
  static bool checked=false,enabled=false,attempted=false,finished=false;
+ static bool alternate=false,reconnecting=false,rescanned=false;
+ static uint8_t firstBssid[6];
  static uint64_t deadline=0, reconnectAt=0;
  if(!checked) {
   checked=true;uint32_t flag=0;
   enabled=PE_parse_boot_argn("pong_wifi_test",&flag,sizeof flag)&&flag==1;
+  alternate=enabled&&PE_parse_boot_argn("pong_wifi_alt",&flag,sizeof flag)&&flag==1;
   if(enabled&&(!kWifiTestSsidBytes||!kWifiTestKeyBytes)) {
    log(6,"WiFi association test SKIP: no private network fixture");enabled=false;
   }
@@ -536,7 +539,7 @@ void testNetwork(const nw_wifi_status &st) {
  }
  if(reconnectAt) {
   if(now()<reconnectAt)return;
-  reconnectAt=0;attempted=false;finished=false;deadline=now()+60000;
+  reconnectAt=0;attempted=false;finished=false;reconnecting=true;deadline=now()+60000;
   log(6,"WiFi lifecycle test RUNNING: reconnecting to scanned network");
  }
  if(finished)return;
@@ -544,6 +547,7 @@ void testNetwork(const nw_wifi_status &st) {
   nw_bss_info b={};
   for(int i=0,n=nw_wifi_bss_count();i<n;++i) {
    if(nw_wifi_bss_get(i,&b)||b.ssid_len!=kWifiTestSsidBytes||memcmp(b.ssid,kWifiTestSsid,kWifiTestSsidBytes))continue;
+   if(alternate&&reconnecting&&!memcmp(b.bssid,firstBssid,sizeof firstBssid))continue;
    int result=nw_wifi_connect(kWifiTestSsid,kWifiTestSsidBytes,b.bssid,
     reinterpret_cast<const char *>(kWifiTestKey),kWifiTestKeyBytes);
    attempted=true;deadline=now()+60000;
@@ -551,9 +555,17 @@ void testNetwork(const nw_wifi_status &st) {
    if(result){finished=true;log(3,"WiFi association test FAIL: station refused request");}
    break;
   }
+  if(alternate&&reconnecting&&!attempted&&!rescanned) {
+   rescanned=true;
+   nw_wifi_scan(kWifiTestSsid,kWifiTestSsidBytes);
+  }
  }
  if(attempted&&st.state==NW_STA_UP&&pong_wifi_net_has_ipv4()) {
   finished=true;log(6,"WiFi association test PASS: authenticated link and IPv4 address");
+  if(!reconnecting)memcpy(firstBssid,st.bssid,sizeof firstBssid);
+  else if(alternate)log(6,memcmp(firstBssid,st.bssid,sizeof firstBssid)?
+   "WiFi lifecycle test AP switch PASS: associated to distinct BSSID":
+   "WiFi lifecycle test AP switch FAIL: BSSID did not change");
   unsigned idle=0;
   __atomic_compare_exchange_n(&testReconnectState,&idle,1,false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
   pong_wifi_net_diagnostics();

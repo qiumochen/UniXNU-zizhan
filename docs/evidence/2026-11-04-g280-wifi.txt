@@ -1,0 +1,11 @@
+Device: Xiaomi MIX Fold 2, iPadOS 18 22H374, temporary g280 boot.
+UFS log: 952113 bytes, deadline, image epoch matched; returned to Android.
+Pong WiFi18: DHCP service RUNNING
+PongWifi[6]: WiFi association test PASS: authenticated link and IPv4 address
+Pong WiFi18: IPv4 DHCP lease observed
+Pong WiFi18: HTTPS probe 1 store=1 primary-en0=0 router=0 dns=0
+Pong WiFi18: HTTPS probe 2 store=1 primary-en0=0 router=0 dns=0
+Pong WiFi18: HTTPS probe 3 store=1 primary-en0=0 router=0 dns=0
+Pong WiFi18: HTTPS probe 4 store=1 primary-en0=0 router=0 dns=0
+Pong WiFi18: HTTPS test FAIL status=0 bytes=0 error=-1009 attempt=4
+Pong UI18: open prefs:root=WIFI accepted=0 (workspace 1)

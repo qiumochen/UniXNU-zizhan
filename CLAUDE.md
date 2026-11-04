@@ -26,7 +26,7 @@ g268 自动轮次工具已补上有界 adb 探测和 `fastboot boot` 的真实�
 
 23:33 Wi-Fi 最新：g275 已在真机完成扫描（15 个网络），WMI 修正有效；关联、DHCP、公网和真实 GIC MSI 尚未验证。g276 在进入 fastboot 时 USB 未枚举，没有启动。g277 关联测试镜像和三配置构建已准备，当前等待用户重插直连 USB；电脑不重启。私有网络配置只留仓库外，试验输入默认关闭。恢复后继续 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md) 的 g277 轮次。
 
-2026-11-04 接续：[Wi-Fi 与 USB 记录](docs/progress/2026-11-04-wifi-usb.md)。后部 USB-A 的 10 次完整切换与稳定等待后的 100168 KB 临时启动通过，Mac 未重启。g279 已验证真实 WPA2 和 DHCP；仍在核对公网及 Settings。以下之前的 USB 等待描述仅供回溯。
+2026-11-04 接续：[Wi-Fi 与 USB 记录](docs/progress/2026-11-04-wifi-usb.md)。后部 USB-A 的 10 次完整切换与稳定等待后的 100168 KB 临时启动通过，Mac 未重启。g279–g282 已验证真实 WPA2 和 DHCP；已定位到 DHCP ACK 含网关/DNS、但系统未发布可用默认网络。g282 补偿未生效，公网和 Settings 尚未通过。以下之前的 USB 等待描述仅供回溯。
 
 ## 目标与当前状态
 

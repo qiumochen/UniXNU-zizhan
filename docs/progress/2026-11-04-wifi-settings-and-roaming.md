@@ -2,6 +2,8 @@
 
 接续 [原生接口修正](2026-11-04-wifi-native-repair.md)。用户明确授权无人值守专攻 Wi-Fi，使用已有截图、手势采样、UFS 日志和自动返回。全部轮次使用后部 USB-A、临时 `fastboot boot` 和 autoreset；完整分区备份保留，未刷写分区。
 
+本文保留 g299–g333 的历史过程。后续 PrimaryTimeout、连接保持和原生开关验收见 [11 月 5 日生命周期记录](2026-11-05-wifi-lifecycle.md)；下文“周期断开待定位”不是最新状态。
+
 ## 跨频段重连
 
 旧 g292/g294 的首次连接与主动续租通过，但跨频段重连在管理帧阶段触发固件 RDDM。核对固定 Linux v7.0.14 的 `ath11k/mac.c`：`ath11k_recalculate_mgmt_rate` 缓存 `ar->hw_rate_code`，`ath11k_start_vdev` 在后续启动时重新写入它。共享 legacy station 原本到收到关联响应后才通知 `BSS_CHANGED_BASIC_RATES`，无法在下一次跨频段认证之前更新缓存。

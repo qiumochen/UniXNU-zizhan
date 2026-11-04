@@ -10,7 +10,9 @@
 
 `92ef6d2` 从 SpringBoard/wifid/configd 栈确认了原生 InterfaceNamer 的 240 秒等待，镜像配置使用它已有的 30/10 秒 stack/quiet 超时，由 configd 实际发布 Timeout/Complete；没有伪造 Quiet。g309 使用 Settings 的真实选网行、secure text input 和导航栏 Join，收到 900 字节原生 Apple80211 请求，WPA2、DHCP、HTTPS 200 通过。内核自动关联关闭，测试 UI 仅在 `pong_wifi_ui_test=1` 且存在本地权限受限文件时运行；默认不启用。测试文件不提交，默认准备镜像推广前必须移除。
 
-11 月 5 日凌晨接续：`718f73c` 补原生扫描时间戳、RSSI_BOUNDS 和真实授权后的 RSN 通知。g312 证明无测试密码的保存凭据复用；g331/g332 证明系统自动关联和 HTTPS 200，后者使用原始 wifid、无设置页启动及实际默认 128 MiB DMA。但仍周期主动断开，保持问题尚未解决。默认准备镜像尚未推广到试验状态，继续安装必须使用本机实际 manifest。
+11 月 5 日凌晨接续：`718f73c` 补原生扫描时间戳、RSSI_BOUNDS 和真实授权后的 RSN 通知。g312 证明无测试密码的保存凭据复用；g331/g332 证明系统自动关联和 HTTPS 200，但当时仍周期主动断开。后续进度以 [连接生命周期记录](docs/progress/2026-11-05-wifi-lifecycle.md) 为准：`601f361` 为真实 en0 的 ACK 补偿会话补齐 Setup Interface，解决 wifid 的 PrimaryTimeout；`8f1c86f` 在 firmware dispatcher 外通过有界 FIFO 派发网络通知。g337 的原始 wifid、无 fixture、无设置页启动轮次自动加入后保持至约 309 秒，无 link loss。默认 DMA 改为真实 64 MiB，显式 128 MiB 仍保留失败回退。
+
+g338–g340 的原生开关完成首次 HTTPS 和断开清理，第二次密钥安装后却卡住。`959b00b` 修复共享 timer pass 在递归 pump 摘除后继节点后沿自指节点空转的问题，主机重放复现旧挂住并验证修正；g341 随后取得两组不同 DHCP REQUEST/ACK、两次 HTTPS 200，原生关开和断开清理闭环通过，worker 持续推进。干净 OS 已移除本机开关测试；g342 无 Settings 的网络保持通过，但显示画布失败、早期日志被覆盖，不能记完整 UI 通过。g343 在同一干净 OS 打开原生 Wi-Fi 页，自动入网、HTTPS、零 link loss 和三张完整截图通过。实际干净 OS/UI/helper、overlay、layout、描述符及默认安装 state 已同步，旧准备态完整保留；手机已回 Android。后续安装仍须核对实际 manifest。
 
 Wi-Fi 仍单独使用 `zizhan_ipados18_wifi_defconfig`；GPU 默认配置保持 Wi-Fi 关闭。不同 SSID/子网、自然 T1、长时间稳定性及真实 GIC MSI 尚未通过。下文 g292–g295 的 RDDM/Settings 失败是历史证据，不能作为当前结论。每次安装以实际已写入的 manifest/state 为准，不把旧准备 OS 直接当手机当前版本。
 

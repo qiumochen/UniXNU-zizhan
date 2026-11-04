@@ -11,6 +11,7 @@ Paths in the notes refer to the author's workspace:
 
 ## 最新交接
 
+- [2026-11-05 Wi-Fi 连接生命周期](2026-11-05-wifi-lifecycle.md)：修复原生 PrimaryTimeout、dispatcher 内同步通知和 timer 重入遍历；g337 自动入网及短时保持、g341 原生关开后的第二次 DHCP/HTTPS 与清理通过。
 - [2026-11-04 Wi-Fi 设置与跨频段重连](2026-11-04-wifi-settings-and-roaming.md)：提前更新管理帧速率后，2.4↔5 GHz 两个方向都通过三次 HTTPS 和断线清理；缩短原生 InterfaceNamer 回退等待后，g309 从真实 Settings 加入完成 WPA2、DHCP、HTTPS。
 
 - [2026-11-04 display-link 设备对照](2026-11-04-displaylink-device.md)：修正实际 UIKit 动画类名，g298 moving 95.3 fps，基线 56.7–58.4；动画尾段间隔改善，首帧约 80 ms 仍待定位。

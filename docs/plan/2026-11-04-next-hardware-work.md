@@ -12,7 +12,9 @@
 - [x] 2.4 GHz 与 5 GHz 两个方向切换到不同 BSSID，核对旧路由/DNS 清除和新租约 HTTPS（g304/g306）。
 
 - [x] 无 UI 私有配置/内核凭据的重启自动入网及 HTTPS（g331/g332），原始 wifid、无设置页启动的对照也通过。
-- [ ] 修正周期主动断开并验收保持；随后清理诊断并推广已验证镜像/manifest。
+- [x] 定位原生 `Not Primary Interface(1005)`，补齐真实接口的 session Setup 绑定；g337 原始 wifid、无 Settings/fixture 连接保持约 309 秒。
+- [x] 原生关开后取得第二次 DHCP ACK/HTTPS；g341 修正 timer 重入后，两组不同 DHCP REQUEST/ACK、两次 HTTPS 200、断开 session/路由/DNS 清理通过。见 [生命周期记录](../progress/2026-11-05-wifi-lifecycle.md)。
+- [x] 清理本机开关测试并复验：g343 干净原生设置页自动入网、HTTPS、零 link loss、三张完整截图通过；准备 OS/UI/helper、overlay、layout、描述符和安装 state 已同步，旧副本保留。g342 无 Settings 的显示失败仍单列待查。
 - [ ] 验证从一个 SSID/子网切到另一个后，旧路由和 DNS 清除，新网重新取得租约并能访问 HTTPS；另测自然 T1 续租。记录原生路由何时接手、补偿何时退出。保留 g290 的租约补偿作为回退；真实 GIC MSI 到达另行验证。
 
 [g290 基线](../progress/2026-11-04-wifi-usb.md)：测试轮已通过首次联网、主动触发的续租、断开清理和同网重连；无凭据轮只验证了扫描。上述待办不用重做已通过的同网测试。

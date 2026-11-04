@@ -1,0 +1,78 @@
+Device: zizhan, 22H374. Rear USB-A, temporary fastboot boot, automatic return.
+Source: 601f3612f455ae95b41e44fa4014fbdf1acd95df (real en0 repair-service binding).
+Source: 8f1c86fbb358697389336ed2bd5e04e3cf662f25 (notification FIFO and default real 64 MiB).
+Source: 959b00b1b81186c40b75b16a1c27c512062a2e1a (reentrant timer pass and optional progress diagnostics).
+No SSID, BSSID, client address, transaction IDs, credentials or private paths included.
+
+g335-fixed: fresh UFS log, 1747268 bytes; deadline return to Android.
+Native association requests: 1; link loss notifications: 0.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+
+g337-deferred-events: fresh UFS log, 1801588 bytes; deadline return to Android.
+Native association requests: 1; link loss notifications: 0.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+
+g340-progress-watch: fresh UFS log, 1999435 bytes; deadline return to Android.
+Native association requests: 2; link loss notifications: 1.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi UI test: RUNNING native radio off action
+Pong WiFi18: disconnect cleanup PASS
+Pong WiFi UI test: RUNNING native radio on action; verify cleanup, native rejoin and HTTPS separately (selected=0 password-field=0)
+Progress samples (first and last):
+wifi-net: dispatcher phase=7 age-ms=2 generation=32033 where=0 fn-offset=0 depth=0
+wifi-net: dispatcher phase=2 age-ms=121351 generation=163923 where=0 fn-offset=0 depth=1
+
+g341-timer-reentry: fresh UFS log, 1843243 bytes; deadline return to Android.
+Native association requests: 2; link loss notifications: 1.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi UI test: RUNNING native radio off action
+Pong WiFi18: disconnect cleanup PASS
+Pong WiFi UI test: RUNNING native radio on action; verify cleanup, native rejoin and HTTPS separately (selected=0 password-field=0)
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong WiFi18: native UI lifecycle PASS
+Progress samples (first and last):
+wifi-net: dispatcher phase=7 age-ms=0 generation=30329 where=0 fn-offset=0 depth=0
+wifi-net: dispatcher phase=7 age-ms=2 generation=298065 where=0 fn-offset=0 depth=0
+Distinct matching DHCP REQUEST/ACK transactions: 2.
+Screenshots: three complete 120/120-row images at 141.162, 166.165 and 191.206 seconds; private network labels retained locally.
+
+Host results at the timer-fix source snapshot:
+Wi-Fi, CI and GPU kernel configurations: KERNEL_DONE.
+UI/helper compiled, signed and strictly verified for the clean successor OS.
+Read-only clean OS verification: original wifid; no fixture/observer/log probe; matching UI/helper; job/cache agreement; stock InterfaceNamer configuration keys 30/10.
+check-wifi-host.py: native service staging, SMMU, WMI, DHCP, notification FIFO and USB guard/retry replay PASS.
+Actual original timer pass: recursive-pump hang reproduced by subprocess timeout.
+Actual adapted timer pass: recursive removal, successor cancellation, running rearm, 256-callback budget and future deadlines PASS.
+Unexpected shared dispatcher source is rejected explicitly.
+Host replay/build results do not establish device function.
+
+g342-clean-native: clean public UI/helper, original wifid, no fixture, no Settings launch.
+UI library is byte-for-byte identical to the previously clean g336 OS used in g337.
+Fresh UFS log: 2,111,414 bytes; console ring wrapped, so early association/handshake records were overwritten.
+Pong WiFi18: HTTPS probe 1 store=1 primary-en0=1 router=1 dns=1
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Retained runtime samples: 24, all actual NW_STA_UP (6); frames increased from 681 to 292019.
+Progress generation increased from 44503 to 701642; no persistent worker stall in retained samples.
+431-second automatic return, genuine deadline rather than panic.
+Display limitation: repeated canvas-mapping failures; no screenshots decoded. Not a full UI pass.
+Do not infer a retained association count of zero as absence of a join: the early console was overwritten.
+
+g343-clean-settings: same clean OS as g342, normal Settings URL launch, no private fixture or test UI/helper.
+Fresh UFS log: 1,943,231 bytes; 306-second automatic return to Android.
+PongWifi[6]: wifi-net: native client type 20 set bytes=900 -> 0
+PongWifi[6]: wifi: keys installed after message 4 completed (tx acked 2, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong UI18: open prefs:root=WIFI accepted=1 (workspace 1)
+Pong WiFi UI test: SKIP no private fixture
+Native associations: 1; link loss: 0; canvas-mapping failures: 0.
+Three complete screenshots: 143.767, 172.028 and 201.208 seconds, all 120/120 rows.
+Settings render verified locally; private network labels are not published.
+Actual default DMA: 64 MiB. Final retained runtime state: NW_STA_UP (6), frames 345406.
+
+Prepared-state promotion: PASS. Actual phone extent and manifest verified before promotion.
+Local complete OS chunks and whole image hash matched the actual installed trial state.
+Canonical/trial manifests and 4K descriptor byte-identical; default install state matches actual clean trial.
+Prepared and overlay UI/helper match the verified clean trial, with strict signatures.
+Overlay contains no fixture/observer; canonical native wifid job and launchd cache agree.
+Prior OS/UI/layout/descriptor/install state and related overlay metadata retained for rollback.
+Promotion made no phone writes; phone returned to Android.

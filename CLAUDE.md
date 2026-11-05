@@ -1,8 +1,8 @@
 # zizhan 开发交接
 
-本文件是从旧项目记忆整理的公开交接，基础内容更新至 **2026-11-02 09:39（UTC+8）**；2026-11-03 的接续见下段。先读 [AGENTS.md](AGENTS.md)、[porting.toml](porting.toml) 和 [最新进度](docs/progress/README.md)。历史轮次以对应进度文档为准；本文件不保存机器身份或设备标识。
+本文件保存开发环境、工作流和历史教训。**当前基线、任务优先级和验证边界统一见 [当前台账](docs/progress/STATUS.md)**；先读 [AGENTS.md](AGENTS.md) 的进度管理规则，再读台账和相关证据。[porting.toml](porting.toml) 是能力记录；本文件内的日期段落按当时状态理解，不用历史“当前”覆盖台账。本文件不保存机器身份或设备标识。
 
-下一轮按 [硬件适配待办](docs/plan/2026-11-04-next-hardware-work.md) 接续：先验证 Wi-Fi 设置页入网和换网，再分别验证 GPU 首帧/回弹和内屏调光。外屏先独立出图和触控，再做折叠切换。
+2026-11-05 交接：默认 GPU、Wi-Fi、内屏亮度同时开启；原生 Wi-Fi 基础链、手动亮度及正常 60/120 Hz 已有真机证据。功能基线 `de0d977d654f054da22896de41596f4ba5610a89` 的四项 CI 全通过。下一主线是主屏约 80 ms 首帧延迟；冷启动和网络长稳另安排回归，再推进外屏。详见台账中的稳定任务 ID 和验收条件；[硬件适配计划](docs/plan/2026-11-04-next-hardware-work.md) 保留场景设计。
 
 ## 2026-11-05 显示、首帧与内屏亮度
 
@@ -52,7 +52,7 @@ g268 自动轮次工具已补上有界 adb 探测和 `fastboot boot` 的真实�
 
 2026-11-04 接续：[Wi-Fi 与 USB 记录](docs/progress/2026-11-04-wifi-usb.md)。后部 USB-A 的 10 次完整切换与稳定等待后的 100168 KB 临时启动通过，Mac 未重启。g279–g282 已验证真实 WPA2 和 DHCP；已定位到 DHCP ACK 含网关/DNS、但系统未发布可用默认网络。g290 的默认 Wi-Fi 路径使用独立租约补偿会话，真机首次联网、原生续租、断线清理与重连三次 HTTPS 均返回 200；Settings 和实际 MSI 仍待验证。g290 无凭据启动及扫描通过；g291 切换到不同 BSSID 后认证成功但无 DHCP 回复，跨 AP 联网未通过。同镜像重跑出现固件 RDDM/MHI 恢复失败，重复日志覆盖前半段，不能确认初始故障阶段；手机已回 Android。下一步先保留首次故障并定位 worker/固件恢复路径。以下之前的 USB 等待描述仅供回溯。
 
-## 目标与当前状态
+## 历史目标与状态（截至 g298，已被上述 11-05 记录取代）
 
 GPU 最新完成：[g296–g298 设备对照](docs/progress/2026-11-04-displaylink-device.md)，源码 `42629e5`。g298 与 g296 使用同一个启动镜像，只改已安装 UI 库，moving 58.4 → 95.3 fps，抬手后 1–1.5 秒帧间隔约 33.2 → 8.3 ms；首帧仍约 75–80 ms。准备 OS/UI、布局和默认安装状态已同步为已验证 g298，并保留 `.pre-g298` 回退副本；完整 g295/g290 副本也在本机。当前没有设备轮次或 USB 等待器运行，手机已回 Android。
 
@@ -78,7 +78,7 @@ Xiaomi MIX Fold 2（zizhan / SM8475）运行 iPadOS 18.7.10 / 22H374，Darwin 24
 
 origin 是 `qiumochen/UniXNU-zizhan`，upstream 是 `Chengdong-Yu/UniXNU-pong`。这是保留 Pong 历史的独立仓库，**不是 GitHub fork**；保持 `unixnu` topic，UniXNU 的设备目录同步工作流会读取有效的 board / porting 记录并更新 `devices.toml`。固件另在 [uefi-zizhan](https://github.com/qiumochen/uefi-zizhan)，它是 uefi-pong 的 fork。只推送授权的 origin，禁止强推和改写已发布历史。
 
-内核 / 驱动修改推送前应在 Mac **同时构建** `pong_ipados18_ci_defconfig`（Adreno 关闭）和 `zizhan_ipados18_gpu_defconfig`；GPU 专用符号须置于 `#if XNU_PONG_ADRENO_PLATFORM`，静态链接不能依靠未定义 weak 符号。本次接管保存现有 WIP 时只有 Linux 静态检查，双配置与 plugin / UI 构建尚未执行，不视为通过。
+内核 / 驱动修改推送前应在 Mac **同时构建** `pong_ipados18_ci_defconfig`（Adreno 关闭）和 `zizhan_ipados18_gpu_defconfig`；GPU 专用符号须置于 `#if XNU_PONG_ADRENO_PLATFORM`，静态链接不能依靠未定义 weak 符号。早期接管只有 Linux 静态检查的限制已被后续 Mac 构建取代；具体提交的通过范围以台账和对应证据为准。
 
 发布前审查完整暂存 diff：不带本机路径、主机身份、设备唯一标识或私有输入；照片去 EXIF。只发布源码、配置、文档与脚本；Apple 二进制、手机固件、根镜像、分区备份、凭据和编译产物留本机。git 身份由开发者在本地自行配置。
 
@@ -147,7 +147,7 @@ DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh
 - `ADSP=2 bash round.sh RUN [args…]` 构建 GPU 内核、打包、运行 cycle；首次先核实 ZIZHAN_ROOT_4K、klog 状态和真实 volume layout。
 - `cycle.sh IMG RUN [WAIT]`：临时 fastboot boot → deadline 回 fastboot → RamoopsDump 把 ramoops 写到已备份的 logfs → Android / adb 取日志。它涉及日志写入；不是无写入测试。禁止 fastboot flash。
 - 中断时用 `cycle-resume.sh IMG RUN` 接后半段；USB 掉线时 `when-back.sh RUN [args…]` 等恢复再跑。`usbkick.sh remember` 在手机可见时记端口；换口后重记。先判断端口枚举，不能把 USB 不可见直接当内核冻结。
-- 无人值守等待器如果由临时工具会话直接启动，会随会话结束而退出。要跨会话等待，使用当前用户图形域的 `launchctl submit` 托管 `when-back.sh`，设置 `ZIZHAN_SRC` 和 `WHEN_BACK_IMAGE`，将输出写入本机日志；用 `launchctl list` 和日志心跳核对存活。当前 g269 任务见 [Wi-Fi 记录](docs/progress/2026-11-03-wifi-bringup.md)。
+- 无人值守等待器如果由临时工具会话直接启动，会随会话结束而退出。要跨会话等待，使用当前用户图形域的 `launchctl submit` 托管 `when-back.sh`，设置 `ZIZHAN_SRC` 和 `WHEN_BACK_IMAGE`，将输出写入本机日志；用 `launchctl list` 和日志心跳核对存活。g269 是[历史示例](docs/progress/2026-11-03-wifi-bringup.md)，不代表有等待器运行；活跃进程写入本机 handoff 并实时复查。
 - `klog.py` 把状态保存在工作目录；干净 UFS klog 优先于热机后位翻转严重的 DRAM ramoops。每轮日志保留参数、源码版本、镜像 / plugin / UI 版本、结果和下一步。
 - `cycle.sh` 和 `cycle-resume.sh` 经 `pull-logfs.sh` 导出 logfs；导出或拉取失败会清掉本机同名旧副本并停止轮次。只有真实取回的新镜像才能继续提取 `XNULOG.TXT`。
 
@@ -168,7 +168,7 @@ DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh
 | `pong_ufs_async` | 默认 0，不重复使用已失败的异步路径推断 |
 | `pong_fast_pri` / `pong_fast_cpu` / `pong_cpu_boost_ms` | 默认 47 / 7 / 400；UI 优先 X2 和触摸 boost |
 | `pong_astc` | 默认保持系统原生回答（CPU 解码）；1 强答支持，2 仅 UI 进程实验，均未验证修复 |
-| `pong_dl_full` | 新 WIP 默认拦截指定 link 的低帧率请求；0 保留原速率，未验证 |
+| `pong_dl_full` | 默认拦截指定 link 的低帧率请求；0 保留原速率；g298 已验证对应类名修复，非所有场景帧率保证 |
 | `touch_lat=1` / `pong_gtrace=<s>` | 手势与逐帧诊断；display-link WIP 也由 touch_lat 输出 |
 | `gs=<ms>` / `gs_proc` / `gs_all` | 手势采样；必须设置 gs 时长，单写 proc / all 不生效；all=2 包含等待线程 |
 | `pong_url=<s>` / `pong_pane` | SpringBoard 延时打开设置，默认 BATTERY_USAGE；H 进入电池健康 |
@@ -200,8 +200,8 @@ python3 <UniXNU-checkout>/scripts/porting-record.py check --device "$ZIZHAN_SRC/
 - 修改已应用的 XNU 补丁先处理旧补丁 / 缓存，再重建；应用应使用 forward，防止重叠补丁被反向撤销。
 - 连续轮次发热会污染 ramoops；cycle 先冷却到 35 °C。尚无完整温控，不能把长时间稳定运行当作已验证。
 
-## 已知问题与接续优先级
+## 已知问题与接续入口
 
-先完成 GPU 记录中的 g245/g239 分析、fairplayd 策略和 ASTC 视觉验证，再测试 display-link，随后依次做 nopreamble、内存、壁纸、截图。当前没有足够证据决定删去 EXCLUDED18。
+任务优先级统一维护在 [当前台账](docs/progress/STATUS.md)，不在本文件复制旧队列。首帧约 80 ms、罕见映射失败回归、网络长稳/换网及未接通硬件的边界分别列出。Wi-Fi 和内屏手动亮度已有真机闭环；旧截图右侧缺失已证明是日志缺列，不能继续列作屏幕黑区故障。
 
-电池健康缺 thermalmonitord 的 ageAwareMitigationState 和 powerd 的 Battery Service State，不能伪造“正常”；用量图表需累计使用。外屏 / 外屏触摸、亮度、Wi-Fi、音频、蓝牙、传感器、休眠唤醒均未验证可用。动态壁纸被限制 GPU；截图右侧和 HUD 问题未解。待用户验证清单在各进度文档末尾维护，最新项以 GPU 交接为准。
+电池健康仍缺 thermalmonitord 的 ageAwareMitigationState 和 powerd 的 Battery Service State，不能伪造“正常”；用量图表需累计使用。动态壁纸仍受 GPU 限制；fairplayd 的当前安装与全量构建 EXCLUDED18 策略差异要单独验证。每次交接同时更新台账与仓库外本机 handoff，历史记录保留原条件和负面证据。

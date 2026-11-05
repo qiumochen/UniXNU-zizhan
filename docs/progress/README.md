@@ -11,6 +11,7 @@ Paths in the notes refer to the author's workspace:
 
 ## 最新交接
 
+- [当前进度与工作队列](STATUS.md)：唯一持续维护的状态入口，含任务编号、验收条件、下一动作及已验证发布/CI 基线。日期文档中的“当前”按记录当时理解。
 - [2026-11-05 显示、首帧与内屏亮度](2026-11-05-display-and-backlight.md)：画布映射生命周期加固；首帧分段与被撤销的退步候选；L18 真实读写/恢复、原生滑条和 HID 拖动通过。
 - [2026-11-05 GPU＋Wi-Fi 默认配置](2026-11-05-default-gpu-wifi.md)：默认构建和打包同时开启两者，旧 Wi-Fi 配置名只作兼容链接；精简 CI 仍明确选择。
 - [2026-11-05 Wi-Fi 连接生命周期](2026-11-05-wifi-lifecycle.md)：修复原生 PrimaryTimeout、dispatcher 内同步通知和 timer 重入遍历；g337 自动入网及短时保持、g341 原生关开后的第二次 DHCP/HTTPS 与清理通过。
@@ -20,8 +21,8 @@ Paths in the notes refer to the author's workspace:
 
 - [2026-11-04 原生 Wi-Fi 修正与跨频段故障](2026-11-04-wifi-native-repair.md)：原生接口绑定与 manager 端口修补已有设备证据；跨频段 RDDM、Settings 入网未通过，随后转入 GPU 对照。
 
-- [下一轮硬件适配待办](../plan/2026-11-04-next-hardware-work.md)：Wi-Fi 设置页与换网、GPU 首帧与回弹、内屏调光、外屏出图与折叠切换。
-- [2026-11-03 display-link 主机核对](2026-11-03-displaylink-host.md)（当前准备镜像含 hook；UI、bridge、plugin 与双配置构建通过，设备帧率待验证）。
+- [硬件适配实验计划](../plan/2026-11-04-next-hardware-work.md)：保留已完成项与场景验收设计；执行优先级以当前台账为准。
+- [2026-11-03 display-link 主机核对](2026-11-03-displaylink-host.md)（历史主机构建状态；后续设备帧率已有 g298 记录）。
 - [2026-11-03 音频板级审查](2026-11-03-audio-board-audit.md)（公开 zizhan DT 与 Pong 音频常量对照；未上机）。
 - [2026-11-04 Wi-Fi 与 USB](2026-11-04-wifi-usb.md)：默认 Wi-Fi 路径的 DHCP、续租、断开清理和重连 HTTPS 通过；后部 USB-A 自动部署已实测。
 - [2026-11-03 Wi-Fi 首轮准备与扫描](2026-11-03-wifi-bringup.md)。

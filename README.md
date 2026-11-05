@@ -20,7 +20,7 @@
 | 启动 | `fastboot boot` 临时引导 UEFI → UniXNU 菜单 → DarwinBoot24 → XNU，**不写任何分区**，每轮结束都回到 Android |
 | CPU / 内存 | 8 核（4×A510、3×A710、1×X2）以 AMP 方式运行，UI 线程优先用 X2；受管内存 9728 MiB |
 | 存储 | 根镜像是 Android `/data` 里一个物理连续的 19.4 GiB 文件，含 OS、SystemOS 和可写 Data 三个卷；修好了一个概率性的 APFS 挂根死锁（0006） |
-| 显示 | 内屏 2160×1916 显示 iPadOS 主屏，面板切到 120 Hz，DPU 直接翻页（零拷贝三缓冲）；外屏未驱动，亮度不可调 |
+| 显示 | 内屏 2160×1916、DPU 零拷贝三缓冲；默认开启真实 L18 DCS 亮度，原生设置滑条和 HID 拖动已有匹配回读及恢复证据。60/120 Hz 与最新验收见[显示记录](docs/progress/2026-11-05-display-and-backlight.md)。外屏未驱动，未提供面板光度校准 |
 | 触摸 | 内屏 ST FTS（GPIO 模拟 SPI），能点开应用、滑动；外屏触摸未驱动 |
 | GPU | Adreno 730，Turnip + metal2vulkan；g298 修正 UIKit 类名后，合成滑动 moving 95.3 fps（同条件基线 56.7–58.4），首帧仍约 75–80 ms；壁纸扩展默认不能使用 GPU，不能宣称全局 120 fps |
 | 电池 | ADSP 启动，经 PMIC GLINK 读到电池，读数与 Android 一致；状态栏与充电拔插已确认，设置电池页能打开；健康度仍转圈 |

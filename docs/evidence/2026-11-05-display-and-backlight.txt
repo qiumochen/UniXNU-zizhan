@@ -1,0 +1,197 @@
+zizhan / 22H374 display, latency and primary L18 brightness qualification.
+Source: 88e5106dca99c03b9be1af02ceae5b041480a83d.
+Device rounds were local snapshots forming this source commit; rejected experiments are not included.
+Rear USB-A, temporary fastboot boot, automatic return. Original private inputs/logs/images remain local.
+Host build/replay evidence is separate from device function.
+
+g345-cold-home: Unmodified combined-default control; no mapping failure. Deadline fence age 67 ms is in-flight, not a prolonged stall.
+Fresh UFS log: 2181356 bytes.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.1/s over 4060 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 2810, 67 ms ago
+
+g346-pool-premap: First cached-slot mapping implementation; actual canvas logged reused=1.
+Fresh UFS log: 2178992 bytes.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.1/s over 258 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 2581, 66 ms ago
+
+g348-late-map-reuse: Three real early slot mappings; native late allocations also worked, but their panel-slot use was not established.
+Fresh UFS log: 2139225 bytes.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.1/s over 3710 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 2535, 990 ms ago
+
+g350-backlight-read: Actual initial brightness read succeeded; later launchd shared-cache ENOMEM caused a genuine panic. Not a full boot pass.
+Fresh UFS log: 41800 bytes.
+PongBacklight: read-only brightness PASS level=307 max=2047 writes=0
+
+g350-read-repeat: Same read-only image repeated; full boot, exact initial read, original panic not suppressed.
+Fresh UFS log: 1696065 bytes.
+PongBacklight: read-only brightness PASS level=307 max=2047 writes=0
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.2/s over 149377 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 864, 12768 ms ago
+
+g351-backlight-levels: No service publication; actual nonzero writes, independent readback and original restoration.
+Fresh UFS log: 1572049 bytes.
+PongBacklight: nonzero level probe RUNNING original=307 first=64
+PongBacklight: probe readback step=1 level=64 writes=1
+PongBacklight: probe readback step=2 level=512 writes=2
+PongBacklight: probe readback step=3 level=307 writes=3
+PongBacklight: nonzero level probe PASS restored=307 original=307 writes=3
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.1/s over 149493 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 639, 48608 ms ago
+
+g355-backboard-crash: Original native-service control captured repeated CoreBrightness null-map SIGSEGV. Fatal signal forwarded unchanged.
+Fresh UFS log: 1395458 bytes.
+PongBacklight: DCS service ready, board-version=2 level=307 max=2047, readback PASS
+PONG TE deadline: INTF_1 te 0.0/s frames 60.5/s over 276214 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 19, 2934 ms ago
+15 captured backboardd failures had the same selected-image PC; symbolication identified _DisplaySliderToLogicalBrightnessInternal +272.
+Matching call chain: DisplayCreateWithCapabilitiesAndID, DisplayCreateWithID, CBDisplayContaineriOS handleDisplayArrival.
+
+g356-native-curve-fix: Exact-image/native-service-gated initialization fix restored UI and hardware request path.
+Fresh UFS log: 1776734 bytes.
+PongBacklight: DCS service ready, board-version=2 level=307 max=2047, readback PASS
+Pong UI18: 22H374 CoreBrightness fallback mapping initialization selected
+Pong brightness18: native software curve used before mapping initialization
+PongBacklight: native target readback PASS level=1024 requests=1 writes=323
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.1/s over 209576 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 689, 44270 ms ago
+
+g361-native-packet: Native visible Settings slider selected safely; three real UI actions and actual matching hardware readbacks, original restored.
+Fresh UFS log: 1737819 bytes.
+PongBacklight: DCS service ready, board-version=2 level=307 max=2047, readback PASS
+Pong UI18: 22H374 CoreBrightness fallback mapping initialization selected
+Pong brightness18: native software curve used before mapping initialization
+PongBacklight: native target readback PASS level=1024 requests=1 writes=1
+Pong brightness UI: native initial=0.500000 restoration=0.500000
+Pong brightness UI: RUNNING native slider step=1 value=0.2500 original=0.5000; verify hardware independently
+PongBacklight: native target readback PASS level=512 requests=2 writes=2
+Pong brightness UI: RUNNING native slider step=2 value=0.6500 original=0.5000; verify hardware independently
+PongBacklight: native target readback PASS level=1331 requests=3 writes=3
+Pong brightness UI: RUNNING native slider step=3 value=0.5000 original=0.5000; verify hardware independently
+PongBacklight: native target readback PASS level=1024 requests=4 writes=4
+PONG TE deadline: INTF_1 te 0.0/s frames 120.1/s over 151782 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 634, 52231 ms ago
+
+g364-hid-thumb: Actual finite HID drag began on the real thumb; hardware moved up/down and known native value restored.
+Fresh UFS log: 1826468 bytes.
+PongBacklight: DCS service ready, board-version=2 level=307 max=2047, readback PASS
+Pong UI18: 22H374 CoreBrightness fallback mapping initialization selected
+Pong brightness18: native software curve used before mapping initialization
+PongBacklight: native target readback PASS level=1024 requests=1 writes=1
+PongBacklight: native target readback PASS level=1986 requests=32 writes=19
+PongBacklight: native target readback PASS level=1862 requests=35 writes=21
+PongBacklight: native target readback PASS level=1832 requests=36 writes=22
+PongBacklight: native target readback PASS level=1801 requests=37 writes=23
+PongBacklight: native target readback PASS level=1770 requests=38 writes=24
+PongBacklight: native target readback PASS level=1739 requests=39 writes=25
+PongBacklight: native target readback PASS level=1708 requests=40 writes=26
+PongBacklight: native target readback PASS level=1677 requests=41 writes=27
+PongBacklight: native target readback PASS level=1647 requests=42 writes=28
+PongBacklight: native target readback PASS level=1616 requests=43 writes=29
+PongBacklight: native target readback PASS level=1585 requests=44 writes=30
+PongBacklight: native target readback PASS level=1554 requests=45 writes=31
+PongBacklight: native target readback PASS level=1523 requests=46 writes=32
+PongBacklight: native target readback PASS level=1492 requests=47 writes=33
+PongBacklight: native target readback PASS level=1028 requests=62 writes=41
+Pong brightness UI: native initial=0.501883 restoration=0.500000
+Pong brightness UI: RUNNING native slider step=3 value=0.5000 original=0.5000; verify hardware independently
+PongBacklight: native target readback PASS level=1024 requests=63 writes=42
+PONG TE deadline: INTF_1 te 0.0/s frames 120.2/s over 250404 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 803, 33869 ms ago
+
+g367-default-60hz: Normal mode without qualification/UI switches; native brightness, networking and measured 60 Hz. Screenshot incomplete, not a full image pass.
+Fresh UFS log: 1462272 bytes.
+PongBacklight: DCS service ready, board-version=2 level=307 max=2047, readback PASS
+Pong UI18: 22H374 CoreBrightness fallback mapping initialization selected
+Pong brightness18: native software curve used before mapping initialization
+PongBacklight: native target readback PASS level=1024 requests=1 writes=1
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 60.5/s over 150072 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 667, 55605 ms ago
+
+g368-default-cold120: Normal default 120 Hz, no Settings URL, no brightness test switches; clean cold-start regression.
+Fresh UFS log: 1724204 bytes.
+PongBacklight: DCS service ready, board-version=2 level=307 max=2047, readback PASS
+Pong UI18: 22H374 CoreBrightness fallback mapping initialization selected
+Pong brightness18: native software curve used before mapping initialization
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.1/s over 549 ms (vsync_count 167)
+PONG FENCE age at the deadline: newest submit 2017, 58 ms ago
+
+g349-settings-scroll: retained timing analysis; performance trials have no screenshots.
+{"retained_downs": 49, "down_to_first_panel": {"samples": 49, "median_ms": 26.026, "p90_ms": 31.734}, "idle_down_to_first_panel": null, "down_to_native_pan_began": null, "native_pan_began_to_swap": null, "swap_to_panel": {"samples": 49, "median_ms": 5.444, "p90_ms": 8.719}, "sample_to_hid_read": {"samples": 49, "median_ms": 0.041, "p90_ms": 0.048}, "hid_read_to_dispatch": {"samples": 49, "median_ms": 0.265, "p90_ms": 0.305}, "trace_windows": [{"seconds": 8, "events": 927, "submits": 309, "completions": 309, "copies": 309, "lost": 0}], "note": "Retained matching records only; idle means at least 90 ms without a prior swap. Screenshot/performance trials should be separate."}
+
+g352-home-gesture: retained timing analysis; performance trials have no screenshots.
+{"retained_downs": 18, "down_to_first_panel": {"samples": 18, "median_ms": 64.528, "p90_ms": 83.227}, "idle_down_to_first_panel": {"samples": 9, "median_ms": 78.291, "p90_ms": 85.236}, "down_to_native_pan_began": {"samples": 11, "median_ms": 25.512, "p90_ms": 27.838}, "native_pan_began_to_swap": {"samples": 11, "median_ms": 36.468, "p90_ms": 42.021}, "swap_to_panel": {"samples": 18, "median_ms": 10.876, "p90_ms": 15.09}, "sample_to_hid_read": {"samples": 18, "median_ms": 0.042, "p90_ms": 0.046}, "hid_read_to_dispatch": {"samples": 18, "median_ms": 0.22, "p90_ms": 0.234}, "trace_windows": [{"seconds": 8, "events": 1870, "submits": 625, "completions": 625, "copies": 620, "lost": 0}], "note": "Retained matching records only; idle means at least 90 ms without a prior swap. Screenshot/performance trials should be separate."}
+
+g363-pan-control: retained timing analysis; performance trials have no screenshots.
+{"retained_downs": 29, "down_to_first_panel": {"samples": 29, "median_ms": 68.953, "p90_ms": 86.525}, "idle_down_to_first_panel": {"samples": 17, "median_ms": 79.76, "p90_ms": 87.871}, "down_to_native_pan_began": {"samples": 23, "median_ms": 24.928, "p90_ms": 29.856}, "native_pan_began_to_swap": {"samples": 23, "median_ms": 37.093, "p90_ms": 43.886}, "swap_to_panel": {"samples": 29, "median_ms": 11.9, "p90_ms": 15.937}, "sample_to_hid_read": {"samples": 29, "median_ms": 0.043, "p90_ms": 0.048}, "hid_read_to_dispatch": {"samples": 29, "median_ms": 0.233, "p90_ms": 0.266}, "trace_windows": [{"seconds": 8, "events": 1124, "submits": 376, "completions": 375, "copies": 373, "lost": 0}], "note": "Retained matching records only; idle means at least 90 ms without a prior swap. Screenshot/performance trials should be separate."}
+
+g365-pan-flush: retained timing analysis; performance trials have no screenshots.
+{"retained_downs": 31, "down_to_first_panel": {"samples": 31, "median_ms": 290.858, "p90_ms": 315.016}, "idle_down_to_first_panel": {"samples": 16, "median_ms": 301.675, "p90_ms": 323.919}, "down_to_native_pan_began": {"samples": 29, "median_ms": 28.572, "p90_ms": 31.626}, "native_pan_began_to_swap": {"samples": 29, "median_ms": 256.834, "p90_ms": 277.77}, "swap_to_panel": {"samples": 31, "median_ms": 10.974, "p90_ms": 14.651}, "sample_to_hid_read": {"samples": 31, "median_ms": 0.043, "p90_ms": 0.049}, "hid_read_to_dispatch": {"samples": 31, "median_ms": 0.285, "p90_ms": 0.32}, "trace_windows": [{"seconds": 8, "events": 912, "submits": 305, "completions": 305, "copies": 302, "lost": 0}], "note": "Retained matching records only; idle means at least 90 ms without a prior swap. Screenshot/performance trials should be separate."}
+
+g365 early-CA-flush candidate regressed; it was removed entirely from the published source.
+Historical g342 canvas-mapping failure remains unreproduced. The old wait snapshot and last-submit age alone do not prove a live GPU stall; actual completion is read separately by the follow-up diagnostic. No universal GPU-hang fix is claimed.
+Host: full default and reduced CI kernels ended KERNEL_DONE.
+Host: public UI/helper compiled and strictly signed; clean OS checks passed with stock wifid, no fixture/observer and matching job/cache metadata.
+Host: actual brightness initialization helper and DSI owner-concurrency replay passed. Existing Wi-Fi regression suite passed.
+Physical photometric calibration, ambient sensing, suspend/wake and outer display are not inferred from register readback or screenshots.
+
+Live-completion diagnostic source: 9d7afd134e56d14dcdd2d0862f3a18f49427b49a.
+The underlying ring submission protocol was preserved; speculative marker changes were not deployed or published.
+
+g369-default-settings120:
+Fresh UFS log: 1995014 bytes.
+Legacy report fields are wait-time snapshots, not live completion. Last-submit age does not establish a hardware hang.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.1/s over 149360 ms (vsync_count 167)
+PONG FENCE at the deadline: waits 3619 timeouts 2673, last timed out on 744 (GPU had written 743), newest handed out 744, newest completed 743, unheld waits 210, last refused 0
+Canvas-mapping failures: 0; captured backboardd fatal signals: 0.
+
+g371-clean-60hz:
+Fresh UFS log: 2116169 bytes.
+Legacy report fields are wait-time snapshots, not live completion. Last-submit age does not establish a hardware hang.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 60.5/s over 209129 ms (vsync_count 167)
+PONG FENCE at the deadline: waits 2963 timeouts 2130, last timed out on 610 (GPU had written 609), newest handed out 610, newest completed 609, unheld waits 236, last refused 0
+Canvas-mapping failures: 0; captured backboardd fatal signals: 0.
+
+g372-stall-watch:
+Fresh UFS log: 1826264 bytes.
+Legacy report fields are wait-time snapshots, not live completion. Last-submit age does not establish a hardware hang.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.2/s over 209492 ms (vsync_count 167)
+PONG FENCE at the deadline: waits 3715 timeouts 2744, last timed out on 772 (GPU had written 771), newest handed out 772, newest completed 771, unheld waits 227, last refused 0
+Canvas-mapping failures: 0; captured backboardd fatal signals: 0.
+
+g374-live-fence-control:
+Fresh UFS log: 1797666 bytes.
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+PONG TE deadline: INTF_1 te 0.0/s frames 120.2/s over 209922 ms (vsync_count 167)
+PONG FENCE at the deadline: waits 3721 timeouts 2754, last timed out on 763 (GPU had written 762), wait snapshot submitted 763 completed 762, unheld waits 219, last refused 0
+PONG FENCE live at the deadline: observed=1 submitted=763 retired=763
+Canvas-mapping failures: 0; captured backboardd fatal signals: 0.
+Live hardware completion 763/763 disproves the apparent legacy 763/762 stall in this control.
+Three complete screenshots; no actual two-second outstanding-fence watch fired.
+
+g375-live-60hz: normal mode, original ring protocol, clean final OS, actual 60 Hz regression.
+Source: 9d7afd134e56d14dcdd2d0862f3a18f49427b49a.
+Fresh UFS log: 1,551,596 bytes; 247-second deadline return to Android.
+PONG FENCE live at the deadline: observed=1 submitted=665 retired=665
+PONG FENCE at the deadline: waits 3202 timeouts 2334, last timed out on 664 (GPU had written 663), wait snapshot submitted 664 completed 663, unheld waits 226, last refused 0
+PONG TE deadline: INTF_1 te 0.0/s frames 60.5/s over 149666 ms (vsync_count 167)
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Two complete Settings screenshots, zero canvas-mapping errors or captured backboardd fatal signals.
+Live CP completion665/665 with older wait snapshot664/663 confirms the diagnostic distinction at 60 Hz too.
+
+Final preparation promotion: PASS. Clean original wifid, no fixture/observer, public UI/helper matched trial.
+Actual phone extent and manifest, every local OS chunk and whole OS hash verified before promotion.
+Prepared OS/UI/helper/overlay/layout/descriptor/default install state now match the actual clean final trial.
+Previous preparation artifacts and metadata retained for rollback. Promotion made no phone writes.
+Default ready package contains GPU, Wi-Fi and L18 brightness, no qualification, UI-action or timing-probe switches.

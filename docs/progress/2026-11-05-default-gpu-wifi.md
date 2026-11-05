@@ -2,6 +2,8 @@
 
 按用户要求，将此前已完成 [生命周期验证](2026-11-05-wifi-lifecycle.md) 的 Wi-Fi 并入设备默认配置。默认入口现在同时编译和启动 Adreno 730 与 QCA6490，不再要求单独指定 Wi-Fi profile 或 `WIFI=1`。
 
+后续用户授权的 [内屏亮度工作](2026-11-05-display-and-backlight.md) 已把真实 L18 背光服务也接入默认设备配置；本文保留 GPU/Wi-Fi 合并时的验收过程。
+
 ## 配置和启动入口
 
 - `board.toml` 原有默认名 `zizhan_ipados18_gpu_defconfig` 保留，内容同时开启 GPU、Wi-Fi 和既有 PongPower。背光、音频和 ADSP 的运行策略未在本轮改动。

@@ -4,6 +4,16 @@
 
 下一轮按 [硬件适配待办](docs/plan/2026-11-04-next-hardware-work.md) 接续：先验证 Wi-Fi 设置页入网和换网，再分别验证 GPU 首帧/回弹和内屏调光。外屏先独立出图和触控，再做折叠切换。
 
+## 2026-11-05 显示、首帧与内屏亮度
+
+最新以 [显示记录](docs/progress/2026-11-05-display-and-backlight.md) 为准。面板池画布改为复用显示初始化时建立的真实缓存映射，失败槽不提供给客户端；g346 记录实际 KVA 复用。历史 g342 的罕见映射失败仍未稳定复现；其“未完成 fence”来自旧等待快照，不能当作实际硬件时间戳。汇总现区分等待快照与直接读取的 CP 完成值，不能宣称所有 GPU 长停已修复。
+
+首帧已拆出 HID、原生 pan gesture、swap 和面板时间。主屏静止首帧 g363 中位数 79.76 ms；提前提交候选 g365 退步至 301.68 ms，已从源码完全撤销。有效 display-link 修复保留，约 80 ms 首帧仍未解决，不能从有新诊断就提升性能状态。
+
+内屏使用自己的 version 2 ADT：DSI0、VC0、最大 2047、非零最小 4。实际读回 307，非零 64/512/307 恢复通过；原生滑条 25%/65%/50% 对应硬件 512/1331/1024，真实 HID 拖动到 1986 再恢复 1024 也通过。22H374 CoreBrightness 空映射初始化崩溃已按本机实际调用栈、映像 UUID 和真实背光服务限定修正，不假造光度校准。DSI 刷新率/亮度通过 owner lease 串行化；仍忙的失败 DMA 不复用。
+
+默认 GPU 配置现编入并启动亮度服务，`pong_backlight=0` 可回退固件亮度；测试探针、滑条动作及延迟观测默认关闭。最终 g374/g375 正常 120/60 Hz 均有完整截图、HTTPS 和直接 CP 完成值；准备 OS/UI/helper、overlay、layout、描述符与默认安装 state 已同步实际干净 trial，旧版本保留。安装前仍核对实际 manifest。新增 Display host regressions，发布后须跟完四个工作流。
+
 ## 2026-11-04 晚间 Wi-Fi 接续
 
 最新结果以 [Wi-Fi 设置与跨频段记录](docs/progress/2026-11-04-wifi-settings-and-roaming.md) 为准。`0336379` 在释放临时内核输入后再申请显示池，解决较大 Wi-Fi 内核使 96 MiB 低地址池申请失败的问题。`9cc3938` 在 channel assign 前按目标 AP 更新基础速率，g304/g306 两个方向 2.4↔5 GHz 的首次、主动续租、不同 BSSID 重连三次 HTTPS 200，清理通过且无 RDDM。
@@ -150,6 +160,7 @@ DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh
 | `pong_touch` / `touch_flip` | 打包默认 touch=0，round 显式 1；翻转默认 2（y 镜像） |
 | `ADSP` / `pong_adsp` | ci_boot_ufs 默认 ADSP=0；2 启 DSP + 电池，1 只调查，0 关 |
 | `pong_wifi` | 随实际编译驱动选择；设备默认内核为 1，精简 CI 为 0；`WIFI=0` 可显式关闭 |
+| `pong_backlight` | 默认完整设备内核为 1；0 保留固件亮度；探针及原生滑条自动操作默认关闭 |
 | `pong_audio` | 本地打包默认 0，音频仍单独验证 |
 | `pong_panel_hz` | 默认 120，60 回固件速率 |
 | `pong_dpu_flip` / `pong_dpu_bufs` / `pong_zc` / `fb_swapwait` | 默认 1 / 2 / 2 / 1；三画布直接 DPU 翻页。`pong_zc_async` 默认关 |

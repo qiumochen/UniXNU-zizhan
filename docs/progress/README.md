@@ -11,6 +11,7 @@ Paths in the notes refer to the author's workspace:
 
 ## 最新交接
 
+- [2026-11-05 显示、首帧与内屏亮度](2026-11-05-display-and-backlight.md)：画布映射生命周期加固；首帧分段与被撤销的退步候选；L18 真实读写/恢复、原生滑条和 HID 拖动通过。
 - [2026-11-05 GPU＋Wi-Fi 默认配置](2026-11-05-default-gpu-wifi.md)：默认构建和打包同时开启两者，旧 Wi-Fi 配置名只作兼容链接；精简 CI 仍明确选择。
 - [2026-11-05 Wi-Fi 连接生命周期](2026-11-05-wifi-lifecycle.md)：修复原生 PrimaryTimeout、dispatcher 内同步通知和 timer 重入遍历；g337 自动入网及短时保持、g341 原生关开后的第二次 DHCP/HTTPS 与清理通过。
 - [2026-11-04 Wi-Fi 设置与跨频段重连](2026-11-04-wifi-settings-and-roaming.md)：提前更新管理帧速率后，2.4↔5 GHz 两个方向都通过三次 HTTPS 和断线清理；缩短原生 InterfaceNamer 回退等待后，g309 从真实 Settings 加入完成 WPA2、DHCP、HTTPS。

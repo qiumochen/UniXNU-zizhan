@@ -22,6 +22,10 @@ extern "C" const uint8_t PongAdrenoGmuFirmware[];
 extern "C" const size_t PongAdrenoGmuFirmwareBytes;
 extern "C" void pong_ramoops_diagnostic_write(const char *,int);
 extern "C" struct vnode *rootvnode;
+extern "C" int pong_gpu_fences(uint32_t *,uint32_t *);
+extern "C" void pong_gpu_stall_snapshot(void);
+extern "C" volatile uint32_t native_adreno_last_submit_fence;
+extern "C" volatile uint64_t native_adreno_last_submit_us;
 namespace {
 struct Mapping {OSSharedPtr<IOMemoryMap> keep;uintptr_t cpu=0;size_t bytes=0;};
 struct Memory {IOBufferMemoryDescriptor *keep=nullptr;uint8_t *cpu=nullptr;uint64_t pa=0;size_t bytes=0;};
@@ -444,6 +448,23 @@ static void dcvs(void *,wait_result_t)
         uint64_t busy=0,ns=0;
         if(PongAdrenoGmuBusyTicks(&gmu,&busy)) {record("STOP DCVS busy read",1);break;}
         const uint64_t t=mach_absolute_time();
+        /* One read-only snapshot per genuinely stale outstanding fence,
+         * bounded for the boot. Never equate a recent in-flight submit with
+         * a hang or issue recovery/reset commands from this governor. */
+        {
+            static uint32_t captured, snapshots;
+            uint64_t nowNs=0;absolutetime_to_nanoseconds(t,&nowNs);
+            const uint32_t latest=native_adreno_last_submit_fence;
+            const uint64_t submittedAt=native_adreno_last_submit_us;
+            if(latest && latest!=captured && snapshots<4 && submittedAt && nowNs/1000>submittedAt+2000000ull) {
+                uint32_t submitted=0,retired=0;
+                if(pong_gpu_fences(&submitted,&retired) && retired<latest && submitted>=latest) {
+                    captured=latest;snapshots++;
+                    record("stale fence observed",latest,(uint64_t(submitted)<<32)|retired,nowNs/1000-submittedAt);
+                    pong_gpu_stall_snapshot();
+                }
+            }
+        }
         absolutetime_to_nanoseconds(t-lastT,&ns);
         uint64_t busyNs=(busy-lastBusy)*625/12;   /* 52.083 ns per XO tick */
         if(busyNs>ns)busyNs=ns;

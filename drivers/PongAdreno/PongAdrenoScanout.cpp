@@ -56,13 +56,18 @@ extern "C" volatile uint32_t native_adreno_ib_log_count;
 extern "C" char native_adreno_ib_log_who[4][16];
 extern "C" volatile uint32_t native_adreno_last_submit_fence;
 extern "C" volatile uint64_t native_adreno_last_submit_us;
+extern "C" int pong_gpu_fences(uint32_t *,uint32_t *);
 uint64_t us(uint64_t a);
 void fenceReport(const char *why,bool ibs=false)
 {
     char text[300];
     const volatile uint32_t *w=native_adreno_fence_wait,*r=native_adreno_ring_poison,*c=native_adreno_submit_poison;
     int n=snprintf(text,sizeof(text),"PONG FENCE %s: waits %u timeouts %u, last timed out on %u (GPU had written %u), "
-        "newest handed out %u, newest completed %u, unheld waits %u, last refused %u\n",why,w[0],w[1],w[2],w[3],w[4],w[5],w[6],w[7]);
+        "wait snapshot submitted %u completed %u, unheld waits %u, last refused %u\n",why,w[0],w[1],w[2],w[3],w[4],w[5],w[6],w[7]);
+    if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
+    uint32_t submitted=0,retired=0;
+    const int observed=pong_gpu_fences(&submitted,&retired);
+    n=snprintf(text,sizeof text,"PONG FENCE live %s: observed=%d submitted=%u retired=%u\n",why,observed,submitted,retired);
     if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
     n=snprintf(text,sizeof(text),"PONG POISON %s: ring %u from %08x (fence in memory %u, seqno %u, next %u, rptr %u), submit cores %u from %08x\n",
         why,r[0],r[1],r[2],r[3],r[4],r[5],c[0],c[1]);

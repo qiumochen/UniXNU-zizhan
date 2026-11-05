@@ -108,6 +108,21 @@ static bool faulted()
     return gpu->poisoned;
 }
 static bool client_healthy() {return gpu && gpu->started && !faulted();}
+extern "C" void pong_gpu_stall_snapshot(void)
+{
+    if(!gpu || !gpu->started)return;
+    const auto *p=gpu->context.programResult();
+    note("stalled ring status",rd(GEN7_RBBM_INT_0_STATUS),
+        (uint64_t(rd(GEN7_CP_RB_RPTR))<<32)|rd(GEN7_CP_RB_WPTR),
+        (uint64_t(rd(GEN7_RBBM_STATUS))<<32)|rd(GEN7_CP_HW_FAULT));
+    note("stalled IB1",rd(GEN7_CP_IB1_REM_SIZE),
+        (uint64_t(rd(GEN7_CP_IB1_BASE_HI))<<32)|rd(GEN7_CP_IB1_BASE),rd(GEN7_CP_STATUS_1));
+    note("stalled IB2",rd(GEN7_CP_IB2_REM_SIZE),
+        (uint64_t(rd(GEN7_CP_IB2_BASE_HI))<<32)|rd(GEN7_CP_IB2_BASE),rd(GEN7_CP_BV_HW_FAULT));
+    note("stalled translation",sr(p->context_offset+0x58),
+        (uint64_t(sr(0x48))<<32)|rd(GEN7_GBIF_HALT_ACK),
+        (uint64_t(rd(GEN7_GMU_AHB_FENCE_STATUS))<<32)|rd(GEN7_RBBM_STATUS3));
+}
 /* No logging, allocation or ring mutation in interrupt context. The GIC
  * owner masks this SPI around the callback; only this decoder clears RBBM
  * status. Retain fatal status for the submitting thread before acknowledging. */

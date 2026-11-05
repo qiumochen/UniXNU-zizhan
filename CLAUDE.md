@@ -14,7 +14,7 @@
 
 g338–g340 的原生开关完成首次 HTTPS 和断开清理，第二次密钥安装后却卡住。`959b00b` 修复共享 timer pass 在递归 pump 摘除后继节点后沿自指节点空转的问题，主机重放复现旧挂住并验证修正；g341 随后取得两组不同 DHCP REQUEST/ACK、两次 HTTPS 200，原生关开和断开清理闭环通过，worker 持续推进。干净 OS 已移除本机开关测试；g342 无 Settings 的网络保持通过，但显示画布失败、早期日志被覆盖，不能记完整 UI 通过。g343 在同一干净 OS 打开原生 Wi-Fi 页，自动入网、HTTPS、零 link loss 和三张完整截图通过。实际干净 OS/UI/helper、overlay、layout、描述符及默认安装 state 已同步，旧准备态完整保留；手机已回 Android。后续安装仍须核对实际 manifest。
 
-Wi-Fi 仍单独使用 `zizhan_ipados18_wifi_defconfig`；GPU 默认配置保持 Wi-Fi 关闭。不同 SSID/子网、自然 T1、长时间稳定性及真实 GIC MSI 尚未通过。下文 g292–g295 的 RDDM/Settings 失败是历史证据，不能作为当前结论。每次安装以实际已写入的 manifest/state 为准，不把旧准备 OS 直接当手机当前版本。
+按用户后续要求，[设备默认配置已统一开启 GPU 与 Wi-Fi](docs/progress/2026-11-05-default-gpu-wifi.md)。默认构建与打包不再要求 `DEFCONFIG`、`PROFILE` 或 `WIFI=1`；旧 Wi-Fi 配置名只是默认配置的兼容链接。`WIFI=0` 留作关闭无线排障，云端 CI 明确选择精简配置。不同 SSID/子网、自然 T1、长时间稳定性及真实 GIC MSI 尚未通过。下文 g292–g295 的 RDDM/Settings 失败是历史证据，不能作为当前结论。每次安装以实际已写入的 manifest/state 为准，不把旧准备 OS 直接当手机当前版本。
 
 ## 2026-11-03 接续
 
@@ -149,7 +149,8 @@ DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh
 | `pong_button_reset` | 默认 3000 ms 长按电源键回 fastboot；保留真实 panic 处理和复位 |
 | `pong_touch` / `touch_flip` | 打包默认 touch=0，round 显式 1；翻转默认 2（y 镜像） |
 | `ADSP` / `pong_adsp` | ci_boot_ufs 默认 ADSP=0；2 启 DSP + 电池，1 只调查，0 关 |
-| `pong_wifi` / `pong_audio` | 打包均为 0，未接入 |
+| `pong_wifi` | 随实际编译驱动选择；设备默认内核为 1，精简 CI 为 0；`WIFI=0` 可显式关闭 |
+| `pong_audio` | 本地打包默认 0，音频仍单独验证 |
 | `pong_panel_hz` | 默认 120，60 回固件速率 |
 | `pong_dpu_flip` / `pong_dpu_bufs` / `pong_zc` / `fb_swapwait` | 默认 1 / 2 / 2 / 1；三画布直接 DPU 翻页。`pong_zc_async` 默认关 |
 | `pong_gpu_level` / `pong_gpu_deny` | 默认 level 9（710 MHz），默认拒绝 MercuryPosterEx；`-` 放行仅用于受控调查 |

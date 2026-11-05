@@ -25,7 +25,7 @@
 | GPU | Adreno 730，Turnip + metal2vulkan；g298 修正 UIKit 类名后，合成滑动 moving 95.3 fps（同条件基线 56.7–58.4），首帧仍约 75–80 ms；壁纸扩展默认不能使用 GPU，不能宣称全局 120 fps |
 | 电池 | ADSP 启动，经 PMIC GLINK 读到电池，读数与 Android 一致；状态栏与充电拔插已确认，设置电池页能打开；健康度仍转圈 |
 | 按键 | 长按电源键 3 秒热复位回 fastboot；其他按键未核对 |
-| Wi-Fi | QCA6490 试验配置已验证原生 Settings 加入、保存凭据自动入网、WPA2/DHCP/HTTPS；g341 原生关开后第二次 DHCP/HTTPS 与路由/DNS 清理通过。2.4↔5 GHz 不同 BSSID 重连及主动续租也已通过。默认 GPU 配置仍关闭 Wi-Fi；真实 MSI、自然 T1、不同子网和长时间压力待验收，见[最新记录](docs/progress/2026-11-05-wifi-lifecycle.md) |
+| Wi-Fi | 已并入 [GPU＋Wi-Fi 默认配置](docs/progress/2026-11-05-default-gpu-wifi.md)。原生 Settings 加入、保存凭据自动入网、WPA2/DHCP/HTTPS，关开重连与路由/DNS 清理已通过；2.4↔5 GHz 不同 BSSID 重连及主动续租也已通过。真实 MSI、自然 T1、不同子网和长时间压力待验收，见[生命周期记录](docs/progress/2026-11-05-wifi-lifecycle.md) |
 | 蜂窝 / 音频 | 蜂窝未实现；CS35L41 功放尚未接入，与 Pong 的 TFA9873 不同 |
 
 ## 与 Pong 的硬件差异

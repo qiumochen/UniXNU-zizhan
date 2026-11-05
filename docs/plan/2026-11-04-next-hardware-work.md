@@ -4,6 +4,8 @@
 
 发布侧另有 [上游与 CI 待办](../progress/2026-11-04-upstream-ci-audit.md)：统一 package 模板与 action 尚未接入；目录收录、记录检查和内核构建分别验收。
 
+默认使用 [GPU＋Wi-Fi 统一配置](../progress/2026-11-05-default-gpu-wifi.md)，本地默认构建/打包均开启两者；g344 真机自动联网、HTTPS、零 link loss 和完整设置页截图通过。旧 Wi-Fi 名称仅作兼容链接。
+
 ## 1. Wi-Fi：设置页入网和换网
 
 11-04 晚间接续：[g299–g309](../progress/2026-11-04-wifi-settings-and-roaming.md) 已恢复大内核镜像的真实显示池，定位并缩短原生 InterfaceNamer 的 240 秒回退等待；g309 用真实 Settings 行、secure text field 和导航栏 Join 完成原生 Apple80211 加入、WPA2、DHCP 与 HTTPS 200。g304/g306 的 2.4↔5 GHz 两个方向、不同 BSSID 均通过首次/主动续租/重连三次 HTTPS 和断线清理。不同 SSID/子网、自然 T1 和真实 MSI 仍独立待验收。

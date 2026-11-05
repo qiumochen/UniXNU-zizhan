@@ -1,0 +1,27 @@
+zizhan / 22H374: default GPU + Wi-Fi integration.
+Source: cc016a5c44c1ed074e98ea7c1104c1e5cbdff88f.
+No private firmware, OS images, credentials, network identities or host paths published.
+
+Host: default ci_kernel.sh without DEFCONFIG -> KERNEL_DONE.
+Host: explicit pong_ipados18_ci_defconfig -> KERNEL_DONE.
+Host: old Wi-Fi config is a relative symlink to the canonical GPU + Wi-Fi defconfig; pinned configuration parser returns identical settings.
+Host: real system-bash default ci_boot_ufs.sh without PROFILE/WIFI -> GPU and Wi-Fi compiled and one startup flag for each.
+Host: explicit WIFI=0 -> one pong_wifi=0, no pong_wifi=1, GPU still enabled.
+Host: explicit reduced CI profile -> both drivers disabled in report; no GPU start and one pong_wifi=0.
+Host: existing check-wifi-host.py suite passed, including reentrant dispatcher, notification FIFO and prior regressions.
+Host: current phone root extent and clean installed manifest matched before temporary boot.
+Host builds/packaging do not establish device function.
+
+Device g344-default-combined: rear USB-A, temporary fastboot boot, deadline return.
+Actual default build/package used no DEFCONFIG, PROFILE or WIFI override.
+Original stock-wifid clean OS; no private UI fixture or temporary test UI/helper.
+Fresh UFS log: 2,021,761 bytes; automatic return after 309 seconds.
+PongWifi[6]: wifi-net: native client type 20 set bytes=900 -> 0
+PongWifi[6]: wifi: keys installed after message 4 completed (tx acked 2, not acked 0, dropped 0; ath11k tx reason snapshot unavailable)
+Pong WiFi18: HTTPS test PASS status=200 bytes=577 error=0 attempt=1
+Pong UI18: open prefs:root=WIFI accepted=1 (workspace 1)
+Pong WiFi UI test: SKIP no private fixture
+Native association requests: 1; link loss: 0; canvas-mapping errors: 0.
+Last retained wireless runtime: NW_STA_UP (6), actual DMA 64 MiB.
+Three full screenshots: 140.956, 165.962, 193.497 seconds, each 120/120 rows.
+Settings rendering inspected locally; private network labels not published.

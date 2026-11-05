@@ -4,6 +4,7 @@
  * or submission scanout_gate. Only a real completed GPU copy retires a frame.
  */
 #include "PongAdrenoScanout.h"
+#include "../PongPower/PongDsiLease.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
@@ -300,6 +301,13 @@ IOMemoryDescriptor *dbPool;uint64_t dbPoolBytes;   /* mode 1 on the loader's pan
  * pong_zc=1): step 3.1 of docs/plan/2026-10-31-zero-copy-step3.md. Taken/given under slotLock; geometry must match the panel. */
 constexpr unsigned SlotMax=8;
 uint64_t slotPhys[SlotMax];bool slotUsed[SlotMax];uint32_t slotBpr[SlotMax];int slotDb[SlotMax];unsigned slotCount,slotTaken,slotRefused;uint32_t slotBytes,zc;IOSimpleLock *slotLock;
+/* The physical panel pool is outside managed RAM. Establish each cached
+ * kernel mapping before user clients start, then reuse bounded subranges.
+ * Recreating a physical pager from a later client thread can fail even
+ * after prepare() succeeded (g342). A failed reservation is never offered. */
+IOMemoryDescriptor *slotMemory[SlotMax];IOMemoryMap *slotMapping[SlotMax];
+uint32_t slotPreMap=1;
+uint32_t dsiOwner;
 constexpr uint64_t SlotStride=0x1100000;   /* 17 MiB: 2160 x 1916 at up to 8704 bytes per row (CoreAnimation's 256-aligned rows, g152l) */
 uint32_t dbCurStride;   /* SSPP_YSTRIDE0 as last written by dbFlip (0 = the firmware's) */
 /* step 3.2 (pong_zc=2): frames shown straight from a canvas slot, no presenter copy */
@@ -477,8 +485,23 @@ void dbInit(uint64_t physical,size_t rounded,uint32_t stride,uint32_t height)
                 zc=2;(void)PE_parse_boot_argn("pong_zc",&zc,sizeof zc);   /* default: canvases in slots and flipped directly (g152t/w) */
                 const unsigned total=unsigned(lease[1]/stride);
                 if(!slotLock)slotLock=IOSimpleLockAlloc();
+                (void)PE_parse_boot_argn("pong_slot_premap",&slotPreMap,sizeof slotPreMap);
                 for(unsigned i=n;i<total && slotCount<SlotMax && dbN<DbMax;++i) {
-                    slotPhys[slotCount]=lease[0]+uint64_t(i)*stride;slotDb[slotCount]=int(dbN);
+                    const uint64_t physical=lease[0]+uint64_t(i)*stride;
+                    IOMemoryDescriptor *memory=nullptr;IOMemoryMap *mapping=nullptr;
+                    if(slotPreMap) {
+                        memory=IOMemoryDescriptor::withPhysicalAddress(physical,stride,kIODirectionInOut);
+                        const IOReturn held=memory?memory->prepare():kIOReturnNoMemory;
+                        if(held==kIOReturnSuccess)mapping=memory->createMappingInTask(kernel_task,0,kIOMapAnywhere|kIOMapCopybackCache);
+                        if(!mapping) {
+                            dpuLine(text,snprintf(text,sizeof text,"PONG DBUF: slot premap FAILED phys=0x%llx bytes=%llu prepare=0x%x; slot skipped\n",physical,stride,held));
+                            if(memory){if(held==kIOReturnSuccess)memory->complete();memory->release();}
+                            continue;
+                        }
+                        dpuLine(text,snprintf(text,sizeof text,"PONG DBUF: slot premap PASS phys=0x%llx bytes=%llu\n",physical,stride));
+                    }
+                    slotPhys[slotCount]=physical;slotDb[slotCount]=int(dbN);
+                    slotMemory[slotCount]=memory;slotMapping[slotCount]=mapping;
                     db[dbN]={slotPhys[slotCount],~0ull};++dbN;++slotCount;   /* flip targets for step 3.2, never presenter targets */
                 }
                 slotBytes=uint32_t(stride);
@@ -535,6 +558,40 @@ extern "C" int pong_panel_slot_take(uint32_t width,uint32_t height,uint32_t byte
     IOSimpleLockUnlock(slotLock);
     IOLog("PONG DBUF: canvas slot %s 0x%llx (%u taken so far)\n",*phys?"given":"NONE FREE for",(unsigned long long)*phys,slotTaken);
     return *phys?1:0;
+}
+extern "C" IOMemoryDescriptor *pong_panel_slot_memory(uint64_t phys,uint32_t bytes)
+{
+    if(!bytes || bytes>slotBytes || !slotLock)return nullptr;
+    IOMemoryDescriptor *parent=nullptr;bool leased=false;
+    IOSimpleLockLock(slotLock);
+    for(unsigned i=0;i<slotCount;++i)if(slotPhys[i]==phys && slotUsed[i]) {
+        leased=true;parent=slotMemory[i];if(parent)parent->retain();break;
+    }
+    IOSimpleLockUnlock(slotLock);
+    if(!leased)return nullptr;
+    if(!slotPreMap)return IOMemoryDescriptor::withPhysicalAddress(phys,bytes,kIODirectionInOut);
+    if(!parent)return nullptr;
+    IOMemoryDescriptor *memory=IOSubMemoryDescriptor::withSubRange(parent,0,bytes,kIODirectionInOut);
+    parent->release();return memory;
+}
+extern "C" bool pong_panel_slot_range(uint64_t phys,uint64_t bytes)
+{
+    if(!bytes || bytes>slotBytes)return false;
+    for(unsigned i=0;i<slotCount;++i)if(phys>=slotPhys[i] && phys-slotPhys[i]<=slotBytes-bytes)return true;
+    return false;
+}
+extern "C" uint64_t pong_panel_slot_address(uint64_t phys)
+{
+    for(unsigned i=0;i<slotCount;++i)if(slotPhys[i]==phys && slotMapping[i])return slotMapping[i]->getVirtualAddress();
+    return 0;
+}
+extern "C" bool pong_dsi_try_acquire(uint32_t owner)
+{
+    return pong_dsi_lease_try(&dsiOwner,owner);
+}
+extern "C" bool pong_dsi_release(uint32_t owner)
+{
+    return pong_dsi_lease_release(&dsiOwner,owner);
 }
 extern "C" void pong_panel_slot_give(uint64_t phys)
 {
@@ -655,10 +712,14 @@ int dsiDcs(const uint8_t *buf,uint32_t len,bool lp)
         dsiWr(DsiCmdDmaSwTrigger,1);
         bool done=false;
         for(i=0;i<1250 && !done;++i){done=(dsiRd(DsiIntCtrl)&DsiIntDmaDone)!=0;if(!done)IODelay(20);}   /* 25 ms */
-        dsiWr(DsiIntCtrl,(dsiRd(DsiIntCtrl)&DsiIntEnableBits)|DsiIntDmaDone);
-        dsiWr(DsiTpgCtrl,0);dsiWr(DsiTpgDmaFifoReset,1);IODelay(1);dsiWr(DsiTpgDmaFifoReset,0);   /* dsi_ctrl_hw_cmn_reset_cmd_fifo */
-        dsiWr(DsiTpgCtrl,tpg);dsiWr(DsiCmdDmaCtrl,dma);
-        if((trig&0xfu)!=DsiTrigSw)dsiWr(DsiTrigCtrl,trig);
+        /* Never reset/reuse a timed-out FIFO while its DMA is still active.
+         * The shared lease stays held, so brightness cannot overwrite it. */
+        if(!(dsiRd(DsiStatus)&DsiDmaBusy)) {
+            dsiWr(DsiIntCtrl,(dsiRd(DsiIntCtrl)&DsiIntEnableBits)|DsiIntDmaDone);
+            dsiWr(DsiTpgCtrl,0);dsiWr(DsiTpgDmaFifoReset,1);IODelay(1);dsiWr(DsiTpgDmaFifoReset,0);
+            dsiWr(DsiTpgCtrl,tpg);dsiWr(DsiCmdDmaCtrl,dma);
+            if((trig&0xfu)!=DsiTrigSw)dsiWr(DsiTrigCtrl,trig);
+        }
         if(!done)rc=-3;
     }
     if(rc){++dsiFailures;char text[200];dpuLine(text,snprintf(text,sizeof text,"PONG PANEL: DCS 0x%02x (%u bytes) failed %d, status 0x%x int 0x%x\n",buf[0],len,rc,dsiRd(DsiStatus),dsiRd(DsiIntCtrl)));}
@@ -681,15 +742,16 @@ int dsiSet(const uint8_t *set,uint32_t len,bool lp,unsigned *sent)
 void panelHz(void)
 {
     char text[240];
-    panelDone=true;
     panelHzWant=120;(void)PE_parse_boot_argn("pong_panel_hz",&panelHzWant,sizeof panelHzWant);   /* default since g160 (11-01) */
-    if(panelHzWant==60)return;   /* the firmware's rate: nothing to send */
-    if(panelHzWant!=120 && panelHzWant!=60)return;
-    if(!dsiInit())return;
+    if(panelHzWant!=120){panelDone=true;return;} // 60 preserves the firmware timing
+    if(!pong_dsi_try_acquire(PongDsiTiming))return; // retry on the next real frame
+    panelDone=true;
+    if(!dsiInit()){pong_dsi_release(PongDsiTiming);return;}
     intfRate("before the switch");
     if(pong_klog_flush)pong_klog_flush(3);
     const uint64_t t0=mach_absolute_time();unsigned sent=0;
     const int rc=panelHzWant==120?dsiSet(panelSwitch120,sizeof panelSwitch120,false,&sent):dsiSet(panelSwitch60,sizeof panelSwitch60,false,&sent);
+    if(!(dsiRd(DsiStatus)&DsiDmaBusy))pong_dsi_release(PongDsiTiming);
     dpuLine(text,snprintf(text,sizeof text,"PONG PANEL: timing switch to %u Hz: %u packets sent, rc %d, %llu us, MDP-busy waits %u\n",panelHzWant,sent,rc,us(mach_absolute_time()-t0),dsiMdpWaits));
     if(pong_klog_flush)pong_klog_flush(3);
     if(rc)return;

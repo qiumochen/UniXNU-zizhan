@@ -1,0 +1,26 @@
+zizhan: record the actual allocation/read stage of native code-signature cache failure; preserve every verification and error.
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -5912,10 +5912,13 @@
+ 	kr = kmem_alloc(kernel_map, &storage, allocation,
+ 	    KMA_KOBJECT | KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_SECURITY);
+ 	if (kr != KERN_SUCCESS) {
++        printf("PONG CS4K: storage allocation failed kr=%d bytes=%llu code-limit=%llu pages=%llu\n",
++            kr, (uint64_t)allocation, limit, (uint64_t)count);
+ 		return ENOMEM;
+ 	}
+ 	buffer = kalloc_data(16384, Z_WAITOK);
+ 	if (buffer == NULL) {
++        printf("PONG CS4K: block buffer allocation failed bytes=16384\n");
+ 		error = ENOMEM;
+ 		goto out;
+ 	}
+@@ -5936,6 +5939,8 @@
+ 		    UIO_SYSSPACE, 0, vfs_context_ucred(vfs_context_current()),
+ 		    &resid, current_proc());
+ 		if (error || resid) {
++            printf("PONG CS4K: vnode read failed error=%d residual=%d offset=%llu length=%lu\n",
++                error, resid, offset, length);
+ 			error = error ? error : EIO;
+ 			goto out;
+ 		}

@@ -1,0 +1,16 @@
+{
+  "board": "zizhan",
+  "panel": "qcom,mdss_dsi_l18_38_0c_0a_prim_dsc_cmd",
+  "source": "zizhan Android live DT; matching Xiaomi SM8450 display-driver DCS path",
+  "width": 2160,
+  "height": 1916,
+  "brightness": {
+    "controller": "0x0ae94000",
+    "register_bytes": 1024,
+    "maximum": 2047,
+    "minimum_nonzero": 4,
+    "bl_inverted_dbv": true,
+    "channel": 0,
+    "version": 2
+  }
+}

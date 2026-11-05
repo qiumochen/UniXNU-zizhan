@@ -11,3 +11,7 @@
 0012-zizhan-swapwait.patch
 0013-zizhan-latch-async.patch
 0014-zizhan-fast-core.patch
+0015-zizhan-panel-slot-mapping.patch
+0016-zizhan-scroll-probe.patch
+0017-zizhan-cs-cache-failure-stage.patch
+0018-zizhan-bounded-control-drag.patch

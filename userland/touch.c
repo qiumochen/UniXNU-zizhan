@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/sysctl.h>
 #include <mach/mach_time.h>
 #include <notify.h>
 #include "touch.h"
@@ -116,6 +117,12 @@ service_copy_property(__attribute__((unused)) void *target, void *refcon, __attr
 #define TOUCH_MODE_WAKE         0xfe
 #define TOUCH_MODE_OFF          0xff
 static int touch_mode;
+static bool latency_trace;
+static mach_timebase_info_data_t latency_clock;
+static uint64_t latency_us(uint64_t ticks)
+{
+    return latency_clock.denom ? (uint64_t)((__uint128_t)ticks * latency_clock.numer / latency_clock.denom / 1000) : 0;
+}
 
 /* What the event server tells a service of ours: said once per name, to learn what there is. */
 static Boolean
@@ -319,8 +326,17 @@ input_thread(void *unused)
         wake_control=make_service(client,"Pong touch wake control",HID_PAGE_CONSUMER,HID_USAGE_CONSUMER_CONTROL,false);
     say("Pong touch HID: display-integrated digitizer opened\n");
     if (wake_control) say("Pong touch HID: tap-to-wake consumer opened\n");
+    char bootargs[1024]={};size_t bootargs_size=sizeof(bootargs);
+    if(sysctlbyname("kern.bootargs",bootargs,&bootargs_size,NULL,0)==0) {
+        bootargs[sizeof(bootargs)-1]=0;
+        const char *option=strstr(bootargs,"touch_lat=1");
+        latency_trace=option && (option==bootargs || option[-1]==' ') && (option[11]==0 || option[11]==' ');
+    }
+    if(mach_timebase_info(&latency_clock)!=KERN_SUCCESS)latency_trace=false;
+    unsigned latency_count=0,first_move=0;
     struct pong_touch sample;unsigned count=0,waking=0;ssize_t length;
     while ((length=read(device,&sample,sizeof(sample)))>0 || (length<0 && errno==EINTR)) {
+        const uint64_t received=latency_trace?mach_absolute_time():0;
         if (length<0) continue;
         if (length!=(ssize_t)sizeof(sample) || sample.type<PONG_TOUCH_DOWN || sample.type>PONG_TOUCH_UP) continue;
         if (sample.finger>=MAX_FINGERS) continue;
@@ -336,6 +352,16 @@ input_thread(void *unused)
         }
         if (waking&bit) {if (sample.type==PONG_TOUCH_UP) waking&=~bit;continue;}
         send_touch(screen,&sample);
+        if(latency_trace && latency_count<120) {
+            if(sample.type==PONG_TOUCH_DOWN)first_move&=~bit;
+            if(sample.type==PONG_TOUCH_DOWN || (sample.type==PONG_TOUCH_MOVE && !(first_move&bit))) {
+                if(sample.type==PONG_TOUCH_MOVE)first_move|=bit;
+                fprintf(stderr,"tl: h type %u sample %llu received %llu sent %llu\n",sample.type,
+                    latency_us(sample.time),latency_us(received),latency_us(mach_absolute_time()));
+                latency_count++;
+            }
+            if(sample.type==PONG_TOUCH_UP)first_move&=~bit;
+        }
     }
     /* Release outstanding contacts if the physical source goes away. */
     release_contacts(screen,mach_absolute_time());

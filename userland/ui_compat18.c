@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <math.h>
@@ -646,6 +647,85 @@ static bool install_compositor_code(const struct mach_header *header,intptr_t sl
     fprintf(stderr,"Pong UI18: 22H374 %s selected\n",label);return true;
 }
 
+/* 22H374 CoreBrightness calls slider conversion before allocating its own
+ * uncalibrated fallback curve. g355 captures the same null-map fault as Pong
+ * services84. Use ONLY this exact image's built-in software defaults while
+ * its mapping is null; existing mappings call the original function.
+ * These defaults are not measured L18 panel photometry. Adapted from
+ * UniXNU-pong e0ee6df109b4b5dc706cac660d4f8210dc911dac, services85.
+ * The service gate below uses verified zizhan hardware, not Pong identity. */
+static float (*brightness18_slider_original)(void *,float);
+static float brightness18_defaults[3];
+static float brightness18_slider(void *display,float slider)
+{
+    uintptr_t curve=0;
+    if(display)memcpy(&curve,(const char *)display+0x48,sizeof(curve));
+    if(display && !curve) {
+        if(!(slider>=0.0f))slider=0.0f;
+        if(slider>1.0f)slider=1.0f;
+        const float position=slider*2.0f;
+        const unsigned lower=position>=1.0f?1:0;
+        static unsigned reported;
+        if(__atomic_fetch_add(&reported,1,__ATOMIC_RELAXED)==0)
+            fprintf(stderr,"Pong brightness18: native software curve used before mapping initialization\n");
+        return brightness18_defaults[lower]+(position-(float)lower)*
+            (brightness18_defaults[lower+1]-brightness18_defaults[lower]);
+    }
+    return brightness18_slider_original(display,slider);
+}
+static void brightness18_image(const struct mach_header *header,intptr_t slide)
+{
+    if(brightness18_slider_original || strcmp(getprogname(),"backboardd") || header->magic!=MH_MAGIC_64)return;
+    static const uint8_t uuid[16]={0x0a,0x02,0x14,0x08,0xa8,0xf4,0x37,0x2c,
+                                 0xb5,0xd5,0x5f,0xdf,0xcc,0x83,0xc3,0x4a};
+    const struct mach_header_64 *h=(const void *)header;
+    const struct load_command *lc=(const void *)(h+1);
+    const char *end=(const char *)lc+h->sizeofcmds;bool matched=false;
+    for(uint32_t i=0;i<h->ncmds;i++) {
+        if((const char *)lc+sizeof(*lc)>end || lc->cmdsize<sizeof(*lc) ||
+           lc->cmdsize>(size_t)(end-(const char *)lc))return;
+        if(lc->cmd==LC_UUID && lc->cmdsize==sizeof(struct uuid_command) &&
+           !memcmp(((const struct uuid_command *)lc)->uuid,uuid,sizeof(uuid)))matched=true;
+        lc=(const void *)((const char *)lc+lc->cmdsize);
+    }
+    if(!matched)return;
+    // Require this board's actual DCS service, published only after hardware readback.
+    CFMutableDictionaryRef (*matching)(const char *)=dlsym(RTLD_DEFAULT,"IOServiceMatching");
+    uint32_t (*get)(uint32_t,CFDictionaryRef)=dlsym(RTLD_DEFAULT,"IOServiceGetMatchingService");
+    int (*release)(uint32_t)=dlsym(RTLD_DEFAULT,"IOObjectRelease");
+    if(!matching||!get||!release)return;
+    CFMutableDictionaryRef dict=matching("IOService");
+    const void *keys[]={CFSTR("PongPanel"),CFSTR("backlight-control")};
+    const void *values[]={CFSTR("zizhan L18 primary / SM8475 DSI0"),kCFBooleanTrue};
+    CFDictionaryRef properties=CFDictionaryCreate(NULL,keys,values,2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if(!dict || !properties){if(dict)CFRelease(dict);if(properties)CFRelease(properties);return;}
+    CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
+    uint32_t service=get(0,dict);if(!service)return;release(service);
+    const uintptr_t offset=0x144f5c,entry=(uintptr_t)header+offset;
+    const uintptr_t defaults=(uintptr_t)header+0x1bead4;
+    static const uint32_t expected[]={0xd10103ff,0xa9037bfd,0x9100c3fd,0xf81f83a0};
+    if(!executable_image_range(h,slide,entry,sizeof(expected)) ||
+       !executable_image_range(h,slide,defaults,sizeof(brightness18_defaults)) ||
+       memcmp((const void *)entry,expected,sizeof(expected)))return;
+    memcpy(brightness18_defaults,(const void *)defaults,sizeof(brightness18_defaults));
+    if(!(brightness18_defaults[0]>0.0f && brightness18_defaults[0]<brightness18_defaults[1] &&
+         brightness18_defaults[1]<brightness18_defaults[2] && brightness18_defaults[2]<100000.0f))return;
+    vm_address_t trampoline=0;
+    if(vm_allocate(mach_task_self(),&trampoline,vm_page_size,VM_FLAGS_ANYWHERE)!=KERN_SUCCESS)return;
+    uint32_t back[]={0x58000050,0xd61f0200,(uint32_t)(entry+16),(uint32_t)((entry+16)>>32)};
+    memcpy((void *)trampoline,expected,sizeof(expected));memcpy((void *)(trampoline+16),back,sizeof(back));
+    sys_icache_invalidate((void *)trampoline,32);
+    if(vm_protect(mach_task_self(),trampoline,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_EXECUTE)!=KERN_SUCCESS) {
+        (void)vm_deallocate(mach_task_self(),trampoline,vm_page_size);return;
+    }
+    const uintptr_t replacement=(uintptr_t)brightness18_slider;
+    const uint32_t jump[]={0x58000050,0xd61f0200,(uint32_t)replacement,(uint32_t)(replacement>>32)};
+    brightness18_slider_original=(float(*)(void *,float))trampoline;
+    if(!install_compositor_code(header,slide,offset,expected,jump,sizeof(expected),"CoreBrightness fallback mapping initialization")) {
+        brightness18_slider_original=NULL;(void)vm_deallocate(mach_task_self(),trampoline,vm_page_size);
+    }
+}
+
 /* This build's generated deviceSupportsDynamicIsland getter calls
  * MGGetBoolAnswer with this exact key. Keep every other answer native: in
  * particular this does not advertise Face ID, telephony or camera hardware.
@@ -1157,6 +1237,7 @@ static void photos_context_image(const struct mach_header *header,intptr_t slide
  */
 static void compositor_image(const struct mach_header *header,intptr_t slide)
 {
+    brightness18_image(header,slide);
     phone_gestalt_image(header,slide);
     phone_presentation();
     phone_selector_image(header,slide);
@@ -1511,6 +1592,27 @@ static void lsd_abort(int number,siginfo_t *info,void *saved)
     }
     signal(number,SIG_DFL);raise(number);
 }
+static void backboard_fatal(int number,siginfo_t *info,void *saved)
+{
+    (void)info;
+    ucontext_t *context=saved;
+    char line[180];uint64_t fp=0;
+    if(context && context->uc_mcontext) {
+        int n=snprintf(line,sizeof line,"Pong BB18: fatal signal=%d pc=%llx lr=%llx\n",number,
+            (unsigned long long)context->uc_mcontext->__ss.__pc,(unsigned long long)context->uc_mcontext->__ss.__lr);
+        if(n>0)(void)write(2,line,(size_t)n<sizeof line?(size_t)n:sizeof line-1);
+        fp=context->uc_mcontext->__ss.__fp;
+    }
+    for(unsigned i=0;i<12 && fp>=0x100000000ULL && !(fp&15);i++) {
+        uint64_t frame[2];vm_size_t size=0;
+        if(vm_read_overwrite(mach_task_self(),(vm_address_t)fp,sizeof frame,(vm_address_t)frame,&size)!=KERN_SUCCESS || size!=sizeof frame)break;
+        int n=snprintf(line,sizeof line,"Pong BB18: fatal frame[%u]=%llx\n",i,(unsigned long long)frame[1]);
+        if(n>0)(void)write(2,line,(size_t)n<sizeof line?(size_t)n:sizeof line-1);
+        if(frame[0]<=fp || frame[0]-fp>0x100000)break;
+        fp=frame[0];
+    }
+    signal(number,SIG_DFL);raise(number);
+}
 
 
 /* Preserve the actual PosterBoard fatal signal and a small persistent stack.
@@ -1855,6 +1957,185 @@ static void backboard_container(void)
     fprintf(stderr,"Pong UI18: backboardd container uses writable %s\n",path);
 }
 
+static uint64_t input_trace_us(uint64_t ticks)
+{
+    static mach_timebase_info_data_t clock;
+    if(!clock.denom && mach_timebase_info(&clock)!=KERN_SUCCESS)return 0;
+    return clock.denom?(uint64_t)((__uint128_t)ticks*clock.numer/clock.denom/1000):0;
+}
+static id input_gesture_observer;
+static char input_observed_key, input_moved_key;
+static void input_gesture(id self,SEL selector,id gesture)
+{
+    (void)self;(void)selector;
+    static unsigned count;
+    const long state=((long(*)(id,SEL))objc_msgSend)(gesture,sel_registerName("state"));
+    id view=((id(*)(id,SEL))objc_msgSend)(gesture,sel_registerName("view"));
+    bool report=state==1 || state==3 || state==4;
+    if(state==1)objc_setAssociatedObject(gesture,&input_moved_key,nil,OBJC_ASSOCIATION_ASSIGN);
+    if(state==2 && !objc_getAssociatedObject(gesture,&input_moved_key)) {
+        report=true;objc_setAssociatedObject(gesture,&input_moved_key,(id)kCFBooleanTrue,OBJC_ASSOCIATION_ASSIGN);
+    }
+    if(report && count++<160) {
+        fprintf(stderr,"tl: g class %s state %ld at %llu\n",view?object_getClassName(view):"nil",state,input_trace_us(mach_absolute_time()));
+    }
+}
+static unsigned input_observe_view(id view,unsigned depth,unsigned *visited)
+{
+    if(!view || depth>32 || ++*visited>2048)return 0;
+    unsigned found=0;
+    if(((bool(*)(id,SEL,Class))objc_msgSend)(view,sel_registerName("isKindOfClass:"),objc_getClass("UIScrollView")) &&
+        (!springboard_process || strstr(object_getClassName(view),"IconScrollView"))) {
+        id pan=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("panGestureRecognizer"));
+        if(pan && !objc_getAssociatedObject(pan,&input_observed_key)) {
+            ((void(*)(id,SEL,id,SEL))objc_msgSend)(pan,sel_registerName("addTarget:action:"),input_gesture_observer,sel_registerName("observeGesture:"));
+            objc_setAssociatedObject(pan,&input_observed_key,(id)kCFBooleanTrue,OBJC_ASSOCIATION_ASSIGN);
+            fprintf(stderr,"Pong input trace: native pan observer view=%s\n",object_getClassName(view));found++;
+            const CGPoint offset=((CGPoint(*)(id,SEL))objc_msgSend)(view,sel_registerName("contentOffset"));
+            const CGSize content=((CGSize(*)(id,SEL))objc_msgSend)(view,sel_registerName("contentSize"));
+            const CGRect bounds=((CGRect(*)(id,SEL))objc_msgSend)(view,sel_registerName("bounds"));
+            fprintf(stderr,"Pong input trace: scroll extent offset=%.2f,%.2f content=%.2f,%.2f viewport=%.2f,%.2f\n",
+                offset.x,offset.y,content.width,content.height,bounds.size.width,bounds.size.height);
+        }
+    }
+    id children=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
+    unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(children,sel_registerName("count"));
+    for(unsigned long i=0;i<n && *visited<2048;i++)
+        found+=input_observe_view(((id(*)(id,SEL,unsigned long))objc_msgSend)(children,sel_registerName("objectAtIndex:"),i),depth+1,visited);
+    return found;
+}
+static void input_event_trace(void *unused)
+{
+    (void)unused;
+    if(!input_gesture_observer) {
+        Class cls=objc_allocateClassPair(objc_getClass("NSObject"),"PongInputGestureObserver",0);
+        if(!cls){fprintf(stderr,"Pong input trace: SKIP observer class unavailable\n");return;}
+        class_addMethod(cls,sel_registerName("observeGesture:"),(IMP)input_gesture,"v@:@");
+        objc_registerClassPair(cls);input_gesture_observer=((id(*)(id,SEL))objc_msgSend)((id)cls,sel_registerName("new"));
+    }
+    id app=((id(*)(id,SEL))objc_msgSend)((id)objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
+    id windows=((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("windows"));
+    unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(windows,sel_registerName("count"));
+    unsigned found=0,visited=0;
+    for(unsigned long i=0;i<n && visited<2048;i++)
+        found+=input_observe_view(((id(*)(id,SEL,unsigned long))objc_msgSend)(windows,sel_registerName("objectAtIndex:"),i),0,&visited);
+    fprintf(stderr,"Pong input trace: added=%u visited=%u native pan observers\n",found,visited);
+}
+
+static id brightness_test_slider;
+static float brightness_test_original;
+static unsigned brightness_test_step, brightness_test_tries;
+static bool brightness_test_restore_only;
+static bool brightness_visible(id view,CGRect *rectangle)
+{
+    id window=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("window"));
+    if(!window)return false;
+    for(id current=view;current;current=((id(*)(id,SEL))objc_msgSend)(current,sel_registerName("superview"))) {
+        if(((bool(*)(id,SEL))objc_msgSend)(current,sel_registerName("isHidden")) ||
+           ((CGFloat(*)(id,SEL))objc_msgSend)(current,sel_registerName("alpha"))<.01)return false;
+    }
+    CGRect bounds=((CGRect(*)(id,SEL))objc_msgSend)(view,sel_registerName("bounds"));
+    CGRect frame=((CGRect(*)(id,SEL,CGRect,id))objc_msgSend)(view,sel_registerName("convertRect:toView:"),bounds,window);
+    CGRect screen=((CGRect(*)(id,SEL))objc_msgSend)(window,sel_registerName("bounds"));
+    if(rectangle)*rectangle=frame;
+    return !CGRectIsEmpty(CGRectIntersection(frame,screen));
+}
+static void brightness_find_slider(id view,unsigned depth,unsigned *visited,id *result,unsigned *matches)
+{
+    if(!view || depth>32 || ++*visited>2048)return;
+    if(((bool(*)(id,SEL,Class))objc_msgSend)(view,sel_registerName("isKindOfClass:"),objc_getClass("UISlider"))) {
+        float lo=((float(*)(id,SEL))objc_msgSend)(view,sel_registerName("minimumValue"));
+        float hi=((float(*)(id,SEL))objc_msgSend)(view,sel_registerName("maximumValue"));
+        bool enabled=((bool(*)(id,SEL))objc_msgSend)(view,sel_registerName("isEnabled"));
+        if(enabled && fabsf(lo)<.0001f && fabsf(hi-1.f)<.0001f) {
+            CGRect frame=CGRectZero;bool visible=brightness_visible(view,&frame);
+            if(brightness_test_tries<2)
+                fprintf(stderr,"Pong brightness UI: candidate class=%s visible=%d frame=%.1f,%.1f,%.1f,%.1f\n",
+                    object_getClassName(view),visible,frame.origin.x,frame.origin.y,frame.size.width,frame.size.height);
+            if(visible){*result=view;(*matches)++;}
+        }
+    }
+    id children=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
+    unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(children,sel_registerName("count"));
+    for(unsigned long i=0;i<n && *visited<2048;i++)
+        brightness_find_slider(((id(*)(id,SEL,unsigned long))objc_msgSend)(children,sel_registerName("objectAtIndex:"),i),depth+1,visited,result,matches);
+}
+static void brightness_ui_test(void *unused)
+{
+    (void)unused;
+    if(!brightness_test_slider) {
+        id app=((id(*)(id,SEL))objc_msgSend)((id)objc_getClass("UIApplication"),sel_registerName("sharedApplication"));
+        id windows=((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("windows"));
+        unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(windows,sel_registerName("count"));
+        id slider=nil;unsigned visited=0,matches=0;
+        for(unsigned long i=0;i<n && visited<2048;i++)
+            brightness_find_slider(((id(*)(id,SEL,unsigned long))objc_msgSend)(windows,sel_registerName("objectAtIndex:"),i),0,&visited,&slider,&matches);
+        if(matches!=1) {
+            if(++brightness_test_tries<10)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),NULL,brightness_ui_test);
+            else fprintf(stderr,"Pong brightness UI: SKIP expected one enabled 0..1 slider, found=%u\n",matches);
+            return;
+        }
+        brightness_test_original=((float(*)(id,SEL))objc_msgSend)(slider,sel_registerName("value"));
+        const float initial=brightness_test_original;
+        char restoration[32];
+        if(boot_value("pong_brightness_restore=",restoration,sizeof restoration)) {
+            char *end=NULL;double value=strtod(restoration,&end);
+            if(end==restoration || *end || !isfinite(value) || value<.05 || value>.95) {
+                fprintf(stderr,"Pong brightness UI: SKIP invalid restoration value\n");return;
+            }
+            brightness_test_original=(float)value;
+        }
+        if(!isfinite(brightness_test_original) || brightness_test_original<.05f || brightness_test_original>.95f) {
+            fprintf(stderr,"Pong brightness UI: SKIP original value outside safe test interval\n");return;
+        }
+        brightness_test_slider=((id(*)(id,SEL))objc_msgSend)(slider,sel_registerName("retain"));
+        fprintf(stderr,"Pong brightness UI: native initial=%.6f restoration=%.6f\n",initial,brightness_test_original);
+        if(brightness_test_restore_only)brightness_test_step=2;
+    }
+    float value=brightness_test_step==0?(fabsf(brightness_test_original-.25f)<.01f?.35f:.25f):
+        brightness_test_step==1?(fabsf(brightness_test_original-.65f)<.01f?.55f:.65f):brightness_test_original;
+    ((void(*)(id,SEL,float,bool))objc_msgSend)(brightness_test_slider,sel_registerName("setValue:animated:"),value,false);
+    ((void(*)(id,SEL,unsigned long))objc_msgSend)(brightness_test_slider,sel_registerName("sendActionsForControlEvents:"),(1ul<<12)|(1ul<<6));
+    fprintf(stderr,"Pong brightness UI: RUNNING native slider step=%u value=%.4f original=%.4f; verify hardware independently\n",
+        ++brightness_test_step,value,brightness_test_original);
+    if(brightness_test_step<3)
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,brightness_ui_test);
+    else {
+        ((void(*)(id,SEL))objc_msgSend)(brightness_test_slider,sel_registerName("release"));
+        brightness_test_slider=nil;
+    }
+}
+
+/* Explicit regression probe: create/release real panel-sized IOSurfaces in
+ * backboardd after normal startup. API allocation alone is not a panel-pool
+ * PASS; correlate with the kernel's slot/mapping evidence. No pixels drawn. */
+static void late_surface_probe(void *unused)
+{
+    (void)unused;
+    static void *image;
+    static unsigned index;
+    if(!image)image=dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface",RTLD_NOW|RTLD_LOCAL);
+    CFTypeRef (*create)(CFDictionaryRef)=image?(CFTypeRef(*)(CFDictionaryRef))dlsym(image,"IOSurfaceCreate"):NULL;
+    void *(*address)(CFTypeRef)=image?(void *(*)(CFTypeRef))dlsym(image,"IOSurfaceGetBaseAddress"):NULL;
+    size_t (*size)(CFTypeRef)=image?(size_t(*)(CFTypeRef))dlsym(image,"IOSurfaceGetAllocSize"):NULL;
+    if(!create || !address || !size){fprintf(stderr,"Pong surface probe: SKIP native API unavailable\n");return;}
+    const void *keys[]={CFSTR("IOSurfaceWidth"),CFSTR("IOSurfaceHeight"),CFSTR("IOSurfaceBytesPerRow"),
+        CFSTR("IOSurfaceAllocSize"),CFSTR("IOSurfaceBytesPerElement"),CFSTR("IOSurfacePixelFormat")};
+    int32_t values[]={2160,1916,8704,0xfe8000,4,0x42475241};
+    CFNumberRef numbers[6]={};bool ready=true;
+    for(unsigned i=0;i<6;i++){numbers[i]=CFNumberCreate(NULL,kCFNumberSInt32Type,&values[i]);ready&=numbers[i]!=NULL;}
+    CFDictionaryRef properties=ready?CFDictionaryCreate(NULL,keys,(const void **)numbers,6,
+        &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks):NULL;
+    CFTypeRef surface=properties?create(properties):NULL;
+    const bool mapped=surface && address(surface)!=NULL;
+    fprintf(stderr,"Pong surface probe: %s native allocation %u at %llu created=%d mapped=%d bytes=%lu; verify panel-slot reuse independently\n",
+        mapped?"PASS":"FAIL",++index,input_trace_us(mach_absolute_time()),surface!=NULL,mapped,
+        (unsigned long)(surface?size(surface):0));
+    if(surface)CFRelease(surface);
+    if(properties)CFRelease(properties);
+    for(unsigned i=0;i<6;i++)if(numbers[i])CFRelease(numbers[i]);
+}
+
 /* zizhan: pong_dl_full=0 preserves requested rates. g296 observed the
  * current runtime target UIKit.InProcessAnimationManager; retain the older
  * Objective-C class spelling for restores that still use it.
@@ -1929,6 +2210,11 @@ __attribute__((constructor)) static void pong_ui18_start(void)
 {
     const char *name=getprogname();
     if(!name)return;
+    if(strcmp(name,"backboardd")==0 && boot_option("pong_backlight_diag=1")) {
+        struct sigaction action={0};action.sa_sigaction=backboard_fatal;
+        action.sa_flags=SA_SIGINFO|SA_RESETHAND;sigemptyset(&action.sa_mask);
+        (void)sigaction(SIGSEGV,&action,NULL);(void)sigaction(SIGBUS,&action,NULL);(void)sigaction(SIGABRT,&action,NULL);
+    }
     phone_ui_process=!strcmp(name,"Preferences") || !strcmp(name,"SpringBoard");
     photos_process=!strcmp(name,"Photos");
     if(photos_process) {
@@ -1956,6 +2242,15 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     (void)dup2(2,1);setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);
     fprintf(stderr,"Pong iPadOS18 adapter: %s (22H374)\n",name);
     if(strcmp(name,"Preferences")==0)pong_settings18_start();
+    if(strcmp(name,"Preferences")==0 && boot_option("pong_pane=DISPLAY")) {
+        brightness_test_restore_only=boot_option("pong_brightness_restore_only=1");
+        if(brightness_test_restore_only || boot_option("pong_brightness_ui_test=1"))
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(brightness_test_restore_only?110:20)*NSEC_PER_SEC),
+                dispatch_get_main_queue(),NULL,brightness_ui_test);
+    }
+    if(phone_ui_process && boot_option("touch_lat=1"))
+        for(unsigned seconds=15;seconds<=45;seconds+=15)
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)seconds*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,input_event_trace);
     // Keep SpringBoard/compositor adapters out of the poster renderer.
     // Only its native storage path and single-user identity are adapted.
     if(!strcmp(name,"PosterBoard")){
@@ -2002,6 +2297,10 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         scanout_format=true;
         backboard_container();
         pong_touch_start();
+        if(boot_option("pong_surface_probe=1"))
+            for(unsigned seconds=90;seconds<=130;seconds+=20)
+                dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)seconds*NSEC_PER_SEC),
+                    dispatch_get_main_queue(),NULL,late_surface_probe);
     }
     _dyld_register_func_for_add_image(compositor_image);
     if(boot_option("pong_boot_snapshot=1"))pong_boot_snapshot_start(name);

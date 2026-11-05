@@ -1,0 +1,77 @@
+zizhan: reuse early kernel mappings for panel-slot canvases; bound late-map diagnostics.
+--- a/iokit/Kernel/MiniIOSurface.cpp
++++ b/iokit/Kernel/MiniIOSurface.cpp
+@@ -39,6 +39,8 @@
+  * placed in loader-reserved RAM below 4 GiB that the DPU can scan out directly (docs/plan/2026-10-31-zero-copy-step3.md, 3.1). */
+ extern "C" int pong_panel_slot_take(uint32_t width, uint32_t height, uint32_t bytesPerRow, uint32_t bytes, uint64_t * phys);
+ extern "C" void pong_panel_slot_give(uint64_t phys);
++extern "C" IOMemoryDescriptor *pong_panel_slot_memory(uint64_t phys, uint32_t bytes);
++extern "C" uint64_t pong_panel_slot_address(uint64_t phys);
+ extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
+ static unsigned gSlotMisses;
+ #endif
+@@ -786,7 +788,7 @@
+ 	s->kpixels = s->kbase + PAGE_SIZE;
+ #if XNU_PONG_ADRENO_PLATFORM
+ 	if (slotPhys != 0) {
+-		s->client = IOMemoryDescriptor::withPhysicalAddress(slotPhys, alloc, kIODirectionInOut);
++		s->client = pong_panel_slot_memory(slotPhys, alloc);
+ 		IOReturn held = s->client != NULL ? s->client->prepare() : kIOReturnNoMemory;
+ 		if (held == kIOReturnSuccess) {
+ 			s->clientMap = s->client->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapCopybackCache);
+@@ -800,6 +802,10 @@
+ 			return NULL;
+ 		}
+ 		s->kpixels = (uint8_t *) s->clientMap->getVirtualAddress();
++        static unsigned mapped;
++        if (__atomic_fetch_add(&mapped, 1u, __ATOMIC_RELAXED) < 16)
++            IOLog("MiniIOSurface: panel cached kernel map reused=%u bytes=%u\n",
++                (uint64_t)s->kpixels == pong_panel_slot_address(slotPhys), alloc);
+ 		/* (the loader zeroed the pool; a reused slot shows its previous canvas for a frame. Not bzero: a default mapping of
+ 		 * memory outside the kernel's RAM is device-like, and large stores into it (dc zva) are what froze g152l/o/p/q.) */
+ 		IOLog("MiniIOSurface: backboardd canvas %ux%u bpr %u (%u bytes) in panel slot %#llx\n", width, height, bpr, alloc, slotPhys);
+--- a/iokit/Kernel/IOMemoryDescriptor.cpp
++++ b/iokit/Kernel/IOMemoryDescriptor.cpp
+@@ -4919,6 +4919,20 @@
+ 	return mapping;
+ }
+ 
++#if XNU_PONG_ADRENO_PLATFORM
++extern "C" bool pong_panel_slot_range(uint64_t phys, uint64_t bytes);
++extern "C" void pong_ramoops_diagnostic_write(const char *, int);
++static void pong_panel_map_error(const char *phase, IOReturn error, uint64_t physical, uint64_t bytes, IOOptionBits options, bool kernel)
++{
++    static unsigned failures;
++    if (!pong_panel_slot_range(physical, bytes) || __atomic_fetch_add(&failures, 1u, __ATOMIC_RELAXED) >= 16) return;
++    char line[220];
++    int n = snprintf(line, sizeof line, "PONG POOL %s: error=0x%x phys=0x%llx bytes=%llu kernel=%u options=0x%x\n",
++        phase, error, physical, bytes, kernel, (unsigned)options);
++    if (n > 0) { IOLog("%s", line); pong_ramoops_diagnostic_write(line, n < (int)sizeof line ? n : (int)sizeof line - 1); }
++}
++#endif
++
+ IOReturn
+ IOGeneralMemoryDescriptor::doMap(
+ 	vm_map_t                __addressMap,
+@@ -5303,6 +5317,9 @@
+ 			    (vm_map_offset_t)0);
+ 
+ 			if (KERN_SUCCESS != err) {
++#if XNU_PONG_ADRENO_PLATFORM
++                pong_panel_map_error("VMFAULT", err, physAddr, segLen, options, true);
++#endif
+ 				break;
+ 			}
+ 		}
+@@ -5996,6 +6013,11 @@
+ 			mapDesc->addMapping(result);
+ 			result->setMemoryDescriptor(mapDesc.get(), offset);
+ 		} else {
++#if XNU_PONG_ADRENO_PLATFORM
++            IOByteCount span = 0;
++            const addr64_t physical = mapDesc->getPhysicalSegment(offset, &span, kIOMemoryMapperNone);
++            pong_panel_map_error("MAP", kr, physical, length, options, mapping->fAddressMap == kernel_map);
++#endif
+ 			mapping->release();
+ 			mapping = NULL;
+ 		}

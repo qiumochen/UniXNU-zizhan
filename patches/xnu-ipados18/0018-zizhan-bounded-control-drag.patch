@@ -1,0 +1,55 @@
+zizhan: bounded custom HID drag coordinates for real UI-control qualification; off by default.
+--- a/bsd/dev/pong_fts.c
++++ b/bsd/dev/pong_fts.c
+@@ -1039,6 +1039,20 @@
+         printf("zizhan touch: synthetic swipes FAIL invalid vertical x percent\n");
+         thread_terminate(current_thread()); return;
+     }
++    uint32_t drag = 0, line = 50, maximum = 0;
++    PE_parse_boot_argn("tsdrag", &drag, sizeof(drag));
++    PE_parse_boot_argn("tsy", &line, sizeof(line));
++    PE_parse_boot_argn("tscount", &maximum, sizeof(maximum));
++    if (maximum > 100) maximum = 100;
++    if (drag) {
++        const uint32_t a = drag / 100, b = drag % 100;
++        if (vertical || a < 5 || a > 95 || b < 5 || b > 95 || a == b || line < 5 || line > 95) {
++            printf("zizhan touch: custom drag FAIL invalid geometry\n");
++            thread_terminate(current_thread()); return;
++        }
++        if (!maximum) maximum = 2;
++        printf("zizhan touch: custom drag RUNNING %u%%->%u%% y=%u%% count=%u\n", a, b, line, maximum);
++    }
+     sleep_ms(delay * 1000);
+ 	/* Boot-arg tsa=XXYY (percent of the width, of the height): instead of page swipes, tap there (a dock icon), wait <period> s,
+ 	 * go home with a swipe up from the bottom edge, wait again -- the app-open / return-home zooms (11-01: they hitch). */
+@@ -1075,19 +1089,24 @@
+ 		}
+ 	}
+ 	printf("zizhan touch: synthetic %s swipe every %u s, x=%u%% after %u s\n", vertical ? "vertical" : "horizontal", period, vertical, delay);
+-	for (unsigned n = 0;; n++) {
+-		const uint32_t from = n & 1 ? 13107 : 52428, to = n & 1 ? 52428 : 13107;   /* 20% and 80% of the width */
++	for (unsigned n = 0; !maximum || n < maximum; n++) {
++        const uint32_t a = drag ? (drag / 100) * 65535 / 100 : 52428;
++        const uint32_t b = drag ? (drag % 100) * 65535 / 100 : 13107;
++        const uint32_t from = n & 1 ? b : a, to = n & 1 ? a : b;
++        const uint32_t center = drag ? line * 65535 / 100 : y;   /* 20% and 80% of the width */
+ 		pong_touch_activity++;
+-		touch_post(PONG_TOUCH_DOWN, id, vertical ? vertical * 65535 / 100 : from, vertical ? from : y);
++		touch_post(PONG_TOUCH_DOWN, id, vertical ? vertical * 65535 / 100 : from, vertical ? from : center);
+ 		for (uint32_t i = 1; i <= steps; i++) {
+ 			sleep_ms(8);
+ 			pong_touch_activity++;
+ 			const uint32_t position = from + (int32_t)(to - from) * (int32_t)i / (int32_t)steps;
+-            touch_post(PONG_TOUCH_MOVE, id, vertical ? vertical * 65535 / 100 : position, vertical ? position : y);
+-		}
+-		touch_post(PONG_TOUCH_UP, id, vertical ? vertical * 65535 / 100 : to, vertical ? to : y);
++            touch_post(PONG_TOUCH_MOVE, id, vertical ? vertical * 65535 / 100 : position, vertical ? position : center);
++		}
++		touch_post(PONG_TOUCH_UP, id, vertical ? vertical * 65535 / 100 : to, vertical ? to : center);
+ 		sleep_ms(period * 1000);
+ 	}
++    printf("zizhan touch: finite synthetic sequence DONE count=%u\n", maximum);
++    thread_terminate(current_thread()); return;
+ }
+ 
+ void

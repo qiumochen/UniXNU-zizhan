@@ -36,6 +36,7 @@ def main():
  env=dict(os.environ,DEVELOPER_DIR=str(pong_paths.developer_dir()))
  sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
  flags=['-target','arm64-apple-ios18.0','-isysroot',sdk,'-mkernel','-ffreestanding','-fno-builtin','-fno-stack-protector','-mgeneral-regs-only','-fblocks','-O2','-DKERNEL=1','-DKERNEL_PRIVATE=1','-DXNU_KERNEL_PRIVATE=1','-DARM64_BOARD_CONFIG_PONG=1','-I'+str(framework/'PrivateHeaders'),'-I'+str(framework/'Headers'),'-I'+str(ROOT/'drivers/PongPower'),'-I'+str(out),'-I'+str(pong_paths.sheng_root()/'package'),'-Wno-deprecated-declarations']
+ flags+=['-DXNU_PONG_ADRENO_PLATFORM='+str(int(os.environ.get('XNU_PONG_ADRENO_PLATFORM')=='1'))]
  container=pong_paths.audio_inputs()/'tfa98xx.cnt'
  if container.is_file():
   subprocess.run([os.sys.executable,str(ROOT/'scripts/prepare-pong-audio.py'),'--container',str(container),'--output',str(out/'PongAmpProfiles.h')],check=True)

@@ -169,7 +169,7 @@ def main():
     # or a claim of Apple personalization. Keep only its SHA-384 digest in DT.
     # Rebooting the same image reuses it; rebuilding rolls it.
     boot_nonce_hash = hashlib.sha384(os.urandom(32)).digest()
-    backlight = json.loads((ROOT / 'configs/pong-display-sm8475.json').read_text())['brightness']
+    backlight = json.loads((ROOT / 'configs/zizhan-display-sm8475.json').read_text())['brightness']
     chosen = [
         ('random-seed', os.urandom(64)),
         ('osenvironment', b'main\0'),

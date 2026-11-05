@@ -1,0 +1,44 @@
+zizhan: optional bounded startup delay and vertical HID scroll coordinates for controlled UI measurements.
+--- a/bsd/dev/pong_fts.c
++++ b/bsd/dev/pong_fts.c
+@@ -1031,7 +1031,15 @@
+ 		printf("zizhan touch: synthetic swipes SKIP (no SpringBoard)\n");
+ 		thread_terminate(current_thread()); return;
+ 	}
+-	sleep_ms(20000);
++	uint32_t delay = 20, vertical = 0;
++    PE_parse_boot_argn("tsdelay", &delay, sizeof(delay));
++    PE_parse_boot_argn("tsv", &vertical, sizeof(vertical));
++    if (delay > 180) delay = 180;
++    if (vertical && (vertical < 5 || vertical > 95)) {
++        printf("zizhan touch: synthetic swipes FAIL invalid vertical x percent\n");
++        thread_terminate(current_thread()); return;
++    }
++    sleep_ms(delay * 1000);
+ 	/* Boot-arg tsa=XXYY (percent of the width, of the height): instead of page swipes, tap there (a dock icon), wait <period> s,
+ 	 * go home with a swipe up from the bottom edge, wait again -- the app-open / return-home zooms (11-01: they hitch). */
+ 	/* tsb=XXYY: a second tap 2.5 s after the first (a row inside the app just opened: Settings > Battery hung, 11-01 v6) */
+@@ -1066,17 +1074,18 @@
+ 			sleep_ms(period * 1000);
+ 		}
+ 	}
+-	printf("zizhan touch: synthetic swipe every %u s\n", period);
++	printf("zizhan touch: synthetic %s swipe every %u s, x=%u%% after %u s\n", vertical ? "vertical" : "horizontal", period, vertical, delay);
+ 	for (unsigned n = 0;; n++) {
+ 		const uint32_t from = n & 1 ? 13107 : 52428, to = n & 1 ? 52428 : 13107;   /* 20% and 80% of the width */
+ 		pong_touch_activity++;
+-		touch_post(PONG_TOUCH_DOWN, id, from, y);
++		touch_post(PONG_TOUCH_DOWN, id, vertical ? vertical * 65535 / 100 : from, vertical ? from : y);
+ 		for (uint32_t i = 1; i <= steps; i++) {
+ 			sleep_ms(8);
+ 			pong_touch_activity++;
+-			touch_post(PONG_TOUCH_MOVE, id, from + (int32_t)(to - from) * (int32_t)i / (int32_t)steps, y);
+-		}
+-		touch_post(PONG_TOUCH_UP, id, to, y);
++			const uint32_t position = from + (int32_t)(to - from) * (int32_t)i / (int32_t)steps;
++            touch_post(PONG_TOUCH_MOVE, id, vertical ? vertical * 65535 / 100 : position, vertical ? position : y);
++		}
++		touch_post(PONG_TOUCH_UP, id, vertical ? vertical * 65535 / 100 : to, vertical ? to : y);
+ 		sleep_ms(period * 1000);
+ 	}
+ }

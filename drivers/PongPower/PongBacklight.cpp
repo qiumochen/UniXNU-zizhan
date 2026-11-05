@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Pong NT37705 DCS brightness. Register/packet facts are documented in
+// SM8475 DCS brightness with validated panel-specific ADT limits. Facts are documented in
 // README.backlight.md; this work-loop transport does not reset the display,
 // reprogram the PLL, or lend a physical DMA buffer to the DSI controller.
 #include <IOKit/IOService.h>
@@ -13,9 +13,11 @@
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSSymbol.h>
+#include <libkern/c++/OSCollectionIterator.h>
 #include <libkern/OSKextLib.h>
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
+#include "PongDsiLease.h"
 
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" void PongBacklightStaticInit(void);
@@ -24,6 +26,9 @@ class PongBacklight;
 namespace {
 PongBacklight *gPublishedBacklight;
 const OSMetaClass *gAppleBacklightClass;
+#if !XNU_PONG_ADRENO_PLATFORM
+uint32_t backlightOnlyLease;
+#endif
 enum : uint32_t {
     Version = 0x000, Control = 0x004, Status = 0x008,
     DmaControl = 0x03c, DmaLength = 0x04c, AckError = 0x068,
@@ -31,7 +36,7 @@ enum : uint32_t {
     DmaTrigger = 0x090, InterruptControl = 0x110,
     PatternControl = 0x15c, PatternData = 0x17c,
     ReadControl = 0x1d4, FifoReset = 0x1ec,
-    DmaBusy = 1u << 1, DmaDone = 1u, BtaDone = 1u << 20,
+    DmaBusy = 1u << 1, MdpBusy = 1u << 2, DmaDone = 1u, BtaDone = 1u << 20,
     ErrorPending = 1u << 24,
     EnableMask = (1u << 1) | (1u << 9) | (1u << 11) | (1u << 13) |
                  (1u << 15) | (1u << 17) | (1u << 21) | (1u << 25) |
@@ -57,14 +62,51 @@ class PongBacklight : public IOService {
     IOWorkLoop *loop = nullptr;
     IOTimerEventSource *timer = nullptr;
     const OSMetaClass *appleClass = nullptr;
-    bool published = false, stopped = false, inFlight = false;
+    bool published = false, stopped = false, inFlight = false, initialized = false;
+    bool leaseHeld = false, leaseBusy = false;
     bool needVerification = false;
     enum Operation { ReadInitial, WriteLevel, ReadVerify } operation = ReadInitial;
     uint32_t savedDma = 0, savedLength = 0, savedTrigger = 0, savedPattern = 0, savedControl = 0;
     uint32_t level = 0, sending = 0, from = 0, goal = 0;
-    uint64_t deadline = 0, classDeadline = 0, fadeStart = 0, fadeDuration = 0;
+    uint64_t deadline = 0, classDeadline = 0, fadeStart = 0, fadeDuration = 0, leaseDeadline = 0, busDeadline = 0;
     uint64_t request = 0;
     uint32_t requestedFade = 0, requests = 0, writes = 0, reads = 0;
+    uint32_t probe = 0;
+    uint32_t probeOriginal = 0, probeStep = 0;
+    bool diagnostics = false;
+    uint32_t rejectedProperties = 0, rejectedZero = 0;
+
+    bool acquireEngine() {
+        leaseBusy = false;
+#if XNU_PONG_ADRENO_PLATFORM
+        const bool acquired = pong_dsi_try_acquire(PongDsiBacklight);
+#else
+        const bool acquired = pong_dsi_lease_try(&backlightOnlyLease, PongDsiBacklight);
+#endif
+        if (!acquired) {
+            if (!leaseDeadline) leaseDeadline = nowNs() + 500000000ULL;
+            leaseBusy = nowNs() < leaseDeadline;
+            return false;
+        }
+        leaseHeld = true; leaseDeadline = 0; return true;
+    }
+    void releaseEngine() {
+        if (!leaseHeld) return;
+#if XNU_PONG_ADRENO_PLATFORM
+        const bool released = pong_dsi_release(PongDsiBacklight);
+#else
+        const bool released = pong_dsi_lease_release(&backlightOnlyLease, PongDsiBacklight);
+#endif
+        leaseHeld = false;
+        if (!released) {
+            __atomic_store_n(&stopped, true, __ATOMIC_RELEASE);
+            IOLog("PongBacklight: DSI lease ownership mismatch; stopped\n");
+        }
+    }
+    bool deferForLease() {
+        if (!leaseBusy) return false;
+        timer->setTimeoutMS(1); return true;
+    }
 
     uint32_t rd(uint32_t offset) const { return regs[offset / 4]; }
     void wr(uint32_t offset, uint32_t value) {
@@ -90,8 +132,15 @@ class PongBacklight : public IOService {
             !(rd(Status) & DmaBusy) && !(rd(PatternControl) & 1u) &&
             (rd(Control) & 1u) && !(rd(InterruptControl) & ErrorPending);
     }
-    bool beginTransaction(const uint32_t *words, unsigned count, bool lowPower) {
-        if (!canBegin()) return false;
+    bool beginTransaction(const uint32_t *words, unsigned count, bool lowPower, bool reading = false) {
+        if (!acquireEngine()) return false;
+        if (rd(Status) & (DmaBusy | MdpBusy)) {
+            if (!busDeadline) busDeadline = nowNs() + 50000000ULL;
+            releaseEngine(); leaseBusy = nowNs() < busDeadline; return false;
+        }
+        busDeadline = 0;
+        if (!canBegin()) { releaseEngine(); return false; }
+        if (reading) { wr(ReadControl, 1); wr(ReadControl, 0); }
         savedDma = rd(DmaControl); savedLength = rd(DmaLength);
         savedTrigger = rd(TriggerControl); savedPattern = rd(PatternControl);
         savedControl = rd(Control);
@@ -122,14 +171,13 @@ class PongBacklight : public IOService {
         wr(TriggerControl, savedTrigger); wr(PatternControl, savedPattern);
         wr(Control, savedControl);
         inFlight = false;
+        releaseEngine();
     }
     bool startRead(Operation next) {
-        if (!canBegin()) return false;
         // SET_MAXIMUM_RETURN_PACKET_SIZE(2), then GET_DISPLAY_BRIGHTNESS.
         // Header byte 3 marks BTA (bit 5) and last packet (bit 7).
         const uint32_t words[] = {0x00370002u, 0xa0060052u};
-        wr(ReadControl, 1); wr(ReadControl, 0);
-        if (!beginTransaction(words, 2, true)) return false;
+        if (!beginTransaction(words, 2, true, true)) return false;
         operation = next;
         return true;
     }
@@ -182,7 +230,7 @@ class PongBacklight : public IOService {
         setProperty("NativeSandboxGrantProcess", "backboardd");
         setProperty("backlight-control", true); setProperty("built-in", true);
         publishLevel(); registerService();
-        IOLog("PongBacklight: NT37705 DCS service ready, level=%u max=%u, readback PASS\n", level, board.maximum);
+        IOLog("PongBacklight: DCS service ready, board-version=%u level=%u max=%u, readback PASS\n", board.version, level, board.maximum);
     }
     void service() {
         if (stopped) return;
@@ -223,19 +271,46 @@ class PongBacklight : public IOService {
                 reads++;
                 if (operation == ReadVerify && returned != sending) { fail("DCS brightness readback differs"); return; }
                 level = returned;
-                if (!published) { from = goal = level; publishFirst(); }
-                else publishLevel();
+                if (probe == 1 && operation == ReadInitial) {
+                    IOLog("PongBacklight: read-only brightness PASS level=%u max=%u writes=%u\n", level, board.maximum, writes);
+                    __atomic_store_n(&stopped, true, __ATOMIC_RELEASE);
+                    timer->cancelTimeout(); return;
+                }
+                if (!initialized) {
+                    initialized = true; from = goal = level;
+                    if (probe == 2) {
+                        if (!level) {
+                            IOLog("PongBacklight: nonzero level probe SKIP initial brightness is zero\n");
+                            __atomic_store_n(&stopped, true, __ATOMIC_RELEASE); return;
+                        }
+                        probeOriginal = level;
+                        goal = level == 64 ? 128 : 64;
+                        IOLog("PongBacklight: nonzero level probe RUNNING original=%u first=%u\n", probeOriginal, goal);
+                    } else publishFirst();
+                } else if (published) publishLevel();
                 needVerification = false;
                 setProperty("PongBrightnessReadback", level, 32);
                 setProperty("PongBrightnessWrites", writes, 32);
+                if (diagnostics && operation == ReadVerify && level == goal)
+                    IOLog("PongBacklight: native target readback PASS level=%u requests=%u writes=%u\n", level, __atomic_load_n(&requests, __ATOMIC_RELAXED), writes);
+                if (probe == 2 && operation == ReadVerify) {
+                    IOLog("PongBacklight: probe readback step=%u level=%u writes=%u\n", ++probeStep, level, writes);
+                    if (probeStep == 3) {
+                        IOLog("PongBacklight: nonzero level probe %s restored=%u original=%u writes=%u\n",
+                            level == probeOriginal ? "PASS" : "FAIL", level, probeOriginal, writes);
+                        __atomic_store_n(&stopped, true, __ATOMIC_RELEASE);
+                        timer->cancelTimeout(); return;
+                    }
+                    goal = probeStep == 1 ? (probeOriginal == 512 ? 768 : 512) : probeOriginal;
+                }
             }
         }
         if (needVerification) {
-            if (!startRead(ReadVerify)) { fail("DSI readback engine unavailable"); return; }
+            if (!startRead(ReadVerify)) { if (deferForLease()) return; fail("DSI readback engine unavailable"); return; }
             timer->setTimeoutMS(1); return;
         }
-        if (!published) {
-            if (!startRead(ReadInitial)) { fail("DSI engine not ready at handoff"); return; }
+        if (!initialized) {
+            if (!startRead(ReadInitial)) { if (deferForLease()) return; fail("DSI engine not ready at handoff"); return; }
             timer->setTimeoutMS(1); return;
         }
         const uint64_t elapsed = nowNs() - fadeStart;
@@ -247,7 +322,7 @@ class PongBacklight : public IOService {
             sending = next;
             const uint32_t wire = encodedLevel(next);
             const uint32_t words[] = {0xc0390003u, 0xff000051u | (wire << 8)};
-            if (!beginTransaction(words, 2, false)) { fail("DSI write engine unavailable"); return; }
+            if (!beginTransaction(words, 2, false)) { if (deferForLease()) return; fail("DSI write engine unavailable"); return; }
             operation = WriteLevel;
             timer->setTimeoutMS(1);
         } else if (next != goal) timer->setTimeoutMS(16);
@@ -261,8 +336,12 @@ public:
         OSData *data = chosen ? OSDynamicCast(OSData, chosen->getProperty("pong-dsi-backlight")) : nullptr;
         if (data && data->getLength() == sizeof(board)) memcpy(&board, data->getBytesNoCopy(), sizeof(board));
         OSSafeReleaseNULL(chosen);
-        if (board.version != 1 || board.base != 0xae94000 || board.span != 0x400 ||
-            board.maximum != 4095 || board.minimum != 10 || board.swappedDbv != 1 || board.channel) return false;
+        const bool knownPanel = board.version == 2 && board.maximum == 2047 && board.minimum == 4;
+        if (!knownPanel || board.base != 0xae94000 || board.span != 0x400 ||
+            board.swappedDbv != 1 || board.channel) return false;
+        PE_parse_boot_argn("pong_backlight_probe", &probe, sizeof probe);
+        uint32_t diag = 0;
+        diagnostics = PE_parse_boot_argn("pong_backlight_diag", &diag, sizeof diag) && diag == 1;
         IODeviceMemory *memory = IODeviceMemory::withRange(board.base, board.span);
         mapping = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
         OSSafeReleaseNULL(memory);
@@ -275,7 +354,7 @@ public:
         loop = IOWorkLoop::workLoop();
         timer = IOTimerEventSource::timerEventSource(this, tick);
         if (!loop || !timer || loop->addEventSource(timer)) return false;
-        setProperty("PongPanel", "NT37705 Visionox / SM8475 DSI0");
+        setProperty("PongPanel", "zizhan L18 primary / SM8475 DSI0");
         setProperty("PongDSIVersion", rd(Version), 32);
         classDeadline = nowNs() + 30000000000ULL;
         timer->setTimeoutMS(1);
@@ -285,13 +364,36 @@ public:
         OSDictionary *properties = OSDynamicCast(OSDictionary, object);
         if (!properties) return kIOReturnBadArgument;
         if (__atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return kIOReturnNotReady;
-        if (properties->getCount() > 2 ||
+        /* Darwin24's optional current-table level accompanies the DBV
+         * request. Validate/record this metadata; it is not another DCS
+         * command or measured L18 panel calibration. */
+        if (properties->getCount() > 3 ||
             properties->getCount() != (properties->getObject("brightness") ? 1u : 0u) +
-                                      (properties->getObject("FadePeriod") ? 1u : 0u)) return kIOReturnUnsupported;
+                                      (properties->getObject("FadePeriod") ? 1u : 0u) +
+                                      (properties->getObject("backlight-level") ? 1u : 0u)) {
+            if (diagnostics && __atomic_fetch_add(&rejectedProperties, 1u, __ATOMIC_RELAXED) < 8) {
+                IOLog("PongBacklight: unsupported native property shape count=%u brightness=%u fade=%u\n",
+                    properties->getCount(), properties->getObject("brightness") != nullptr, properties->getObject("FadePeriod") != nullptr);
+                OSCollectionIterator *keys = OSCollectionIterator::withCollection(properties);
+                if (keys) {
+                    while (OSObject *object = keys->getNextObject()) {
+                        const OSSymbol *key = OSDynamicCast(OSSymbol, object);
+                        OSObject *value = key ? properties->getObject(key) : nullptr;
+                        if (key && value) IOLog("PongBacklight: native key=%s type=%s\n",
+                            key->getCStringNoCopy(), value->getMetaClass()->getClassName());
+                    }
+                    keys->release();
+                }
+            }
+            return kIOReturnUnsupported;
+        }
         OSNumber *brightness = OSDynamicCast(OSNumber, properties->getObject("brightness"));
         OSNumber *fade = OSDynamicCast(OSNumber, properties->getObject("FadePeriod"));
+        OSNumber *currentTable = OSDynamicCast(OSNumber, properties->getObject("backlight-level"));
         if ((properties->getObject("brightness") && !brightness) ||
-            (properties->getObject("FadePeriod") && !fade)) return kIOReturnBadArgument;
+            (properties->getObject("FadePeriod") && !fade) ||
+            (properties->getObject("backlight-level") && !currentTable)) return kIOReturnBadArgument;
+        if (currentTable) setProperty("PongNativeCurrentTableLevel", currentTable->unsigned64BitValue(), 64);
         const uint64_t fixed = fade ? fade->unsigned64BitValue() : 0;
         const uint64_t ms = fade ? (fixed > 5u * 65536u ? 5000u : (fixed * 1000) >> 16) :
                                   __atomic_load_n(&requestedFade, __ATOMIC_RELAXED);
@@ -299,7 +401,14 @@ public:
         if (!brightness) return kIOReturnSuccess;
         const int64_t value = (int64_t)brightness->unsigned64BitValue();
         const uint32_t target = value < 0 ? 0 : clamped(value > board.maximum ? board.maximum : (uint32_t)value);
-        __atomic_fetch_add(&requests, 1u, __ATOMIC_RELAXED);
+        if (probe == 3 && !target) {
+            if (__atomic_fetch_add(&rejectedZero, 1u, __ATOMIC_RELAXED) < 8)
+                IOLog("PongBacklight: native qualification rejected zero brightness; current level retained\n");
+            return kIOReturnNotPermitted;
+        }
+        const uint32_t requestCount = __atomic_add_fetch(&requests, 1u, __ATOMIC_RELAXED);
+        if (diagnostics && requestCount <= 64)
+            IOLog("PongBacklight: native request target=%u fade-ms=%u\n", target, (uint32_t)ms);
         __atomic_store_n(&request, (1ULL << 63) | ((uint64_t)target << 16) | ms, __ATOMIC_RELEASE);
         timer->setTimeoutUS(1); // caller never waits on DSI or the work-loop gate
         return kIOReturnSuccess;

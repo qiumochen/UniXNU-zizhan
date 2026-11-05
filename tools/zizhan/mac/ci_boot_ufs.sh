@@ -9,18 +9,21 @@ source $SRC/ci-env.sh
 export PONG_BOOT_TEMPLATE=$SRC/out/zizhan-uefi.img
 cd $SRC/UniXNU-zizhan
 NAME=${1:?name}; BLK=${2:?shngroot 4k block}; shift 2
-# PROFILE picks the kernel build: pong_ipados18_ci (default) or zizhan_ipados18_gpu (Adreno platform on).
-A=$(PROFILE=${PROFILE:-pong_ipados18_ci} python3 -c "import json,os,pathlib;f=[p for p in pathlib.Path('out').rglob('PONG_FORMAT2_RESULT.json') if p.parent.name==os.environ['PROFILE']];assert len(f)==1,f;print(pathlib.Path(json.loads(f[0].read_text())['output'])/'kernel')")
+# The device default includes GPU + Wi-Fi. Reduced CI builds remain explicit.
+A=$(PROFILE=${PROFILE:-zizhan_ipados18_gpu} python3 -c "import json,os,pathlib;f=[p for p in pathlib.Path('out').rglob('PONG_FORMAT2_RESULT.json') if p.parent.name==os.environ['PROFILE']];assert len(f)==1,f;print(pathlib.Path(json.loads(f[0].read_text())['output'])/'kernel')")
 OUT=$SRC/out/$NAME; rm -rf $OUT
-# zizhan hardware differs from Pong for touch (ST FTS), Wi-Fi bring-up, audio and ADSP: keep them off. ADSP=1/2 (environment)
-# overrides pong_adsp for the battery bring-up (docs/progress/2026-11-01-battery.md); boot-args are first-match-wins.
+# GPU/Wi-Fi startup follows the compiled kernel report. WIFI=0 is an explicit
+# radio-off diagnostic override. Touch, audio and ADSP retain their separate
+# board bring-up policy; ADSP=1/2 enables the battery path.
 # Scaled machine timeouts as UniXNU-sheng's board.toml: the DEVELOPMENT kernel panics when interrupts stay masked over 500 us
 # or a lock spins too long; under Gunyah on this SoC that trips on ordinary stalls (g93: 658 us in mk_timer_expire). x40 keeps
 # the checks for real hangs. The interrupt-masked check still panicked at about 1.7 ms with its scale given (g96), so it only
 # records (interrupt-masked-debug-mode=1, SCHED_HYGIENE_MODE_TRACE) instead of panicking.
 # pong_klog_4k (klog.py setup): the kernel copies the ramoops zones to a pinned file before resetting; KLOG=0 leaves it out.
 KLOGARG=$( [ "${KLOG:-1}" != 1 ] || python3 $SRC/klog.py arg )
-ARGS=($KLOGARG pong_shngroot_4k=$BLK pong_touch=0 pong_wifi=${WIFI:-0} pong_audio=0 pong_adsp=${ADSP:-0} ml-timeout-lock-panic-scale=40 interrupt-masked-debug-mode=1 "$@")
+ARGS=($KLOGARG pong_shngroot_4k=$BLK pong_touch=0 pong_audio=0 pong_adsp=${ADSP:-0} ml-timeout-lock-panic-scale=40 interrupt-masked-debug-mode=1)
+if [ -n "${WIFI:-}" ]; then ARGS+=(pong_wifi="$WIFI"); fi
+ARGS+=("$@")
 # The kernel is built with E/P clusters (patches/xnu-ipados18/0008) and hangs early without cluster-type in the ADT (g97).
 export PONG_ADT_CLUSTERS=${PONG_ADT_CLUSTERS:-1}
 KA=(); for x in "${ARGS[@]}"; do KA+=(--kernel-arg "$x"); done

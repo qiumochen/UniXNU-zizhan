@@ -16,7 +16,7 @@ def main():
     p.add_argument('--out', type=Path, default=ROOT / 'out')
     p.add_argument('--jobs', type=int, default=4)
     p.add_argument('--prepare-only', action='store_true')
-    p.add_argument('--defconfig', default='pong_ipados18_defconfig',
+    p.add_argument('--defconfig', default='zizhan_ipados18_gpu_defconfig',
                    help='configs/<name> selected before the kernel build')
     a = p.parse_args(); up=a.unixnu.resolve(); out=a.out.resolve()
     spec=importlib.util.spec_from_file_location('pong_format2',ROOT/'scripts/migrate-pong-format2.py')

@@ -1,6 +1,6 @@
 # zizhan (Xiaomi MIX Fold 2) shipping kernel: Pong's iPadOS 18 / Darwin 24 configuration
-# with the Adreno 730 platform and the ADSP/battery path (PongPower) on.
-# Wi-Fi and backlight stay off: neither is brought up on zizhan yet. The Adreno platform needs the private firmware listed in
+# with Adreno 730, QCA6490 Wi-Fi and the ADSP/battery path (PongPower) on.
+# Backlight stays off pending board validation. GPU and Wi-Fi need the local firmware listed in
 # proprietary-files.txt (gmu_gen70000.bin, a730_sqe.fw, a730_zap.*) in
 # PONG_ADRENO_FIRMWARE; build-pong-adreno-platform.py refuses to continue without it.
 # The boot packager defaults to all 8 SM8475 CPU nodes; PSCI starts them.
@@ -61,6 +61,6 @@ CONFIG_XNU_TRUST_CACHE_RUNTIME=n
 CONFIG_XNU_VERIFIED_ROOT_PROBE=n
 CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE=n
 
-CONFIG_XNU_PONG_WIFI=n
-# ADSP + battery manager (drivers/PongPower) without the Wi-Fi stack; still off at run time unless pong_adsp=1/2.
+CONFIG_XNU_PONG_WIFI=y
+# ADSP + battery manager (drivers/PongPower); still off at run time unless pong_adsp=1/2.
 CONFIG_XNU_PONG_POWER=y

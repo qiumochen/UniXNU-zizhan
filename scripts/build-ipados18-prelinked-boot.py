@@ -58,10 +58,12 @@ def main():
          'pong_gpu_scanout=1','pong_gpu_pool_mib=256','pong_metal_global=1']
  # PCM stays optional and publishes only after the real APM/amp/DMA route
  # is ready. Do not silently disable it in an otherwise audio-enabled build.
- # Keep the live board's Wi-Fi worker and wallpaper snapshot policy in
- # every package; rebuilding must not silently drop these opt-in paths.
+ # Match Wi-Fi startup to the actual compiled driver. The default device
+ # configuration includes it; the reduced CI kernel does not.
  # pong_ram_banks: DarwinBoot24 only looks for pong_ram_banks=0, so the default needs no argument.
- opts+=['launchd_unsecure_cache=1','pong_wifi=1','pong_poster_snapshot=1',f'fb_threads={min(a.cpus,4)}']
+ opts+=['launchd_unsecure_cache=1',
+        'pong_wifi='+str(int(report['settings'].get('XNU_PONG_WIFI')=='1')),
+        'pong_poster_snapshot=1',f'fb_threads={min(a.cpus,4)}']
  if report['settings'].get('XNU_PONG_BACKLIGHT')=='1':opts+=['pong_backlight=1']
  # PE_parse_boot_argn can select the first duplicate. Apply command-line
  # overrides before packaging so there is exactly one value per named key.

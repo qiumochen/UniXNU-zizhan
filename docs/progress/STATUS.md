@@ -84,6 +84,7 @@
 | GPU-DIAG | DONE：等待快照与真实 CP 完成分开报告，有界真实 outstanding 观测及 60/120 Hz 对照。 | 同上；源码 `9d7afd134e56d14dcdd2d0862f3a18f49427b49a`。 |
 | UX-FLUSH | REJECTED：提前 CA flush 候选性能退步，代码已移除。 | g363/g365 同场景控制；后续不得默认重新启用。 |
 | DOC-01 | DONE：建立进度管理规则、唯一当前台账和本机交接入口，纠正旧导航中的过时状态。 | [AGENTS.md](../../AGENTS.md)、本文及仓库外本机 handoff；相对文件链接、任务 ID 唯一性、公开路径和既有四项 CI 引用核对通过，`git diff --check` 通过。本项未改变硬件资格。 |
+| DOC-02 | DONE：按已有真机记录整理面向用户的功能清单，只描述可用情况与使用限制。 | [功能适配清单](../FEATURES.zh.md)，README 和进度索引已加入入口；38 项功能区分已可用、部分可用、待确认及暂不支持，保留高刷、Wi-Fi 长稳、电池健康、锁屏待机及应用覆盖边界。相对链接、状态用词、任务 ID 和 `git diff --check` 通过；仅文档整理，无新设备验证或硬件资格变更。 |
 
 ## 发布与 CI 基线
 
@@ -100,7 +101,7 @@
 
 后续文档提交 `6d074ef09e5777cecfa23612e626ce2c3878153e` 的四项也已 SUCCESS：Porting record `42053769068`、Wi-Fi host `42053768932`、Display host `42053768861`、macOS build `42053768684`；最后一项于 2026-11-05 23:43:58（UTC+8）完成。
 
-11-07 用户要求整理并发布 11-06/07 既有内容，见[本次发布记录](2026-11-07-publication.md)。主提交 `45c7037b5d42c203b2a624f83437bf49f29792a0` 已推送：Porting record、Display、Wi-Fi 云端 SUCCESS，Daily-use host 因电源清单测试依赖本机私有 DTB 失败，macOS build 仍 RUNNING。修正已改为人工最小 FDT 并增加三个拒绝控制，隔离回放通过，本机日用host现67项通过；修正提交需单独跟踪五项CI。发布前Display、固定Sheng Wi-Fi、USB attach及14-area记录检查通过；运行时代码与g397冻结清单一致，已有完整默认/精简内核构建通过，不重复相同构建。g397已覆盖有界Android完成等待的正常返回，没有新的睡眠cycle资格。
+11-07 用户要求整理并发布 11-06/07 既有内容，见[本次发布记录](2026-11-07-publication.md)。主提交 `45c7037b5d42c203b2a624f83437bf49f29792a0` 已推送；Daily-use host 的私有DTB依赖已由 `314744f33cb10303edc78e9cbb66b4aa4409c949` 修正，该提交Daily-use、Display、Wi-Fi云端SUCCESS，但Porting record因旧network area认领全部测试而FAIL，正在收口ownership。电源测试已改人工最小FDT，隔离回放及本机67项日用host通过；修正后的发布SHA仍须单独跟踪五项CI。运行时代码与g397冻结清单一致，已有完整默认/精简内核构建通过，不重复相同构建。g397已覆盖有界Android完成等待的正常返回，没有新的睡眠cycle资格。
 
 ## 每轮更新与交接清单
 

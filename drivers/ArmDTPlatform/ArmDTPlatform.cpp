@@ -2,8 +2,8 @@
 //
 // Generic AArch64 Darwin platform expert for a supplied Apple-format device
 // tree. It derives from XNU's real IODTPlatformExpert and relies on the
-// platform's own DT root name ("device-tree") for matching. No board name,
-// SoC address or vendor identity is compiled into this source.
+// platform's own DT root name ("device-tree") for matching. Optional zizhan
+// observation gets its board resources from the supplied DT, not constants here.
 //
 // The DT must contain the nodes XNU's IODT platform path consumes:
 //   /chosen with a CHRP NVRAM proxy (nvram-bank-size, nvram-proxy-data)
@@ -21,6 +21,8 @@
 #include <kern/clock.h>
 #include "PongBootReset.h"
 #include "PongCpuPark.h"
+#include "ZizhanTsensProbe.h"
+#include "ZizhanPowerAudit.h"
 
 extern "C" bool pong_cpu_start(IOService *platform);
 #if XNU_PONG_WIFI
@@ -229,6 +231,8 @@ bool ArmDTPlatform::configure (IOService *provider)
     return false;
   }
   armdt_platform_configured = 1;
+  zizhan_tsens::start(provider);
+  zizhan_power_audit::start(provider);
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack
 #endif

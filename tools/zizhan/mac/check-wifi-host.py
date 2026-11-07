@@ -33,6 +33,7 @@ def main():
             ("wmi-wait", [tests / "wifi-wmi-wait.c"], args.shared / "shim/include"),
             ("dhcp-ack", [tests / "wifi-dhcp-ack.c"], ROOT / "drivers/PongWifi"),
             ("notifications", [tests / "wifi-notifications.c"], ROOT / "drivers/PongWifi"),
+            ("hold", [tests / "wifi-hold.c"], ROOT / "userland"),
         ]:
             binary = Path(td) / name
             # Only our quoted includes belong to the driver/shim. On glibc,

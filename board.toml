@@ -74,6 +74,15 @@ PONG_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE.
 title = "Zizhan iPadOS 18.7.10"
 [payload.adt]
 packed_data_ramdisk = false
+
+[package]
+# scripts/package.sh resolves this path relative to the device repository. The
+# checkout is a local build input and is intentionally not vendored here.
+unixnu = "../UniXNU"
+
+[package.defconfig]
+"ipados-18.7.10-22H374" = "zizhan_ipados18_gpu_defconfig"
+
 [pong_build]
 entry = "scripts/build-pong-format2.py"
 kernel_entry = "scripts/build-ipados18-pong-macos.py"

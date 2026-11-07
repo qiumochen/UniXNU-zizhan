@@ -449,10 +449,47 @@ static void ui_battery_inputs(unsigned pass)
             ui_escape(text?text:"",e,sizeof(e)));
     }
 }
+static void ui_power_source_inputs(void)
+{
+    typedef CFArrayRef (*copy_sources_t)(CFTypeRef);
+    void *iokit=dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",RTLD_LAZY|RTLD_LOCAL);
+    copy_sources_t copy_sources=iokit?(copy_sources_t)dlsym(iokit,"IOPSCopyPowerSourcesByType"):NULL;
+    if(!copy_sources) {fprintf(stderr,"Pong Settings18 power: IOPS unavailable\n");return;}
+    CFArrayRef sources=copy_sources(CFSTR("InternalBattery"));
+    if(!sources || CFGetTypeID(sources)!=CFArrayGetTypeID() || !CFArrayGetCount(sources)) {
+        fprintf(stderr,"Pong Settings18 power: no internal source\n");
+        if(sources)CFRelease(sources);
+        return;
+    }
+    CFDictionaryRef source=(CFDictionaryRef)CFArrayGetValueAtIndex(sources,0);
+    if(CFGetTypeID(source)!=CFDictionaryGetTypeID()) {
+        fprintf(stderr,"Pong Settings18 power: invalid internal source\n");
+        CFRelease(sources);
+        return;
+    }
+    const char *keys[]={"Battery Service State","Battery Service Flags","batteryServiceFlags",
+                        "MaximumCapacityPercent","BatteryData","NominalChargeCapacity","DesignCapacity","Serial"};
+    for(unsigned i=0;i<sizeof(keys)/sizeof(keys[0]);i++) {
+        CFTypeRef value=NULL;
+        CFStringRef key=CFStringCreateWithCString(kCFAllocatorDefault,keys[i],kCFStringEncodingUTF8);
+        if(key)value=CFDictionaryGetValue(source,key);
+        if(!value) {
+            fprintf(stderr,"Pong Settings18 power: %s=<missing>\n",keys[i]);
+            if(key)CFRelease(key);
+            continue;
+        }
+        CFStringRef description=CFCopyDescription(value);char text[512]={0};
+        if(description)CFStringGetCString(description,text,sizeof(text),kCFStringEncodingUTF8);
+        fprintf(stderr,"Pong Settings18 power: %s=%s\n",keys[i],text[0]?text:"<unprintable>");
+        if(description)CFRelease(description);
+        if(key)CFRelease(key);
+    }
+    CFRelease(sources);
+}
 static void ui_dump(void *context)
 {
     const unsigned pass=(unsigned)(uintptr_t)context;
-    if(pass>=3)ui_battery_inputs(pass);
+    if(pass>=3) {ui_battery_inputs(pass);ui_power_source_inputs();}
     id app=((id(*)(id,SEL))objc_msgSend)((id)objc_lookUpClass("UIApplication"),sel_registerName("sharedApplication"));
     id windows=app?((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("windows")):nil;
     const unsigned long count=windows?((unsigned long(*)(id,SEL))objc_msgSend)(windows,sel_registerName("count")):0;

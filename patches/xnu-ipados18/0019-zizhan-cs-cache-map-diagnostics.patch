@@ -1,0 +1,24 @@
+zizhan: report kernel_map free-space summary for CS cache allocation failure.
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -74,6 +74,7 @@
+ #include <vm/vm_upl.h>
+ #include <vm/vm_kern_xnu.h>
+ #include <vm/vm_protos.h> /* last */
++extern void vm_map_sizes(vm_map_t, vm_map_size_t *, vm_map_size_t *, vm_map_size_t *);
+ #include <vm/vm_ubc.h>
+ 
+ #include <libkern/crypto/sha1.h>
+@@ -5912,8 +5913,12 @@
+ 	kr = kmem_alloc(kernel_map, &storage, allocation,
+ 	    KMA_KOBJECT | KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_SECURITY);
+ 	if (kr != KERN_SUCCESS) {
++        vm_map_size_t map_size = 0, map_free = 0, map_largest = 0;
++        vm_map_sizes(kernel_map, &map_size, &map_free, &map_largest);
+         printf("PONG CS4K: storage allocation failed kr=%d bytes=%llu code-limit=%llu pages=%llu\n",
+             kr, (uint64_t)allocation, limit, (uint64_t)count);
++        printf("PONG CS4K: kernel_map size=%llu free=%llu largest=%llu\n",
++            (uint64_t)map_size, (uint64_t)map_free, (uint64_t)map_largest);
+ 		return ENOMEM;
+ 	}
+ 	buffer = kalloc_data(16384, Z_WAITOK);

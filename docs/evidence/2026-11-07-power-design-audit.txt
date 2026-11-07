@@ -1,0 +1,46 @@
+zizhan POWER-02 research audit, 2026-11-07 UTC+8
+Source: 6d074ef09e5777cecfa23612e626ce2c3878153e + existing worktree.
+Scope: source review, saved live FDT, Android read-only interface/CPU inventory.
+No lock/screen-off/suspend/RTC alarm/cpuidle write, reboot, OS installation or kernel build.
+
+Android advertised interfaces:
+/sys/power/state: freeze mem
+/sys/power/mem_sleep: [s2idle] deep
+rtc0: rtc-pm8xxx on PMK8350
+rtc0 device power/wakeup: enabled
+CPU0 state0: WFI; state1 silver-c4/rail-pc, disable=0, latency=1550us, residency=4090us
+CPU4/7 state0: WFI; state1 gold-c4/rail-pc, disable=0, latency=2150us, residency=4791us
+C4 cumulative usage/time were nonzero. This is not a measured current-interval residency.
+Global suspend_stats success=0 fail=0. No Android suspend test occurred.
+
+Saved live FDT:
+PSCI compatible arm,psci-1.0; method=smc. Current generated ADT also uses smc.
+silver-c4 parameter 0x40000004; entry/exit/min=800/750/4090us; local-timer-stop.
+gold-c4 parameter 0x40000004; entry/exit/min=600/1550/4791us; local-timer-stop.
+cluster-d4 l3-off parameter 0x41000044; entry/exit/min=1050/2500/5309us.
+cluster-e3 llcc-off parameter 0x4100c344; entry/exit/min=2700/3500/13959us.
+Parameters are input declarations, not approved firmware call arguments.
+CPU power domains converge on shared cluster-pd; not the XNU scheduling or EPSS topology.
+RTC resources: 0x6100, 0x6200 under PMK8350 SPMI.
+PDC resource: 0x0b220000; parent mapping present.
+CPU/SoC sleep-stat nodes exist; protocol, access and counter semantics unqualified.
+RSC DRV2 resource: 0x17a20000; tcs-config pairs (2,3),(0,2),(1,2),(3,0),(4,1).
+Existing comments assume sleep0..2/active3..4/wake5..6.
+Mainline SLEEP=0/WAKE=1/ACTIVE=2/CONTROL=3 and DT-list order conflict with that assumption.
+Vendor type4 is not the complete mainline-v6.12 schema; matching vendor definitions remain required.
+No TCS or low-power register was written.
+
+Source findings (not device result):
+ui_compat18.c: SBDisableAutoDim=true; startup wake_home requests 300s no-idle, screen-on and native home/unlock.
+MiniIOMobileFramebuffer: RequestPowerChange currently returns success without an implemented hardware transition.
+CPU policy: 8ms worker/32ms policy; default L3 mode requests highest LUT level when available.
+WLAN: busy1ms/idle5ms pump. Touch: 8ms. Keys:16ms. ADSP active loop:waitEvents(100ms).
+ArmCpu halt directly operates caller timer/GIC and may CPU_OFF caller based on target object logicalId.
+XNU IOCPUSleepKernel invokes halt on CPU objects from the sleep coordinator; target shutdown/resume contract must be fixed.
+These source intervals do not quantify actual wakeups, power, or achieved sleep states.
+
+Capture handling:
+Initial stdin invocation timed out at30s; no usable complete/partial output retained; input failure only.
+Narrow direct commands succeeded. No global sleep was attempted.
+
+Design status: complete design/attempt matrix, no suspend implementation or new hardware qualification.

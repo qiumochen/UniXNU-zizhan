@@ -14,6 +14,7 @@
 #include "../drivers/PongWifi/PongWifiLease.h"
 #include <errno.h>
 #include <unistd.h>
+#include "wifi-hold.h"
 
 typedef CFTypeRef (*CreateService)(CFStringRef, CFDictionaryRef);
 typedef CFDictionaryRef (*CopyInformation)(CFTypeRef);
@@ -41,6 +42,8 @@ static NSString *retired_setup, *retired_native, *retired_ipv4, *retired_dns, *r
 static Boolean (*notify_store)(CFTypeRef, CFStringRef);
 static bool system_setup;
 static bool test_mode, ui_test_mode, reported, test_finished, probe_running;
+static bool hold_test;
+static struct pong_wifi_hold hold_state;
 static unsigned retry_ticks, test_ticks, next_probe, probe_attempts;
 static const char *lease_skip;
 static bool namer_diagnostics;
@@ -343,13 +346,35 @@ static void test_https(void)
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
         bool ok = !error && status >= 200 && status < 300 && body.length;
         dispatch_async(dispatch_get_main_queue(), ^{
-            bool final = ok || attempt >= 4;
+            if (hold_test && hold_state.stopped) {
+                probe_running = false;
+                fprintf(stderr, "Pong WiFi18 hold: STOP late HTTP completion ignored after prior prerequisite failure\n");
+                return;
+            }
+            NSDictionary *current_ipv4 = hold_test ? read_state(@"State:/Network/Global/IPv4") : nil;
+            NSDictionary *current_dns = hold_test ? read_state(@"State:/Network/Global/DNS") : nil;
+            bool route_ok = !hold_test || (kernel_route_error() == 0 &&
+                [current_ipv4[@"PrimaryInterface"] isEqual:@"en0"] && current_ipv4[@"Router"] != nil &&
+                [current_dns[@"ServerAddresses"] count] != 0);
+            bool accepted = ok && route_ok;
+            bool final = (hold_test && hold_state.successes) || accepted || attempt >= 4;
             fprintf(stderr, "Pong WiFi18: HTTPS %s status=%ld bytes=%lu error=%ld attempt=%u\n",
-                    ok ? "test PASS" : final ? "test FAIL" : "probe failed; retrying",
+                    accepted ? "test PASS" : final ? "test FAIL" : "probe failed; retrying",
                     (long)status, (unsigned long)body.length, (long)error.code, attempt);
             test_finished = final;
             probe_running = false;
             next_probe = test_ticks + 4;
+            if (hold_test) {
+                double now = NSProcessInfo.processInfo.systemUptime;
+                pong_wifi_hold_result(&hold_state, now, accepted);
+                fprintf(stderr, "Pong WiFi18 hold: %s attempts=%u successes=%u failures=%u link-losses=%u elapsed=%.1f route-dns=%d lease-sequence=%llu\n",
+                    accepted && !hold_state.stopped ? "PASS" : hold_state.stopped ? "STOP" : "RUNNING",
+                    hold_state.attempts, hold_state.successes, hold_state.failures, hold_state.link_losses,
+                    hold_state.successes ? now - hold_state.first_success : 0, route_ok,
+                    (unsigned long long)observed_sequence);
+                if (accepted) probe_attempts = 0;
+                return;
+            }
             if (!cycle_test || !ok) return;
             if (phase == 0) {
                 refresh_sequence = observed_sequence;
@@ -456,6 +481,20 @@ static void tick(void)
         if (test_mode) fprintf(stderr, "Pong WiFi18: live lease sequence=%llu link=%llu\n",
             (unsigned long long)lease.sequence, (unsigned long long)lease.link);
     }
+    if (hold_test) {
+        if (hold_state.successes && (!witness || lease.version != PONG_WIFI_LEASE_VERSION) && !hold_state.stopped) {
+            hold_state.stopped = true;
+            fprintf(stderr, "Pong WiFi18 hold: FAIL current lease witness unavailable\n");
+        }
+        enum pong_wifi_hold_action action = pong_wifi_hold_poll(&hold_state,
+            NSProcessInfo.processInfo.systemUptime, up && !changed_link, ipv4,
+            reported && witness && lease.version == PONG_WIFI_LEASE_VERSION, probe_running);
+        if (action == PongWifiHoldProbe) test_https();
+        else if (action != PongWifiHoldWait && action != PongWifiHoldStopped)
+            fprintf(stderr, "Pong WiFi18 hold: FAIL prerequisite=%u successes=%u failures=%u link-losses=%u\n",
+                action, hold_state.successes, hold_state.failures, hold_state.link_losses);
+        return;
+    }
     if (!test_mode || test_finished) return;
     ++test_ticks;
     if (phase == 1 && observed_sequence > refresh_sequence && ipv4) {
@@ -487,6 +526,15 @@ int main(void)
         test_mode = kernel_test || ui_test_mode;
         namer_diagnostics = boot_option("pong_wifi_diag=1") || boot_option("pong_wifi_ui_test=1");
         cycle_test = test_mode && boot_option("pong_wifi_cycle=1");
+        hold_test = boot_option("pong_wifi_hold=1");
+        if (hold_test && (!ui_test_mode || kernel_test || cycle_test)) {
+            fprintf(stderr, "Pong WiFi18 hold: SKIP requires native UI-test witness without kernel/cycle fixture\n");
+            hold_test = false;
+        }
+        if (hold_test) {
+            hold_state.began = NSProcessInfo.processInfo.systemUptime;
+            fprintf(stderr, "Pong WiFi18 hold: RUNNING native HTTPS witnesses every 60s, startup bound 330s, maximum 64 successes\n");
+        }
         void *framework = dlopen("/System/Library/PrivateFrameworks/IPConfiguration.framework/IPConfiguration", RTLD_NOW);
         create_service = framework ? (CreateService)dlsym(framework, "IPConfigurationServiceCreate") : NULL;
         copy_information = framework ? (CopyInformation)dlsym(framework, "IPConfigurationServiceCopyInformation") : NULL;

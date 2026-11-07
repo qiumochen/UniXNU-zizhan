@@ -27,6 +27,8 @@ def analyze(text):
     beginnings = sorted({int(t) for t in re.findall(r"tl: g class \S+ state 1 at (\d+)", text)})
     all_first, idle_first, recognition, after_recognition, swap_panel = [], [], [], [], []
     ordered_swaps = sorted(swaps.values())
+    idle_segments = []
+    gpu_submits = sorted(int(t) for t in re.findall(r"^GT s \d+ (\d+) \S+ \d+ \d+", text, re.M))
     for down in downs:
         candidates = sorted((t, i) for i, t in swaps.items() if down <= t < down + 500000 and i in frames)
         if not candidates:
@@ -37,12 +39,23 @@ def analyze(text):
             continue
         all_first.append((done - down) / 1000)
         previous = [t for t in ordered_swaps if t < down]
-        if previous and down - previous[-1] >= 90000:
+        idle = bool(previous and down - previous[-1] >= 90000)
+        if idle:
             idle_first.append((done - down) / 1000)
         began = next((t for t in beginnings if down <= t <= swap), None)
         if began is not None:
             recognition.append((began - down) / 1000)
             after_recognition.append((swap - began) / 1000)
+            if idle:
+                idle_segments.append({
+                    "down_us": down, "began_us": began, "swap_us": swap, "panel_us": done,
+                    "recognition_ms": (began - down) / 1000,
+                    "gesture_to_swap_ms": (swap - began) / 1000,
+                    "swap_to_panel_ms": (done - swap) / 1000,
+                    "total_ms": (done - down) / 1000,
+                    "gpu_trace_covers_interval": bool(gpu_submits and
+                        gpu_submits[0] <= down <= done <= gpu_submits[-1]),
+                })
         swap_panel.append((done - swap) / 1000)
     return {
         "retained_downs": len(downs),
@@ -53,6 +66,16 @@ def analyze(text):
         "swap_to_panel": distribution(swap_panel),
         "sample_to_hid_read": distribution([(r - t) / 1000 for k, t, r, s in hid if k == 1 and t <= r <= s]),
         "hid_read_to_dispatch": distribution([(s - r) / 1000 for k, t, r, s in hid if k == 1 and t <= r <= s]),
+        "idle_matched_segments": {
+            "samples": len(idle_segments),
+            "recognition": distribution([row["recognition_ms"] for row in idle_segments]),
+            "gesture_to_swap": distribution([row["gesture_to_swap_ms"] for row in idle_segments]),
+            "swap_to_panel": distribution([row["swap_to_panel_ms"] for row in idle_segments]),
+            "total": distribution([row["total_ms"] for row in idle_segments]),
+            "within_gpu_trace": sum(row["gpu_trace_covers_interval"] for row in idle_segments),
+        },
+        "gpu_trace_submit_window_us": [gpu_submits[0], gpu_submits[-1]] if gpu_submits else None,
+        "idle_samples": idle_segments,
         "trace_windows": [dict(seconds=int(sec), events=int(events), submits=int(submits),
                                completions=int(done), copies=int(copies), lost=int(lost))
                           for sec, events, submits, done, copies, lost in re.findall(

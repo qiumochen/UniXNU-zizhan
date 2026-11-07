@@ -1,0 +1,28 @@
+zizhan: observe bounded native display power requests without changing hardware or legacy ABI.
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -1444,6 +1444,9 @@
+ 	}
+ }
+ 
++// zizhan POWER-02: default-off bounded observation; no display power executor yet.
++extern "C" void zizhan_display_power_observe(uint32_t,const uint64_t *,size_t) __attribute__((weak_import));
++
+ IOReturn
+ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
+     IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
+@@ -1556,8 +1559,13 @@
+ 	case kFBMethodSwapSignal:
+ 	case kFBMethodSwapCancel:
+ 	case kFBMethodSwapCancelAll:
++	case kFBMethodChangeFrameInfo:
++		return kIOReturnSuccess;
+ 	case kFBMethodRequestPowerChange:
+-	case kFBMethodChangeFrameInfo:
++		if (zizhan_display_power_observe)
++			zizhan_display_power_observe(args->scalarInputCount, in, args->structureInputSize);
++		// Existing compatibility return retained; observation explicitly reports
++		// hardware-transition=UNIMPLEMENTED, never a device PM completion.
+ 		return kIOReturnSuccess;
+ 
+ 	case kFBMethodNotifications:                    /* in: callback (0 = off), its argument, type, 0 */

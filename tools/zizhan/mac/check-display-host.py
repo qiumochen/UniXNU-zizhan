@@ -14,6 +14,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
     args = parser.parse_args()
+    subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests/frame-latency.py")], check=True)
+    subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests/shot-integrity.py")], check=True)
     subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests/brightness-curve.py"),
                     "--cc", args.cc], check=True)
     with tempfile.TemporaryDirectory(prefix="zizhan-display-host-") as td:

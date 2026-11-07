@@ -15,3 +15,5 @@
 0016-zizhan-scroll-probe.patch
 0017-zizhan-cs-cache-failure-stage.patch
 0018-zizhan-bounded-control-drag.patch
+0019-zizhan-cs-cache-map-diagnostics.patch
+0020-zizhan-display-power-observer.patch

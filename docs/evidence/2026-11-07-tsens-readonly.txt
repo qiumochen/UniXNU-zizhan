@@ -1,0 +1,68 @@
+zizhan THERM-01, 2026-11-07 UTC+8; sanitized observation excerpt
+Source: 6d074ef09e5777cecfa23612e626ce2c3878153e + uncommitted candidate snapshot
+Dirty manifest SHA256: cec7359316fd601a2b943d996b7b6fbb30478b80c435e5d5b8dee232b93431fb
+g396 image SHA256: 5c31b871ce91d8c9c4d0bd7cd195f5ce4c46ebc5d5381928497e121bc8fde2d5
+g396 actual stage kernel SHA256: b7335f29b25ee84c919a84fedf2d30da77126392d2107da5897dc7438991b6cc
+OS370 retained; temporary USB-A boot; no OS installation.
+Args: zizhan_tsens=1 pong_touch=0 pong_audio=0 pong_adsp=0 pong_autoreset=300 pong_autoreset_sb=180
+Host: 34 cases PASS; reduced CI and full default kernel KERNEL_DONE.
+Cloud CI: not run for this uncommitted work.
+
+g395: temperature SKIP; boot/deadline klog/Android return PASS.
+Extra TRDY gate was not part of the v2 getter and was removed in g396.
+
+g395-tsens-readonly:
+ZIZHAN_TSENS: RUNNING banks=2 one-shot=1 readonly=1
+ZIZHAN_TSENS: bank=0 version=0x20080000 control=0x9d67fff9 ready=0x8 reason=not-ready
+ZIZHAN_TSENS: bank=0 SKIP prerequisite=not-ready
+ZIZHAN_TSENS: bank=1 version=0x20080000 control=0x9d67fff9 ready=0x8 reason=not-ready
+ZIZHAN_TSENS: bank=1 SKIP prerequisite=not-ready
+ZIZHAN_TSENS: SKIP samples=0 failed=0 skipped-banks=2 readonly=1 finished=1
+
+g396-tsens-valid:
+ZIZHAN_TSENS: RUNNING banks=2 one-shot=1 readonly=1
+ZIZHAN_TSENS: bank=0 version=0x20080000 control=0x9d67fff9 raw-trdy=0x8 reason=none
+ZIZHAN_TSENS: bank=0 sensor=0 PASS raw=0x20018e milliC=39800
+ZIZHAN_TSENS: bank=0 sensor=1 PASS raw=0x60019a milliC=41000
+ZIZHAN_TSENS: bank=0 sensor=2 PASS raw=0xa0018e milliC=39800
+ZIZHAN_TSENS: bank=0 sensor=3 PASS raw=0xe0019a milliC=41000
+ZIZHAN_TSENS: bank=0 sensor=4 PASS raw=0x12001a2 milliC=41800
+ZIZHAN_TSENS: bank=0 sensor=5 PASS raw=0x16001a6 milliC=42200
+ZIZHAN_TSENS: bank=0 sensor=6 PASS raw=0x1a001d5 milliC=46900
+ZIZHAN_TSENS: bank=0 sensor=7 PASS raw=0x1e0018e milliC=39800
+ZIZHAN_TSENS: bank=0 sensor=8 PASS raw=0x220018e milliC=39800
+ZIZHAN_TSENS: bank=0 sensor=9 PASS raw=0x260018a milliC=39400
+ZIZHAN_TSENS: bank=0 sensor=10 PASS raw=0x2a00186 milliC=39000
+ZIZHAN_TSENS: bank=0 sensor=11 PASS raw=0x2e0019e milliC=41400
+ZIZHAN_TSENS: bank=0 sensor=12 PASS raw=0x32001a2 milliC=41800
+ZIZHAN_TSENS: bank=0 sensor=13 PASS raw=0x3600196 milliC=40600
+ZIZHAN_TSENS: bank=0 sensor=14 PASS raw=0x3a0017e milliC=38200
+ZIZHAN_TSENS: bank=0 sensor=15 PASS raw=0x3e0018a milliC=39400
+ZIZHAN_TSENS: bank=1 version=0x20080000 control=0x9d67fff9 raw-trdy=0x8 reason=none
+ZIZHAN_TSENS: bank=1 sensor=0 PASS raw=0x200187 milliC=39100
+ZIZHAN_TSENS: bank=1 sensor=1 PASS raw=0x600183 milliC=38700
+ZIZHAN_TSENS: bank=1 sensor=2 PASS raw=0xa0018b milliC=39500
+ZIZHAN_TSENS: bank=1 sensor=3 PASS raw=0xe0017f milliC=38300
+ZIZHAN_TSENS: bank=1 sensor=4 PASS raw=0x1200187 milliC=39100
+ZIZHAN_TSENS: bank=1 sensor=5 PASS raw=0x1600177 milliC=37500
+ZIZHAN_TSENS: bank=1 sensor=6 PASS raw=0x1a00163 milliC=35500
+ZIZHAN_TSENS: bank=1 sensor=7 PASS raw=0x1e0016b milliC=36300
+ZIZHAN_TSENS: bank=1 sensor=8 PASS raw=0x2200177 milliC=37500
+ZIZHAN_TSENS: bank=1 sensor=9 PASS raw=0x2600183 milliC=38700
+ZIZHAN_TSENS: bank=1 sensor=10 PASS raw=0x2a0017f milliC=38300
+ZIZHAN_TSENS: bank=1 sensor=11 PASS raw=0x2e00167 milliC=35900
+ZIZHAN_TSENS: bank=1 sensor=12 PASS raw=0x320016b milliC=36300
+ZIZHAN_TSENS: bank=1 sensor=13 PASS raw=0x3600177 milliC=37500
+ZIZHAN_TSENS: bank=1 sensor=14 PASS raw=0x3a0016f milliC=36700
+ZIZHAN_TSENS: bank=1 sensor=15 PASS raw=0x3e00173 milliC=37100
+ZIZHAN_TSENS: PASS samples=32 failed=0 skipped-banks=0 readonly=1 finished=1
+
+g396 fresh klog bytes: 1350838
+g396 raw log SHA256: b1f9f560255f02ed3f2052b21d9215d3996a3dff03d1cb13710027a4e6136ff6
+g396: sensor observation PASS (32 unique sensors; VALID and signed decode independently checked).
+g396 automatic supervisor: FAIL at 09:19:43, cycle rc=0; Android boot_completed not yet set.
+Bounded follow-up: boot_completed=1 at 09:20:29, 46.224 seconds after supervisor finish.
+Original supervisor FAIL retained; Android return independently reconciled PASS within 120 seconds.
+Final 09:21:06 check: Android device, boot_completed=1, product=zizhan; battery 32.6 C.
+Both single-run launchd jobs removed; no device cycle or lock remains.
+Scope: one-shot valid last-temperature register readings. No calibration, update freshness, continuous sampling, thermal policy, frequency control, power or UI qualification.

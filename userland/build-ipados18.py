@@ -7,6 +7,7 @@ finish:  produce PackedRAMDisk; image verification is opt-in.
 helper:  compile init and the matching OS runtime without rebuilding images.
 refresh_runtime: update only init and the UI adapter in the prepared OS copy.
 refresh_cryptex: expose matching SystemOS files absent from the OS namespace.
+stage_jobs: generate an isolated service-catalog candidate without image edits.
 rebuild_data: recreate the local Data copy from the original empty APFS template.
 reset_data: replace the prepared Data copy with the original empty template and current seed.
 No mode writes a phone, a physical disk or the original restore image.
@@ -25,6 +26,7 @@ import struct
 import subprocess
 import sys
 from wifi_service_stage import compile_service as compile_wifi_service, stage_service as stage_wifi_service
+from service_policy18 import resolve as resolve_service_policy, validate as validate_service_policy, identity as service_policy_identity
 
 VERIFY_IMAGES = False
 BUILD_PLAN_FORMAT = 'pong-userland-22H374-v1'
@@ -104,6 +106,46 @@ def file_sha(path):
         for b in iter(lambda: f.read(1024 * 1024), b''):
             h.update(b)
     return h.hexdigest()
+
+
+def source_identity():
+    head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=PROJECT, text=True).strip()
+    files = []
+    roots = [PROJECT / 'userland', PROJECT / 'tools/apfs',
+             PROJECT / 'tools/sparsebundle.py', PROJECT / 'configs/zizhan-22h374-os370-services.json']
+    for root in roots:
+        if root.is_file():
+            candidates = [root]
+        elif root.is_dir():
+            candidates = sorted(root.rglob('*'))
+        else:
+            raise RuntimeError('missing userland build input: ' + str(root.relative_to(PROJECT)))
+        for path in candidates:
+            if path.name == '__pycache__' or '__pycache__' in path.parts or path.suffix == '.pyc':
+                continue
+            if path.is_dir():
+                continue
+            relative = path.relative_to(PROJECT).as_posix()
+            if path.is_symlink():
+                content, kind = os.readlink(path).encode(), 'symlink'
+            elif path.is_file():
+                content, kind = path.read_bytes(), 'file'
+            else:
+                raise RuntimeError('unsupported userland build input: ' + relative)
+            files.append(dict(path=relative, kind=kind, bytes=len(content),
+                              sha256=hashlib.sha256(content).hexdigest()))
+    files.sort(key=lambda row: row['path'])
+    manifest_hash = hashlib.sha256(json.dumps(files, sort_keys=True,
+                                                separators=(',', ':')).encode()).hexdigest()
+    identity = dict(head=head, input_files=len(files), input_manifest_sha256=manifest_hash)
+    identity['worktree_sha256'] = hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return identity
+
+
+def verify_source_identity(recorded, current=None):
+    if recorded is not None and recorded != (source_identity() if current is None else current):
+        raise RuntimeError('source worktree differs from the candidate build plan')
 
 
 def native_init_signature(data):
@@ -465,7 +507,10 @@ def adapt_job18(job):
     return changes
 
 
-def jobs(root, cryptex, overlay, out, app_cryptex=None):
+def jobs(root, cryptex, overlay, out, app_cryptex=None, service_policy=None):
+    policy = (resolve_service_policy(None, EXCLUDED18) if service_policy is None
+              else validate_service_policy(service_policy))
+    exclusions = policy['excluded_jobs']
     # Darwin 24 only permits system event publishers/host special ports from
     # its native service cache. File-only import makes even stock notifyd an
     # untrusted job, rejects com.apple.notifyd.matching, then notifyd traps.
@@ -502,7 +547,7 @@ def jobs(root, cryptex, overlay, out, app_cryptex=None):
             reason = None
             if not mapped or not mapped.is_file(): reason = 'program absent from supplied 22H374 OS/SystemOS/AppOS'
             elif job.get('_LimitLoadToVariant') == 'IsDarwinOS': reason = 'DarwinOS variant; this source is iOS'
-            elif label in EXCLUDED18: reason = EXCLUDED18[label]
+            elif label in exclusions: reason = exclusions[label]
             record = dict(source=f.relative_to(root).as_posix(), label=label, program=program,
                           action='excluded' if reason else ('boot' if core or job.get('RunAtLoad') or job.get('KeepAlive') is True else 'on-demand'), reason=reason)
             records.append(record)
@@ -561,11 +606,48 @@ def jobs(root, cryptex, overlay, out, app_cryptex=None):
     # signature is paired with this adapted, development-only cache.
     put_plist(overlay / 'System/Library/xpc/launchd.plist', cache)
     dump(out / 'jobs-report.json', {'jobs': records, 'resources': resources,
+         'service_policy': policy, 'service_policy_sha256': service_policy_identity(policy),
          'missing_core_labels': sorted(set(CORE) - selected),
          'service_cache': {'version': 7, 'jobs': len(cached_jobs), 'source_build': '22H374',
                            'path': '/System/Library/xpc/launchd.plist'}})
     return {kind: sum(r['action'] == kind for r in records)
             for kind in ('boot', 'on-demand', 'excluded')}
+
+
+def verify_service_policy_plan(plan, out, current_source=None):
+    """Refuse image editing if the cached job catalog has stale policy identity."""
+    report_path = out / 'jobs-report.json'
+    if not report_path.is_file():
+        raise RuntimeError('service job report is missing')
+    report = json.loads(report_path.read_text())
+    verify_source_identity(plan.get('source_identity'), current_source)
+    planned = plan.get('service_policy')
+    reported = report.get('service_policy')
+    if planned is None:
+        if reported is not None:
+            raise RuntimeError('job report has an unrecorded service policy')
+        return
+    validate_service_policy(planned)
+    expected = service_policy_identity(planned)
+    if plan.get('service_policy_sha256') != expected:
+        raise RuntimeError('build plan service policy hash mismatch')
+    if reported != planned or report.get('service_policy_sha256') != expected:
+        raise RuntimeError('job report service policy differs from build plan')
+
+
+def verify_prepared_images(plan, out):
+    for filename, key in (('pong-ipados18-system.cdr', 'os_source'),
+                          ('pong-ipados18-data.cdr', 'data_source')):
+        source = plan[key]
+        target = out / filename
+        if not target.is_file() or target.is_symlink() or target.samefile(source):
+            raise RuntimeError('refusing non-copy target: ' + filename)
+        expected_source = plan.get('input_images', {}).get(key, {}).get('sha256')
+        expected_prepared = plan.get('prepared_images', {}).get(key)
+        if expected_source and file_sha(source) != expected_source:
+            raise RuntimeError('source input image changed after prepare: ' + filename)
+        if expected_prepared and file_sha(target) != expected_prepared:
+            raise RuntimeError('prepared image differs from its recorded hash: ' + filename)
 
 
 def settings_resources(root, destination):
@@ -969,6 +1051,10 @@ def helper(a):
 
 
 def prepare(a):
+    service_policy = resolve_service_policy(a.service_policy, EXCLUDED18)
+    source = source_identity()
+    input_images = dict(os_source=dict(path=str(a.os_image.resolve()), sha256=file_sha(a.os_image)),
+                        data_source=dict(path=str(a.data_image.resolve()), sha256=file_sha(a.data_image)))
     out = a.out.resolve(); out.mkdir(parents=True, exist_ok=True)
     root, cryptex = a.os_root.resolve(), a.system_cryptex.resolve()
     version = plistlib.loads((root / 'System/Library/CoreServices/SystemVersion.plist').read_bytes())
@@ -982,7 +1068,7 @@ def prepare(a):
     stage_audio_policy(overlay)
     (overlay / 'sbin').mkdir(exist_ok=True)
     init_signature = compile_init(out, a.developer, overlay / 'sbin/launchd')
-    counts = jobs(root, cryptex, overlay, out, a.app_cryptex)
+    counts = jobs(root, cryptex, overlay, out, a.app_cryptex, service_policy)
     wifi_service = out / 'wifi-service18'
     compile_wifi_service(wifi_service, a.developer)
     stage_wifi_service(overlay, wifi_service, root)
@@ -1010,10 +1096,13 @@ def prepare(a):
     if len(cache_files) < 2: raise RuntimeError('matching split arm64 shared cache missing')
     # Record all matching cache pieces; do not copy or replace any with 20F66 files.
     cache_info = {p.name: {'size': p.stat().st_size, 'sha256': sha(p)} for p in cache_files}
-    state = dict(format=BUILD_PLAN_FORMAT, version=version, cryptex_version=cv,
+    state = dict(format=BUILD_PLAN_FORMAT, source_identity=source, input_images=input_images,
+                 version=version, cryptex_version=cv,
                  os_source=str(a.os_image.resolve()), os_root=str(root), system_cryptex=str(cryptex),
                  data_source=str(a.data_image.resolve()), apple_sha256=hashes, cache=cache_info,
-                 jobs=counts, data=seed, static_init_signature=init_signature,
+                 jobs=counts, service_policy=service_policy,
+                 service_policy_sha256=service_policy_identity(service_policy),
+                 data=seed, static_init_signature=init_signature,
                  disabled=['20F66 fixed-address injection', 'Redwood sysctls',
                  'ramfs / custom APFS ABI from the earlier port', 'hardware firmware and GPU libraries'],
                  system_cryptex_runtime='/private/preboot',
@@ -1031,6 +1120,11 @@ def prepare(a):
                 if not dest.exists() and appended.exists():appended.rename(dest)
             else: shutil.copyfile(source, dest)
         if dest.samefile(source): raise RuntimeError('destination must be an independent image')
+    state['prepared_images'] = {
+        'os_source': file_sha(out / 'pong-ipados18-system.cdr'),
+        'data_source': file_sha(out / 'pong-ipados18-data.cdr'),
+    }
+    dump(out / 'build-plan.json', state)
     print(json.dumps({'prepared': str(out), 'jobs': counts, 'data': seed}, indent=2))
 
 
@@ -1060,11 +1154,8 @@ def apply(a):
     out = a.out.resolve(); plan = json.loads((out / 'build-plan.json').read_text())
     if plan['format'] != BUILD_PLAN_FORMAT: raise RuntimeError('wrong build plan')
     if (out / 'apply-complete.json').exists(): raise RuntimeError('images already modified; use a new output directory')
-    for name, source in (('pong-ipados18-system.cdr', plan['os_source']),
-                         ('pong-ipados18-data.cdr', plan['data_source'])):
-        target = out / name
-        if not target.is_file() or target.is_symlink() or target.samefile(source):
-            raise RuntimeError('refusing non-copy target: ' + str(target))
+    verify_service_policy_plan(plan, out)
+    verify_prepared_images(plan, out)
     root = out / 'system-mount'
     device = attach(out / 'pong-ipados18-system.cdr', root)
     try:
@@ -1285,6 +1376,27 @@ def install_app_cryptex(source, root, numeric_owners=True):
                 os.chown(item, 0, 0, follow_symlinks=False)
 
 
+def stage_jobs(a):
+    """Prepare a separate catalog; never mount/copy images or touch the phone."""
+    root, cryptex = a.os_root.resolve(), a.system_cryptex.resolve()
+    for source in (root, cryptex):
+        version = plistlib.loads((source / 'System/Library/CoreServices/SystemVersion.plist').read_bytes())
+        if version.get('ProductBuildVersion') != '22H374':
+            raise RuntimeError('22H374 OS and SystemCryptex required')
+    policy = resolve_service_policy(a.service_policy, EXCLUDED18)
+    out = a.out.resolve()
+    if out == PROJECT or PROJECT in out.parents:
+        raise RuntimeError('stage_jobs output must stay outside the public repository')
+    out.mkdir(parents=True, exist_ok=False)
+    counts = jobs(root, cryptex, out / 'overlay', out, a.app_cryptex, policy)
+    dump(out / 'jobs-candidate.json', dict(build='22H374', source_identity=source_identity(), os_root=str(root),
+         system_cryptex=str(cryptex), app_cryptex=str(a.app_cryptex) if a.app_cryptex else None,
+         service_policy=policy, service_policy_sha256=service_policy_identity(policy),
+         counts=counts, images_modified=False, phone_written=False,
+         qualification='Catalog staging only; no full image rebuild, installation or device qualification'))
+    print(json.dumps(counts, indent=2))
+
+
 def refresh_jobs(a):
     """Update only the prepared 22H374 OS job definitions; retain device Data."""
     if os.geteuid() != 0: raise RuntimeError('refresh_jobs requires system authentication')
@@ -1295,7 +1407,8 @@ def refresh_jobs(a):
         a.app_cryptex = Path(previous_app)
     version = plistlib.loads((a.os_root / 'System/Library/CoreServices/SystemVersion.plist').read_bytes())
     if version.get('ProductBuildVersion') != '22H374': raise RuntimeError('22H374 source jobs required')
-    counts = jobs(a.os_root, a.system_cryptex, out / 'overlay', out, a.app_cryptex)
+    service_policy = resolve_service_policy(a.service_policy, EXCLUDED18, plan.get('service_policy'))
+    counts = jobs(a.os_root, a.system_cryptex, out / 'overlay', out, a.app_cryptex, service_policy)
     adapt_launchd18(a.os_root / 'sbin/launchd', out / 'launchd.ios', out)
     image = os_copy(out)
     if image.is_symlink() or image.samefile(plan['os_source']): raise RuntimeError('prepared OS copy required')
@@ -1331,11 +1444,14 @@ def refresh_jobs(a):
     finally:
         run(['hdiutil', 'detach', device])
     dump(out / 'jobs-update.json', dict(build='22H374', counts=counts, data_modified=False,
+         service_policy=service_policy, service_policy_sha256=service_policy_identity(service_policy),
          app_cryptex=str(a.app_cryptex) if a.app_cryptex else None,
          operation='Pong non-Exclaves jobs and native Version 7 service cache', image_verification='skipped by request'))
     if a.app_cryptex:
         plan.update(app_cryptex=str(a.app_cryptex.resolve()), app_cryptex_runtime='/System/Cryptexes/App')
-        dump(out / 'build-plan.json', plan)
+    plan.update(service_policy=service_policy, service_policy_sha256=service_policy_identity(service_policy),
+                source_identity=source_identity())
+    dump(out / 'build-plan.json', plan)
     print(json.dumps(counts, indent=2))
 
 
@@ -1549,6 +1665,7 @@ def refresh_metal(a):
 def finish(a):
     out = a.out.resolve(); plan = json.loads((out / 'build-plan.json').read_text())
     if not (out / 'apply-complete.json').exists(): raise RuntimeError('apply has not completed')
+    verify_service_policy_plan(plan, out)
     if not VERIFY_IMAGES:
         packed = out / 'pong-ipados18-data.packed'
         pack_data(out / 'pong-ipados18-data.cdr', packed)
@@ -1630,6 +1747,7 @@ def main():
     for name in ('os-root', 'os-image', 'system-cryptex', 'data-image', 'developer'):
         s.add_argument('--' + name, type=Path, required=True)
     s.add_argument('--app-cryptex', type=Path)
+    s.add_argument('--service-policy', type=Path, help='Explicit 22H374 job exclusions; default retains legacy policy')
     for name in ('apply', 'finish', 'rebuild_data', 'reset_data'):
         s = sub.add_parser(name); s.add_argument('--out', type=Path, required=True)
     s = sub.add_parser('helper'); s.add_argument('--out', type=Path, required=True)
@@ -1638,6 +1756,12 @@ def main():
     s.add_argument('--os-root', type=Path, required=True)
     s.add_argument('--system-cryptex', type=Path, required=True)
     s.add_argument('--app-cryptex', type=Path)
+    s.add_argument('--service-policy', type=Path, help='Explicit policy; otherwise inherit the prepared build plan')
+    s = sub.add_parser('stage_jobs'); s.add_argument('--out', type=Path, required=True)
+    s.add_argument('--os-root', type=Path, required=True)
+    s.add_argument('--system-cryptex', type=Path, required=True)
+    s.add_argument('--app-cryptex', type=Path)
+    s.add_argument('--service-policy', type=Path)
     s = sub.add_parser('refresh_runtime'); s.add_argument('--out', type=Path, required=True)
     s.add_argument('--enable-audio-hal', action='store_true',
                    help='Expose experimental PCM HAL; default keeps it outside the boot HAL view')

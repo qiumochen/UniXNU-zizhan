@@ -72,5 +72,9 @@ rm -f "$KLOG_MARKER"
 bash "$S/UniXNU-zizhan/tools/zizhan/mac/decode-shots.sh" "$RUN" || echo "$(ts) screenshot decoding failed; inspect $L/$RUN.txt"
 rm -f "$L/$RUN.wifi-summary.txt"
 python3 "$S/UniXNU-zizhan/tools/zizhan/mac/wifi-stage.py" "$L/$RUN.txt" > "$L/$RUN.wifi-summary.txt" || { rm -f "$L/$RUN.wifi-summary.txt"; echo "$(ts) Wi-Fi summary failed; inspect $L/$RUN.txt"; }
+# ADB and logfs can appear before Android framework startup completes (g396).
+# Preserve fresh logs first, then require a bounded target/completion witness.
+python3 "$S/UniXNU-zizhan/tools/zizhan/mac/wait-android.py" \
+  --timeout "${ANDROID_RETURN_TIMEOUT:-120}" --output "$L/$RUN.android-return.json" || exit 8
 echo "$(ts) saved $L/$RUN.txt ($(wc -c < $L/$RUN.txt) bytes); battery $(battery_temp) (tenths C) back in Android"
 [ -z "${ZIZHAN_ASK_FILE:-}" ] || printf '%s\n' "第 $RUN 轮结束，手机已回到安卓，日志已自动取回。" > "$ZIZHAN_ASK_FILE"

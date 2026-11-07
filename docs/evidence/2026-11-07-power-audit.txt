@@ -1,0 +1,32 @@
+zizhan POWER-02 g397 query-only audit, 2026-11-07 UTC+8
+image: boot-g397-power-audit-v1; temporary rear USB-A boot; OS370 unchanged
+source: current dirty candidate; no OS installation or partition write
+
+ZIZHAN_POWER: RUNNING query-only=1 executor=ABSENT
+ZIZHAN_POWER: registry root-domain-present=1 contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmDTPlatform power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=IOPMrootDomain power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmCpu power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmCpu power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmCpu power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmCpu power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmCpu power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmCpu power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmCpu power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=ArmCpu power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry owner=IOMobileFramebuffer power-contract=UNQUALIFIED
+ZIZHAN_POWER: registry observed=90 owners=11 limit=256/16 inventory-only=1
+ZIZHAN_POWER: psci version-raw=0x10001 version=1.1 conduit=smc
+ZIZHAN_POWER: psci feature=0x8400000a raw=0x0 result=0 supported=1
+ZIZHAN_POWER: psci feature=0xc4000001 raw=0x3 result=3 supported=1
+ZIZHAN_POWER: psci feature=0xc400000e raw=0x0 result=0 supported=1
+ZIZHAN_POWER: psci feature=0x8400000f raw=0x0 result=0 supported=1
+ZIZHAN_POWER: psci cpu-suspend format-extended=1 osi-advertised=1 state-ids=UNQUALIFIED
+ZIZHAN_POWER: PASS query-only=1 queries=5 suspend-calls=0 mode-writes=0 finished=1
+ZIZHAN_POWER_REQUEST: SKIP observe-only=1 sequence=1 scalars=1 structure=0 raw=0x1/0x0/0x0 hardware-transition=UNIMPLEMENTED
+
+fresh klog bytes: 1495019
+raw log SHA256: 19760ffdabaa1afe4b0767cd46a956679536c635d8051fd776305bc421b2b1f1
+supervisor: PASS; return: Android boot_completed=1
+suspend calls: 0; mode writes: 0; RTC alarm writes: 0; display hardware transition: UNIMPLEMENTED
+scope: query-only capability/registry/display-request observation; hardware sleep remains unqualified

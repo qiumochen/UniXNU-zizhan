@@ -18,6 +18,7 @@ import time
 import importlib.util
 
 from pong_adt_contract import audit_adt
+from zizhan_tsens_inputs import encode as encode_tsens
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -184,6 +185,9 @@ def main():
             int(backlight['controller'], 0), backlight['register_bytes'],
             backlight['maximum'], backlight['minimum_nonzero'],
             int(backlight['bl_inverted_dbv']), backlight['channel'], backlight['version'])),
+        # zizhan resources only; the one-shot observer stays off unless explicitly requested.
+        ('zizhan-tsens-v2', encode_tsens(json.loads(
+            (ROOT / 'configs/zizhan-thermal-sm8475.json').read_text()))),
         ('pong-audio-dma', bytes(16)),
         # zizhan: DarwinBoot24 fills {pa, bytes} of a 48 MiB panel pool below 4 GiB (PANEL_POOL_PAGES) for the DPU flip path.
         ('pong-panel-pool', bytes(16)),

@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <notify.h>
 #include "touch.h"
+#include "zizhan-bringup18.h"
 
 static bool software_composition;
 static bool scanout_format;
@@ -1363,6 +1364,37 @@ static void volume18_prepare(void *context)
     fprintf(stderr,"Pong volume18: physical volume keys routed to 22H374 SBVolumeControl; power uses HID\n");
 }
 
+static bool zizhan_bringup_preferences(void)
+{
+    const bool bringup=boot_option("zizhan_bringup=1");
+    const bool legacy=boot_option("zizhan_autodim_restore=1");
+    CFTypeRef current=CFPreferencesCopyAppValue(ZIZHAN_AUTODIM_KEY,kCFPreferencesCurrentApplication);
+    CFTypeRef marker=CFPreferencesCopyAppValue(ZIZHAN_AUTODIM_OWNER_KEY,kCFPreferencesCurrentApplication);
+    ZizhanBringupPlan plan=zizhan_bringup_plan(bringup,legacy,current,marker);
+    bool synchronized=true;
+    if(plan.write_marker)CFPreferencesSetAppValue(
+        ZIZHAN_AUTODIM_OWNER_KEY,plan.marker,kCFPreferencesCurrentApplication);
+    if(plan.write_value)CFPreferencesSetAppValue(
+        ZIZHAN_AUTODIM_KEY,plan.value,kCFPreferencesCurrentApplication);
+    if((plan.write_marker || plan.write_value) &&
+       !CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)) {
+        /* Retain both original values on failed persistence; do not claim a
+         * completed migration or schedule UI actions from a failed plan. */
+        synchronized=false;
+        CFPreferencesSetAppValue(ZIZHAN_AUTODIM_KEY,current,kCFPreferencesCurrentApplication);
+        CFPreferencesSetAppValue(ZIZHAN_AUTODIM_OWNER_KEY,marker,kCFPreferencesCurrentApplication);
+        (void)CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+    }
+    fprintf(stderr,"Zizhan bringup18: %s reason=%s bringup=%u legacy=%u wake=%u\n",
+        synchronized?plan.status:"FAIL",synchronized?plan.reason:"preference-sync",
+        bringup,legacy,(unsigned)(plan.request_wake && synchronized));
+    const bool wake=plan.request_wake && synchronized;
+    zizhan_bringup_plan_release(&plan);
+    if(marker)CFRelease(marker);
+    if(current)CFRelease(current);
+    return wake;
+}
+
 static void wake_home(void *unused)
 {
     (void)unused;
@@ -2285,8 +2317,10 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         if(!boot_option("pong_volume_direct=0"))
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,volume18_prepare);
         skip_setup=boot_option("pong_skip_setup=1");
-        CFPreferencesSetAppValue(CFSTR("SBDisableAutoDim"),kCFBooleanTrue,kCFPreferencesCurrentApplication);
-        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,wake_home);
+        /* zizhan: setup adaptation does not authorize forcing an unlock or
+         * disabling automatic display sleep. Bring-up actions are opt-in. */
+        if(zizhan_bringup_preferences())
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,wake_home);
         char delay[16];
         if(boot_value("pong_url=",delay,sizeof(delay)) && atoi(delay)>0)
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)atoi(delay)*NSEC_PER_SEC),

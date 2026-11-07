@@ -46,8 +46,10 @@ python3 tools/zizhan/tests/usb-attach.py
 
 修正为代码构造的最小 FDT，以人工地址、名称和时序覆盖八核、四 idle state、域依赖、TCS 顺序及未决 RTC IRQ 形状，不发布原始 DTB。增加外来板型、缺失 CPU 和循环域拒绝控制。隔离临时 checkout 中，旧测试因缺少私有文件按预期失败，修正后七项全部通过；完整本机日用回归增加为 67 项并通过。内核运行时代码未改，不重建相同内核。
 
-修正提交仍须单独跟踪五个工作流；不能继承主提交的 SUCCESS。Linux 上缺少 CoreFoundation 的六项测试明确 SKIP，本机 macOS 的实际 CF 回放已通过。云端结论在收口时追加，本机原始日志、源码快照和操作状态保留在仓库外。
+修正提交各自独立跟踪五个工作流；不能继承其他 SHA 的 SUCCESS。Linux 上缺少 CoreFoundation 的六项测试明确 SKIP，本机 macOS 的实际 CF 回放已通过。本机原始日志、源码快照和操作状态保留在仓库外。
 
-修正提交 `314744f33cb10303edc78e9cbb66b4aa4409c949` 已推送：Daily-use host `42345638369`、Display `42345638340`、Wi-Fi `42345638381` 均 SUCCESS；macOS `42345638365` 尚待完成。Porting record `42345638342` FAIL，原因是旧 network area 用 `tools/zizhan/tests/**` 认领了所有测试，电源测试修改因而要求同时更新网络记录。
+修正提交 `314744f33cb10303edc78e9cbb66b4aa4409c949` 已推送：Daily-use host `42345638369`、Display `42345638340`、Wi-Fi `42345638381` 均 SUCCESS；macOS `42345638365` 后被下一次同分支提交取消。Porting record `42345638342` FAIL，原因是旧 network area 用 `tools/zizhan/tests/**` 认领了所有测试，电源测试修改因而要求同时更新网络记录。
 
 本次进一步把 network 的测试范围收窄为 `wifi-*`，将电源清单及 `power-*` 测试归入 power area，并同步两个 area 的 findings。旧 checker 按前后 ownership 的并集检查，因此迁移说明也保留在 network；没有为无关测试伪造网络功能结论。主机预检改为显式对比当前内容与基准提交的 changed paths，提交后再运行真实 `--base` 检查；此前单独 `--base HEAD` 只覆盖已提交内容，不能证明 dirty diff 的 area 同步。
+
+发布修正 `477417e2d8daf9efbb74e78dc98f40a55f8fbe96` 已推送，五项 CI 全部 SUCCESS：Porting record `42345816118`、Daily-use host `42345816142`、Display host `42345816064`、Wi-Fi host `42345816069`、macOS build `42345816283`。macOS 磁盘检查、精简内核编译和 boot image 阶段均完成。该 SHA 的最终状态快照位于本机 `logs/publish-20261107/477417e-ci-runs.json`；先前 SHA 的 CI 结论不继承。

@@ -100,7 +100,7 @@
 
 后续文档提交 `6d074ef09e5777cecfa23612e626ce2c3878153e` 的四项也已 SUCCESS：Porting record `42053769068`、Wi-Fi host `42053768932`、Display host `42053768861`、macOS build `42053768684`；最后一项于 2026-11-05 23:43:58（UTC+8）完成。
 
-11-07 用户要求整理并发布 11-06/07 既有内容，见[本次发布记录](2026-11-07-publication.md)。发布前重新运行64项日用host、Display、固定Sheng Wi-Fi、USB attach回放及14-area记录检查均通过；运行时代码与g397冻结清单一致，已有完整默认/精简内核构建通过，不重复构建相同输入。g397已覆盖新增有界Android完成等待的正常返回；没有新的睡眠cycle资格。本次推送后需跟踪精确SHA的五项工作流，当前尚无本轮云端结论。
+11-07 用户要求整理并发布 11-06/07 既有内容，见[本次发布记录](2026-11-07-publication.md)。主提交 `45c7037b5d42c203b2a624f83437bf49f29792a0` 已推送：Porting record、Display、Wi-Fi 云端 SUCCESS，Daily-use host 因电源清单测试依赖本机私有 DTB 失败，macOS build 仍 RUNNING。修正已改为人工最小 FDT 并增加三个拒绝控制，隔离回放通过，本机日用host现67项通过；修正提交需单独跟踪五项CI。发布前Display、固定Sheng Wi-Fi、USB attach及14-area记录检查通过；运行时代码与g397冻结清单一致，已有完整默认/精简内核构建通过，不重复相同构建。g397已覆盖有界Android完成等待的正常返回，没有新的睡眠cycle资格。
 
 ## 每轮更新与交接清单
 

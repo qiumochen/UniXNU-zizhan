@@ -30,4 +30,20 @@ python3 tools/zizhan/tests/usb-attach.py
 
 ## 发布与云端验证
 
-本条在提交前建立，尚无本次发布 SHA 的云端结论。推送后按精确 SHA 跟踪 Porting record、Display host、Wi-Fi host、Daily-use host 和 macOS build；已通过的历史运行不能替代本次结果。运行 ID 与结论在收口时追加，本机原始日志、源码快照和操作状态继续保留在仓库外。
+主提交 `45c7037b5d42c203b2a624f83437bf49f29792a0` 已正常推送至 `origin/main`。该 SHA 的首轮结果：
+
+| 工作流 | 运行 ID | 当前结论 |
+| --- | --- | --- |
+| Porting record | 42345399532 | SUCCESS |
+| Display host regressions | 42345399483 | SUCCESS |
+| Wi-Fi host regressions | 42345399554 | SUCCESS |
+| Daily-use host regressions | 42345399573 | FAIL，电源清单测试依赖本机私有 DTB |
+| zizhan macOS build | 42345399626 | RUNNING，待精确 SHA 收口 |
+
+### 干净 checkout 回归修正
+
+首轮 Daily-use host 暴露 `tests/power-inventory.py` 的测试输入错误：四项回放直接读取仓库外 `logs/daily-use-1106/entry-live.dtb`，本机存在而云端不存在。原运行 FAIL 保留；这是回归可移植性问题，不是新的硬件故障。
+
+修正为代码构造的最小 FDT，以人工地址、名称和时序覆盖八核、四 idle state、域依赖、TCS 顺序及未决 RTC IRQ 形状，不发布原始 DTB。增加外来板型、缺失 CPU 和循环域拒绝控制。隔离临时 checkout 中，旧测试因缺少私有文件按预期失败，修正后七项全部通过；完整本机日用回归增加为 67 项并通过。内核运行时代码未改，不重建相同内核。
+
+修正提交仍须单独跟踪五个工作流；不能继承主提交的 SUCCESS。Linux 上缺少 CoreFoundation 的六项测试明确 SKIP，本机 macOS 的实际 CF 回放已通过。云端结论在收口时追加，本机原始日志、源码快照和操作状态保留在仓库外。

@@ -1,6 +1,49 @@
 name: Wi-Fi host regressions
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    paths:
+      - '.github/workflows/wifi-host.yml'
+      - '.github/actions/**'
+      - 'board.toml'
+      - 'feeds.toml'
+      - 'unixnu.lock'
+      - 'configs/**'
+      - 'dts/**'
+      - 'migration/format2/**'
+      - 'scripts/**'
+      - 'patches/xnu-ipados18/**'
+      - 'drivers/PongWifi/**'
+      - 'drivers/PongAdreno/ArmSmmu4K/**'
+      - 'userland/wifi*'
+      - 'tools/zizhan/mac/check-wifi-host.py'
+      - 'tools/zizhan/mac/fastboot*.sh'
+      - 'tools/zizhan/mac/usbkick.sh'
+      - 'tools/zizhan/tests/wifi-*'
+      - '!**/*.md'
+      - '!**/*.rst'
+  pull_request:
+    paths:
+      - '.github/workflows/wifi-host.yml'
+      - '.github/actions/**'
+      - 'board.toml'
+      - 'feeds.toml'
+      - 'unixnu.lock'
+      - 'configs/**'
+      - 'dts/**'
+      - 'migration/format2/**'
+      - 'scripts/**'
+      - 'patches/xnu-ipados18/**'
+      - 'drivers/PongWifi/**'
+      - 'drivers/PongAdreno/ArmSmmu4K/**'
+      - 'userland/wifi*'
+      - 'tools/zizhan/mac/check-wifi-host.py'
+      - 'tools/zizhan/mac/fastboot*.sh'
+      - 'tools/zizhan/mac/usbkick.sh'
+      - 'tools/zizhan/tests/wifi-*'
+      - '!**/*.md'
+      - '!**/*.rst'
+  workflow_dispatch:
 
 permissions:
   contents: read

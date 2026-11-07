@@ -84,6 +84,8 @@ origin 是 `qiumochen/UniXNU-zizhan`，upstream 是 `Chengdong-Yu/UniXNU-pong`�
 
 内核 / 驱动修改推送前应在 Mac **同时构建** `pong_ipados18_ci_defconfig`（Adreno 关闭）和 `zizhan_ipados18_gpu_defconfig`；GPU 专用符号须置于 `#if XNU_PONG_ADRENO_PLATFORM`，静态链接不能依靠未定义 weak 符号。早期接管只有 Linux 静态检查的限制已被后续 Mac 构建取代；具体提交的通过范围以台账和对应证据为准。
 
+GitHub 的 `Porting record` 继续自动检查每次 push / PR；显示、Wi-Fi、日用回归按相关路径自动触发，公共配置、设备树、格式 2 层、源码固定版本、`scripts/` 和 XNU 补丁变化触发三组。`macos-build.yml` 仅手动触发：`task=kernel` 构建，`task=disk-probe` 单独排查环境。阶段性发布、工具链 / 构建脚本变动或干净环境重建调查时运行云端内核；普通提交不再等待未触发的云端构建，也不能把未运行记为 PASS。跟踪实际触发工作流的精确 SHA；本机双配置要求不变。详见 [CI 效率调整](docs/progress/2026-11-07-ci-efficiency.md)。
+
 发布前审查完整暂存 diff：不带本机路径、主机身份、设备唯一标识或私有输入；照片去 EXIF。只发布源码、配置、文档与脚本；Apple 二进制、手机固件、根镜像、分区备份、凭据和编译产物留本机。git 身份由开发者在本地自行配置。
 
 ## 在 Mac Studio 上从仓库继续开发

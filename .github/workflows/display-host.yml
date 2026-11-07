@@ -1,5 +1,54 @@
 name: Display host regressions
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    paths:
+      - '.github/workflows/display-host.yml'
+      - '.github/actions/**'
+      - 'board.toml'
+      - 'feeds.toml'
+      - 'unixnu.lock'
+      - 'configs/**'
+      - 'dts/**'
+      - 'migration/format2/**'
+      - 'scripts/**'
+      - 'patches/xnu-ipados18/**'
+      - 'drivers/PongPower/**'
+      - 'drivers/PongAdreno/**'
+      - 'userland/ui_compat18.c'
+      - 'tools/zizhan/mac/check-display-host.py'
+      - 'tools/zizhan/mac/frame-latency.py'
+      - 'tools/zizhan/mac/shot*.py'
+      - 'tools/zizhan/tests/frame-latency.py'
+      - 'tools/zizhan/tests/shot-integrity.py'
+      - 'tools/zizhan/tests/brightness-curve.py'
+      - 'tools/zizhan/tests/dsi-lease.c'
+      - '!**/*.md'
+      - '!**/*.rst'
+  pull_request:
+    paths:
+      - '.github/workflows/display-host.yml'
+      - '.github/actions/**'
+      - 'board.toml'
+      - 'feeds.toml'
+      - 'unixnu.lock'
+      - 'configs/**'
+      - 'dts/**'
+      - 'migration/format2/**'
+      - 'scripts/**'
+      - 'patches/xnu-ipados18/**'
+      - 'drivers/PongPower/**'
+      - 'drivers/PongAdreno/**'
+      - 'userland/ui_compat18.c'
+      - 'tools/zizhan/mac/check-display-host.py'
+      - 'tools/zizhan/mac/frame-latency.py'
+      - 'tools/zizhan/mac/shot*.py'
+      - 'tools/zizhan/tests/frame-latency.py'
+      - 'tools/zizhan/tests/shot-integrity.py'
+      - 'tools/zizhan/tests/brightness-curve.py'
+      - 'tools/zizhan/tests/dsi-lease.c'
+      - '!**/*.md'
+      - '!**/*.rst'
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

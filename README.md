@@ -66,9 +66,24 @@ $ZIZHAN_SRC/
 | 从现有镜像去掉 launchd 任务 | `jobs-refresh.sh TAG LABEL…`（与 `userland/build-ipados18.py` 的 `EXCLUDED18` 对应） |
 | 诊断 | `gsym.py LOG 手势号 [TID…] --bin 二进制`（采样器 `gs_all=2` 的整条栈）、`settings-ui.py LOG`（带 `pong_url` 的轮里设置界面的打印） |
 
-`.github/workflows/macos-build.yml` 沿用 UniXNU-pong 的 GitHub Actions 内核构建，用法见 [UniXNU-pong 的 README](https://github.com/Chengdong-Yu/UniXNU-pong#用-github-actions-编译内核)。
+日常内核 / 驱动开发在本机完成精简 CI 和完整设备两套配置构建；GitHub Actions 按以下方式补充检查：
 
-`Porting record` 检查结构与 push/PR 增量区域覆盖；`Wi-Fi host regressions` 在无固件、无凭据环境回放 SMMU、WMI、DHCP 和 USB 失败路径。默认 macOS CI 关闭 Wi-Fi、Adreno 和背光，不能代替完整配置或真机验收。仓库已被上游目录收录；最新统一 `scripts/package.sh` / package action 尚待迁移，见 [规范核对与待办](docs/progress/2026-11-04-upstream-ci-audit.md)。
+| 工作流 | 触发方式 |
+| --- | --- |
+| `Porting record` | 每次 push / PR 检查结构与增量区域覆盖，包括纯文档提交。 |
+| 显示、Wi-Fi、日用主机回归 | 相关源码、测试、工作流或公共依赖变化时自动运行，也可手动运行；纯文档修改不触发。 |
+| `zizhan macOS build` | 仅手动运行。`task=kernel` 编译内核；`task=disk-probe` 单独诊断 runner 磁盘与工具，两者不同时启动。 |
+
+公共配置、设备树、格式 2 层、源码固定版本、`scripts/` 或 XNU 补丁变化会触发三组主机回归。阶段性发布、工具链 / 构建脚本变更，或需要检查干净环境可重建性时，在 Actions 页面选择 `zizhan macOS build` → `Run workflow` → `task=kernel`；排查 runner 环境时选 `disk-probe`。命令行入口：
+
+```bash
+gh workflow run macos-build.yml -f task=kernel
+gh workflow run macos-build.yml -f task=disk-probe
+```
+
+手动内核构建默认仍关闭 Wi-Fi、Adreno 和背光；可选固件、IPSW 输入保留，磁盘诊断不使用这些输入。主机回归和云端构建不能代替完整设备配置或真机验收。触发策略与验证范围见 [CI 效率调整](docs/progress/2026-11-07-ci-efficiency.md)。
+
+仓库已被上游目录收录；统一 `scripts/package.sh` 与 22H374 配置映射已加入，package action 仍待上游支持 Darwin24/UFS 构建入口，见 [打包接入进展](docs/progress/2026-11-06-boot-release-followup.md#release-01)。
 
 ## 私有输入
 

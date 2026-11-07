@@ -1,8 +1,15 @@
 name: zizhan macOS build
 on:
-  push:
   workflow_dispatch:
     inputs:
+      task:
+        description: 'Run the kernel build or the separate disk/tool diagnostic.'
+        required: true
+        default: kernel
+        type: choice
+        options:
+          - kernel
+          - disk-probe
       firmware_url:
         description: 'Firmware archive URL (zip or tar.gz) with the phone firmware tree. Empty builds the CI config without Wi-Fi, backlight or Adreno.'
         required: false
@@ -32,12 +39,13 @@ permissions:
   contents: read
   actions: write
 concurrency:
-  group: pong-macos-${{ github.ref }}
+  group: pong-macos-${{ github.ref }}-${{ inputs.task }}
   cancel-in-progress: true
 
 jobs:
   disk-probe:
     name: disk probe (not a kernel build)
+    if: ${{ inputs.task == 'disk-probe' }}
     runs-on: macos-15-intel
     timeout-minutes: 20
     steps:
@@ -90,6 +98,7 @@ jobs:
 
   kernel-ci:
     name: CI kernel (WIFI and backlight off unless a firmware archive is given)
+    if: ${{ inputs.task == 'kernel' }}
     runs-on: macos-15-intel
     # 360 is the maximum GitHub honours on a hosted runner; a larger number is
     # not a longer allowance, it is a run that fails at six hours. The userdata

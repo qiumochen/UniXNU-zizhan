@@ -12,6 +12,7 @@ Paths in the notes refer to the author's workspace:
 ## 最新交接
 
 - [当前进度与工作队列](STATUS.md)：唯一持续维护的状态入口，含任务编号、验收条件、下一动作及已验证发布/CI 基线。日期文档中的“当前”按记录当时理解。
+- [2026-11-07 CI 效率调整](2026-11-07-ci-efficiency.md)：云端 macOS 构建与磁盘诊断改手动，快速回归按源码及公共依赖路径触发，本机双配置验证保留。
 - [2026-11-07 整理与发布](2026-11-07-publication.md)：11-06/07 代码、计划与证据的发布范围，本机验证和本次提交的云端 CI 跟踪。
 - [2026-11-07 完整锁屏与硬件休眠设计](../plan/2026-11-07-lockscreen-suspend-design.md)：原生显示请求与实际缺口、runtime PM和CPU/SoC主线、备选SYSTEM_SUSPEND、逐设备恢复、wake/投票/时间契约及功耗验收；本次为调研设计。
 - [2026-11-07 电源首批无人值守实现](2026-11-07-power-first-implementation.md)：bring-up隔离、电源事务模型、PSCI/registry只读审计、g397查询轮次与真实未完成边界。

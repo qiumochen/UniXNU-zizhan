@@ -46,3 +46,18 @@ gh workflow run macos-build.yml -f task=disk-probe
 - 文档相对链接与 `git diff --check` 检查通过。
 
 本次没有执行云端重型构建或设备试验。发布后仅核对实际自动触发的工作流；云端结果单独登记，不继承入口 SHA 的绿灯。
+
+## 发布验证
+
+配置提交 `80c8deb0507ce1123502b9e5026b98731665e1a8` 已推送 origin/main。2026-11-07 14:32（UTC+8），该 SHA 只触发以下四项自动检查，均成功；从创建到最后一项结束为 24 秒：
+
+| 工作流 | 运行 ID | 结论 / 创建至结束 |
+| --- | --- | --- |
+| Porting record | 42347442352 | SUCCESS / 10 秒 |
+| Display host regressions | 42347442416 | SUCCESS / 12 秒 |
+| Daily-use host regressions | 42347442367 | SUCCESS / 14 秒 |
+| Wi-Fi host regressions | 42347442320 | SUCCESS / 24 秒 |
+
+该 SHA 没有 macOS 自动运行。此前 `477417e2d8daf9efbb74e78dc98f40a55f8fbe96` 的旧 macOS 任务不属于本次触发，本次没有取消或重启它。手动任务选择经过本地语法 / 互斥验证，未为本次策略调整消耗云端重型构建。
+
+本次验证记录的后续提交仅修改文档，用于核对纯文档事件只触发记录检查；其最终 SHA 和实际运行结果留在本机交接及发布报告，不把配置提交的绿灯继承给文档提交。

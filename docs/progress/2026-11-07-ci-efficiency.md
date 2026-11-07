@@ -60,4 +60,6 @@ gh workflow run macos-build.yml -f task=disk-probe
 
 该 SHA 没有 macOS 自动运行。此前 `477417e2d8daf9efbb74e78dc98f40a55f8fbe96` 的旧 macOS 任务不属于本次触发，本次没有取消或重启它。手动任务选择经过本地语法 / 互斥验证，未为本次策略调整消耗云端重型构建。
 
-本次验证记录的后续提交仅修改文档，用于核对纯文档事件只触发记录检查；其最终 SHA 和实际运行结果留在本机交接及发布报告，不把配置提交的绿灯继承给文档提交。
+验证记录提交 `cc10ff9ae2633b66e6ecdd76f996bb9f90e9ac22` 仅修改文档，实际只触发 `Porting record`（42347591584），9 秒 SUCCESS，没有主机回归或 macOS 自动运行。
+
+随后同期 POWER-02 工作新增面板程序回归，日用工作流补充 `tools/zizhan/tests/panel-*` 与 `tools/zizhan/mac/panel-power-inventory.py` 路径，已有 ADSP 前缀保留。扩展后的本地验证为 40 个路径场景、63 个输入路径；这些未提交的电源实现仍归另一项工作，本次只提交过滤规则及记录。该补充提交预期仅触发记录检查和日用回归，结果在本机交接与发布报告单列。

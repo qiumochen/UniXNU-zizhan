@@ -62,4 +62,6 @@ gh workflow run macos-build.yml -f task=disk-probe
 
 验证记录提交 `cc10ff9ae2633b66e6ecdd76f996bb9f90e9ac22` 仅修改文档，实际只触发 `Porting record`（42347591584），9 秒 SUCCESS，没有主机回归或 macOS 自动运行。
 
-随后同期 POWER-02 工作新增面板程序回归，日用工作流补充 `tools/zizhan/tests/panel-*` 与 `tools/zizhan/mac/panel-power-inventory.py` 路径，已有 ADSP 前缀保留。扩展后的本地验证为 40 个路径场景、63 个输入路径；这些未提交的电源实现仍归另一项工作，本次只提交过滤规则及记录。该补充提交预期仅触发记录检查和日用回归，结果在本机交接与发布报告单列。
+随后同期 POWER-02 工作新增面板程序回归，日用工作流补充 `tools/zizhan/tests/panel-*` 与 `tools/zizhan/mac/panel-power-inventory.py` 路径，已有 ADSP 前缀保留。扩展后的本地验证为 40 个路径场景、63 个输入路径；这些未提交的电源实现仍归另一项工作，本次只提交过滤规则及记录。补充提交 `bb3bab5981b625f7cecafa9ee78e4a381e753629` 的 Daily-use host（42347903554）14 秒 SUCCESS；Porting record 首次失败（42347903492），指出工作流改动需要更新 diagnostics 区域，故随后补齐记录。
+
+仅包含 diagnostics 记录修正的 `4c21486118c2b385c58b6e2074c66235c0b7f152` 触发 Porting record（42348027974），8 秒 SUCCESS。BB SHA 的首次记录失败已由新 SHA 检查通过修正结果闭环；保留失败及修正证据。本轮增量仅带来这次快速日用回归和复核记录检查，没有 Mac 构建或设备操作。

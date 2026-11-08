@@ -111,3 +111,11 @@ v23r2改为单次被动恢复：15分钟内等待稳定、product核对通过的
 21:48和21:56两次失败仍使用原OS370，22:05同OS又完整往返；v23删fairplay候选22:14后才安装，至今未boot，不能作为此次故障起点。受控usb-attach/usbkick/boot脚本与接续HEAD逐字节相同；本轮未更新platform-tools，当前可执行文件mtime为7月，不能据此推断更早的环境历史。主机近1小时内指定内核USB错误的统一日志查询无匹配，仅表示该日志源没给出额外证据，不证明没有底层USB错误。
 
 手机显示fastboot与USB完成枚举是两步；用户已确认前者，主机在失败期间持续看不到后者且hub连接位为0。根因仍待定位，不能仅凭此断言线缆损坏、Mac系统回归或新OS引入故障。当前被动恢复器继续独占，未新增重启/端口动作。
+
+### v23r2 终态审查：中断、未发送，USB已换身份
+
+2026-11-08T22:54:14.969616+08:00 心跳复查：恢复器在22:47:46记录FAIL/`supervisor interrupted; inspect device before retry`，`phone_boot_dispatched=false`。这不是正常900秒超时；中断发起者未由本记录确定。主机复核时launchd job已不存在、监督进程退出、锁已释放，无活跃cycle/install/waiter。没有新XNU、定位栈或天气结果，干预验收SKIP；未修改原始失败记录。
+
+本次只读端口复核出现新状态：USB2从仅供电变为highspeed/enable/connect，手机身份为`05c6:f000`，IORegistry只列出`Mass Storage`接口。主机adb最初探测8秒超时；有界恢复adb服务后，adb和fastboot列表仍均为空。现在不能再沿用“物理未检测连接”描述当前状态，也不能把此身份当作可用Android/root或fastboot。未发送模式切换、重启、boot或端口恢复命令。
+
+实际已安装OS仍是v23隔离候选，未启动验收；canonical仍OS370。回退的未满足前置仍为可用Android/root通道，当前不能安全执行OS-only回退。下一动作是先恢复并核对Android adb或真正fastboot接口，再协调唯一owner与实际manifest/log arm状态；不重复已有的Android切换、VBUS或PORT_RESET负结果。有界Paseo心跳已删除，全部设备监督任务已结束，不再自动重复启动。

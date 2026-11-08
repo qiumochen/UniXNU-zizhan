@@ -2,6 +2,8 @@
 
 本文件保存开发环境、工作流和历史教训。**当前基线、任务优先级和验证边界统一见 [当前台账](docs/progress/STATUS.md)**；先读 [AGENTS.md](AGENTS.md) 的进度管理规则，再读台账和相关证据。[porting.toml](porting.toml) 是能力记录；本文件内的日期段落按当时状态理解，不用历史“当前”覆盖台账。本文件不保存机器身份或设备标识。
 
+**2026-11-08 主线重排**：APP-01 可见内容为第一主线，POWER-02 降为受控支线（解阻条件见台账）。首个交付为 `panelpool-128` v5 候选的一轮天气内容验收，见 [11-08 记录](docs/progress/2026-11-08-panelpool-128.md)；该候选已打包、未上机。
+
 当前接续按 2026-11-06 用户的[日用路线](docs/plan/2026-11-06-daily-use-roadmap.md)：先补温控、电源恢复、网络与常用应用，再推进声音与折叠，最终手机能力；人工验收积累后集中进行。11-07 已按新授权继续：THERM-01 [默认关闭的一次只读 XNU 候选](docs/progress/2026-11-07-tsens-readonly.md)与主机/内核构建已完成，设备结果单独登记；BASE-01 完整主机候选保留，未安装。POWER-02 有[分阶段恢复契约](docs/plan/2026-11-07-power-resume-contract.md)，尚未实现系统睡眠。状态与下一动作统一以台账为准。
 
 11-07 后续已形成[完整锁屏、熄屏与硬件休眠方案](docs/plan/2026-11-07-lockscreen-suspend-design.md)，并按授权完成[首批实现](docs/progress/2026-11-07-power-first-implementation.md)：bring-up隔离UI仅为未安装候选；电源事务模型、板级清单和默认关闭的PSCI/display请求观察已主机验证，g397仅查询审计及正常返回通过。真实显示掉电、系统睡眠和恢复尚未实现验收；后续接续以POWER-02台账为准。

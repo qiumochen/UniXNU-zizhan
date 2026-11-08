@@ -7,6 +7,7 @@
 本仓库从 Nothing Phone (2) 的 [UniXNU-pong](https://github.com/Chengdong-Yu/UniXNU-pong) 派生，保留了它的完整提交历史。两台手机都是 SM8475，所以 SoC 层、PongPlatform24 组件和大部分驱动直接沿用；zizhan 的改动在 pong `64ddf28` 之后的提交里。
 
 - 固件：[uefi-zizhan](https://github.com/qiumochen/uefi-zizhan)（uefi-pong 加 `Platforms/Xiaomi/zizhanPkg`）
+- 面向用户：[功能适配清单](docs/FEATURES.zh.md)（只看哪些能用、有哪些限制、哪些尚未确认）
 - 结构化移植记录：[porting.toml](porting.toml)
 - 开发交接与 Mac 配置：[CLAUDE.md](CLAUDE.md)（含最新 GPU WIP 与待验证项）
 - 开发记录：[docs/progress/](docs/progress/)（按日期，含每一轮的配置、结果和根因）

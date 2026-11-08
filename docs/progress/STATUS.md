@@ -1,10 +1,19 @@
 # 当前进度与接续入口
 
-更新日期：2026-11-07（UTC+8）。这是持续维护的当前任务台账；历史实验仍保留在日期文档。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机路径、安装状态及进程交接见仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
+更新日期：2026-11-08（UTC+8）。这是持续维护的当前任务台账；历史实验仍保留在日期文档。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机路径、安装状态及进程交接见仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
+
+## 11-08 主线重排（本条优先于下方全部 11-07 段）
+
+11-07 全天 POWER-02 产出了诊断仪器和只读审计，但**没有任何用户可感知的功能交付**，首次面板 off/on 一次未执行。11-08 起按“最大结果、最小 MVP”重排：
+
+- **主线 = APP-01 日用内容**。首个交付是 v5 候选一轮：`panel-pool 128 MiB`（3 buffers / 5 canvas slots）下的天气可见内容。验收四条：新鲜 klog 出现 128 MiB pool 与 5/5 slots；无 `canvas slot NONE FREE`；有效 `PONG SHOT` 且非黑；Wi-Fi 64 MiB arena 与 Android 返回。第二轮同内核换 Safari，验收 HTTPS 页面、地址栏输入与滚动。
+- **POWER-02 降级为受控支线**。重新进场的条件是两条具体证据同时存在：启动日志出现 `ZIZHAN_DSI_DMA: buffer ready`，且 128 MiB 布局下显示域仍为 `IdentityObserved`。在此之前不再产出新诊断模型、不再开只读审计轮、不执行面板 off、锁屏或真睡眠。
+- **唯一设备主实验**同时只能有一轮；每轮结束当场写记录，未记录候选视为不存在（11-08 00:31–00:44 的 v3/v5 即因此在本机停留 16 小时无人接续）。
+- 工作树积压（15 修改 + 24 未跟踪）按“运行时代码 / 文档”两批提交，不再以“保留并发改动”为由长期不提交。
 
 ## 当前开发方向与验收安排
 
-11-06 用户最新要求：面向日用重新规划，人工验收先积累。本安排取代白天“人工验收留今晚”和优先继续 UX-01 的接续顺序；既有实验及结论不变。阶段设计见[日用路线](../plan/2026-11-06-daily-use-roadmap.md)。
+11-06 用户要求：面向日用重新规划，人工验收先积累。阶段设计见[日用路线](../plan/2026-11-06-daily-use-roadmap.md)。下方 11-07 各条保留当时授权与记录，不再构成接续顺序。
 
 - 先补内屏 Wi-Fi 日用基础：温控、启动/数据可靠性、锁屏恢复/待机、网络与常用应用；随后音频及折叠，最终蜂窝与相机。完整手机资格仍需通话、短信等独立闭环。
 - 11-07 用户再次授权按优先级继续无人值守。THERM-01 已完成默认关闭、有界一次的 XNU TSENS 观察及 g396 两组32路有效寄存器读数；下一步为有界多时点/新鲜度语义及真实热策略调查，仍无温控。POWER-02 已有分阶段恢复契约，BASE-01 完整主机候选保留。热负载、真睡眠、出声或折叠仍按各自前置和集中验收安排推进。UX-01 保留调查进度，优先级为 P2。
@@ -15,6 +24,8 @@
 - POWER-01 聚焦电池与原生管理状态；原任务中的真正睡眠/唤醒拆为 POWER-02，保留既有调查和未通过结论。新增任务均为规划项，不能视为已有实现。
 - 11-07 用户新增待办：后续先做一轮系统应用实际情况检查，再根据检查结果决定应用适配顺序，归入 APP-01。逐应用区分启动、内容显示、核心操作与联网能力；系统 HTTPS 通过不能替代 Safari 网页验收。此次仅登记待办，执行时间待安排。
 - 11-07 用户新增待办 PERSIST-01：后续探索脱离电脑的持久启动方案，以及重启/异常退出后的数据保存可靠性。当前系统镜像已落盘，但仍用临时 `fastboot boot`，不能把镜像存在等同于独立开机能力。此次只登记，保留现有开发主线和不刷写启动分区的约束。
+- 11-07 APP-01/PERSIST-01 首轮无人值守检查已完成[记录](2026-11-07-app-persistence.md)：天气 `com.apple.weather` 前台会话有多次 resumed 证据，但本轮无有效截图，且出现一次 canvas slot/IOSurface 内存不足；天气内容、核心操作和联网仍未通过，Safari/设置/时钟/照片本轮未完成。Android A/B 启动输入、userdata 内 pinned root、OS/SystemOS/Data 窗口和回退边界已只读核对；持久化探索方案形成，独立开机和 Data 跨重启可靠性未验证。
+- 11-08 00:31–00:44 已存在两个未上机候选 `out/app01-panelpool-128-device-v3` / `-v5`（pool 96→128 MiB；loader 已重建且不含撤回的 `pong-dsi-command` 字符串）。v5 身份：image `94d04d5f…a4d7`、loader `1f51ed2b…b8e2`、kernel `66553850…08e3`、ADT `c11cebc3…772f`；`stage/EFI/UniXNU/pong-boot-manifest.json` 仍为 APP-01 天气参数（`pong_shot=100`、`tsa=1118`）。未启动、未记录；启动前须复核 loader 确为隔离构建（本文档记录 `dc607a1d…dbb` 为 11-07 的干净 loader，v5 使用的是 11-08 重新构建的 EFI，二者不可混用）、Wi-Fi arena 预算与回退。见[本轮记录](2026-11-08-panelpool-128.md)。
 - 11-07 用户要求对照 UniXNU 设备目录寻找类似设备，先形成一轮待验证方向。已完成[首轮参考调查](../research/2026-11-07-device-reference-directions.md)，登记 REF-01；R1–R10 分别接温控、显示恢复、共享供电/IRQ、CPU idle、持久启动/Data、启动分配、折叠、音频、应用/GPU及蓝牙/蜂窝。先借 SM-T733 的热策略失效语义、Pong 的显示资源生命周期、Sheng 的共享 owner 做主机差异审计；POWER-02 主实验与现有验收前置保持。方案尚未移植/设备验证，目录及继承记录不能作为本机新资格。
 
 ## 已验证基线
@@ -39,27 +50,27 @@
 
 | ID | 优先级 / 状态 | 范围与验收条件 | 下一步 / 证据 |
 | --- | --- | --- | --- |
+| APP-01 | P1 / IN_PROGRESS | 主线。逐应用记录启动、内容显示、核心操作、联网、输入及前后台表现；至少覆盖 Safari、设置、时钟、天气、照片，产出状态表并据此定序。 | MVP-1：v5 候选（panel pool 128 MiB / 5 slots）一轮，验收 128 MiB pool 日志、无 `canvas slot NONE FREE`、有效非黑天气截图、Wi-Fi arena 与 Android 返回。MVP-2：同内核换 Safari 目标，验收真实 HTTPS 页面、地址栏输入、滚动。随后 Settings/Photos 可见内容。首轮天气只有 resumed 证据，无截图且出现 IOSurface 内存不足，不得当作内容 PASS。见[首轮记录](2026-11-07-app-persistence.md)。 |
+| POWER-02 | P3 / BLOCKED | 完整原生锁屏/自动与手动熄屏、按后台任务进入真实低功耗并可靠恢复；静默、联网、后台任务与功耗分场景验收。支线 MVP 仍为原生显示请求→内屏真实 off→wake→可见首帧。 | 11-08 起降级为受控支线，不再产出新诊断模型或只读审计轮。解阻条件（须同时满足）：启动日志出现 `ZIZHAN_DSI_DMA: buffer ready`；128 MiB 布局下显示域仍 `IdentityObserved`。在此之前不执行面板 off/锁屏/睡眠。既有结果保留：v5 只读快照 PASS（SMR3=0x84022800、S2CR3=3、CB3 SCTLR=0xe0、FSR=0x400、11 reads 0 write）；FIFO-v2 正常 8 包 461µs、CP1836/1836；memory-v2 因 ADT `pong-dsi-command` 字段早期 FAIL 且该字段已撤回；长包 DMA 需 IOVA 而非物理地址。见[本批记录](2026-11-07-power-unattended.md)。 |
 | THERM-01 | P1 / IN_PROGRESS | 本机温度传感器、真实热策略与 CPU 限频/恢复；输入来源、单位、失效处理和负载响应可核对。 | g395温度SKIP保留；按v2 VALID纠正后，g396两组2.8/32路有效 last-temperature 读取PASS（35.5–46.9°C），34项host及完整/精简内核通过。原supervisor因Android未完成记FAIL；46.224秒后有界复核boot_completed=1，返回单独PASS，未改旧记录。下一步有界多时点/更新与过期语义、映射交叉核对及vendor热策略输入；无温控或限频资格。见[本轮记录](2026-11-07-tsens-readonly.md)。 |
-| POWER-02 | P1 / IN_PROGRESS | 完整原生锁屏/自动与手动熄屏、后台硬件按任务进入真实低功耗，CPU/timer/GIC与UFS/GPU/DSI/WLAN/ADSP正常退出/恢复；静默、联网和后台任务分场景验收。 | 首批实现：bring-up偏好所有权隔离、有限电源事务模型、PSCI/registry只读审计、live FDT power inputs、display RequestPowerChange观察器均已主机验证。g397 query-only设备轮次PASS：PSCI1.1/SMC、CPU_SUSPEND raw3、SYSTEM_SUSPEND/SET_SUSPEND_MODE raw0、root domain/11 owners，1次显示请求观察，0电源/模式/RTC写入；正常返回和fresh klog通过。它不是锁屏/息屏/硬件休眠PASS。下一步收口日志身份，再设计真实display off事务；独立返回未知，首次真睡眠人工前置不变。见[首批记录](2026-11-07-power-first-implementation.md)。 |
-| BASE-01 | P1 / HOST_VERIFIED | 以现有 Darwin24/UFS 链路得到可追踪、可重建和可回退的本地日用候选；源码、OS/UI/helper、服务策略和 manifest 对齐。 | `os370-full-candidate-v3` 已按显式 OS370 服务存在性策略完整 prepare/apply/finish；source/input/prepared image/policy hash 固定，APFS readback、Data roundtrip、24项服务/runtime审计通过。完整镜像只在仓库外；未安装/启动，OS370 仍是设备基线。验收暂存；设备批次执行前重新preflight并登记变量/回退。默认策略审计仍指出 fairplayd 漂移。见[本批记录](2026-11-06-daily-use-development.md)。 |
+| BASE-01 | P2 / HOST_VERIFIED | 以现有 Darwin24/UFS 链路得到可追踪、可重建和可回退的本地日用候选；源码、OS/UI/helper、服务策略和 manifest 对齐。 | `os370-full-candidate-v3` 已按显式 OS370 服务存在性策略完整 prepare/apply/finish；source/input/prepared image/policy hash 固定，APFS readback、Data roundtrip、24项服务/runtime审计通过。完整镜像只在仓库外；未安装/启动，OS370 仍是设备基线。验收暂存；设备批次执行前重新preflight并登记变量/回退。默认策略审计仍指出 fairplayd 漂移。见[本批记录](2026-11-06-daily-use-development.md)。 |
+| USB-01 | P1 / DEVICE_VERIFIED | 后部 USB-A 有界稳定枚举、目标检查、临时启动、autoreset、ramoops 取回及 Android 返回。 | g390 单轮通过，包含两次等待期记录端口 VBUS 恢复；只证明此条件的一次完整往返，不代表长期失败率或 USB-C。见[g390与下一项设计](2026-11-06-daytime-input-power.md)。 |
 | UX-01 | P2 / IN_PROGRESS | 降低主屏静止首帧延迟；保留相同输入和可见内容控制，报告有效样本数、median/p90，确认改善且无内容/稳定性退步。历史控制 17 次，79.76/87.87 ms；11-06 当前 OS 控制 16 次，73.608/86.020 ms，不当作优化收益。 | g379 已取得三个真正重叠 GPU trace 的静止样本，主要延迟在提交前；下一步用有界 CA commit/编码观察细分前端，候选仍需至少 15 样本、median 改善 ≥10%、p90 不退步及独立画面验收。保留调查、排在日用基础之后；见[本轮记录](2026-11-06-overnight.md)。 |
 | GPU-01 | P1 / DEVICE_VERIFIED | 罕见冷启动画布失败的持续回归与复现；每轮完整画面、映射结果、真实 CP 完成及退出状态可核对。多轮成功仅登记覆盖，故障根因另行验收。 | g380/g381 两轮有界正常启动覆盖完成，CP1843/1843、1777/1777，各四张完整主屏采样、HTTPS及返回；02:02 原始日志/PNG逐像素和macOS独立解码推翻此前残图误判，驱动诊断候选已撤回。仅本轮覆盖通过，g342 根因未解决；见[本轮记录](2026-11-06-overnight.md)。 |
 | BOOT-01 | P1 / IN_PROGRESS | 诊断真实共享缓存签名存储分配失败；保留错误处理，在相同资源输入下取得可解释的分配与完整启动证据。 | 失败路径 kernel_map size/free/largest 诊断已实现，精简CI和完整默认主机内核构建通过。g393完整profile启动/返回通过，但 fresh klog 未复现CS4K失败，也没有 map summary；根因仍未知，不重复同条件。见[后续结果](2026-11-06-boot-release-followup.md)。 |
-| PERSIST-01 | P2 / TODO | 探索 iPadOS 持久化方案，分别覆盖脱离电脑的冷启动/重启进入、Android 共存与故障恢复，以及 Data 在正常重启和异常退出后的完整性。探索阶段验收为形成基于本机启动链与存储约束的方案比较、前置条件、风险、回退及分阶段验证计划；实际能力须另有设备证据。 | 11-07 用户要求记录、后续探索，执行时间待安排。先只读梳理现有 UEFI/DarwinBoot24 启动链、启动分区/槽位与恢复入口、pinned root 定位和 Data 写回/卸载机制，再比较可行路径；数据场景与 APP-01 协同，候选身份与 BASE-01 对齐。当前只允许临时 `fastboot boot`，本待办不授权刷写启动分区；若方案涉及改变该约束，先形成可审查设计。尚未开始调查、实现或设备试验。 |
-| REF-01 | P2 / TODO | 验证首轮设备参考 R1–R10 的可迁移性并筛选最小候选；每个方向记录固定上游版本、本机已有/新增/不适用部分、假设、前置、单变量验收及回退。实现与设备结果归对应子系统，不从外部记录提升本机资格。 | [首轮方案与来源](../research/2026-11-07-device-reference-directions.md)已形成，迁移验证未开始。先 R1→THERM-01 的读数新鲜度/失效回放，R2→POWER-02 的显示源退役/首帧，R3→POWER-02/NET-02 的共享 owner/IRQ审计；R4 CPU idle、R5 Data/独立启动、R6 分配归因、R7 折叠、R8 音频、R9 应用/GPU、R10 蓝牙/蜂窝按各自主任务与前置进入批次。已有 Pong 派生代码先查差异，不重复移植；没有成熟双屏/SM8475深睡样板的缺口保留，当前 POWER-02 主实验不变。 |
+| PERSIST-01 | P2 / HOST_VERIFIED | 探索 iPadOS 持久化方案，分别覆盖脱离电脑的冷启动/重启进入、Android 共存与故障恢复，以及 Data 在正常重启和异常退出后的完整性。探索阶段验收为形成基于本机启动链与存储约束的方案比较、前置条件、风险、回退及分阶段验证计划；实际能力须另有设备证据。 | 已完成 Android A/B 启动输入、userdata/pinned root/klog extent、OS/SystemOS/Data layout 和当前临时 `fastboot boot` 边界的只读核对，形成方案比较与分阶段验证。当前不刷写启动分区；下一步先做主机 boot image 设计审计，再用临时启动做 Data sentinel 正常/异常返回测试。独立开机、Android 共存和 Data 跨重启可靠性未验证。见[本批记录](2026-11-07-app-persistence.md)。 |
 | NET-01 | P2 / IN_PROGRESS | 不同 SSID/子网切换、自然 T1、长时运行分别验收；旧 session/路由/DNS 清理，新 DHCP 租约和 HTTPS 都有证据。 | g387同网有界窗口（启用限频原生HTTPS witness）28次成功，跨度27.89分钟、末端≤64.3秒、0见证失败/链路丢失、三张晚期图通过；不是无探针功耗或长期资格。helper-off对照未上机：g388/g389均传输前NO_FASTBOOT；已恢复OS370。自然T1、不同SSID/子网及helper-off行为仍待验。见[本轮记录](2026-11-06-overnight.md)。 |
-| NET-02 | P3 / TODO | 真实 GIC MSI 接收、企业认证、SAE、6 GHz 各自独立资格。 | IRQ驱动收包/真实wake/WoW子能力先作为POWER-02的P1联网深睡前置推进；认证/SAE/6GHz仍按本项后续扩展。先审查硬件/固件及环境，不能从WPA2或polling成功推断IRQ与睡眠支持。 |
-| DISP-01 | P2 / TODO | 自动环境光、光度校准、睡眠恢复和运行中刷新率切换分别验收。 | 先明确电源/传感器前置条件；当前仅承认手动亮度和两种刷新率正常启动。 |
-| FOLD-01 | P2 / BLOCKED | 外屏独立 60 Hz 测试图、真实帧推进及熄屏恢复；随后外触控、手动切屏、Hall 自动切屏和失败恢复。 | 11-06 主机核对确认 DSI1、SE19 外触控及 Hall GPIO62；真机前置为人工固定姿态、采集交接和观察出光/触控，集中验收尚未安排；继续独立适配准备。见[调查](2026-11-06-fold-power-audit.md)。 |
-| AUDIO-01 | P2 / TODO | 本机 CS35L41 音频链；板级输入、启动、播放/停止/静音及恢复分段验收，麦克风输入另建链。 | 复核 live DT；先准备隔离只读身份探针，再核对固件/调音及 ADSP 路由，不能复制 Pong TFA9873 常量。见[音频审查](2026-11-03-audio-board-audit.md)。 |
-| MODEM-01 | P3 / TODO | 蜂窝数据与完整手机能力；固件/SIM/注册/数据、通话、短信和待机恢复分别验收，当前未实现。 | 先做本机资源/驱动链调查及独立计划；通话依赖音频及电源恢复，不从 Wi-Fi 或注册成功推断。 |
 | POWER-01 | P2 / IN_PROGRESS | 电池/充电真实状态、原生管理状态及 ADSP 开销；健康页修复独立判定，睡眠/唤醒已拆为 POWER-02。 | g391 ADSP 阶段1–13、电池发布、Settings 健康页诊断完成；`getBatteryHealthServiceState=-1`、`getManagementState=0`、spinner仍在，健康状态未修复。先追真实服务输入；人工页面/充电器核对留集中验收。见[本轮设计](2026-11-06-daytime-input-power.md)。 |
-| GPU-02 | P3 / TODO | IOSurfaceSharedEvent listener、动态壁纸及 ASTC/多任务/Photos 等更广应用覆盖。 | 单场景截图与真实完成验收；保留动态壁纸当前限制及 fairplayd 安装/全量重建差异。见 [porting.toml](../../porting.toml)。 |
 | IO-01 | P2 / IN_PROGRESS | 本轮选定音量实体键，验收真实 PMIC→HID/通知→原生音量动作、短按/长按/连按与释放。蓝牙、其他传感器另行资格。 | g391 已确认内核按键识别、HID 服务和 `SBVolumeControl` 路由 ready；没有物理按键事件，短按/长按/连按/锁屏留集中验收。见[本轮结果](2026-11-06-daytime-input-power.md)。 |
-| APP-01 | P2 / TODO | 先完成一轮系统应用现状检查，再决定应用适配顺序。盘点当前镜像中的系统应用，至少覆盖 Safari、设置、时钟、天气、照片；逐项记录启动、内容显示、核心操作、联网、输入及前后台表现，数据持久性和锁屏恢复按前置条件单列。产出应用现状表、故障证据及按日用影响与依赖排序的适配建议。 | 11-07 用户要求登记、后续执行：先固定镜像/内核/UI/helper身份、应用/内容清单及日志入口；重点验证 Safari 启动、真实 HTTPS 网页加载、地址输入、滚动与跳转，不用网络探针成功代替。各场景记 PASS/FAIL/SKIP，保留未测项和前置；检查后再确定适配先后，真实 GPU 阻塞进入 GPU-02。既有截图仅作历史证据，见[日用路线](../plan/2026-11-06-daily-use-roadmap.md)。 |
+| AUDIO-01 | P2 / TODO | 本机 CS35L41 音频链；板级输入、启动、播放/停止/静音及恢复分段验收，麦克风输入另建链。 | 复核 live DT；先准备隔离只读身份探针，再核对固件/调音及 ADSP 路由，不能复制 Pong TFA9873 常量。见[音频审查](2026-11-03-audio-board-audit.md)。 |
 | BT-01 | P3 / TODO | 本机蓝牙传输/固件与原生栈，发现/配对、HID、音频分别建链及验收。 | 先做只读资源和接口盘点，再选择有界探针；音频与待机恢复分别列依赖。当前无本轮蓝牙资格。 |
 | CAM-01 | P3 / TODO | 本机相机；传感器/ISP/固件、单摄预览、拍照与 Photos 保存，随后录像和其他镜头。 | 先盘点板级输入、缓冲及原生接口，选择最小闭环；新规划项，无本轮实现或设备结果。 |
-| USB-01 | P1 / DEVICE_VERIFIED | 后部 USB-A 有界稳定枚举、目标检查、临时启动、autoreset、ramoops 取回及 Android 返回。 | g390 单轮通过，包含两次等待期记录端口 VBUS 恢复；只证明此条件的一次完整往返，不代表长期失败率或 USB-C。见[g390与下一项设计](2026-11-06-daytime-input-power.md)。 |
+| DISP-01 | P2 / TODO | 自动环境光、光度校准、睡眠恢复和运行中刷新率切换分别验收。 | 先明确电源/传感器前置条件；当前仅承认手动亮度和两种刷新率正常启动。 |
+| FOLD-01 | P2 / BLOCKED | 外屏独立 60 Hz 测试图、真实帧推进及熄屏恢复；随后外触控、手动切屏、Hall 自动切屏和失败恢复。 | 11-06 主机核对确认 DSI1、SE19 外触控及 Hall GPIO62；真机前置为人工固定姿态、采集交接和观察出光/触控，集中验收尚未安排；继续独立适配准备。见[调查](2026-11-06-fold-power-audit.md)。 |
+| GPU-02 | P3 / TODO | IOSurfaceSharedEvent listener、动态壁纸及 ASTC/多任务/Photos 等更广应用覆盖。 | 单场景截图与真实完成验收；保留动态壁纸当前限制及 fairplayd 安装/全量重建差异。见 [porting.toml](../../porting.toml)。 |
+| MODEM-01 | P3 / TODO | 蜂窝数据与完整手机能力；固件/SIM/注册/数据、通话、短信和待机恢复分别验收，当前未实现。 | 先做本机资源/驱动链调查及独立计划；通话依赖音频及电源恢复，不从 Wi-Fi 或注册成功推断。 |
+| NET-02 | P3 / TODO | 真实 GIC MSI 接收、企业认证、SAE、6 GHz 各自独立资格。 | IRQ驱动收包/真实wake/WoW子能力先作为POWER-02的P1联网深睡前置推进；认证/SAE/6GHz仍按本项后续扩展。先审查硬件/固件及环境，不能从WPA2或polling成功推断IRQ与睡眠支持。 |
+| REF-01 | P2 / TODO | 验证首轮设备参考 R1–R10 的可迁移性并筛选最小候选；每个方向记录固定上游版本、本机已有/新增/不适用部分、假设、前置、单变量验收及回退。实现与设备结果归对应子系统，不从外部记录提升本机资格。 | [首轮方案与来源](../research/2026-11-07-device-reference-directions.md)已形成，迁移验证未开始。先 R1→THERM-01 的读数新鲜度/失效回放，R2→POWER-02 的显示源退役/首帧，R3→POWER-02/NET-02 的共享 owner/IRQ审计；R4 CPU idle、R5 Data/独立启动、R6 分配归因、R7 折叠、R8 音频、R9 应用/GPU、R10 蓝牙/蜂窝按各自主任务与前置进入批次。已有 Pong 派生代码先查差异，不重复移植；没有成熟双屏/SM8475深睡样板的缺口保留，当前 POWER-02 主实验不变。 |
 | RELEASE-01 | P3 / BLOCKED | 接入上游统一 package 模板与 action，`--check` 和完整本地构建通过。 | 已加入上游原样 `scripts/package.sh` 和 22H374→GPU defconfig 映射。当前工作区 UniXNU 缺少 `release` 命令；含该命令的审查 checkout 不含 22H374 profile，且通用 build/pack 步骤不调用 Darwin24/UFS 专用 kernel/prelink/boot 入口。外部前置为上游支持 Darwin24 自定义 recipe，随后继续接入 UEFI/local inputs、workflow 并完成真实构建；现有链可复现性由 BASE-01 独立推进。见[后续准备](2026-11-06-boot-release-followup.md)。 |
 
 既有 `IN_PROGRESS` 表示保留中的开发/调查，不表示手机正在运行试验，也不代表新主线已开工。只保留一项设备主实验；下一次设备试验前记录实验设计和验收阈值，尚未启动的轮次不写 `RUNNING`。
@@ -77,7 +88,7 @@
 | FOLD-01 / POWER-02 / AUDIO-01 | 尚有实现或前置缺口，不能直接联合验收 | 分别准备显示交接、恢复/独立返回、板级输入/音频链；首次出光/折叠、真睡眠和实际声音需人在场。 |
 | THERM-01 | 默认关闭的一次 XNU 寄存器观察已通过 g396，热控制未实现 | 待多时点读数更新/过期、映射交叉核对与真实热策略；Android 4项其他温区 ERROR 保留。仅一次VALID读数，不代表校准、新鲜度、持续监控或热控制验收。 |
 | BASE-01 | 完整本地主机候选已验证，未安装/启动 | 设备功能验收暂存；按集中批次冻结候选/hash/OS370 回退和步骤。原默认策略与显式候选差异继续可见。 |
-| APP-01 | 系统应用现状检查待安排，尚未执行 | 先按当前镜像逐应用检查并形成现状表，包含 Safari 实际联网浏览；列出故障、未测项和依赖后决定应用适配顺序。锁屏恢复、声音等缺少前置的场景单列 SKIP，不阻止独立基础检查。 |
+| APP-01 | 已完成首轮设备检查，尚未完成应用资格 | 天气前台会话路径有 PASS 证据，但截图缺失且出现 IOSurface/canvas 内存不足；天气内容、核心操作、联网仍待验。Safari、设置、时钟、照片按表中范围补测；Safari 必须真实加载 HTTPS 网页并完成地址输入、滚动和跳转。锁屏恢复、声音等缺少前置的场景单列 SKIP。 |
 | UX-01 | 既有调查阶段，未新增可验候选 | 产出后登记身份、主机验证和批次依赖，再做同候选联合日用验收。 |
 
 ## 已完成项目索引

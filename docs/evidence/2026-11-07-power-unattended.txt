@@ -1,0 +1,69 @@
+POWER-02 unattended host/device evidence, 2026-11-07
+
+Scope
+- Temporary fastboot boot only; no partition flash, no OS install, no RTC alarm write, no PSCI CPU_SUSPEND/SYSTEM_SUSPEND call, no display power transition.
+- Source/runtime candidate contained the POWER-02 CPU target contract check, opt-in ADSP event wait, and offline L18 command preflight.
+- Device boot argument added only `zizhan_adsp_events=1`; ADSP remained `pong_adsp=2` for its existing firmware/battery path.
+
+Host PASS
+- Synthetic ADSP wait replay: five event-arrival boundaries, timeout/spurious handling, and event/retry policy under ASan/UBSan.
+- Synthetic panel program replay: all packet types, payload lengths 1..252, FIFO 64-byte boundary, malformed tail, complete off/resume preflight, uncertainty, deadline, and mandatory post-command waits under ASan/UBSan.
+- Live-DT offline panel inventory: L18 timing@0 and timing@1 each contain 7 off packets and 55 on packets. Off waits total 130 ms; on waits total 120 ms. One 90-byte on payload requires a DMA-capable path because the vendor FIFO store is 64 bytes.
+- Daily-use host suite: 13 test groups PASS.
+- Reduced CI kernel: KERNEL_DONE.
+- Full default zizhan GPU/Wi-Fi kernel: KERNEL_DONE.
+- REJECTED early long-DMA candidate: host compilation alone did not establish the DSI address domain. Vendor source uses an aspace IOVA, so the direct-physical implementation was removed before any long-packet device call. Current transport remains FIFO-only until DSI stream/context/mapping ownership is established.
+- Display owner host replay: pending/in-flight frames block off, stale generations are rejected, uncertain hardware completion quarantines the state, and resume requires a confirmed visible first frame.
+
+Device PASS
+- Preflight: Android/product/temperature/backup inventory/root and klog extents/manifest/OS/UI/helper/rear USB-A all PASS; temperature 25.1 C at entry.
+- Temporary boot: image transfer and boot PASS; command line 921 bytes.
+- Fresh klog: 1,337,747 bytes, deadline return, no panic; Android return PASS with product `zizhan` and `boot_completed=1`.
+- ADSP log: `ZIZHAN_ADSP_PM: RUNNING idle-wait=event`; IPCC/GLINK events were observed, including event waits with bits `0x2`, `0x10`, and `0x12`; one pending-send wait used the bounded 1000 ms retry. ADSP reached stage 13.
+- CPU log: all 8 CPUs registered and first boot completed.
+
+Not qualified by this evidence
+- Native lockscreen or automatic/manual screen off.
+- Panel/DPU/DSI/PHY/clock power transition or first-frame restore.
+- GPU, UFS, WLAN, touch, PMIC/RTC/PDC or shared-domain runtime PM.
+- CPU deep idle, shared rail/L3/LLCC residency, system suspend, physical wake, network wake, or power consumption.
+- ADSP suspend/resume or long-term battery/power qualification. The event wait is opt-in and remains a candidate until its error, firmware reset, and battery-update behavior are separately exercised.
+
+Continuation host scope
+- Ordered 0021 patch: actual producer/take/software-finish blocks replayed for 10,000 frames with concurrent queueing. Counts match; software return never establishes visibility.
+- Production FIFO executor replay: packet type preservation, stale DONE clearing, DONE plus DMA idle, busy/error/timeout/frozen-clock bounds and register restoration. Long resume packets are unsupported before any command write.
+- New owner/transport kernel configuration and device results are recorded separately after the candidate is frozen; the earlier ADSP trial predates these changes.
+
+Owner-v2 ordinary-device results (separate from initial ADSP run)
+- Frozen source base 087416a4eb083032b2a4fbb43617f76a11d41c36 plus WIP; source manifest SHA256 5e195c419ffb22b7da102a6af9729bd1d7d6117688242c904e52a53679baf0f8.
+- Stage kernel SHA256 40d35b3cb44d73c929b9c5b1e013f6d469bbd91441fd60ec05202d4c10645e57 for all three runs.
+- owner=1 control: software accounting PASS, actual CP1734/1734, 1,434,704-byte deadline log, two complete images and Android return PASS; Wi-Fi arena allocation FAIL retained. Overall mixed/PARTIAL, no joint network PASS.
+- owner=0 control: 1,889,364-byte deadline log, CP2192/2192, Wi-Fi64MiB allocation/firmware/station/scan milestones, two complete images and Android return PASS. One sample does not prove allocation failure cause or network long stability.
+- owner=0 plus new FIFO: eight known timing packets complete, result0 retain0, 461us; INTF frame counter about120.1/s (TE reported0 is not an IRQ/wake qualification). Actual CP1836/1836, 1,666,175-byte deadline log, Wi-Fi allocation/milestones, two complete images and Android return PASS. No panel sleep/off/on command.
+- All six images raw pixels/PNG copies match; nonblack samples 3489/3489,3488/3487,3487/3487. Static widget/dock pixels remain present. Intermittent partial image-tool rendering is not a file-content failure.
+- First owner-off supervisor attempt refused stale preflight before device action; evidence preserved. Fresh preflight attempt later ran successfully; no overwritten FAIL-to-PASS record.
+- Host-only post-v2 changes: permanent retained-lease quarantine on uncertain DMA, offline display address-domain inventory. These are not covered by the above hardware error-path evidence.
+
+Final host-only v3 closure
+- Source443-file manifest SHA256 9aeeb60bc23cc10c938907996d3635f327bece259a7dbf65f5ba9ceba28b7c7e; unprelinked default kernel SHA256 b0bf4b04cc018c75c0869d83bdf5ee47a73070d6c893324fc906fb41431e05b0.
+- Reduced/default KERNEL_DONE; daily-use14groups79tests and existing display regressions PASS; record14areas/dirty29paths, links, syntax and public private-path review PASS.
+- v3 has not booted. Existing v2 device results do not qualify the v3 retained-busy error branch or any panel/CPU/SoC power transition.
+
+v5 fixed display-domain read-only device result
+- Frozen v5 source manifest SHA256 7177fe6c5963f83dfbd2f52b005371a2a51f63680d2a306c17880ebc3fe68561; stage kernel `ee5e8e1d9472b17f712067af98375b811d88e83b08ac6d8289c19f81e0040c74`.
+- Read-only observer PASS: 11 bounded reads, 0 writes; IDR0 0x4c017e71, IDR1 0x6000004b, SMR3 0x84022800, S2CR3 0x3, CBA2R3 1, CB3 SCTLR 0xe0, FSR 0x400. FSR 0x400 is retained as nonfatal under the existing fatal mask 0xc00001fe.
+- Timing FIFO 8 packets PASS, CP1803/1803, Wi-Fi arena/firmware/station/scan milestones, two complete raw captures, Android return PASS. No SMMU/RTC/power writes, long DMA, panel off or suspend.
+- This is a stable address-domain snapshot, not a durable IOVA lease or long-DMA qualification.
+
+POWER-02 MVP increment: low-address DSI command buffer (host implementation)
+- DarwinBoot24 reserves one dedicated page below 4 GiB and fills the optional `/chosen/pong-dsi-command` lease; no fixed PA, panel-pool reuse, SMMU write, or IOVA claim.
+- Long DSI commands require a fresh fixed display group/context read with `IdentityObserved` immediately before each packet. DMA succeeds only on DONE plus idle; a still-busy timeout retains the DSI lease. The original controller offset/length/FIFO/control registers are restored only after idle.
+- Host PASS: DSI command DMA bounds, 90-byte encoding, cache-flush target, identity/address/capacity gates, completion, busy quarantine and register restoration; panel-program and fixed-domain observer regressions pass.
+- Build PASS: DarwinBoot24; reduced CI kernel and complete default GPU/Wi-Fi kernel on the final source snapshot. These are host build results, not device DMA qualification.
+
+POWER-02 `memory-v2` first loader-handoff device attempt
+- Scope: ordinary-display startup only, rear USB-A, temporary `fastboot boot`; owner=0, existing 120-Hz timing transport opt-in, autoreset/power-key return present. No display off/on, SYSTEM_SUSPEND, SMMU/RTC write, or OS partition write.
+- Frozen candidate image SHA256 `c438f36cdee6cf30af1a2bebda83c814ad3692dc15b0773dd3cad32c5cbca150`; stage kernel SHA256 `031f41cb15164ee9c1cc618d602b1f2209309688142566f58fb2b8474760a5c9`. Loader was rebuilt locally for this candidate; exact private input identities are retained in the local run manifest.
+- Transfer/dispatch succeeded; fastboot returned after about 59 seconds; ramoops dump returned Android and `boot_completed=1`. Fresh `XNULOG.TXT` was only 154 bytes: empty CONSOLE descriptor (`start=8`, `size=0x2bde`) and empty DIAG. No XNU text, screenshots, DSI DMA buffer-ready marker, or timing-command completion. **Device result FAIL (early boot failure, cause unknown), not PASS.** The supervisor/cycle transport result alone had returned zero; feature review explicitly downgrades this attempt to FAIL.
+- The five rotating UEFI log slots include an EBS marker around 11.5 seconds but no unambiguous `DARWINBOOT24` or `BOOTFAIL` record attributable to this attempt. Their rotation may include adjacent boots; loader invocation is therefore unknown. The candidate did not reach evidence that the new command page was handed to XNU or mapped. Preserve the source, image and logs; do not repeat unchanged. Next action is local early-boot localization from the exact loader/ADT/image and retained ramoops/boot-failure evidence, then a corrected ordinary-display boot before any panel power transition.
+- Remaining MVP gap: native Off/On request ABI and completion, serialized panel/DPU/DSI/PHY/clock transaction, real panel off, wake and visible first-frame proof. No POWER-02 user-facing MVP or low-power qualification yet.

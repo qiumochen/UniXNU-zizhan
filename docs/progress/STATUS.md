@@ -4,6 +4,8 @@
 
 ## 11-08 主线重排（本条优先于下方全部 11-07 段）
 
+- **22:34 无人值守恢复 RUNNING（优先）**：用户重启后v23r1试验改为Android延迟7秒重启、主机先退出adb，仍NO_FASTBOOT、未发镜像。端口仅供电无连接，一次限定手机端口的hub PORT_RESET后仍未枚举。v23r2现由单次launchd被动等待稳定/目标核对通过的fastboot，15分钟等待、30分钟总期限；恢复后直接临时boot同候选、自动收日志，不再重复Android切换或VBUS。Paseo有界心跳负责本线程接续审查；超时停止，不把等待记通过。实际OS仍已安装v23隔离候选，OS370回退完整保留。[记录](2026-11-08-weather-authorization.md)。
+
 - **22:18 最新状态（优先）**：v22r2已抓到locationd主线程等队列、工作线程1000/1000次卡在与g212同址的MIG1203同步依赖，天气仍`--`；不能据此确诊全系统权限弹窗或GPS。隔离OS370候选仅删fairplayd.A2 job，OS-only安装及整窗读回PASS，但v23再次NO_FASTBOOT、未发镜像，因果对照SKIP。**当前手机已安装该候选、未启动；canonical文件仍OS370，不能声称已回退。** adb/fastboot不可见，无活跃设备操作。恢复连接后先核对实际状态，完成对照或OS-only回退；[详情](2026-11-08-weather-authorization.md)。
 
 - **22:11 APP-01 新设备证据**：v22r2完整采集/Android返回PASS，locationd主线程等队列，工作线程1000/1000次停在与g212逐地址相同的同步Mach栈。天气仍`--`，不是GPS或授权弹窗已确诊。下一步隔离OS370 clone仅移除反复退出的fairplayd job，保持内核/UI/Data与诊断参数，验证真实依赖阻塞；详见[诊断设计](2026-11-08-weather-authorization.md)。

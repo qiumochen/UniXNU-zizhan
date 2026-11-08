@@ -203,12 +203,12 @@ ParseKernel (CONST UINT8 *Data, UINTN Size, KERNEL *Kernel)
 }
 
 STATIC UINTN mAudioDmaOffset = MAX_UINTN;
-// zizhan panel pool: 96 MiB below 4 GiB for the DPU (32-bit SSPP addresses, display SMMU bypassed), five 17 MiB buffers
+// zizhan panel pool: 128 MiB below 4 GiB for the DPU (32-bit SSPP addresses, display SMMU bypassed), seven 17 MiB buffers
 // (2160x1916 at CoreAnimation's 8704-byte rows)
-// (up to three for the kernel's own flip buffers, the rest for backboardd's canvases, xnu patch 0011).
+// (two for the kernel's own flip buffers by default, the rest for backboardd's canvases, xnu patch 0011).
 // XNU owns no low RAM on this device (the 4 GiB window and extra banks all sit above 4 GiB), so the kernel cannot allocate it
 // later (g152i, 2026-10-31); reserved here like the audio lease and published as /chosen/pong-panel-pool {pa, bytes}.
-#define PANEL_POOL_PAGES 24576
+#define PANEL_POOL_PAGES 32768
 STATIC UINTN mPanelPoolOffset = MAX_UINTN;
 #define PONG_RAM_MAX 64
 #define PONG_RAM_WIRE_SIZE (32 + PONG_RAM_MAX * 16)

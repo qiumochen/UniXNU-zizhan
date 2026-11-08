@@ -9,6 +9,7 @@
 #include <kern/thread.h>
 #include <sys/errno.h>
 #include <pexpert/pexpert.h>
+#include "ZizhanAdspWait.h"
 extern "C" {
 kern_return_t clear_wait(thread_t, wait_result_t);
 #include "QcomGlink.h"
@@ -133,15 +134,16 @@ void rscIrq(void *) {
     wake(kEvRsc);
 }
 
-// Waits for an event up to ms milliseconds; returns the event bits (0: the deadline passed).
+// zizhan: ms=0 is an event-only wait; boot handshakes retain finite deadlines.
 uint32_t waitEvents(uint32_t ms) {
-    uint32_t bits = __atomic_exchange_n(&gPending, 0, __ATOMIC_ACQ_REL);
-    if (bits) return bits;
-    assert_wait_timeout((event_t)&gPending, THREAD_UNINT, ms, kMillisecondScale);
-    bits = __atomic_exchange_n(&gPending, 0, __ATOMIC_ACQ_REL);
-    if (bits) {clear_wait(current_thread(), THREAD_AWAKENED); return bits;}
-    thread_block(THREAD_CONTINUE_NULL);
-    return __atomic_exchange_n(&gPending, 0, __ATOMIC_ACQ_REL);
+    return zizhan_adsp::wait(ms,
+        [] { return __atomic_exchange_n(&gPending, 0, __ATOMIC_ACQ_REL); },
+        [](uint32_t timeout) {
+            if (timeout) assert_wait_timeout((event_t)&gPending, THREAD_UNINT, timeout, kMillisecondScale);
+            else assert_wait((event_t)&gPending, THREAD_UNINT);
+        },
+        [] { clear_wait(current_thread(), THREAD_AWAKENED); },
+        [] { thread_block(THREAD_CONTINUE_NULL); });
 }
 
 void ring(uint32_t client, uint32_t signal) {wr(gIpcc, QCOM_IPCC_SEND, qcom_ipcc_id(client, signal));}
@@ -580,12 +582,32 @@ void adspThread(void *, wait_result_t) {
     IOLog("PongAdsp: survey slave-kernel %d items 0x%x aoss 0x%x rsc 0x%x crash '%s'\n",native_adsp_stats[3],native_adsp_stats[4],
         native_adsp_stats[5],native_adsp_stats[6],native_adsp_text);
     if (mode < 2 || !start() || !startGlink()) return;
-    // From here on the thread only answers doorbells and client sends; with nothing pending it sleeps without a deadline, except while
-    // a send waits for an intent or FIFO room (then it looks again every second).
+    // zizhan POWER-02 candidate: IPCC is attached by start(), and client
+    // registration/sends call wake(). Keep the old polling control until the
+    // event path has device evidence for battery updates and remote failure.
+    uint32_t eventMode = 0;
+    PE_parse_boot_argn("zizhan_adsp_events", &eventMode, sizeof eventMode);
+    const bool events = eventMode == 1 && gIrq;
+    IOLog("ZIZHAN_ADSP_PM: %s idle-wait=%s pending-retry-ms=%u system-suspend=UNIMPLEMENTED\n",
+          events ? "RUNNING" : "SKIP", events ? "event" : "poll-100ms",
+          zizhan_adsp::timeout(events, true));
+    unsigned observations = 0;
     for (;;) {
         bool pending = false;
-        for (unsigned i = 0; i < gClientCount; ++i) pending |= gClients[i].count != 0;
-        service(waitEvents(100) | kEvSmp2p | kEvGlink | (pending ? kEvSend : 0));
+        IOLockLock(gClientLock);
+        const unsigned count = __atomic_load_n(&gClientCount, __ATOMIC_ACQUIRE);
+        for (unsigned i = 0; i < count; ++i) pending |= gClients[i].count != 0;
+        IOLockUnlock(gClientLock);
+        const uint32_t timeout = zizhan_adsp::timeout(events, pending);
+        const uint64_t began = events && observations < 16 ? mach_absolute_time() : 0;
+        const uint32_t bits = waitEvents(timeout);
+        if (began) {
+            uint64_t ns = 0;
+            absolutetime_to_nanoseconds(mach_absolute_time() - began, &ns);
+            IOLog("ZIZHAN_ADSP_PM: event-wait sequence=%u timeout-ms=%u elapsed-ms=%llu bits=0x%x pending=%u\n",
+                  ++observations, timeout, ns / 1000000, bits, pending ? 1u : 0u);
+        }
+        service(bits | (events ? 0u : kEvSmp2p | kEvGlink) | (pending ? kEvSend : 0));
         if(gSlave & kFatal){IOLog("PongAdsp: fatal %s\n",native_adsp_text);for(unsigned i=0;i<gClientCount;i++)if(gClients[i].client.state)gClients[i].client.state(gClients[i].context,0);return;}
     }
 }

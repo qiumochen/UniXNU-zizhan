@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[3]
 def main():
     for name in ("thermal-inventory.py", "tsens-probe.py", "xnu-patch-format.py",
                  "wait-android.py", "bringup-policy.py", "power-transaction.py",
-                 "power-query.py", "power-inventory.py", "userland-policy-audit.py",
+                 "power-query.py", "power-inventory.py", "adsp-event-wait.py",
+                 "panel-program.py", "panel-pool.py", "display-owner.py", "dsi-command.py", "dsi-domain.py", "userland-policy-audit.py",
                  "service-policy.py"):
         subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests" / name)],
                        check=True, timeout=60)

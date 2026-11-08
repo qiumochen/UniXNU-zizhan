@@ -1,0 +1,103 @@
+zizhan POWER-02: account real framebuffer producer/presenter work under fSwapLock.
+Default-off, no hardware transition or visibility completion is inferred.
+
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -42,6 +42,7 @@
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ 
+ #include "MiniIOSurface.h"
++#include "ZizhanDisplayOwner.h"
+ 
+ #if XNU_PONG_ADRENO_PLATFORM
+ extern "C" void pong_scanout_initialize(uint64_t,size_t,uint32_t,uint32_t,uint32_t);
+@@ -242,6 +243,11 @@
+ 	uint8_t         fSwap[SWAP_QUEUE][SWAP_SIZE];   /* the swaps on their way to the panel (fb_queue), from fSwapFirst on */
+ 	MiniIOSurface * fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS]; /* ... their surfaces, held from SwapEnd on: their maker may let go of them */
+ 	unsigned        fSwapFirst, fSwapsWaiting;
++	// zizhan POWER-02: serialized by fSwapLock; software drain only.
++	zizhan_display::Owner fDisplayOwner;
++	bool fDisplayOwnerEnabled;
++	unsigned fDisplayOwnerReports;
++	void observePowerOwner(void);
+ 	/*
+ 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
+ 	 * (boot-arg fb_beat=0: at once): frames then follow each other at an even pace whatever
+@@ -424,6 +430,10 @@
+ 	fRowBytes = vinfo.v_rowbytes;
+ 	fLock = IOLockAlloc();
+ 	fSwapLock = IOLockAlloc();
++	fDisplayOwner.initialize();
++	uint32_t ownerMode = 0;
++	PE_parse_boot_argn("zizhan_display_owner", &ownerMode, sizeof(ownerMode));
++	fDisplayOwnerEnabled = ownerMode == 1;
+ 	fHelperLock = IOLockAlloc();
+ 	fColumn = IONewZero(uint32_t, vinfo.v_width);
+ 	fColumnWeight = IONewZero(uint16_t, vinfo.v_width);
+@@ -913,6 +923,10 @@
+ 		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
+ 	}
+ 	fSwapsWaiting++;
++	if (fDisplayOwnerEnabled && fDisplayOwner.present_queued() != zizhan_display::Result::Ok) {
++		fDisplayOwner.fail();
++		IOLog("ZIZHAN_DISPLAY_OWNER: FAIL queue-accounting; hardware unchanged\n");
++	}
+ 	IOLockWakeup(fSwapLock, fSwap, true);
+ 	IOLockUnlock(fSwapLock);
+ }
+@@ -936,6 +950,10 @@
+ 		}
+ 		memcpy(swap, fSwap[fSwapFirst], SWAP_SIZE);
+ 		memcpy(surfaces, fSwapSurfaces[fSwapFirst], sizeof(surfaces));
++		if (fDisplayOwnerEnabled && fDisplayOwner.take_present() != zizhan_display::Result::Ok) {
++			fDisplayOwner.fail();
++			IOLog("ZIZHAN_DISPLAY_OWNER: FAIL take-accounting; hardware unchanged\n");
++		}
+ 		IOLockUnlock(fSwapLock);
+ 		show(swap, surfaces);
+ 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+@@ -944,7 +962,35 @@
+ 			}
+ 		}
+ 		MiniIOSurfaceClearKept();               /* (the next frame is some milliseconds away) */
+-	}
++		IOLockLock(fSwapLock);
++		if (fDisplayOwnerEnabled) {
++			const auto result = fDisplayOwner.software_done();
++			const auto state = fDisplayOwner.snapshot();
++			if (result != zizhan_display::Result::Ok || state.queued != fSwapsWaiting) {
++				fDisplayOwner.fail();
++				IOLog("ZIZHAN_DISPLAY_OWNER: FAIL finish-accounting queue=%u/%u in-flight=%u\n",
++				      state.queued, fSwapsWaiting, state.in_flight);
++			} else if (fDisplayOwnerReports++ < 4) {
++				IOLog("ZIZHAN_DISPLAY_OWNER: PASS software-drain-only=1 completed=%llu queued=%u in-flight=%u hardware=UNQUALIFIED\n",
++				      state.software_completed, state.queued, state.in_flight);
++			}
++		}
++		IOLockUnlock(fSwapLock);
++	}
++}
++
++// Called from the native request path. Counts are captured under the same
++// lock as producer/presenter. This is not an ack of panel power or visibility.
++void
++IOMobileFramebuffer::observePowerOwner(void)
++{
++	IOLockLock(fSwapLock);
++	if (fDisplayOwnerEnabled) {
++		const auto state = fDisplayOwner.snapshot();
++		IOLog("ZIZHAN_DISPLAY_OWNER: power-request state=%u queued=%u in-flight=%u software-completed=%llu hardware=UNQUALIFIED\n",
++		      static_cast<unsigned>(state.state), state.queued, state.in_flight, state.software_completed);
++	}
++	IOLockUnlock(fSwapLock);
+ }
+ 
+ /* A swap's surfaces onto the panel, once the GPU is done with them. */
+@@ -1564,6 +1610,7 @@
+ 	case kFBMethodRequestPowerChange:
+ 		if (zizhan_display_power_observe)
+ 			zizhan_display_power_observe(args->scalarInputCount, in, args->structureInputSize);
++		fOwner->observePowerOwner();
+ 		// Existing compatibility return retained; observation explicitly reports
+ 		// hardware-transition=UNIMPLEMENTED, never a device PM completion.
+ 		return kIOReturnSuccess;

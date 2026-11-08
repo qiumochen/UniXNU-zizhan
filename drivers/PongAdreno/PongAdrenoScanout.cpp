@@ -5,8 +5,13 @@
  */
 #include "PongAdrenoScanout.h"
 #include "../PongPower/PongDsiLease.h"
+#include "../PongPower/ZizhanPanelPool.h"
+#include "../PongPower/ZizhanPanelProgram.h"
+#include "../PongPower/ZizhanDsiCommand.h"
+#include "../PongPower/ZizhanDsiDomain.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOMapper.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IODeviceTreeSupport.h>
@@ -480,18 +485,20 @@ void dbInit(uint64_t physical,size_t rounded,uint32_t stride,uint32_t height)
             if(chosen)chosen->release();
         }
         const uint64_t stride=rounded>SlotStride?rounded:SlotStride;   /* every pool buffer, dbuf's own too, is one slot wide */
-        if(lease[0] && lease[1]>=2*stride && !(lease[0]&4095) && lease[0]+lease[1]<=0x100000000ull) {
-            unsigned n=unsigned(lease[1]/stride);if(n>want)n=want;if(n>3)n=3;
+        zizhan_panel_pool::Layout poolLayout{};
+        if(lease[0] && !(lease[0]&4095) && lease[0]+lease[1]<=0x100000000ull &&
+           zizhan_panel_pool::plan(lease[1],stride,want,DbMax,SlotMax,&poolLayout)) {
+            const unsigned n=poolLayout.buffers;
             dbPool=IOMemoryDescriptor::withPhysicalAddress(lease[0],uint64_t(n)*stride,kIODirectionInOut);
             if(dbPool) {
                 shotMapPool(lease[0],lease[1]);
                 for(unsigned i=0;i<n;++i){db[dbN]={lease[0]+uint64_t(i)*stride,uint64_t(i)*stride};++dbN;}
                 dbPoolBytes=uint64_t(n)*stride;
                 zc=2;(void)PE_parse_boot_argn("pong_zc",&zc,sizeof zc);   /* default: canvases in slots and flipped directly (g152t/w) */
-                const unsigned total=unsigned(lease[1]/stride);
+                const unsigned total=poolLayout.total_strides;
                 if(!slotLock)slotLock=IOSimpleLockAlloc();
                 (void)PE_parse_boot_argn("pong_slot_premap",&slotPreMap,sizeof slotPreMap);
-                for(unsigned i=n;i<total && slotCount<SlotMax && dbN<DbMax;++i) {
+                for(unsigned i=n;i<total && slotCount<poolLayout.slots && slotCount<SlotMax && dbN<DbMax;++i) {
                     const uint64_t physical=lease[0]+uint64_t(i)*stride;
                     IOMemoryDescriptor *memory=nullptr;IOMemoryMap *mapping=nullptr;
                     if(slotPreMap) {
@@ -510,8 +517,8 @@ void dbInit(uint64_t physical,size_t rounded,uint32_t stride,uint32_t height)
                     db[dbN]={slotPhys[slotCount],~0ull};++dbN;++slotCount;   /* flip targets for step 3.2, never presenter targets */
                 }
                 slotBytes=uint32_t(stride);
-                dpuLine(text,snprintf(text,sizeof text,"PONG DBUF: panel pool 0x%llx (%llu MiB from the loader): %u buffers, %u canvas slots (pong_zc=%u)\n",
-                    (unsigned long long)lease[0],(unsigned long long)(lease[1]>>20),n,slotCount,zc));
+                dpuLine(text,snprintf(text,sizeof text,"PONG DBUF: panel pool 0x%llx (%llu MiB from the loader): %u buffers, %u/%u canvas slots (pong_zc=%u)\n",
+                    (unsigned long long)lease[0],(unsigned long long)(lease[1]>>20),n,slotCount,poolLayout.slots,zc));
             }
         } else if(usePool) dpuLine(text,snprintf(text,sizeof text,"PONG DBUF: no panel pool lease (0x%llx + 0x%llx)\n",(unsigned long long)lease[0],(unsigned long long)lease[1]));
         for(unsigned n=want;n>=2 && !dbAlloc && !dbPool;--n) {
@@ -558,10 +565,15 @@ extern "C" int pong_panel_slot_take(uint32_t width,uint32_t height,uint32_t byte
             width,height,bytesPerRow,bytes,unsigned(mode.width),unsigned(mode.height),unsigned(mode.stride),slotBytes);
         return 0;
     }
+    unsigned active=0;
     IOSimpleLockLock(slotLock);
-    for(unsigned i=0;i<slotCount;++i)if(!slotUsed[i]){slotUsed[i]=true;slotBpr[i]=bytesPerRow;db[slotDb[i]].stride=bytesPerRow;*phys=slotPhys[i];++slotTaken;break;}
+    for(unsigned i=0;i<slotCount;++i) {
+        if(slotUsed[i]) {++active;continue;}
+        if(*phys)continue;
+        slotUsed[i]=true;slotBpr[i]=bytesPerRow;db[slotDb[i]].stride=bytesPerRow;*phys=slotPhys[i];++active;++slotTaken;
+    }
     IOSimpleLockUnlock(slotLock);
-    IOLog("PONG DBUF: canvas slot %s 0x%llx (%u taken so far)\n",*phys?"given":"NONE FREE for",(unsigned long long)*phys,slotTaken);
+    IOLog("PONG DBUF: canvas slot %s 0x%llx (active %u/%u, %u taken so far)\n",*phys?"given":"NONE FREE for",(unsigned long long)*phys,active,slotCount,slotTaken);
     return *phys?1:0;
 }
 extern "C" IOMemoryDescriptor *pong_panel_slot_memory(uint64_t phys,uint32_t bytes)
@@ -601,10 +613,14 @@ extern "C" bool pong_dsi_release(uint32_t owner)
 extern "C" void pong_panel_slot_give(uint64_t phys)
 {
     if(!slotLock)return;
+    unsigned active=0;
     IOSimpleLockLock(slotLock);
-    for(unsigned i=0;i<slotCount;++i)if(slotPhys[i]==phys)slotUsed[i]=false;
+    for(unsigned i=0;i<slotCount;++i) {
+        if(slotPhys[i]==phys)slotUsed[i]=false;
+        if(slotUsed[i])++active;
+    }
     IOSimpleLockUnlock(slotLock);
-    IOLog("PONG DBUF: canvas slot 0x%llx returned\n",(unsigned long long)phys);
+    IOLog("PONG DBUF: canvas slot 0x%llx returned (active %u/%u)\n",(unsigned long long)phys,active,slotCount);
 }
 void dbStats(const char *when)
 {
@@ -670,13 +686,20 @@ void intfRate(const char *when)
 enum : uint32_t {DsiPa=0x0ae94000u,DsiLen=0x400,DsiHwVersion=0x000,DsiCtrl=0x004,DsiStatus=0x008,DsiCmdDmaCtrl=0x03c,DsiDmaCmdLength=0x04c,DsiTrigCtrl=0x084,
     DsiCmdDmaSwTrigger=0x090,DsiIntCtrl=0x110,DsiTpgCtrl=0x15c,DsiTpgCmdDmaInitVal=0x17c,DsiTpgDmaFifoReset=0x1ec};
 constexpr uint32_t DsiDmaBusy=1u<<1,DsiMdpBusy=1u<<2,DsiIntDmaDone=1u<<0,DsiIntEnableBits=0xaaaaaaaau,DsiTpgFifoOn=3u<<16|1u<<2|1u<<1,DsiTrigSw=4u,DsiMaxPayload=60;
-vm_offset_t dsiMap;unsigned panelHzWant,panelHzNow=60,dsiFailures,dsiMdpWaits;bool panelDone;
+vm_offset_t dsiMap;
+IOMemoryDescriptor *dsiCommandMemory;
+IOMemoryMap *dsiCommandMapping;
+uint8_t *dsiCommandVirtual;
+uint64_t dsiCommandPhysical;
+size_t dsiCommandBytes;
+unsigned panelHzWant,panelHzNow=60,dsiFailures,dsiMdpWaits;bool panelDone,strictDsiQuarantined;
 static const uint8_t panelSwitch120[]={0x39,0,0,0x40,0,0,3,0xf0,0x5a,0x5a, 0x39,0,0,0x40,0,0,3,0x60,0x08,0x00, 0x39,0,0,0x40,0,0,3,0xb0,0x03,0xf2,
     0x39,0,0,0x40,0,0,2,0xf2,0x70, 0x39,0,0,0x40,0,0,2,0xb9,0x02, 0x39,0,0,0x40,0,0,8,0xbd,0x01,0x00,0x00,0x80,0x00,0x01,0xc0,
     0x39,0,0,0x40,0,0,3,0x60,0x08,0x00, 0x39,0,0,0x00,0,0,2,0xf7,0x0f};
 static const uint8_t panelSwitch60[]={0x39,0,0,0x40,0,0,3,0xf0,0x5a,0x5a, 0x39,0,0,0x40,0,0,3,0x60,0x08,0x00, 0x39,0,0,0x40,0,0,3,0xb0,0x03,0xf2,
     0x39,0,0,0x40,0,0,2,0xf2,0x70, 0x39,0,0,0x40,0,0,2,0xb9,0x11, 0x39,0,0,0x40,0,0,8,0xbd,0x01,0x00,0x00,0x80,0x00,0x01,0xc0,
     0x39,0,0,0x40,0,0,3,0x60,0x08,0x01, 0x39,0,0,0x00,0,0,2,0xf7,0x0f};
+static bool prepareDsiCommandMemory(void);
 uint32_t dsiRd(uint32_t off){return dpuRd(dsiMap+off);}
 void dsiWr(uint32_t off,uint32_t v){dpuWr(dsiMap+off,v);}
 bool dsiInit(void)
@@ -684,13 +707,114 @@ bool dsiInit(void)
     char text[240];
     if(!dsiMap)dsiMap=ml_io_map_unmappable(DsiPa,DsiLen,0x7 /* VM_WIMG_IO */);
     if(!dsiMap){dpuLine(text,snprintf(text,sizeof text,"PONG PANEL: no mapping of DSI0\n"));return false;}
-    const uint32_t ver=dsiRd(DsiHwVersion),ctl=dsiRd(DsiCtrl);
+    const uint32_t ver=dsiRd(DsiHwVersion),controlReg=dsiRd(DsiCtrl);
     dpuLine(text,snprintf(text,sizeof text,"PONG PANEL: DSI0 version 0x%08x ctrl 0x%08x status 0x%08x dma_ctrl 0x%08x trig 0x%08x tpg 0x%08x int 0x%08x\n",
-        ver,ctl,dsiRd(DsiStatus),dsiRd(DsiCmdDmaCtrl),dsiRd(DsiTrigCtrl),dsiRd(DsiTpgCtrl),dsiRd(DsiIntCtrl)));
-    if((ver>>28)!=2 || (ctl&5u)!=5u){dpuLine(text,snprintf(text,sizeof text,"PONG PANEL: DSI0 is not a running command-mode DSI 2.x controller: no DCS\n"));return false;}
+        ver,controlReg,dsiRd(DsiStatus),dsiRd(DsiCmdDmaCtrl),dsiRd(DsiTrigCtrl),dsiRd(DsiTpgCtrl),dsiRd(DsiIntCtrl)));
+    if((ver>>28)!=2 || (controlReg&5u)!=5u){dpuLine(text,snprintf(text,sizeof text,"PONG PANEL: DSI0 is not a running command-mode DSI 2.x controller: no DCS\n"));return false;}
+    uint32_t dmaMemory=0;PE_parse_boot_argn("zizhan_dsi_dma_memory",&dmaMemory,sizeof(dmaMemory));
+    if(dmaMemory && !prepareDsiCommandMemory())
+        IOLog("ZIZHAN_DSI_DMA: SKIP missing or unusable reserved command page; FIFO commands remain available\n");
+    else if(!dmaMemory)
+        IOLog("ZIZHAN_DSI_DMA: SKIP reserved-page mapping disabled by boot argument; FIFO commands remain available\n");
     return true;
 }
-/* one DCS write (buf[0] = command): short 0x05/0x15 or long 0x39, virtual channel 0; 0 when the controller reported CMD_DMA_DONE */
+static bool prepareDsiCommandMemory(void)
+{
+    if(dsiCommandVirtual)return true;
+    struct Lease { uint64_t address; uint32_t bytes,reserved; } lease{};
+    static_assert(sizeof(Lease)==16,"zizhan DSI command ADT lease");
+    IORegistryEntry *chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
+    // The pool is already reserved by the qualified DarwinBoot24 handoff.
+    // Its whole-stride canvas/buffer consumers never cover the trailing
+    // partial stride; dedicate the final page in that tail to DSI commands.
+    OSData *data=chosen?OSDynamicCast(OSData,chosen->getProperty("pong-panel-pool")):nullptr;
+    if(data&&data->getLength()==sizeof(lease))memcpy(&lease,data->getBytesNoCopy(),sizeof(lease));
+    if(chosen)chosen->release();
+    if(!lease.address||lease.bytes<0x01000000||lease.reserved||
+       (lease.address&4095)||lease.address+lease.bytes>0x100000000ull)return false;
+    constexpr uint64_t commandBytes=4096;
+    const uint64_t stride=mode.bytes>SlotStride?mode.bytes:SlotStride;
+    if(!stride)return false;
+    const uint64_t slots=lease.bytes/stride;
+    const uint64_t tail=lease.bytes-slots*stride;
+    if(tail<commandBytes)return false;
+    const uint64_t commandAddress=lease.address+lease.bytes-commandBytes;
+    if(commandAddress<lease.address+slots*stride||commandAddress+commandBytes>0x100000000ull)return false;
+    IOAddressRange range{commandAddress,commandBytes};
+    dsiCommandMemory=IOMemoryDescriptor::withOptions(&range,1,0,TASK_NULL,
+        IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryTypePhysical64)|
+        IOOptionBits(kIOMemoryMapperNone),kIOMapperSystem);
+    if(!dsiCommandMemory)return false;
+    if(dsiCommandMemory->prepare()!=kIOReturnSuccess){dsiCommandMemory->release();dsiCommandMemory=nullptr;return false;}
+    dsiCommandMapping=dsiCommandMemory->createMappingInTask(kernel_task,0,
+        kIOMapAnywhere|kIOMapCopybackCache);
+    IOByteCount contiguous=0;
+    const uint64_t physical=dsiCommandMemory->getPhysicalSegment(0,&contiguous,kIOMemoryMapperNone);
+    if(!dsiCommandMapping||!dsiCommandMapping->getVirtualAddress()||
+       physical!=commandAddress||contiguous<commandBytes){
+        if(dsiCommandMapping){dsiCommandMapping->release();dsiCommandMapping=nullptr;}
+        (void)dsiCommandMemory->complete();dsiCommandMemory->release();dsiCommandMemory=nullptr;
+        return false;
+    }
+    dsiCommandVirtual=reinterpret_cast<uint8_t *>(dsiCommandMapping->getVirtualAddress());
+    dsiCommandPhysical=physical;dsiCommandBytes=commandBytes;
+    IOLog("ZIZHAN_DSI_DMA: buffer ready pa=%llx bytes=%lu mapper=NONE; each transfer requires fresh identity-context read\n",
+          (unsigned long long)dsiCommandPhysical,(unsigned long)dsiCommandBytes);
+    return true;
+}
+static bool loadDsiDomainBoard(zizhan_dsi_domain::Board &board)
+{
+    IORegistryEntry *chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
+    OSData *data=chosen?OSDynamicCast(OSData,chosen->getProperty("zizhan-dsi-domain-v1")):nullptr;
+    if(data&&data->getLength()==sizeof(board))memcpy(&board,data->getBytesNoCopy(),sizeof(board));
+    if(chosen)chosen->release();
+    return zizhan_dsi_domain::valid(board)&&board.base==0x15000000&&board.span==0x100000&&
+        board.group==3&&board.bank==3&&board.sid==0x2800&&board.mask==0x402;
+}
+struct ZizhanDsiDomainIo {
+    zizhan_dsi_domain::Board board{};
+    vm_offset_t globals=0,bank=0;
+    bool global(uint32_t offset,uint32_t &value) {
+        if(offset!=0x20&&offset!=0x24&&offset!=0x80c&&offset!=0xc0c&&offset!=0x180c)return false;
+        if(!globals)globals=ml_io_map_unmappable(board.base,0x2000,0x7);
+        if(!globals)return false;
+        value=dpuRd(globals+offset);return true;
+    }
+    bool context(uint32_t offset,uint32_t &value) {
+        if(offset!=0x83000&&offset!=0x83058)return false;
+        if(!bank)bank=ml_io_map_unmappable(board.base+0x83000,0x1000,0x7);
+        if(!bank)return false;
+        value=dpuRd(bank+offset-0x83000);return true;
+    }
+};
+static zizhan_dsi_domain::Observation zizhanDsiDomainSnapshot()
+{
+    zizhan_dsi_domain::Observation invalid{};
+    ZizhanDsiDomainIo io{};
+    if(!loadDsiDomainBoard(io.board))return invalid;
+    return zizhan_dsi_domain::observe(io.board,io);
+}
+static void zizhanDsiDomainAudit(void)
+{
+    uint32_t enabled=0;
+    if(!PE_parse_boot_argn("zizhan_dsi_domain",&enabled,sizeof(enabled))||!enabled)return;
+    static bool attempted;
+    if(attempted)return;
+    attempted=true;
+    if(enabled!=1){IOLog("ZIZHAN_DSI_DOMAIN: SKIP unsupported-mode\n");return;}
+    zizhan_dsi_domain::Board board{};
+    if(!loadDsiDomainBoard(board)) {
+        IOLog("ZIZHAN_DSI_DOMAIN: SKIP missing-or-unqualified-board\n");return;
+    }
+    ZizhanDsiDomainIo io{};io.board=board;
+    const auto o=zizhan_dsi_domain::observe(board,io);
+    using zizhan_dsi_domain::State;
+    const char *status=o.state==State::IdentityObserved?"PASS":
+        o.state==State::ReadError||o.state==State::Changed||o.state==State::Faulted?"FAIL":"SKIP";
+    IOLog("ZIZHAN_DSI_DOMAIN: %s snapshot-only=1 state=%u reads=%u group=3 bank=3 id0=%x id1=%x smr=%x s2cr=%x cba2r=%x sctlr=%x fsr=%x context-read=%u writes=0\n",
+          status,unsigned(o.state),o.reads,o.id0,o.id1,o.smr,o.s2cr,o.cba2r,o.sctlr,o.fsr,o.context_read?1u:0u);
+}
+/* Legacy qualified timing transport remains the default control. */
 int dsiDcs(const uint8_t *buf,uint32_t len,bool lp)
 {
     uint32_t words[2+(DsiMaxPayload+3)/4];uint32_t n=0,i;
@@ -744,6 +868,48 @@ int dsiSet(const uint8_t *set,uint32_t len,bool lp,unsigned *sent)
     }
     return rc;
 }
+// zizhan POWER-02: actual production FIFO executor; opt-in on the existing
+// 120-Hz timing program before any panel power transition. The same executor
+// and full-program preflight are host-replayed with completion/error/busy I/O.
+struct ZizhanDsiIo {
+    uint32_t read(uint32_t offset) { return dsiRd(offset); }
+    void write(uint32_t offset,uint32_t value) { dsiWr(offset,value); }
+    void delay_us(uint32_t delay) { IODelay(delay); }
+    uint64_t now_us() { return us(mach_absolute_time()); }
+    void flush_buffer(uint8_t *,uint64_t physical,unsigned bytes) {
+        flush_dcache64(physical,bytes,1);
+        __asm__ volatile("dsb sy":::"memory");
+    }
+};
+static int zizhanDsiSet(const uint8_t *program,uint32_t bytes,bool lp,unsigned *sent)
+{
+    ZizhanDsiIo io;
+    if(strictDsiQuarantined) {*sent=0;return -1;}
+    bool retain=false;
+    const auto result=zizhan_panel::run(program,bytes,
+        [](const zizhan_panel::Packet &p) { return p.fits_fifo() ||
+            (p.long_packet() && dsiCommandVirtual && dsiCommandBytes); },
+        [&](const zizhan_panel::Packet &p) {
+            zizhan_dsi::Outcome outcome{};
+            if(p.fits_fifo())outcome=zizhan_dsi::transfer(io,p,lp);
+            else {
+                const auto domain=zizhanDsiDomainSnapshot();
+                const bool identity=domain.state==zizhan_dsi_domain::State::IdentityObserved;
+                const zizhan_dsi::CommandMemory memory{dsiCommandVirtual,dsiCommandPhysical,
+                    dsiCommandBytes,identity};
+                outcome=zizhan_dsi::transfer_memory(io,p,lp,memory);
+            }
+            retain|=outcome.retain_lease;
+            return outcome.result;
+        },
+        [](uint32_t ms) { IOSleep(ms); }, [] { return us(mach_absolute_time())/1000; },
+        us(mach_absolute_time())/1000+1000,*sent);
+    const bool ok=result==zizhan_panel::Result::Ok;
+    IOLog("ZIZHAN_DSI_COMMAND: %s timing-only=1 packets=%u result=%u retain=%u dma=identity-gated\n",
+          ok?"PASS":"FAIL",*sent,unsigned(result),retain?1u:0u);
+    if(retain) {strictDsiQuarantined=true;++dsiFailures;}
+    return ok?0:-int(result)-1;
+}
 void panelHz(void)
 {
     char text[240];
@@ -752,11 +918,15 @@ void panelHz(void)
     if(!pong_dsi_try_acquire(PongDsiTiming))return; // retry on the next real frame
     panelDone=true;
     if(!dsiInit()){pong_dsi_release(PongDsiTiming);return;}
+    zizhanDsiDomainAudit(); // default-off fixed-group read; normal timing path continues
     intfRate("before the switch");
     if(pong_klog_flush)pong_klog_flush(3);
     const uint64_t t0=mach_absolute_time();unsigned sent=0;
-    const int rc=panelHzWant==120?dsiSet(panelSwitch120,sizeof panelSwitch120,false,&sent):dsiSet(panelSwitch60,sizeof panelSwitch60,false,&sent);
-    if(!(dsiRd(DsiStatus)&DsiDmaBusy))pong_dsi_release(PongDsiTiming);
+    uint32_t strict=0;PE_parse_boot_argn("zizhan_panel_transport",&strict,sizeof(strict));
+    const uint8_t *program=panelHzWant==120?panelSwitch120:panelSwitch60;
+    const uint32_t bytes=panelHzWant==120?sizeof(panelSwitch120):sizeof(panelSwitch60);
+    const int rc=strict==1?zizhanDsiSet(program,bytes,false,&sent):dsiSet(program,bytes,false,&sent);
+    if(zizhan_dsi::may_release(strictDsiQuarantined,dsiRd(DsiStatus)))pong_dsi_release(PongDsiTiming);
     dpuLine(text,snprintf(text,sizeof text,"PONG PANEL: timing switch to %u Hz: %u packets sent, rc %d, %llu us, MDP-busy waits %u\n",panelHzWant,sent,rc,us(mach_absolute_time()-t0),dsiMdpWaits));
     if(pong_klog_flush)pong_klog_flush(3);
     if(rc)return;

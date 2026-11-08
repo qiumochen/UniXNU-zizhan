@@ -22,6 +22,15 @@ from zizhan_tsens_inputs import encode as encode_tsens
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def encode_dsi_domain(d):
+    """Encode only the previously inspected zizhan display read aperture."""
+    values = (int(d['base'], 0), d['register_bytes'], d['version'], d['group'], d['bank'],
+              int(d['sid'], 0), int(d['mask'], 0), d['cba2r'], 0)
+    if values != (0x15000000, 0x100000, 1, 3, 3, 0x2800, 0x402, 1, 0):
+        raise ValueError('Unqualified zizhan DSI address-domain observer profile')
+    return struct.pack('<Q8I', *values)
+
 # Values cross-checked against the Pong platform DTS and UEFI memory map.
 DRAM_BASE = 0x80000000
 APSS_BASE = 0x17000000
@@ -171,6 +180,7 @@ def main():
     # Rebooting the same image reuses it; rebuilding rolls it.
     boot_nonce_hash = hashlib.sha384(os.urandom(32)).digest()
     backlight = json.loads((ROOT / 'configs/zizhan-display-sm8475.json').read_text())['brightness']
+    domain = json.loads((ROOT / 'configs/zizhan-display-sm8475.json').read_text())['display_domain_observer']
     chosen = [
         ('random-seed', os.urandom(64)),
         ('osenvironment', b'main\0'),
@@ -185,6 +195,9 @@ def main():
             int(backlight['controller'], 0), backlight['register_bytes'],
             backlight['maximum'], backlight['minimum_nonzero'],
             int(backlight['bl_inverted_dbv']), backlight['channel'], backlight['version'])),
+        # zizhan only: fixed display group/context read allowlist, no mapper
+        # and no sleep capability. Historical bank must match current reads.
+        ('zizhan-dsi-domain-v1', encode_dsi_domain(domain)),
         # zizhan resources only; the one-shot observer stays off unless explicitly requested.
         ('zizhan-tsens-v2', encode_tsens(json.loads(
             (ROOT / 'configs/zizhan-thermal-sm8475.json').read_text()))),

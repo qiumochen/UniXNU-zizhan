@@ -179,6 +179,12 @@ for relative, (digest, atime, mtime) in json.loads(Path('.cache/xnu-patch-times.
     if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
         os.utime(path, ns=(atime, mtime))
 PY_PATCH_TIMES
+# zizhan POWER-02: the framebuffer accounting patch shares its actual owner
+# state machine with the host replay. Keep this controlled header in the local
+# generated XNU tree; reference sources are never modified.
+if ! cmp -s "$ROOT/drivers/PongPower/ZizhanDisplayOwner.h" .cache/xnu-work/iokit/Kernel/ZizhanDisplayOwner.h; then
+  cp "$ROOT/drivers/PongPower/ZizhanDisplayOwner.h" .cache/xnu-work/iokit/Kernel/ZizhanDisplayOwner.h
+fi
 export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
 python3 scripts/prepare-xnu-source.py
 BOOT_PROGRESS=${XNU_BOOT_PROGRESS:-0}

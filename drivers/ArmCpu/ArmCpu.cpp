@@ -4,6 +4,7 @@
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <kern/processor.h>
+#include <arm/cpu_number.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSIterator.h>
 #include <libkern/c++/OSSymbol.h>
@@ -502,6 +503,10 @@ void ArmCpu::enableCPUTimeBase(bool enabled)
 
 void ArmCpu::quiesceCPU(void)
 {
+  // zizhan POWER-02: PE_cpu_machine_quiesce is a *local* shutdown
+  // continuation. Never disable the caller's timer/GIC for another IOCPU.
+  if (static_cast<uint32_t>(cpu_number()) != logicalId)
+    panic("ArmCpu: quiesce target %u called on CPU %d", logicalId, cpu_number());
   enableCPUTimeBase(false);
   uint64_t value = 0;
   __asm__ volatile("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r"(value) : "memory");
@@ -513,10 +518,13 @@ void ArmCpu::quiesceCPU(void)
 
 void ArmCpu::haltCPU(void)
 {
-  quiesceCPU();
-  setCPUState(kIOCPUStateStopped);
-  __asm__ volatile("msr daifset, #15" ::: "memory");
-  for (;;) __asm__ volatile("wfi");
+  // zizhan POWER-02: IOCPUSleepKernel calls haltCPU on each target object
+  // from the boot CPU, then processor_sleep(target->getMachProcessor()).
+  // The latter schedules the target's own shutdown continuation, eventually
+  // reaching quiesceCPU locally. Hardware shutdown here would CPU_OFF the
+  // boot CPU while processing a secondary's object and never return.
+  // There is no remote platform action needed before processor_sleep.
+  // This fixes the target/caller contract only; it enables no suspend state.
 }
 
 kern_return_t ArmCpu::startCPU(vm_offset_t, vm_offset_t)

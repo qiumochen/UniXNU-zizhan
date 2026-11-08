@@ -4,6 +4,17 @@
   "source": "zizhan Android live DT; matching Xiaomi SM8450 display-driver DCS path",
   "width": 2160,
   "height": 1916,
+  "display_domain_observer": {
+    "source": "zizhan live DT apps-smmu and smmu_sde_unsec_cb; fixed group/bank and 4K CB aperture observed in g149/g151",
+    "base": "0x15000000",
+    "register_bytes": 1048576,
+    "version": 1,
+    "group": 3,
+    "bank": 3,
+    "sid": "0x2800",
+    "mask": "0x402",
+    "cba2r": 1
+  },
   "brightness": {
     "controller": "0x0ae94000",
     "register_bytes": 1024,

@@ -4,6 +4,8 @@
 
 ## 11-08 主线重排（本条优先于下方全部 11-07 段）
 
+- **23:03 当前接续（优先）**：用户开机后adb/boot_completed恢复，v23r3整窗live候选hash与前置PASS；原标准Android→bootloader仍NO_FASTBOOT、未发镜像，主机重启未修复切换。现v23r4只被动等待fastboot下重插原USB-A路径，稳定目标出现后直接临时boot同候选，不再返回Android；15min等待/30min总期限，launchd+有界Paseo心跳接续审查。候选OS已安装未启动、OS370回退保留。详情见[记录](2026-11-08-weather-authorization.md)。
+
 - **22:57 主机重启后复核（优先）**：用户确认重启电脑，主机启动时间22:48:05，与v23r2中断吻合。USB连接仍在，但手机只提供`05c6:f000` Mass Storage，adb/fastboot均空；尚不能继续设备对照或回退。等待手机恢复真实调试/fastboot接口，未再写手机，v23已安装未启动与OS370回退状态不变。
 
 - **22:54 终态复查（优先）**：v23r2于22:47:46被中断，未发镜像，非正常超时；job/进程/锁均已清理，无设备操作，Paseo心跳已删除。当前USB已连接但身份为`05c6:f000`且仅Mass Storage接口，adb/fastboot均不可用；不能沿用“无物理连接”描述当前状态。v23候选仍已安装未启动，OS370回退完整但缺Android/root通道。下一步恢复并核对真正adb/fastboot接口，再继续对照或回退；[详情](2026-11-08-weather-authorization.md)。

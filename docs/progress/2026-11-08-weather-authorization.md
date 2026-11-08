@@ -123,3 +123,13 @@ v23r2改为单次被动恢复：15分钟内等待稳定、product核对通过的
 ### 主机重启说明与恢复后检查
 
 2026-11-08T22:57:46.717477+08:00 用户说明刚才重启了电脑；主机kern.boottime为22:48:05，与监督器22:47:46退出相吻合。此前“中断来源未知”据此补充为用户执行的主机重启上下文，不能当作手机自动返回或等待超时。重启主机并未自动恢复调试接口：再次只读核对仍为Xiaomi `05c6:f000`、仅Mass Storage，adb/fastboot列表均空。USB连接已成立，当前明确前置是手机提供真正的adb/fastboot接口，而不是继续重启电脑或重复端口复位。未发送任何phone写入/重启命令；候选安装状态与OS370回退保持。
+
+## v23r3：主机重启、手机完整开机后的对照
+
+2026-11-08T22:59:28.072209+08:00 用户确认开机；adb重新出现，product=zizhan、boot_completed=1，无设备owner/锁。重新验证已安装v23候选的整窗live OS与extent/manifest/温度/备份，随后按原标准boot/cycle流程启动同一不可变v22镜像（不使用本机adb延迟/释放wrapper）。主机重启是新的连接控制，设备变量仍仅为已安装OS中fairplayd job的有无；原OS370的v22r2作定位栈控制。所有其他身份、诊断参数与300/240秒返回不变；run名v23r3，单次launchd监督30分钟、15秒心跳。结果按USB发送、XNU/新日志、locationd旧栈、天气可见内容、Android返回分别判定；失败不覆盖旧记录，不flash。
+
+### v23r3结果与v23r4直接接续
+
+2026-11-08T23:03:11.428842+08:00 v23r3完整live OS preflight PASS（候选OS哈希一致、温度27.1°C），标准流程再次在Android→bootloader后的100秒枚举窗口NO_FASTBOOT，未发送镜像；候选干预验收SKIP。退出后只读核对端口仅供电无连接，adb/fastboot列表空，原job已移除、锁释放。主机重启不能视为解决此切换问题。
+
+v23r4已挂单次被动直接接续器，输入改为本次主机重启后的v23r3 Android preflight/arm证据，等待用户在fastboot保持状态重新插拔同一已验证USB-A路径。目标稳定出现后直接boot既定候选，不再主动返回Android或重复失败的reboot/VBUS/PORT_RESET。15分钟等待、30分钟总期限，独占锁/launchd/日志，未连上不发送；结束显式读pinned copy并与旧日志区分、保留原始ramoops，完整结果仍待设备审查。

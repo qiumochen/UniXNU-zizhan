@@ -1461,6 +1461,46 @@ static void open_pane(void *unused)
     if(target)CFRelease(target);
 }
 
+/* Boot-arg pong_open=<url>: open that URL after SpringBoard starts. An https
+ * URL opens Safari, so an unattended round can load a real page without
+ * tapping a home-screen icon whose position it would otherwise have to guess.
+ * The value cannot contain spaces (boot arguments are space separated). */
+static char pending_open_url[192];
+/* App launch must start on SpringBoard's main run loop: the same calls made
+ * from a global queue returned 0 in the v14 device round, while pong_url's
+ * prefs: URL (handled inside SpringBoard) still worked there. */
+static void open_url_on_main(void *unused)
+{
+    (void)unused;
+    if(!pending_open_url[0])return;
+    Class workspace=objc_lookUpClass("LSApplicationWorkspace");
+    id ws=workspace?((id(*)(id,SEL))objc_msgSend)((id)workspace,sel_registerName("defaultWorkspace")):nil;
+    CFURLRef target=CFURLCreateWithBytes(NULL,(const UInt8 *)pending_open_url,strlen(pending_open_url),kCFStringEncodingUTF8,NULL);
+    BOOL accepted=NO;
+    SEL open=sel_registerName("openSensitiveURL:withOptions:");
+    if(ws && target && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),open))
+        accepted=((BOOL(*)(id,SEL,id,id))objc_msgSend)(ws,open,(id)target,nil);
+    fprintf(stderr,"Pong UI18: open-sensitive %s ok=%d (workspace %d)\n",pending_open_url,accepted,ws!=nil);
+    if(!accepted && ws && target) {
+        SEL plain=sel_registerName("openURL:withOptions:");
+        if(((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),plain))
+            accepted=((BOOL(*)(id,SEL,id,id))objc_msgSend)(ws,plain,(id)target,nil);
+        fprintf(stderr,"Pong UI18: open-plain %s ok=%d\n",pending_open_url,accepted);
+    }
+    if(!accepted && ws) {
+        SEL app=sel_registerName("openApplicationWithBundleID:");
+        if(((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),app))
+            accepted=((BOOL(*)(id,SEL,id))objc_msgSend)(ws,app,(id)CFSTR("com.apple.mobilesafari"));
+        fprintf(stderr,"Pong UI18: open-app safari ok=%d\n",accepted);
+    }
+    if(target)CFRelease(target);
+}
+static void open_pending_url(void *unused)
+{
+    (void)unused;
+    dispatch_async_f(dispatch_get_main_queue(),NULL,open_url_on_main);
+}
+
 static bool own_directory(const char *path)
 {
     if(mkdir(path,0700) && errno!=EEXIST)return false;
@@ -2325,6 +2365,14 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         if(boot_value("pong_url=",delay,sizeof(delay)) && atoi(delay)>0)
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)atoi(delay)*NSEC_PER_SEC),
                 dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),NULL,open_pane);
+        char openurl[192],openat[16]="15";
+        if(boot_value("pong_open=",openurl,sizeof(openurl)) && openurl[0]) {
+            (void)boot_value("pong_open_at=",openat,sizeof(openat));
+            snprintf(pending_open_url,sizeof(pending_open_url),"%s",openurl);
+            int at=atoi(openat);if(at<=0)at=15;
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)at*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),NULL,open_pending_url);
+        }
     }
     if(strcmp(name,"backboardd")==0) {
         software_composition=boot_option("pong_ui_software=1");

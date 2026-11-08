@@ -4,6 +4,8 @@
 
 ## 11-08 主线重排（本条优先于下方全部 11-07 段）
 
+- **21:51 APP-01 接续更正（优先于下方旧天气归因）**：`pp-weather-v18` 原图已有“上海”与 `--`，撤回“没有城市/完全无文字”；“不请求数据、不是网络问题”也超出了已捕获日志的证明范围。定位/权限/天气服务存在，GPS、权限弹窗和天气接口尚未验证。v22 同运行时输入补齐日志与 locationd 栈，打包及 live OS preflight PASS，但 `NO_FASTBOOT`，未发送镜像；常规与延长 VBUS 恢复失败。设备主实验停止，无活跃操作，adb/fastboot 均不可见。下一步重新插拔已验证后部 USB-A，回完整 Android 后以新运行名执行该候选，见[天气授权诊断](2026-11-08-weather-authorization.md)。
+
 11-07 全天 POWER-02 产出了诊断仪器和只读审计，但**没有任何用户可感知的功能交付**，首次面板 off/on 一次未执行。11-08 起按“最大结果、最小 MVP”重排：
 
 - **主线 = APP-01 日用内容**。首个交付是 `panel-pool 128 MiB`（2 buffers / 5 canvas slots）下的天气可见内容。验收四条：新鲜 klog 出现 128 MiB pool 与 5/5 slots；无 `canvas slot NONE FREE`；有效 `PONG SHOT` 且非黑；Wi-Fi 64 MiB arena 与 Android 返回。第二轮同内核换参数继续，随后 Safari，验收 HTTPS 页面、地址栏输入与滚动。
@@ -52,7 +54,7 @@
 
 | ID | 优先级 / 状态 | 范围与验收条件 | 下一步 / 证据 |
 | --- | --- | --- | --- |
-| APP-01 | P1 / IN_PROGRESS | 主线。逐应用记录启动、内容显示、核心操作、联网、输入及前后台表现；至少覆盖 Safari、设置、时钟、天气、照片，产出状态表并据此定序。 | v6/v7/v8r2 已确认：128 MiB pool、5/5 slots、完整截图、Wi-Fi DHCP+IPv4、Android 返回均通过。**天气内容为空的原因已查明：不是网络也不是渲染**——天气 App 进入前台并画出背景渐变，但 `weatherd` 从未启动、无 CoreLocation 客户端注册、无任何应用侧网络请求；此前“HTTPS 200”只访问过 `example.com`，从未验证 Apple 天气服务，定位能力也从未验证（功能清单列为待确认）。下一步：用同一镜像换 Safari 目标，验证与定位无关的网页内容路径；若 Safari 正常则问题限定在数据/定位侧。见[本轮记录](2026-11-08-panelpool-128.md)。 |
+| APP-01 | P1 / IN_PROGRESS | 主线。逐应用记录启动、内容显示、核心操作、联网、输入及前后台表现；至少覆盖 Safari、设置、时钟、天气、照片，产出状态表并据此定序。 | 已纠正天气归因：v18 图中有“上海”与 `--`，无城市和网络已排除的旧结论撤回；无日志不能证明无请求。weatherd/locationd/tccd 存在，历史 locationd→fairplayd 阻塞需新栈验证。v22 同内核/OS/UI 诊断候选和 live OS preflight PASS，但 USB NO_FASTBOOT、未 boot；有界恢复后仍不可见。下一步重新插拔后部 USB-A，恢复完整 Android 后执行新命名控制轮；见[天气授权诊断](2026-11-08-weather-authorization.md)。 |
 | POWER-02 | P3 / BLOCKED | 完整原生锁屏/自动与手动熄屏、按后台任务进入真实低功耗并可靠恢复；静默、联网、后台任务与功耗分场景验收。支线 MVP 仍为原生显示请求→内屏真实 off→wake→可见首帧。 | 11-08 起降级为受控支线，不再产出新诊断模型或只读审计轮。解阻条件（须同时满足）：启动日志出现 `ZIZHAN_DSI_DMA: buffer ready`；128 MiB 布局下显示域仍 `IdentityObserved`。在此之前不执行面板 off/锁屏/睡眠。既有结果保留：v5 只读快照 PASS（SMR3=0x84022800、S2CR3=3、CB3 SCTLR=0xe0、FSR=0x400、11 reads 0 write）；FIFO-v2 正常 8 包 461µs、CP1836/1836；memory-v2 因 ADT `pong-dsi-command` 字段早期 FAIL 且该字段已撤回；长包 DMA 需 IOVA 而非物理地址。见[本批记录](2026-11-07-power-unattended.md)。 |
 | THERM-01 | P1 / IN_PROGRESS | 本机温度传感器、真实热策略与 CPU 限频/恢复；输入来源、单位、失效处理和负载响应可核对。 | g395温度SKIP保留；按v2 VALID纠正后，g396两组2.8/32路有效 last-temperature 读取PASS（35.5–46.9°C），34项host及完整/精简内核通过。原supervisor因Android未完成记FAIL；46.224秒后有界复核boot_completed=1，返回单独PASS，未改旧记录。下一步有界多时点/更新与过期语义、映射交叉核对及vendor热策略输入；无温控或限频资格。见[本轮记录](2026-11-07-tsens-readonly.md)。 |
 | BASE-01 | P2 / HOST_VERIFIED | 以现有 Darwin24/UFS 链路得到可追踪、可重建和可回退的本地日用候选；源码、OS/UI/helper、服务策略和 manifest 对齐。 | `os370-full-candidate-v3` 已按显式 OS370 服务存在性策略完整 prepare/apply/finish；source/input/prepared image/policy hash 固定，APFS readback、Data roundtrip、24项服务/runtime审计通过。完整镜像只在仓库外；未安装/启动，OS370 仍是设备基线。验收暂存；设备批次执行前重新preflight并登记变量/回退。默认策略审计仍指出 fairplayd 漂移。见[本批记录](2026-11-06-daily-use-development.md)。 |
@@ -90,7 +92,7 @@
 | FOLD-01 / POWER-02 / AUDIO-01 | 尚有实现或前置缺口，不能直接联合验收 | 分别准备显示交接、恢复/独立返回、板级输入/音频链；首次出光/折叠、真睡眠和实际声音需人在场。 |
 | THERM-01 | 默认关闭的一次 XNU 寄存器观察已通过 g396，热控制未实现 | 待多时点读数更新/过期、映射交叉核对与真实热策略；Android 4项其他温区 ERROR 保留。仅一次VALID读数，不代表校准、新鲜度、持续监控或热控制验收。 |
 | BASE-01 | 完整本地主机候选已验证，未安装/启动 | 设备功能验收暂存；按集中批次冻结候选/hash/OS370 回退和步骤。原默认策略与显式候选差异继续可见。 |
-| APP-01 | 已完成首轮设备检查，尚未完成应用资格 | 天气前台会话路径有 PASS 证据，但截图缺失且出现 IOSurface/canvas 内存不足；天气内容、核心操作、联网仍待验。Safari、设置、时钟、照片按表中范围补测；Safari 必须真实加载 HTTPS 网页并完成地址输入、滚动和跳转。锁屏恢复、声音等缺少前置的场景单列 SKIP。 |
+| APP-01 | 天气已显示城市名与温度占位符，内容/定位/授权/天气联网尚未完成资格 | v22 未发送镜像，因 USB 不可见暂停；恢复后先采定位依赖栈与权限事件，再验真实天气内容。Safari 仍须实际 HTTPS 页面、地址输入与滚动；锁屏恢复等缺少前置的场景单列 SKIP。 |
 | UX-01 | 既有调查阶段，未新增可验候选 | 产出后登记身份、主机验证和批次依赖，再做同候选联合日用验收。 |
 
 ## 已完成项目索引

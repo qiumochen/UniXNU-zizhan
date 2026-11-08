@@ -119,3 +119,7 @@ v23r2改为单次被动恢复：15分钟内等待稳定、product核对通过的
 本次只读端口复核出现新状态：USB2从仅供电变为highspeed/enable/connect，手机身份为`05c6:f000`，IORegistry只列出`Mass Storage`接口。主机adb最初探测8秒超时；有界恢复adb服务后，adb和fastboot列表仍均为空。现在不能再沿用“物理未检测连接”描述当前状态，也不能把此身份当作可用Android/root或fastboot。未发送模式切换、重启、boot或端口恢复命令。
 
 实际已安装OS仍是v23隔离候选，未启动验收；canonical仍OS370。回退的未满足前置仍为可用Android/root通道，当前不能安全执行OS-only回退。下一动作是先恢复并核对Android adb或真正fastboot接口，再协调唯一owner与实际manifest/log arm状态；不重复已有的Android切换、VBUS或PORT_RESET负结果。有界Paseo心跳已删除，全部设备监督任务已结束，不再自动重复启动。
+
+### 主机重启说明与恢复后检查
+
+2026-11-08T22:57:46.717477+08:00 用户说明刚才重启了电脑；主机kern.boottime为22:48:05，与监督器22:47:46退出相吻合。此前“中断来源未知”据此补充为用户执行的主机重启上下文，不能当作手机自动返回或等待超时。重启主机并未自动恢复调试接口：再次只读核对仍为Xiaomi `05c6:f000`、仅Mass Storage，adb/fastboot列表均空。USB连接已成立，当前明确前置是手机提供真正的adb/fastboot接口，而不是继续重启电脑或重复端口复位。未发送任何phone写入/重启命令；候选安装状态与OS370回退保持。

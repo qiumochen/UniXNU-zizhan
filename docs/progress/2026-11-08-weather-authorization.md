@@ -133,3 +133,9 @@ v23r2改为单次被动恢复：15分钟内等待稳定、product核对通过的
 2026-11-08T23:03:11.428842+08:00 v23r3完整live OS preflight PASS（候选OS哈希一致、温度27.1°C），标准流程再次在Android→bootloader后的100秒枚举窗口NO_FASTBOOT，未发送镜像；候选干预验收SKIP。退出后只读核对端口仅供电无连接，adb/fastboot列表空，原job已移除、锁释放。主机重启不能视为解决此切换问题。
 
 v23r4已挂单次被动直接接续器，输入改为本次主机重启后的v23r3 Android preflight/arm证据，等待用户在fastboot保持状态重新插拔同一已验证USB-A路径。目标稳定出现后直接boot既定候选，不再主动返回Android或重复失败的reboot/VBUS/PORT_RESET。15分钟等待、30分钟总期限，独占锁/launchd/日志，未连上不发送；结束显式读pinned copy并与旧日志区分、保留原始ramoops，完整结果仍待设备审查。
+
+### v23r4终态：被动等待超时，未派发镜像
+
+2026-11-08T23:19:52.934362+08:00 复查：恢复器23:18:15按900秒等待期限记录FAIL，`phone_boot_dispatched=false`，没有发送镜像。launchd虽last exit code为0，但脚本状态是FAIL；两者不可混用。新XNU/定位/天气与候选干预验收均SKIP，不能宣称候选失败或修复。单次job已bootout、设备锁释放、Paseo心跳已删除，不再自动重试。
+
+终态只读设备检查：adb/fastboot均无设备，USB端口已检测连接且身份又为`05c6:f000`，不同于等待目标`18d1:d00d`。不把该身份视为可用Android/root，也不把旧“只有供电”状态沿用到现在。由于没有Android/root通道，无法执行既定OS-only回退。实际已安装候选仍为v23（仅移除fairplayd job）、尚未启动验收；canonical仍OS370、原始回退完整保留。下一步须先恢复并核对真正adb/fastboot接口，再执行同输入对照或在Android/root下回退；不得重复已失败切换或继续无期限等待。

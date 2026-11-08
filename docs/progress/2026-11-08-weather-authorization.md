@@ -177,3 +177,7 @@ v23r5唯一新主机控制：Android nohup延迟7秒执行真实root reboot boot
 2026-11-08T23:53:38.242798+08:00 v24b preflight PASS，但切换阶段NO_FASTBOOT、未发送镜像，原生定位设置页/weatherd栈验收SKIP。job已退出并bootout、锁释放，无活跃设备操作或新增心跳；adb/fastboot列表均空，当前运行状态未知。未在失败后重复重启或端口试验。v23r5已取得的正向定位栈/按需服务/提示显示证据保留，不将v24b未启动解释为候选回归。
 
 当前安装仍v23候选，不推广canonical基线；OS370原镜像/manifest/反向块清单完整。候选存在未完成的原生定位设置与Weather数据资格，继续保护；若要恢复OS370，需真实Android/root通道且无owner，运行有界OS-only rollback并整窗hash验证。下一单一动作是连接恢复后进入原生定位设置页核对全局开关；本批不自动改授权，也不把用户取消当硬件故障。全部现场状态和回退入口已同步本机交接。
+
+### 当前无人值守条件与独立主机核对
+
+2026-11-08T23:57:00.584666+08:00 用户询问能否继续。只读实查adb/fastboot均空、目标端口仅供电无连接、无设备owner/锁/心跳，不能继续真实设备试验，也未另建不变等待器。独立主机只读审计确认候选与OS370均保留WeatherKit authservice的embedded XPC目录/可执行文件及服务树缓存；它不是独立LaunchDaemon，不能因后者找不到便报缺服务。weatherd/locationd/tccd程序存在，weatherd主机签名检查通过。Weather app的strict资源封套检查在原OS370与候选同样报告obsolete custom-omit envelope，此为共同观察，不能归因本次任务移除或直接解释为设备拒绝运行。v23r5查找fairplay失败中Weather占375/513条，仍需实际weatherd栈区分依赖阻塞；日志计数本身不等于根因。两次只读挂载均已卸载，没有手机或镜像写入。

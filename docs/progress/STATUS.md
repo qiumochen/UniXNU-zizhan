@@ -6,7 +6,8 @@
 
 11-07 全天 POWER-02 产出了诊断仪器和只读审计，但**没有任何用户可感知的功能交付**，首次面板 off/on 一次未执行。11-08 起按“最大结果、最小 MVP”重排：
 
-- **主线 = APP-01 日用内容**。首个交付是 v5 候选一轮：`panel-pool 128 MiB`（3 buffers / 5 canvas slots）下的天气可见内容。验收四条：新鲜 klog 出现 128 MiB pool 与 5/5 slots；无 `canvas slot NONE FREE`；有效 `PONG SHOT` 且非黑；Wi-Fi 64 MiB arena 与 Android 返回。第二轮同内核换 Safari，验收 HTTPS 页面、地址栏输入与滚动。
+- **主线 = APP-01 日用内容**。首个交付是 `panel-pool 128 MiB`（2 buffers / 5 canvas slots）下的天气可见内容。验收四条：新鲜 klog 出现 128 MiB pool 与 5/5 slots；无 `canvas slot NONE FREE`；有效 `PONG SHOT` 且非黑；Wi-Fi 64 MiB arena 与 Android 返回。第二轮同内核换参数继续，随后 Safari，验收 HTTPS 页面、地址栏输入与滚动。
+- 11-08 进展：v3/v5 的启动失败根因为 ADT 缺 8 个 `cluster-type`（`PONG_ADT_CLUSTERS` 只在 `ci_boot_ufs.sh` 导出，直接调用打包脚本会丢；`--skip-image-verification` 又跳过 `audit_adt`）。修正后 v6 一轮完成：128 MiB pool / 5 slots / 完整截图 / Wi-Fi arena / 1292 帧 / Android 返回全部通过。天气页未出现的原因为合成触摸周期相位（截图前 0.33 秒刚上滑回主屏），不是渲染故障；`SBRendererService` 的 16 MB 限制来自恢复的 `jetsamproperties.J171.plist` inactive 硬上限。见[本轮记录](2026-11-08-panelpool-128.md)。
 - **POWER-02 降级为受控支线**。重新进场的条件是两条具体证据同时存在：启动日志出现 `ZIZHAN_DSI_DMA: buffer ready`，且 128 MiB 布局下显示域仍为 `IdentityObserved`。在此之前不再产出新诊断模型、不再开只读审计轮、不执行面板 off、锁屏或真睡眠。
 - **唯一设备主实验**同时只能有一轮；每轮结束当场写记录，未记录候选视为不存在（11-08 00:31–00:44 的 v3/v5 即因此在本机停留 16 小时无人接续）。
 - 工作树积压（15 修改 + 24 未跟踪）按“运行时代码 / 文档”两批提交，不再以“保留并发改动”为由长期不提交。
@@ -50,7 +51,7 @@
 
 | ID | 优先级 / 状态 | 范围与验收条件 | 下一步 / 证据 |
 | --- | --- | --- | --- |
-| APP-01 | P1 / IN_PROGRESS | 主线。逐应用记录启动、内容显示、核心操作、联网、输入及前后台表现；至少覆盖 Safari、设置、时钟、天气、照片，产出状态表并据此定序。 | MVP-1：v5 候选（panel pool 128 MiB / 5 slots）一轮，验收 128 MiB pool 日志、无 `canvas slot NONE FREE`、有效非黑天气截图、Wi-Fi arena 与 Android 返回。MVP-2：同内核换 Safari 目标，验收真实 HTTPS 页面、地址栏输入、滚动。随后 Settings/Photos 可见内容。首轮天气只有 resumed 证据，无截图且出现 IOSurface 内存不足，不得当作内容 PASS。见[首轮记录](2026-11-07-app-persistence.md)。 |
+| APP-01 | P1 / IN_PROGRESS | 主线。逐应用记录启动、内容显示、核心操作、联网、输入及前后台表现；至少覆盖 Safari、设置、时钟、天气、照片，产出状态表并据此定序。 | v6 已 PASS 面板池/画布槽/截图/Wi-Fi/返回（128 MiB、2 buffers、5/5 slots、120 行图、64 MiB arena、1292 帧、Android 返回）；天气页未出现是合成触摸相位（截图前 0.33 秒上滑回主屏），非渲染故障。**v7 交接时 RUNNING 且无结果**（17:06:55 临时启动，两次 usbkick，未回落，无 `logs/pp128-v7.txt`），唯一变量 `pong_touch_synth` 3→200、`pong_shot` 100→190；接续者先收口该轮再决定下一步。随后 Safari（HTTPS 页面、地址栏输入、滚动），再 Settings/Photos。见[本轮记录](2026-11-08-panelpool-128.md)、[首轮](2026-11-07-app-persistence.md)。 |
 | POWER-02 | P3 / BLOCKED | 完整原生锁屏/自动与手动熄屏、按后台任务进入真实低功耗并可靠恢复；静默、联网、后台任务与功耗分场景验收。支线 MVP 仍为原生显示请求→内屏真实 off→wake→可见首帧。 | 11-08 起降级为受控支线，不再产出新诊断模型或只读审计轮。解阻条件（须同时满足）：启动日志出现 `ZIZHAN_DSI_DMA: buffer ready`；128 MiB 布局下显示域仍 `IdentityObserved`。在此之前不执行面板 off/锁屏/睡眠。既有结果保留：v5 只读快照 PASS（SMR3=0x84022800、S2CR3=3、CB3 SCTLR=0xe0、FSR=0x400、11 reads 0 write）；FIFO-v2 正常 8 包 461µs、CP1836/1836；memory-v2 因 ADT `pong-dsi-command` 字段早期 FAIL 且该字段已撤回；长包 DMA 需 IOVA 而非物理地址。见[本批记录](2026-11-07-power-unattended.md)。 |
 | THERM-01 | P1 / IN_PROGRESS | 本机温度传感器、真实热策略与 CPU 限频/恢复；输入来源、单位、失效处理和负载响应可核对。 | g395温度SKIP保留；按v2 VALID纠正后，g396两组2.8/32路有效 last-temperature 读取PASS（35.5–46.9°C），34项host及完整/精简内核通过。原supervisor因Android未完成记FAIL；46.224秒后有界复核boot_completed=1，返回单独PASS，未改旧记录。下一步有界多时点/更新与过期语义、映射交叉核对及vendor热策略输入；无温控或限频资格。见[本轮记录](2026-11-07-tsens-readonly.md)。 |
 | BASE-01 | P2 / HOST_VERIFIED | 以现有 Darwin24/UFS 链路得到可追踪、可重建和可回退的本地日用候选；源码、OS/UI/helper、服务策略和 manifest 对齐。 | `os370-full-candidate-v3` 已按显式 OS370 服务存在性策略完整 prepare/apply/finish；source/input/prepared image/policy hash 固定，APFS readback、Data roundtrip、24项服务/runtime审计通过。完整镜像只在仓库外；未安装/启动，OS370 仍是设备基线。验收暂存；设备批次执行前重新preflight并登记变量/回退。默认策略审计仍指出 fairplayd 漂移。见[本批记录](2026-11-06-daily-use-development.md)。 |

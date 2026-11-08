@@ -139,3 +139,41 @@ v23r4已挂单次被动直接接续器，输入改为本次主机重启后的v23
 2026-11-08T23:19:52.934362+08:00 复查：恢复器23:18:15按900秒等待期限记录FAIL，`phone_boot_dispatched=false`，没有发送镜像。launchd虽last exit code为0，但脚本状态是FAIL；两者不可混用。新XNU/定位/天气与候选干预验收均SKIP，不能宣称候选失败或修复。单次job已bootout、设备锁释放、Paseo心跳已删除，不再自动重试。
 
 终态只读设备检查：adb/fastboot均无设备，USB端口已检测连接且身份又为`05c6:f000`，不同于等待目标`18d1:d00d`。不把该身份视为可用Android/root，也不把旧“只有供电”状态沿用到现在。由于没有Android/root通道，无法执行既定OS-only回退。实际已安装候选仍为v23（仅移除fairplayd job）、尚未启动验收；canonical仍OS370、原始回退完整保留。下一步须先恢复并核对真正adb/fastboot接口，再执行同输入对照或在Android/root下回退；不得重复已失败切换或继续无期限等待。
+
+## v23r5：关机充电状态确认与断线跨模式连接控制
+
+2026-11-08T23:39:41.625192+08:00 用户明确观察到此前为关机充电电池画面，现已按电源开机；adb product=zizhan/boot_completed=1，26°C、电量100%。只读原厂USB init配置的 `on charger` 段明确设VID/PID `05c6:f000`并只链接mass_storage，故此前此身份不是正常Android文件传输模式；旧保守未知记录据此补充，不把充电模式当作运行中系统挂死。该配置不能单独说明为什么此前从bootloader转入充电状态。
+
+v23r5唯一新主机控制：Android nohup延迟7秒执行真实root reboot bootloader，主机派发后对已核对的同一手机USB-A端口立即off，跨过手机bootloader初始化后（18秒）on。假设为避开带线跨模式握手，让bootloader在电池供电下初始化后再接线；不同于失败后的VBUS循环。重连后仍须稳定USB/fastboot product核对才能发镜像；只一次控制，不操作其他端口、不刷分区、不改固件。30分钟单次监督，现有autoreset300/240与panic/按键返回保持。候选OS/boot image/UI/helper/Data不变，仍验证fairplayd任务存在性对locationd旧MIG1203及天气的影响，未启动不能填PASS。
+
+2026-11-08T23:41:45.590452+08:00 v23r5已实际boot：23:41:00 Sending/Booting均OKAY、目标核对PASS。该轮首次启动已安装fairplayd-off候选；连接控制仅有一次成功，不升级为稳定USB修复。当前RUNNING，等待同内核同诊断下的locationd栈、完整天气截图与Android返回。
+
+**本轮人工观察/输入（2026-11-08T23:45:21.027969+08:00）**：用户现场报告定位相关提示已弹出，要求去设置打开定位，随后误点“取消”。确切原文与截图未保存，仅保留用户复述。此证据证明本轮至少该提示显示路径可用，不等于已批准应用定位、全局定位已开启或GPS有fix。取消为额外人工输入，天气/授权后续状态应注明；晚期截图无提示不能反推“从未弹出”，也不能用取消后无定位诊断硬件故障。本轮不再是纯无人值守UI控制，定位采样与人工操作的相对时序须结合日志。
+
+## v23r5结果：定位服务解除旧阻塞、提示路径实际可用
+
+2026-11-08T23:49:09.969196+08:00 新鲜deadline klog 2,119,656 bytes、无panic、128MiB/5槽、0 NONE FREE、Wi-Fi state6/DHCP、292秒回fastboot、Android boot_completed=1均通过。5次IOSurface失败和1次SBRendererService 16MiB jetsam保留，不能提升通用稳定性。截图320/320行但仅256/360列，完整帧资格PARTIAL；保留中心“北京 / --”与模态提示，文字因采样率无法逐字确认。用户先报告的定位提示确实在图中，人工取消不抹去显示证据。
+
+同内核/loader/UI/helper/Data、仅删fairplayd job的控制结果：
+
+| 证据 | OS370控制v22r2 | fairplayd-off v23r5 |
+| --- | --- | --- |
+| locationd主线程1秒1000样本 | 等串行队列1000/1000 | CFRunLoopServiceMachPort正常事件循环1000/1000 |
+| 旧MIG1203同步阻塞栈 | 1000/1000 | 所采栈不再出现，原位置线程在workqueue等待 |
+| weatherd成功spawn | 0条 | 1条，ipc(mach)按需启动 |
+| 定位相关提示 | 未观察 | 用户现场+中心截图确认 |
+| 温度/预报 | `--` | 仍`--`，天气未修好 |
+
+**结论**：这一轮已验证移除无人应答的fairplayd任务能解除locationd旧初始化阻塞，应用数据服务/定位提示能继续。不能把此结果扩大成完整GPS、授权成功、全系统提示资格或天气修复。提示要求去设置打开定位，用户点取消；确切全局开关状态尚需原生Settings检查。Weather仍有513条fairplay服务查找失败，需区分这是容错日志还是天气数据的剩余必需依赖，不能伪造服务/成功应答。未做B2重新加回对照，时序/人工取消和截图缺列限制保留；不推广默认OS。候选因有新的正向诊断证据，继续保留用于下一项只读页面调查。
+
+### v24下一诊断设计：原生定位设置页面和weatherd等待栈
+
+只改临时启动诊断/导航参数，OS仍v23隔离候选，不改定位权限或Data、不注入位置。Weather启动后经现有`pong_url`原生LSWorkspace导航到`prefs:root=Privacy&path=LOCATION`，观察全局定位状态；采样目标由locationd换为weatherd，确认已有城市取数停在哪个依赖。截图用于页面确认，导航返回0或页面缺失单列SKIP，不替代权限验收。返回/备份/已安装OS身份和唯一owner规则保持，连接复用v23r5的受控断线跨模式流程，单次监督，不盲重复失败。验收为全局定位开关状态或明确页面/导航阻塞证据，以及weatherd可解释栈；本轮不自动打开定位开关。
+
+2026-11-08T23:50:14.005579+08:00 v24b已准备：image `df7e7972d2d81cc3d22e568ad2e761415d40771f0c3c511369d45fdd4072fee1`；kernel/loader逐字节同v23r5，ADT8cluster，命令行1006字节。`gs_proc=weatherd pong_url=35 pong_pane=Privacy&path=LOCATION`；applog加入Preferences，移除单张截图无效的shot_ms以满足命令行。v24首包1025字节被主机断言拒绝，未boot，负记录保留；v24b才是唯一可运行候选。本轮不修改权限开关。
+
+### v24b结果与本批接续边界
+
+2026-11-08T23:53:38.242798+08:00 v24b preflight PASS，但切换阶段NO_FASTBOOT、未发送镜像，原生定位设置页/weatherd栈验收SKIP。job已退出并bootout、锁释放，无活跃设备操作或新增心跳；adb/fastboot列表均空，当前运行状态未知。未在失败后重复重启或端口试验。v23r5已取得的正向定位栈/按需服务/提示显示证据保留，不将v24b未启动解释为候选回归。
+
+当前安装仍v23候选，不推广canonical基线；OS370原镜像/manifest/反向块清单完整。候选存在未完成的原生定位设置与Weather数据资格，继续保护；若要恢复OS370，需真实Android/root通道且无owner，运行有界OS-only rollback并整窗hash验证。下一单一动作是连接恢复后进入原生定位设置页核对全局开关；本批不自动改授权，也不把用户取消当硬件故障。全部现场状态和回退入口已同步本机交接。

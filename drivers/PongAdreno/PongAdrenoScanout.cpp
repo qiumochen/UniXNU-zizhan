@@ -1072,8 +1072,12 @@ extern "C" IOReturn pong_scanout_call(task_t owner,unsigned op,const void *in,si
  * "PONG SHOT <n> begin <w> <h> at <us>", then "PONG SHOT <n> <row> <x> <RGB hex>" in 32-pixel chunks.
  * IOLog truncates a line near 255 bytes: a whole 135-pixel row silently lost its right 95 pixels, and shot.py painted them black.
  * tools/mac/shot.py writes PNGs. The canvases are BGRA8 (deep framebuffers are off). Lets a round check what the panel showed. */
-static uint32_t shotAt,shotN=6,shotMs=1000,shotTaken,shotHud;   /* pong_shot_hud=1: 136 x 120 at full resolution from 160 px left of the top right corner (the fps_hud box) */static uint64_t shotNext;static bool shotArgs,shotThread;
-static uint8_t shotPix[120][136*3];static unsigned shotW,shotH;static uint64_t shotWhen;static volatile uint32_t shotReady;
+/* pong_shot_step=<n> (default 16): whole-frame sampling, n pixels/rows apart.
+ * pong_shot_rect=<x>,<y>,<w>,<h>: instead capture that region at full resolution (step 1), so text is readable.
+ *   The console ring and the pinned klog are a few MiB: the capture is refused when w*h exceeds SHOT_MAX_PIXELS. */
+static uint32_t shotAt,shotN=6,shotMs=1000,shotTaken,shotHud,shotStep=16,shotRect[4];static uint64_t shotNext;static bool shotArgs,shotThread;
+enum {SHOT_MAX_W=544,SHOT_MAX_H=480,SHOT_MAX_PIXELS=130000};
+static uint8_t shotPix[SHOT_MAX_H][SHOT_MAX_W*3];static unsigned shotW,shotH;static uint64_t shotWhen;static volatile uint32_t shotReady;
 static void shotPrint(void *,wait_result_t)
 {
     static char line[256];
@@ -1102,8 +1106,23 @@ static void shotCapture(uint64_t phys,uint32_t stride)
     if(!shotArgs) {
         shotArgs=true;(void)PE_parse_boot_argn("pong_shot",&shotAt,sizeof shotAt);
         (void)PE_parse_boot_argn("pong_shot_n",&shotN,sizeof shotN);(void)PE_parse_boot_argn("pong_shot_hud",&shotHud,sizeof shotHud);(void)PE_parse_boot_argn("pong_shot_ms",&shotMs,sizeof shotMs);
+        (void)PE_parse_boot_argn("pong_shot_step",&shotStep,sizeof shotStep);
+        if(shotStep<1)shotStep=1;if(shotStep>64)shotStep=64;
+        char rect[40]={};
+        if(PE_parse_boot_argn("pong_shot_rect",rect,sizeof rect)) {
+            unsigned v[4]={0,0,0,0};int field=0;const char *p=rect;
+            for(int i=0;i<4&&*p;++i) {
+                unsigned n=0;bool any=false;
+                while(*p>='0'&&*p<='9'){n=n*10+unsigned(*p-'0');++p;any=true;}
+                v[i]=any?n:0;
+                if(*p==',')++p;
+                field=i+1;
+            }
+            if(field==4){shotRect[0]=v[0];shotRect[1]=v[1];shotRect[2]=v[2];shotRect[3]=v[3];}
+        }
         if(shotAt)nanoseconds_to_absolutetime(uint64_t(shotAt)*1000000000ull,&shotNext);
-        if(shotAt)IOLog("PONG SHOT: %u captures from %u s, %u ms apart (first zero-copy frame at %llu us)\n",shotN,shotAt,shotMs,us(mach_absolute_time()));
+        if(shotAt)IOLog("PONG SHOT: %u captures from %u s, %u ms apart, step %u, rect %u,%u,%u,%u (first zero-copy frame at %llu us)\n",
+            shotN,shotAt,shotMs,shotStep,shotRect[0],shotRect[1],shotRect[2],shotRect[3],us(mach_absolute_time()));
     }
     if(!shotAt || shotTaken>=shotN || shotReady)return;
     const uint64_t now=mach_absolute_time();
@@ -1118,11 +1137,34 @@ static void shotCapture(uint64_t phys,uint32_t stride)
     if(!shotPoolMap){shotAt=0;return;}
     if(shotPoolMap && phys>=shotPoolPhys && phys+uint64_t(stride)*h<=shotPoolPhys+shotPoolBytes) {
         const uint8_t *base=reinterpret_cast<const uint8_t *>(shotPoolMap->getVirtualAddress())+(phys-shotPoolPhys);
-        shotW=(unsigned(mode.width)+15)/16;shotH=(h+15)/16;if(shotW>136)shotW=136;if(shotH>120)shotH=120;
-        const unsigned step=shotHud?1:16,left=shotHud?unsigned(mode.width)-160:0;
-        if(shotHud){shotW=136;shotH=120;}
+        const unsigned frameW=unsigned(mode.width);
+        unsigned step=shotStep,left=0,top=0;
+        if(shotHud) {
+            step=1;left=frameW>160?frameW-160:0;shotW=136;shotH=120;
+        } else if(shotRect[2]&&shotRect[3]) {
+            /* Full-resolution crop: only this region is logged, so text stays readable. */
+            left=shotRect[0]<frameW?shotRect[0]:frameW;
+            top=shotRect[1]<h?shotRect[1]:h;
+            unsigned w=shotRect[2];if(left+w>frameW)w=frameW-left;
+            unsigned hh=shotRect[3];if(top+hh>h)hh=h-top;
+            if(w>SHOT_MAX_W)w=SHOT_MAX_W;
+            if(hh>SHOT_MAX_H)hh=SHOT_MAX_H;
+            if(uint64_t(w)*hh>SHOT_MAX_PIXELS) {
+                IOLog("PONG SHOT: SKIP rect %ux%u exceeds the %u-pixel capture budget\n",w,hh,(unsigned)SHOT_MAX_PIXELS);
+                shotAt=0;return;
+            }
+            shotW=w;shotH=hh;step=1;
+        } else {
+            shotW=(frameW+step-1)/step;shotH=(h+step-1)/step;
+            if(shotW>SHOT_MAX_W)shotW=SHOT_MAX_W;
+            if(shotH>SHOT_MAX_H)shotH=SHOT_MAX_H;
+            if(uint64_t(shotW)*shotH>SHOT_MAX_PIXELS) {
+                IOLog("PONG SHOT: SKIP step %u gives %ux%u, over the %u-pixel capture budget\n",step,shotW,shotH,(unsigned)SHOT_MAX_PIXELS);
+                shotAt=0;return;
+            }
+        }
         for(unsigned y=0;y<shotH;++y)for(unsigned x=0;x<shotW;++x) {
-            const uint8_t *at=base+uint64_t(y)*step*stride+uint64_t(left+x*step)*4;
+            const uint8_t *at=base+uint64_t(top+y*step)*stride+uint64_t(left+x*step)*4;
             const uint32_t v=*reinterpret_cast<const volatile uint32_t *>(at);
             shotPix[y][x*3]=uint8_t(v>>16);shotPix[y][x*3+1]=uint8_t(v>>8);shotPix[y][x*3+2]=uint8_t(v);
         }

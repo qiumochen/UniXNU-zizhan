@@ -7,6 +7,7 @@
 11-07 全天 POWER-02 产出了诊断仪器和只读审计，但**没有任何用户可感知的功能交付**，首次面板 off/on 一次未执行。11-08 起按“最大结果、最小 MVP”重排：
 
 - **主线 = APP-01 日用内容**。首个交付是 `panel-pool 128 MiB`（2 buffers / 5 canvas slots）下的天气可见内容。验收四条：新鲜 klog 出现 128 MiB pool 与 5/5 slots；无 `canvas slot NONE FREE`；有效 `PONG SHOT` 且非黑；Wi-Fi 64 MiB arena 与 Android 返回。第二轮同内核换参数继续，随后 Safari，验收 HTTPS 页面、地址栏输入与滚动。
+- 11-08 收工状态（21:40）：分支 `power02-panelpool-128`，16 个提交未推送；设备可用（`pp-wake-v17` 主屏 lit 25.2%），OS 已回到 OS370（窗口 `a0187c09…`、UI 库 `c3897b10…`）。调试基建已落地：`pong_shot_step`、`pong_shot_rect`（全分辨率裁剪）、`round-report.py`。天气仍未修好：App 不请求数据、`weatherd` 零行，最可能是无定位/无城市。**已撤回**此前"OS 刷新导致回归"的判断——黑屏来自从 fastboot 起步（跳过 klog arm）或缺少上滑手势。新发现：`MiniIOSurface` 画布分配失败（81 MB 已用时即失败，1137 次）与 CS4K 同属"内存充足但内核映射分配失败"，疑同一根因。接续细节见仓库外 `work/CURRENT_HANDOFF.md`。
 - 11-08 进展：v3/v5 的启动失败根因为 ADT 缺 8 个 `cluster-type`（`PONG_ADT_CLUSTERS` 只在 `ci_boot_ufs.sh` 导出，直接调用打包脚本会丢；`--skip-image-verification` 又跳过 `audit_adt`）。修正后 v6 一轮完成：128 MiB pool / 5 slots / 完整截图 / Wi-Fi arena / 1292 帧 / Android 返回全部通过。天气页未出现的原因为合成触摸周期相位（截图前 0.33 秒刚上滑回主屏），不是渲染故障；`SBRendererService` 的 16 MB 限制来自恢复的 `jetsamproperties.J171.plist` inactive 硬上限。见[本轮记录](2026-11-08-panelpool-128.md)。
 - **POWER-02 降级为受控支线**。重新进场的条件是两条具体证据同时存在：启动日志出现 `ZIZHAN_DSI_DMA: buffer ready`，且 128 MiB 布局下显示域仍为 `IdentityObserved`。在此之前不再产出新诊断模型、不再开只读审计轮、不执行面板 off、锁屏或真睡眠。
 - **唯一设备主实验**同时只能有一轮；每轮结束当场写记录，未记录候选视为不存在（11-08 00:31–00:44 的 v3/v5 即因此在本机停留 16 小时无人接续）。

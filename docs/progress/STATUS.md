@@ -4,6 +4,12 @@
 
 ## 11-08 主线重排（本条优先于下方全部 11-07 段）
 
+- **22:18 最新状态（优先）**：v22r2已抓到locationd主线程等队列、工作线程1000/1000次卡在与g212同址的MIG1203同步依赖，天气仍`--`；不能据此确诊全系统权限弹窗或GPS。隔离OS370候选仅删fairplayd.A2 job，OS-only安装及整窗读回PASS，但v23再次NO_FASTBOOT、未发镜像，因果对照SKIP。**当前手机已安装该候选、未启动；canonical文件仍OS370，不能声称已回退。** adb/fastboot不可见，无活跃设备操作。恢复连接后先核对实际状态，完成对照或OS-only回退；[详情](2026-11-08-weather-authorization.md)。
+
+- **22:11 APP-01 新设备证据**：v22r2完整采集/Android返回PASS，locationd主线程等队列，工作线程1000/1000次停在与g212逐地址相同的同步Mach栈。天气仍`--`，不是GPS或授权弹窗已确诊。下一步隔离OS370 clone仅移除反复退出的fairplayd job，保持内核/UI/Data与诊断参数，验证真实依赖阻塞；详见[诊断设计](2026-11-08-weather-authorization.md)。
+
+- **22:05 APP-01 诊断 RUNNING**：用户直接重启后恢复完整 Android；v22r1再次NO_FASTBOOT、未发送。v22r2改主机切换时序（reboot bootloader后立即释放adb服务），同v22不可变候选成功临时boot。OS/UI/Data未改，autoreset 300/240与30分钟单次监督；正在等新日志，尚无天气/定位或权限新结论。
+
 - **21:51 APP-01 接续更正（优先于下方旧天气归因）**：`pp-weather-v18` 原图已有“上海”与 `--`，撤回“没有城市/完全无文字”；“不请求数据、不是网络问题”也超出了已捕获日志的证明范围。定位/权限/天气服务存在，GPS、权限弹窗和天气接口尚未验证。v22 同运行时输入补齐日志与 locationd 栈，打包及 live OS preflight PASS，但 `NO_FASTBOOT`，未发送镜像；常规与延长 VBUS 恢复失败。设备主实验停止，无活跃操作，adb/fastboot 均不可见。下一步重新插拔已验证后部 USB-A，回完整 Android 后以新运行名执行该候选，见[天气授权诊断](2026-11-08-weather-authorization.md)。
 
 11-07 全天 POWER-02 产出了诊断仪器和只读审计，但**没有任何用户可感知的功能交付**，首次面板 off/on 一次未执行。11-08 起按“最大结果、最小 MVP”重排：
@@ -54,7 +60,7 @@
 
 | ID | 优先级 / 状态 | 范围与验收条件 | 下一步 / 证据 |
 | --- | --- | --- | --- |
-| APP-01 | P1 / IN_PROGRESS | 主线。逐应用记录启动、内容显示、核心操作、联网、输入及前后台表现；至少覆盖 Safari、设置、时钟、天气、照片，产出状态表并据此定序。 | 已纠正天气归因：v18 图中有“上海”与 `--`，无城市和网络已排除的旧结论撤回；无日志不能证明无请求。weatherd/locationd/tccd 存在，历史 locationd→fairplayd 阻塞需新栈验证。v22 同内核/OS/UI 诊断候选和 live OS preflight PASS，但 USB NO_FASTBOOT、未 boot；有界恢复后仍不可见。下一步重新插拔后部 USB-A，恢复完整 Android 后执行新命名控制轮；见[天气授权诊断](2026-11-08-weather-authorization.md)。 |
+| APP-01 | P1 / IN_PROGRESS | 主线。逐应用记录启动、内容显示、核心操作、联网、输入及前后台表现；至少覆盖 Safari、设置、时钟、天气、照片，产出状态表并据此定序。 | v22r2完整新日志/画面/Android返回PASS；locationd线程1000/1000停在与g212同址MIG1203，主线程等串行队列，天气仍`--`。隔离候选仅移除fairplayd job，OS-only安装/整窗读回PASS；v23未发送因NO_FASTBOOT，干预结果SKIP。当前候选已安装未启动、USB不可见，先恢复连接并核对状态，再做因果对照或OS370回退。GPS/全系统权限弹窗/天气服务端仍未确诊；见[天气诊断](2026-11-08-weather-authorization.md)。 |
 | POWER-02 | P3 / BLOCKED | 完整原生锁屏/自动与手动熄屏、按后台任务进入真实低功耗并可靠恢复；静默、联网、后台任务与功耗分场景验收。支线 MVP 仍为原生显示请求→内屏真实 off→wake→可见首帧。 | 11-08 起降级为受控支线，不再产出新诊断模型或只读审计轮。解阻条件（须同时满足）：启动日志出现 `ZIZHAN_DSI_DMA: buffer ready`；128 MiB 布局下显示域仍 `IdentityObserved`。在此之前不执行面板 off/锁屏/睡眠。既有结果保留：v5 只读快照 PASS（SMR3=0x84022800、S2CR3=3、CB3 SCTLR=0xe0、FSR=0x400、11 reads 0 write）；FIFO-v2 正常 8 包 461µs、CP1836/1836；memory-v2 因 ADT `pong-dsi-command` 字段早期 FAIL 且该字段已撤回；长包 DMA 需 IOVA 而非物理地址。见[本批记录](2026-11-07-power-unattended.md)。 |
 | THERM-01 | P1 / IN_PROGRESS | 本机温度传感器、真实热策略与 CPU 限频/恢复；输入来源、单位、失效处理和负载响应可核对。 | g395温度SKIP保留；按v2 VALID纠正后，g396两组2.8/32路有效 last-temperature 读取PASS（35.5–46.9°C），34项host及完整/精简内核通过。原supervisor因Android未完成记FAIL；46.224秒后有界复核boot_completed=1，返回单独PASS，未改旧记录。下一步有界多时点/更新与过期语义、映射交叉核对及vendor热策略输入；无温控或限频资格。见[本轮记录](2026-11-07-tsens-readonly.md)。 |
 | BASE-01 | P2 / HOST_VERIFIED | 以现有 Darwin24/UFS 链路得到可追踪、可重建和可回退的本地日用候选；源码、OS/UI/helper、服务策略和 manifest 对齐。 | `os370-full-candidate-v3` 已按显式 OS370 服务存在性策略完整 prepare/apply/finish；source/input/prepared image/policy hash 固定，APFS readback、Data roundtrip、24项服务/runtime审计通过。完整镜像只在仓库外；未安装/启动，OS370 仍是设备基线。验收暂存；设备批次执行前重新preflight并登记变量/回退。默认策略审计仍指出 fairplayd 漂移。见[本批记录](2026-11-06-daily-use-development.md)。 |

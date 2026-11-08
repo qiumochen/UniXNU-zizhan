@@ -55,3 +55,39 @@
 4. 权限弹窗需有实际 request → 提示/错误 → 用户选择/状态变化证据；GPS 需有真实驱动与位置更新证据。这两项不互相替代。
 
 没有修改或安装运行时代码。未修复天气、未验证 GPS 或全系统权限弹窗。此次交付为纠正错误前提、固定诊断候选，以及记录阻塞后的安全接续动作。知识图没有本仓库索引，结构检查已回退到限定源码范围读取与搜索；未从无索引推断代码不存在。
+
+## v22r1：重插后的同候选采集
+
+2026-11-08T21:54:56.306534+08:00 用户已重新插线并授权无人值守。fastboot product 核对为 zizhan，已回 Android 且 boot_completed=1。复用 v22 不可变候选，实验变量和验收条件不变；原 v22 未发送失败保留。源码为 `e763c40a39a6bc507fc612fb66bbe656e342f660`，本轮 dirty 仅文档；OS/UI/helper 不变。状态 RUNNING（主机前置），实际 XNU 派发以 cycle 日志为准。
+
+### v22r1 结果与 v22r2 主机连接控制
+
+2026-11-08T22:04:33.001708+08:00：v22r1 preflight PASS、温度31°C，但 Android→bootloader 后再次 NO_FASTBOOT，未发送镜像；退出后释放 adb 再做一次记录端口 VBUS 恢复仍未枚举。cycle FAIL、天气/定位采集 SKIP；单次 launchd 已移除，无遗留设备操作。用户随后直接重启，重新观察到 Android boot_completed=1、product=zizhan。
+
+v22r2 状态 RUNNING（前置）：同一不可变 v22 镜像，唯一新的主机控制是 `adb reboot bootloader` 成功后立即 `adb kill-server`，随后正常目标核对与有界枚举/一次端口恢复；检验切换时 adb USB 句柄是否有关。原退出后的释放失败记录保留，不能当作此时序控制已试过。设备参数与诊断验收不变，30分钟监督、autoreset 300/240，不改OS/UI/Data、不flash。
+
+2026-11-08T22:06:04.239094+08:00 v22r2 已实际启动：主机立即释放 adb 的控制下，fastboot attach PASS（reboot 派发后约10.4秒 ready），镜像 Sending/Booting 均 OKAY，22:05:08 临时 boot。当前仍 RUNNING，不能把 USB 单次通过推广为根因修复；新页面、栈与自动返回待采集。
+
+## v22r2 结果与 v23 隔离对照设计
+
+2026-11-08T22:12:21.686158+08:00 v22r2 采集完成并返回 Android：新鲜 deadline klog 2,118,109 bytes、128 MiB/5 slots、0 NONE FREE、9 次 IOSurface失败、无panic、无renderer jetsam；Wi-Fi state=6、DHCP完成，完整320行截图显示温度 `--`，本轮没有城市标题。不能从这一张图撤回v18曾显示“上海”的事实，也不能认定城市消失来自诊断参数。
+
+`locationd` 1秒1000次采样、0丢失：主线程356与线程1102均1000/1000等待串行队列；线程729为1000/1000同步Mach接收，去ASLR后自己的调用位置为 `0x1003bd6e0 → 0x1003c8fec → 0x1003f13c8 → 0x100401a04 → 0x1003e9240 → 0x10052598c → 0x1004d9028`，与g212旧fairplay阻塞栈逐项一致。独立符号化使用同22H374 locationd与shared cache。当前证据是共享依赖阻塞，不是GPS更新失败或授权弹窗自身故障；服务端归属仍通过下一轮干预确认。weatherd无已捕获日志，不代表完整网络跟踪。
+
+**v23 设计，尚未安装/启动**：只改变OS中的 `com.apple.fairplayd.A2` launchd缓存项与同名job plist（移除），不改程序、内核、UI/helper、Data、其他服务。假设：移除永远无人应答的保活端口后，locationd进入真实失败处理/继续初始化，原生授权和天气数据路径能前进。已有构建默认排除该job，但OS370因历史回填保留，见[旧记录](2026-11-02-gpu-astc-and-fairplayd.md)。
+
+候选由OS370 APFS clone隔离准备，canonical prepared/layout不改；按原64MiB块散列比较，仅安装改变的OS块与描述符，执行完整live OS hash读回。安装前重验备份、root/klog extent、manifest、Android、温度与USB-A，监督/锁保证无并发。启动复用v22内核/loader/参数与同一截图/定位采样；v23不注入位置、不绕过授权、不伪造fairplay服务。回退使用完整OS370与原manifest，失败或未证实收益时恢复并核验。验收分列：locationd旧栈消失、主线程恢复、天气/权限可见变化、网络/显示与Android返回；旧栈消失不能单独宣称天气已修好。
+
+2026-11-08T22:13:01.756823+08:00 v23主机准备PASS：APFS clone完成、缓存语义对比确认仅删除fairplayd job，其他服务/UI/helper保持，程序本体保留；OS候选SHA256 `fa99737b38035b387bc352e32862178a17b1c1a3ec11ff5a51fc058b0299cb26`，改变5个64MiB块，共320MiB。即将安装，安装与整窗读回后才可称已安装；canonical文件和原OS370保持。操作监督对写入设20分钟期限，前后验证各300秒、温度前置20分钟分别有界。
+
+2026-11-08T22:15:09.934942+08:00 v23 OS-only安装与完整live OS读回PASS，候选OS身份已确认，内核尚未启动。下一轮复用v22逐字节相同boot image，只有已安装OS的fairplayd job存在性不同；RUNNING（启动前置）。
+
+### v23 实际结果：安装通过，设备对照未启动
+
+2026-11-08T22:19:44.203019+08:00：OS-only安装及完整live OS哈希读回PASS，手机实际OS为候选 `fa99737b38035b387bc352e32862178a17b1c1a3ec11ff5a51fc058b0299cb26`。随后v23 preflight再次PASS（31.7°C、备份/extent/manifest/UI/helper），但100秒attach窗口再次NO_FASTBOOT，镜像未发送。即使reboot后立即释放adb，仍不稳定，因此撤回任何“该操作修复USB”的推断，只保留v22r2的单次成功控制。v23 cycle FAIL，locationd/天气干预结果SKIP；无新XNU或天气证据。
+
+当前adb和fastboot都不可见，实际运行状态未知；最后已确认Android在22:15 preflight，随后仅派发reboot bootloader。已退出并移除v23 launchd job，无cycle/installer/waiter/设备锁。候选OS已安装但未启动，canonical prepared/layout仍是原OS370，禁止混为同一状态。当前未能回退的具体前置为Android/root不可达；恢复Android后可通过保留的OS370、变化块反向清单和原manifest执行有界OS-only回退，再做完整live hash校验，不需要刷启动分区。
+
+对问题的结论推进为：**有直接设备证据证明locationd的初始化/串行队列被同步IPC阻塞**；调用位置及MIG1203与旧故障一致，优先验证fairplayd依赖。尚不能宣称GPS是根因，也不能宣称全系统授权弹窗损坏。没有绕过权限、伪造位置或屏蔽真实错误。下一设备动作须先恢复可见连接并核对目标/已安装OS与日志arm状态，保留未发送负结果后执行新命名对照；不重复不变的Android→bootloader枚举失败。
+
+文档检查与私有路径扫描通过。主机准备检查证明cache语义仅删除一个job、UI/helper与其他job保持；无内核/驱动源码变更，不重复内核构建。公共源码尚无新天气修复；默认构建原本就排除此job。全部原始日志、APFS候选、回退镜像、改变块和安装状态只保留本机。

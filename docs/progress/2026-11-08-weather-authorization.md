@@ -181,3 +181,25 @@ v23r5唯一新主机控制：Android nohup延迟7秒执行真实root reboot boot
 ### 当前无人值守条件与独立主机核对
 
 2026-11-08T23:57:00.584666+08:00 用户询问能否继续。只读实查adb/fastboot均空、目标端口仅供电无连接、无设备owner/锁/心跳，不能继续真实设备试验，也未另建不变等待器。独立主机只读审计确认候选与OS370均保留WeatherKit authservice的embedded XPC目录/可执行文件及服务树缓存；它不是独立LaunchDaemon，不能因后者找不到便报缺服务。weatherd/locationd/tccd程序存在，weatherd主机签名检查通过。Weather app的strict资源封套检查在原OS370与候选同样报告obsolete custom-omit envelope，此为共同观察，不能归因本次任务移除或直接解释为设备拒绝运行。v23r5查找fairplay失败中Weather占375/513条，仍需实际weatherd栈区分依赖阻塞；日志计数本身不等于根因。两次只读挂载均已卸载，没有手机或镜像写入。
+
+## v24r1：用户重插且已确认fastboot，直接接续
+
+2026-11-08T23:59:34.372025+08:00 用户报告重插/fb；主机确认fastboot product=zizhan。基于v24b失败前已完成的实际候选manifest/extent/29.4°C/备份/UI/helper前置及klog arm，且期间无XNU或手机OS写入，直接接续v24b不可变镜像，不再返回Android。单次launchd总30分钟，已可见fastboot稳定核对窗口限60秒，启动后300/240自动返回；显式读pinned日志、保留ramoops、不伪造arm marker并拒绝与v23r5相同旧日志。只有导航/采样目标改变，OS仍v23候选，不修改定位开关或授权。验收为原生定位服务设置状态、weatherd栈和Android返回分列；没有payload不能记功能PASS。
+
+2026-11-09T00:01:11.924870+08:00 v24r1目标稳定核对、Sending/Booting已通过，23:59:45前进入autoreset/collection。源revision为 `a92bb6c25b06c1580ea978bb27129872ccdca7c3`，dirty仅本次诊断记录。原cycle-resume不伪造arm marker、先保留ramoops；结束由监督器显式读pinned klog。现在尚未取得页面/栈，不能把boot成功当诊断PASS；自动返回窗口照常运行。
+
+### v24r1结果与截图时序更正
+
+2026-11-09T00:08:19.144670+08:00 本轮已取得不同于旧轮次的新鲜deadline pinned日志2,111,718 bytes；原始ramoops只有167字节，两个副本分别保留。Android boot_completed返回PASS，原job已bootout。`open prefs:root=Privacy&path=LOCATION accepted=1`，Preferences实际spawn，证明原生导航请求和应用启动路径可用，不证明定位开关状态。weatherd采样1000/1000在dispatch_sigsuspend/workqueue，非旧locationd MIG1203，当前无在途工作不能等同数据成功。
+
+**页面截图验收SKIP**：图为360×320全行列，但黑；源码`PongAdrenoScanout.cpp`把pong_shot直接换算成绝对mach时间，与当前绝对值比较。直接boot前fastboot停留使first-frame绝对时间579.205789s已超过shot150，截图在579.205801s立即发生，早于weatherd与Preferences启动。此黑图是过早采样，不能记Settings渲染回归。与历史从fastboot起步漏arm是另一问题；本轮显式pinned读回成功，日志并不缺失。
+
+另有`WiFi wired DMA arena allocation failed at all budgets`，本轮网络前置FAIL；17次IOSurface失败和1次16MiB renderer jetsam保留，无panic。因此不能用本轮weatherd空闲栈排除网络或确认Apple天气服务。
+
+**v25设计**：同OS/内核/UI/helper/导航/采样目标，只改截图时间线为2张、间隔90秒；首张可能因绝对计数器偏移过早，第二张保证在首帧至少90秒后，实际设置打开记录须时间对齐验收。缩短applog_name列表以容纳命令行，不引入新探针或改授权。保持300/240返回、同USB-A连接流程与唯一owner；网络单独验收，不因为图片通过升级联网。此次作为截图时序补偿，不推广kernel截图实现更改，后续独立修复绝对/相对时间语义。
+
+2026-11-09T00:08:57.169798+08:00 v25包准备PASS：image `1c523b6b2ae0f998c79390f1e36b914a37d7b5f0d355c01d3188b35e7cacf5a4`，命令行1004字节、8cluster、kernel/loader同v24r1；设备当前Android完成，单次launchd启动前重验实际候选manifest/extents/备份/温度，不另写OS。
+
+### v25结果：补偿包已备，切换前置失败未boot
+
+2026-11-09T00:12:46.511286+08:00 v25 preflight PASS，随后标准有界attach结果NO_FASTBOOT、cycle exit2，镜像未发送；双时点截图补偿验收SKIP，不将此轮当Settings/Weather回归。原job已bootout、锁释放、无新的被动等待器/心跳。停止相同USB切换重试；保留v25包、源/参数身份和原始失败。实际OS保持v23隔离候选、canonical仍OS370，全部回退保留；恢复真实fastboot后可按v24r1已验证直接接续流程boot v25，避免再次返回Android。下一最小交付仍为在真实页面时点观察全局定位开关及网络前置，未修改权限。

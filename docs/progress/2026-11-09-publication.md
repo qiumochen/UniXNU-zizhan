@@ -35,3 +35,17 @@
 按阶段发布规则，在 `de1ce138c3dbfe11eda7038d18d6a99f62304909` 手动触发macOS精简内核构建：[run 42544865898](https://github.com/qiumochen/UniXNU-zizhan/actions/runs/42544865898)。没有提供固件或Apple restore输入，disk-probe SKIP；本地完整默认/精简内核结果独立保留。09:24检查该run仍在Tools阶段，状态RUNNING，不记PASS。后续由有界自动复查跟踪该精确SHA，遇失败保留并修正可处理原因，不用别的SHA结果替代。
 
 设备仓库main已包含原开发分支全部提交、无stash/额外worktree/未提交内容；独立UEFI checkout、参考构建输入、旧pre-publish镜像与仓库外机器工件不属于本次main合并，详细路径与逐文件清单保留本机交接。Git源码发布未改变手机已安装OS候选，也未提升天气/睡眠资格。
+
+### 手动云端内核完成，发布尾项收口
+
+2026-11-09 09:45（UTC+8），手动 [macOS build 42544865898](https://github.com/qiumochen/UniXNU-zizhan/actions/runs/42544865898) 在精确提交 `de1ce138c3dbfe11eda7038d18d6a99f62304909` 完成 **SUCCESS**；DarwinBoot24与Compile CI kernel通过，日志包含 `kernel_built: true` 与真实kernel输出路径。没有固件/restore输入，本次仅精简内核，disk-probe为SKIP；不把该结果当完整GPU/Wi-Fi镜像或设备验证。完整默认与精简配置的本机构建仍为独立证据。
+
+| 提交 | 实际执行项 | 结果 / 运行ID |
+| --- | --- | --- |
+| `32add9f87305b37dac0a4ff81fd52d966aebc709` | Porting / Display / Wi-Fi | SUCCESS：42544541744 / 42544542000 / 42544541742 |
+| 同上 | Daily-use首次执行 | FAIL：42544541994，GCC mock类型告警，原负结果保留 |
+| `de1ce138c3dbfe11eda7038d18d6a99f62304909` | Daily-use / Porting | SUCCESS：42544793964 / 42544794048 |
+| 同上 | 手动macOS精简内核 | SUCCESS：42544865898；disk-probe SKIP |
+| `3cee4a5edb002453c1ed7fd93462302a745abf36` | 文档Porting | SUCCESS：42545447629，未重复触发其余回归 |
+
+本次运行时代码累计发布、GCC测试修正和手动内核验证已完成。此追加仅记录结果，不改运行时代码、不操作手机或独立UEFI；文档收口提交自身只跟踪实际触发的Porting检查，最终SHA与结果同步本机交接，完成后停止自动复查。独立UEFI与旧mirror待办保持原样，不能因此称为全部工程已发布。

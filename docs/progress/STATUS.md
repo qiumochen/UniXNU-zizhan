@@ -1,45 +1,15 @@
 # 当前进度与接续入口
 
-更新日期：2026-11-08（UTC+8）。这是持续维护的当前任务台账；历史实验仍保留在日期文档。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机路径、安装状态及进程交接见仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
+更新日期：2026-11-09（UTC+8）。这是持续维护的当前任务台账；历史实验仍保留在日期文档。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机路径、安装状态及进程交接见仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
 
-## 11-08 主线重排（本条优先于下方全部 11-07 段）
+## 当前接续（2026-11-09 交接）
 
-- **11-09 00:12 本批终态（优先）**：用户重插后v24r1已真正直接boot/新鲜pinned日志/Android返回PASS；定位页导航accepted1且Preferences启动，weatherd处正常dispatch等待。截图因绝对时钟已579s>shot150在首帧过早拍黑，全局定位状态SKIP；WiFi DMA arena失败，不能验天气数据源。v25双时点补偿包已备，但USB切换NO_FASTBOOT未发送，SKIP；job/锁清理、无心跳，不继续重复切换。实际OS仍v23隔离候选，OS370回退完整。下一步真实fastboot恢复后直接boot v25取正确时点页面，[记录](2026-11-08-weather-authorization.md)。
-
-- **11-09 00:09 诊断接续（优先）**：用户重插fastboot后v24r1已直接boot/新鲜pinned日志/Android返回PASS，原生定位页导航accepted1且Preferences真实启动，但截图在首帧即触发（硬件绝对计数器已579s>shot150），早于页面，定位状态SKIP；本轮WiFi DMA arena失败、17IOSurface/1renderer jetsam保留，不能验天气网络。v25仅改双时点截图（间隔90s）补偿这一时序，其他运行时/已装候选/权限不变，现单次监督前置RUNNING。详见[记录](2026-11-08-weather-authorization.md)。
-
-- **23:53 本批结果（优先）**：v23r5真实设备对照已解除locationd旧MIG1203/队列阻塞（main正常RunLoop），weatherd首次Mach按需启动，用户+中心截图确认定位设置提示，用户误点取消；天气仍北京`--`，GPS/授权成功未验证。v24b只读定位设置/天气服务采样在USB发送前NO_FASTBOOT，结果SKIP，任务已清理、无心跳。实际OS仍隔离v23候选、canonical仍OS370，回退完整，不能声称默认推广。下一步恢复连接后核对原生全局定位设置及weatherd剩余依赖，详见[记录](2026-11-08-weather-authorization.md)。
-
-- **23:49 APP-01有效推进（优先）**：v23r5首次跑通fairplayd-off候选；locationd旧MIG1203/串行队列阻塞消失，主线程1000/1000回正常RunLoop，weatherd首次按需spawn，定位相关提示由用户+中心截图确认（用户误点取消）。天气仍北京`--`，GPS/授权成功/数据源未验证；截图缺列、1次renderer jetsam保留。下一只读诊断为原生定位设置状态+weatherd等待栈，不自动改权限。候选保持隔离、OS370回退完整，详见[记录](2026-11-08-weather-authorization.md)。
-
-- **23:41 实际对照RUNNING（优先）**：用户确认此前为关机充电画面，原厂on-charger配置验证05c6:f000含义；手机按开后adb正常。v23r5改为Android延迟重启、手机端口断电跨过bootloader初始化后重连，23:41:00目标核对/镜像发送/临时boot通过。这是已安装fairplayd-off候选首次真正启动，OS/UI/Data/boot镜像身份保持；正等待新定位栈/天气画面/自动返回，不把单次连接成功当稳定修复。详见[记录](2026-11-08-weather-authorization.md)。
-
-- **23:19 终态（优先）**：v23r4被动等待900秒正常到期，未发镜像；USB恢复结果FAIL、设备干预验收SKIP。job/锁已清理、Paseo心跳已删除，无自动重试。当前USB检测到`05c6:f000`，adb/fastboot均空，缺实际调试接口；v23候选仍已安装未启动，原OS370回退保留但无法在无Android/root时执行。先恢复真正adb/fastboot接口再对照或回退，[详情](2026-11-08-weather-authorization.md)。
-
-- **23:03 当前接续（优先）**：用户开机后adb/boot_completed恢复，v23r3整窗live候选hash与前置PASS；原标准Android→bootloader仍NO_FASTBOOT、未发镜像，主机重启未修复切换。现v23r4只被动等待fastboot下重插原USB-A路径，稳定目标出现后直接临时boot同候选，不再返回Android；15min等待/30min总期限，launchd+有界Paseo心跳接续审查。候选OS已安装未启动、OS370回退保留。详情见[记录](2026-11-08-weather-authorization.md)。
-
-- **22:57 主机重启后复核（优先）**：用户确认重启电脑，主机启动时间22:48:05，与v23r2中断吻合。USB连接仍在，但手机只提供`05c6:f000` Mass Storage，adb/fastboot均空；尚不能继续设备对照或回退。等待手机恢复真实调试/fastboot接口，未再写手机，v23已安装未启动与OS370回退状态不变。
-
-- **22:54 终态复查（优先）**：v23r2于22:47:46被中断，未发镜像，非正常超时；job/进程/锁均已清理，无设备操作，Paseo心跳已删除。当前USB已连接但身份为`05c6:f000`且仅Mass Storage接口，adb/fastboot均不可用；不能沿用“无物理连接”描述当前状态。v23候选仍已安装未启动，OS370回退完整但缺Android/root通道。下一步恢复并核对真正adb/fastboot接口，再继续对照或回退；[详情](2026-11-08-weather-authorization.md)。
-
-- **22:34 无人值守恢复 RUNNING（优先）**：用户重启后v23r1试验改为Android延迟7秒重启、主机先退出adb，仍NO_FASTBOOT、未发镜像。端口仅供电无连接，一次限定手机端口的hub PORT_RESET后仍未枚举。v23r2现由单次launchd被动等待稳定/目标核对通过的fastboot，15分钟等待、30分钟总期限；恢复后直接临时boot同候选、自动收日志，不再重复Android切换或VBUS。Paseo有界心跳负责本线程接续审查；超时停止，不把等待记通过。实际OS仍已安装v23隔离候选，OS370回退完整保留。[记录](2026-11-08-weather-authorization.md)。
-
-- **22:18 最新状态（优先）**：v22r2已抓到locationd主线程等队列、工作线程1000/1000次卡在与g212同址的MIG1203同步依赖，天气仍`--`；不能据此确诊全系统权限弹窗或GPS。隔离OS370候选仅删fairplayd.A2 job，OS-only安装及整窗读回PASS，但v23再次NO_FASTBOOT、未发镜像，因果对照SKIP。**当前手机已安装该候选、未启动；canonical文件仍OS370，不能声称已回退。** adb/fastboot不可见，无活跃设备操作。恢复连接后先核对实际状态，完成对照或OS-only回退；[详情](2026-11-08-weather-authorization.md)。
-
-- **22:11 APP-01 新设备证据**：v22r2完整采集/Android返回PASS，locationd主线程等队列，工作线程1000/1000次停在与g212逐地址相同的同步Mach栈。天气仍`--`，不是GPS或授权弹窗已确诊。下一步隔离OS370 clone仅移除反复退出的fairplayd job，保持内核/UI/Data与诊断参数，验证真实依赖阻塞；详见[诊断设计](2026-11-08-weather-authorization.md)。
-
-- **22:05 APP-01 诊断 RUNNING**：用户直接重启后恢复完整 Android；v22r1再次NO_FASTBOOT、未发送。v22r2改主机切换时序（reboot bootloader后立即释放adb服务），同v22不可变候选成功临时boot。OS/UI/Data未改，autoreset 300/240与30分钟单次监督；正在等新日志，尚无天气/定位或权限新结论。
-
-- **21:51 APP-01 接续更正（优先于下方旧天气归因）**：`pp-weather-v18` 原图已有“上海”与 `--`，撤回“没有城市/完全无文字”；“不请求数据、不是网络问题”也超出了已捕获日志的证明范围。定位/权限/天气服务存在，GPS、权限弹窗和天气接口尚未验证。v22 同运行时输入补齐日志与 locationd 栈，打包及 live OS preflight PASS，但 `NO_FASTBOOT`，未发送镜像；常规与延长 VBUS 恢复失败。设备主实验停止，无活跃操作，adb/fastboot 均不可见。下一步重新插拔已验证后部 USB-A，回完整 Android 后以新运行名执行该候选，见[天气授权诊断](2026-11-08-weather-authorization.md)。
-
-11-07 全天 POWER-02 产出了诊断仪器和只读审计，但**没有任何用户可感知的功能交付**，首次面板 off/on 一次未执行。11-08 起按“最大结果、最小 MVP”重排：
-
-- **主线 = APP-01 日用内容**。首个交付是 `panel-pool 128 MiB`（2 buffers / 5 canvas slots）下的天气可见内容。验收四条：新鲜 klog 出现 128 MiB pool 与 5/5 slots；无 `canvas slot NONE FREE`；有效 `PONG SHOT` 且非黑；Wi-Fi 64 MiB arena 与 Android 返回。第二轮同内核换参数继续，随后 Safari，验收 HTTPS 页面、地址栏输入与滚动。
-- 11-08 收工状态（21:40）：分支 `power02-panelpool-128`，16 个提交未推送；设备可用（`pp-wake-v17` 主屏 lit 25.2%），OS 已回到 OS370（窗口 `a0187c09…`、UI 库 `c3897b10…`）。调试基建已落地：`pong_shot_step`、`pong_shot_rect`（全分辨率裁剪）、`round-report.py`。天气仍未修好：App 不请求数据、`weatherd` 零行，最可能是无定位/无城市。**已撤回**此前"OS 刷新导致回归"的判断——黑屏来自从 fastboot 起步（跳过 klog arm）或缺少上滑手势。新发现：`MiniIOSurface` 画布分配失败（81 MB 已用时即失败，1137 次）与 CS4K 同属"内存充足但内核映射分配失败"，疑同一根因。接续细节见仓库外 `work/CURRENT_HANDOFF.md`。
-- 11-08 进展：v3/v5 的启动失败根因为 ADT 缺 8 个 `cluster-type`（`PONG_ADT_CLUSTERS` 只在 `ci_boot_ufs.sh` 导出，直接调用打包脚本会丢；`--skip-image-verification` 又跳过 `audit_adt`）。修正后 v6 一轮完成：128 MiB pool / 5 slots / 完整截图 / Wi-Fi arena / 1292 帧 / Android 返回全部通过。天气页未出现的原因为合成触摸周期相位（截图前 0.33 秒刚上滑回主屏），不是渲染故障；`SBRendererService` 的 16 MB 限制来自恢复的 `jetsamproperties.J171.plist` inactive 硬上限。见[本轮记录](2026-11-08-panelpool-128.md)。
-- **POWER-02 降级为受控支线**。重新进场的条件是两条具体证据同时存在：启动日志出现 `ZIZHAN_DSI_DMA: buffer ready`，且 128 MiB 布局下显示域仍为 `IdentityObserved`。在此之前不再产出新诊断模型、不再开只读审计轮、不执行面板 off、锁屏或真睡眠。
-- **唯一设备主实验**同时只能有一轮；每轮结束当场写记录，未记录候选视为不存在（11-08 00:31–00:44 的 v3/v5 即因此在本机停留 16 小时无人接续）。
-- 工作树积压（15 修改 + 24 未跟踪）按“运行时代码 / 文档”两批提交，不再以“保留并发改动”为由长期不提交。
+- **APP-01 主线**：天气仍无温度/预报。v23r5同运行时仅移除fairplayd任务后，locationd旧MIG1203阻塞解除、weatherd按需启动，用户+部分截图确认定位提示；用户误点取消。全局开关、授权成功、GPS、天气数据源均未验收。
+- **实际安装为隔离v23候选，canonical仍OS370**，未默认推广，回退完整保留。v24r1定位设置导航accepted1且Preferences启动，但截图因绝对时钟偏移过早，开关状态SKIP；该轮WiFi arena失败，不能验天气网络。
+- **唯一下一设备交付**：重新核对真实接口、输入与日志准备后，以新run执行已备v25双时点截图包，取得原生定位页面状态。v25从未启动（NO_FASTBOOT、未发送）；无活跃设备任务或心跳。隔夜旧arm/温度不得直接沿用。
+- **09:00交接只读观察**：adb/fastboot均空；USB后续核对为05c6:f000关机充电接口。当前屏幕/实际运行状态未直接观察，不能写成Android或fastboot。恢复真实调试接口是设备前置。
+- **POWER-02保持受控支线**：须同时满足`ZIZHAN_DSI_DMA: buffer ready`与128MiB布局下显示域仍`IdentityObserved`才重新进场；此前不执行panel off、锁屏或真睡眠，不继续无结果的诊断审计轮。
+- 汇总和证据边界见[本次交接](2026-11-09-weather-handoff.md)，完整轮次见[天气技术记录](2026-11-08-weather-authorization.md)及[panelpool记录](2026-11-08-panelpool-128.md)。本机工件/命令/回退在仓库外`work/CURRENT_HANDOFF.md`。这些记录不另建任务队列。
 
 ## 当前开发方向与验收安排
 

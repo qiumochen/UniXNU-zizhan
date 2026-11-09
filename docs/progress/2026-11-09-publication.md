@@ -27,3 +27,11 @@
 `32add9f87305b37dac0a4ff81fd52d966aebc709` 已正常推送main，Porting record（42544541744）、Display（42544542000）、Wi-Fi（42544541742）SUCCESS；Daily-use（42544541994）FAIL。失败位于测试 `dsi-command.cpp`：GCC将 `condition ? DmaBusy : 0` 的枚举/非枚举混用作为`-Wextra -Werror`拒绝，本机Clang未报该告警。
 
 修正只把mock读回值显式写为 `uint32_t(DmaBusy)` 和 `0u`，保持寄存器故障回放语义及所有运行时代码。重新运行完整日用host并跟踪修正SHA；首次失败保留，不重跑相同失败输入掩盖问题。此修正不需重建未改内核，不代表设备功能变化。
+
+### 修正SHA与剩余手动构建
+
+修正提交 `de1ce138c3dbfe11eda7038d18d6a99f62304909` 已推送main，Daily-use host（42544793964）与Porting record（42544794048）均SUCCESS。该提交只改测试与证据，未触发Display/Wi-Fi；它们在运行时代码相同的首次发布SHA `32add9f87305b37dac0a4ff81fd52d966aebc709` 上SUCCESS，不冒充修正SHA的新执行。
+
+按阶段发布规则，在 `de1ce138c3dbfe11eda7038d18d6a99f62304909` 手动触发macOS精简内核构建：[run 42544865898](https://github.com/qiumochen/UniXNU-zizhan/actions/runs/42544865898)。没有提供固件或Apple restore输入，disk-probe SKIP；本地完整默认/精简内核结果独立保留。09:24检查该run仍在Tools阶段，状态RUNNING，不记PASS。后续由有界自动复查跟踪该精确SHA，遇失败保留并修正可处理原因，不用别的SHA结果替代。
+
+设备仓库main已包含原开发分支全部提交、无stash/额外worktree/未提交内容；独立UEFI checkout、参考构建输入、旧pre-publish镜像与仓库外机器工件不属于本次main合并，详细路径与逐文件清单保留本机交接。Git源码发布未改变手机已安装OS候选，也未提升天气/睡眠资格。

@@ -1,6 +1,6 @@
 # 天气与定位诊断交接（2026-11-09）
 
-本文整理截至本次交接的结果，不另建工作队列。当前任务与下一动作以 [STATUS](STATUS.md) 为准；逐轮技术证据见 [天气授权诊断](2026-11-08-weather-authorization.md)，机器路径、候选状态、进程与操作命令在仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
+本文整理截至本次交接的结果，不另建工作队列。当前任务与下一动作以 [STATUS](STATUS.md) 为准；逐轮技术证据见 [天气授权诊断](2026-11-08-weather-authorization.md)，机器路径、候选状态、进程与操作命令在仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。后续用户已授权并完成设备main发布，Git/CI精确结果见[发布记录](2026-11-09-publication.md)；下文“整理前”保留当时快照。
 
 ## 接手一分钟概览
 

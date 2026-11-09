@@ -11,6 +11,8 @@ Paths in the notes refer to the author's workspace:
 
 ## 最新交接
 
+- [2026-11-09 累计发布与验证](2026-11-09-publication.md)：设备仓库累计提交快进main、推送前验证与精确SHA CI状态。
+
 - [2026-11-09 天气与定位诊断交接](2026-11-09-weather-handoff.md)：已安装候选与canonical OS370的区别、定位阻塞解除/提示取消、截图时序与网络限制、未启动v25及安全接续；机器工件留本机。
 - [11-08/09 天气逐轮技术记录](2026-11-08-weather-authorization.md)：控制与干预、全部负结果和更正，当前顺序仍以STATUS为准。
 - [2026-11-08 主线重排与 panel pool 128 MiB 候选](2026-11-08-panelpool-128.md)：APP-01 转为第一主线、POWER-02 降为受控支线；pool 96→128 MiB 的槽位计算、候选身份及 MVP-1 验收。v5缺ADT属性不可用；后续v6起已实际完成显示池与正常返回，天气接续见11-09交接。

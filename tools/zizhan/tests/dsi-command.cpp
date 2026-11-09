@@ -23,7 +23,7 @@ struct Io {
     uint32_t read(uint32_t reg) {
         if(reg==Status) {
             if(mode==PreBusy)return MdpBusy;
-            return triggered && mode==DoneBusy?DmaBusy:0;
+            return triggered && mode==DoneBusy?uint32_t(DmaBusy):0u;
         }
         if(reg==InterruptControl && triggered) {
             if(mode==Success || mode==DoneBusy)return Enables|DmaDone;

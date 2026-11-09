@@ -21,3 +21,9 @@
 ## 云端CI与发布收口
 
 推送前尚无本次SHA的CI结果。只跟踪该SHA实际触发的Porting record、Daily-use、Display和Wi-Fi主机回归；macOS内核工作流为手动，不把未运行项写为PASS，不继承其他SHA的绿色状态。推送和CI完成结果在下方追加；最终机器操作状态留本机交接。
+
+### 首次推送结果与测试修正
+
+`32add9f87305b37dac0a4ff81fd52d966aebc709` 已正常推送main，Porting record（42544541744）、Display（42544542000）、Wi-Fi（42544541742）SUCCESS；Daily-use（42544541994）FAIL。失败位于测试 `dsi-command.cpp`：GCC将 `condition ? DmaBusy : 0` 的枚举/非枚举混用作为`-Wextra -Werror`拒绝，本机Clang未报该告警。
+
+修正只把mock读回值显式写为 `uint32_t(DmaBusy)` 和 `0u`，保持寄存器故障回放语义及所有运行时代码。重新运行完整日用host并跟踪修正SHA；首次失败保留，不重跑相同失败输入掩盖问题。此修正不需重建未改内核，不代表设备功能变化。

@@ -9,7 +9,7 @@
 - 两次原生早期内核试验均完成有界返回；第二次只改 `kt_fixed_zones=120` 越过 allocator 断言，停在 C++ 注册故障边界。**无原生桌面、无完整 fileset、无新系统安装**。旧 v23、OS370、Data/备份保护。
 - 两条路线都属于 iOS/iPadOS 18：本次转向是 ARM64/classic prelink → arm64e/PAC/kernel collection。短期日用修复不以此迁移为前置；建议保留实验分支，按完整集合→真实桌面→旧功能覆盖和可测收益决定默认推广。
 - 交付、共享上游阻塞、条件式人日估算及继续投入门槛见[本次检查点与评估](2026-11-14-native-checkpoint-and-decision.md)。下方按时刻保存的 558/464 等为历史；本节为当前权威。
-- 发布前验证：三组 host 回归、native selector 8 项控制、输入 3 项控制、94 路径语法/TOML/链接/隐私与 ownership 检查通过。已有同运行时代码精简/完整内核构建通过；未新增手机试验。提交/推送与本 SHA CI 尚待本批完成，不能继承旧 SHA 绿灯。未完成的桌面目标继续登记未达成；下一开发动作是核对 typed-caller v2 与现有证据兼容并生成一次新闭包，随后处理真实 retained 组件接线。
+- 发布前验证：三组 host 回归、native selector 8 项控制、输入 3 项控制、94 路径语法/TOML/链接/隐私与 ownership 检查通过。已有同运行时代码精简/完整内核构建通过；未新增手机试验。源码提交 `3851643c3b4442f60b0f5c9e6a2833e9d6ae0659` 已推送 origin 特性分支；该 SHA 的 Porting record（43573112468）、Daily-use（43573112498）、Display（43573112444）、Wi-Fi（43573112480）四项云端检查全部 SUCCESS。手动 macOS 默认内核构建 [43573113052](https://github.com/qiumochen/UniXNU-zizhan/actions/runs/43573113052) 仍 RUNNING，不能提前记 PASS，也不覆盖 native 完整集合。未完成的桌面目标继续登记未达成；下一开发动作是核对 typed-caller v2 与现有证据兼容并生成一次新闭包，随后处理真实 retained 组件接线。
 
 ## 11-14 白天新目标：原生桌面
 

@@ -66,3 +66,5 @@
 本次仅做整理、验证和发布，没有新增手机试验。当前本机完整/精简构建证据沿用相同运行时代码已完成批次，不把主机工具更新说成新硬件资格。发布检查和精确 SHA 的云端结果记在 [STATUS](STATUS.md)；云端现有 macOS workflow 检验默认 22H374 构建链，**不覆盖尚未闭合的 native22G100 完整集合**。
 
 本次发布前本机复核：Display、Wi-Fi、Daily-use 三组 host 回归通过；native reference selector 8 项控制、输入下载/CRC 3 项控制通过；94 个改动路径的 Python AST、TOML、文档相对链接、私有路径扫描、记录 ownership 和新增代码的 diff 空白检查通过（`.patch` 内原样保留的上下文按 patch 规则检查，不把上下文前缀视为源码缩进错误）。Wi-Fi 首次调用用了不存在的 shared 路径，第二次默认路径也不可用，两次均为主机依赖失败；按 workflow 固定提交重新取得公开 Ath12kWifi 后第三次完整回归通过，失败日志保留本机。未重新执行相同手机诊断。
+
+源码提交 `3851643c3b4442f60b0f5c9e6a2833e9d6ae0659` 已推送 `origin/feature/native22g100-arm64e`；其四项自动云端检查全部成功：Porting record 43573112468、Daily-use 43573112498、Display 43573112444、Wi-Fi 43573112480。[手动 macOS 内核构建](https://github.com/qiumochen/UniXNU-zizhan/actions/runs/43573113052) 仍在运行，最终结论由台账接续，不记为已通过。本段文档提交的自动检查须按自己的 SHA 单独核对。

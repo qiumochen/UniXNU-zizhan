@@ -1,0 +1,13 @@
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -607,7 +607,9 @@
+ 				u = n;
+ 				sign_char = plus_sign;
+ 			} else {
+-				u = -n;
++				/* zizhan: LLONG_MIN has no positive signed magnitude.
++				 * Convert before negation, retaining defined modulo arithmetic. */
++				u = 0ULL - (unsigned long long)n;
+ 				sign_char = '-';
+ 			}
+ 			goto print_num;

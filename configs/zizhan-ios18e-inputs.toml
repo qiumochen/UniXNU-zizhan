@@ -1,0 +1,25 @@
+# Experimental native input selection. This does not change board.toml or the
+# current 22H374 device profile. Apple files stay in machine-local directories.
+[source]
+original = "https://github.com/Chengdong-Yu/UniXNU-pong.git"
+recovery = "https://github.com/xz1c/UniXNU-pong.git"
+commit = "0ee4243a101eac10a77cbc8b7b8ef77ae8ec93d7"
+tree = "9beca44b35d20904ea493ea02b75316b7108f255"
+
+[prelink]
+git = "https://github.com/UniXNU/XnuPrelink.git"
+commit = "440589b0c31625f17edf363e24b3c82c51c70bb9"
+
+[metal_runtime]
+translator = "624bab3918de5b978e1101517abca2b4fa426565"
+core = "e2fdae4312d0acc3d8a52bc457101e7918095e6a"
+patch_source = "6416a76e0a287d85afbcddda21192388460e155c"
+
+[ipsw]
+url = "https://updates.cdn-apple.com/2025SummerFCS/fullrestores/093-21491/506B3A55-3459-4DEA-A06C-83CEE315F6F5/iPhone17,2_18.6.2_22G100_Restore.ipsw"
+product = "iPhone17,2"
+version = "18.6.2"
+build = "22G100"
+device_class = "d94ap"
+chip_id = 0x8140
+board_id = 0x0e

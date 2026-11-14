@@ -1,5 +1,7 @@
 # Development notes
 
+[11-14 发布检查点、工作量与迁移必要性](2026-11-14-native-checkpoint-and-decision.md) · [Current ledger](STATUS.md) · [11-14 首次原生启动与通俗交接](2026-11-14-native-first-boot.md)
+
 Dated notes from the zizhan bring-up, in Chinese, kept as written during the work: each run (k*, u*, t*, g*) with its boot arguments, result and root cause.
 
 Paths in the notes refer to the author's workspace:
@@ -10,6 +12,40 @@ Paths in the notes refer to the author's workspace:
 - Logs (`logs/*.txt`) and photos other than those in `docs/evidence/` are not published.
 
 ## 最新交接
+
+- [11-14 白天原版Pong对照](2026-11-14-upstream-control-day.md)：用户授权全天手机操作、目标当日原生桌面；同stock原版工具显示大量共享缺口，full复现定位到真实Pong私有输入门槛，继续共享绑定批量重现。
+
+- [11-14 OSSymbol证据修正](2026-11-14-native-symbol-pool-correction.md)：撤回未闭合SMR依赖的findSymbol/hash/equality绑定，当前独立缺717、NoCopy与全局槽位未资格。
+
+- [11-14 OSSymbol 字符串池](2026-11-14-native-symbol-pool.md)：`_strnlen`独立通过后缺口717；`findSymbol` SMR/allocator依赖仍未资格。
+
+- [11-14 原生日志格式器](2026-11-14-native-log-format.md)：修复LLONG_MIN真实UBSan trap，新完整native内核/836向量/149类表/placement/loader与双配置内核主机通过；NoCopy依赖未闭合的13项旧证明撤下，新输入独立缺718项，无collection/boot。
+
+- [11-14 同版KDK与独立函数体检索](2026-11-14-native-kdk-and-proof-search.md)：09:00后仅主机接续；Apple签名同版参考提供154项待审名称线索，资格层清空/改错提议对照通过，vnode_mount完整契约加入后当前独立缺705项。无collection或手机操作。
+
+- [11-14 无人值守晨间记录](2026-11-14-native-morning.md)：整夜交付、错误配对撤回、710项独立资格缺口、未启动状态及保留回退；09:00实际设备观察和监督撤销已完成，目标仍未完成。
+
+- [11-14 原生显示handoff](2026-11-14-native-display-handoff.md)：CPU回落前恢复维护scanout的真实panel owner；未知/未确认GPU结果禁止CPU写入，实际控制块回放与原生链接通过，未做硬件试验。
+
+- [11-14 原生导入契约](2026-11-14-native-import-contracts.md)：三个时钟KPI实际指令计算回放、字符串工厂到全局槽位核对及负控制；真实UUID候选闭包继续推进，无设备启动。
+
+- [11-14 原生PAC与collection布局](2026-11-14-native-pac-layout.md)：实际Android EL0 PAC控制、预期错误认证进程fault与CPU affinity限制；外部PWF2解决实际collection空间拒绝，reader测试/本机OS读回通过，导入仍未闭合。
+
+- [11-14 原生板级最小完整链接](2026-11-14-native-board-link.md)：维护中的ath11k/网络、ADSP/双电池/背光原生编译与PAC继承核对，真实全板级内核链接；旧闭包351缺口，新kernel地址重新派生，无设备启动。
+
+- [11-14 原生应用种子与目录](2026-11-14-native-app-seed.md)：修复实际bootstrap拒绝原生应用种子的路径，完整15,701项资源解析/复制回放；229项目录保留原生可移除迁移，无设备资格。
+
+- [11-14 本机原生OS、GPU/FST2与导入](2026-11-14-native-os-gpu.md)：独立OS/Data种子staging与读回、维护GPU及真实触控源原生内核链接；无boot包/手机写入，按新内核继续闭包识别。
+
+- [11-14 原生根卷链接、loader与闭包](2026-11-14-native-root-loader.md)：真实UFS/AES root链接、保留本机所有权的native loader、bootstrap/UI主机结果；默认stock-kext闭包613项未解析，继续整夜工程，无新设备资格。
+
+- [11-14 原生迁移整夜目标](../plan/2026-11-14-native-overnight.md)：用户授权无人值守至09:00，完整原生候选与桌面/基础功能为方向，中间构建结果不收工；同一对话心跳监督，保留设备安全与回退边界。
+
+- [2026-11-14 原生迁移第一批主机结果](2026-11-14-native-core-and-inputs.md)：匹配22G100系统输入、隔离arm64e core链接、真实zizhan UFS编译与190/181/168方法PAC祖先匹配；无原生设备启动候选，继续本机电源/完整闭包适配。
+
+- [2026-11-14 原生Pong路线前置验证](2026-11-14-native-alignment-gates.md)：新鲜Android/安装/备份前置、CPU PAC报告、arm64e编译及loader格式回放；完整源码/22G100输入仍缺，未启动原生候选。
+
+- [2026-11-13 接手与上游增量调查](../research/2026-11-13-upstream-resume-survey.md)：Pong原生22G100、Sheng/AdrenoMetal、同SM8475 diting Linux恢复与CS35L41参考；只研究，未操作手机，设备主线与资格保持。
 
 - [2026-11-09 累计发布与验证](2026-11-09-publication.md)：设备仓库累计提交快进main、推送前验证与精确SHA CI状态。
 

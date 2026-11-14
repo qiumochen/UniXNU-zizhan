@@ -1,0 +1,36 @@
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -47,6 +47,7 @@
+ extern "C" void pong_scanout_initialize(uint64_t,size_t,uint32_t,uint32_t,uint32_t);
+ extern "C" int pong_scanout_frame(IOMemoryDescriptor *,size_t,uint32_t,uint32_t,uint32_t);
+ extern "C" bool pong_scanout_quarantined(void);
++extern "C" void pong_scanout_cpu_frame(void);
+ #endif
+ #if XNU_PONG_BACKLIGHT
+ extern "C" void pong_backlight_start(IOService *display);
+@@ -1054,7 +1055,11 @@
+ 		IOMemoryDescriptor *memory=base->client?base->client:base->memory;
+ 		size_t offset=(size_t)(base->pixels()-(base->client?base->kpixels:base->kbase));
+ 		beginGraphics();
+-		gpuFrame=pong_scanout_frame(memory,offset,base->info.bytesPerRow,fPanelWidth,fPanelHeight)==1;
++		const int scanoutResult=pong_scanout_frame(memory,offset,base->info.bytesPerRow,fPanelWidth,fPanelHeight);
++		/* zizhan: pending asynchronous latch has no native completion contract yet.
++		 * Never race its active scanout with CPU writes or report it presented. */
++		if(scanoutResult!=0 && scanoutResult!=1){IOLockUnlock(fLock);return kIOReturnNotReady;}
++		gpuFrame=scanoutResult==1;
+ 	}
+ 	/* A delivered GPU copy whose completion is uncertain must never race a
+ 	 * CPU write. Result 2 poisons the handoff; result 0 permits CPU fallback. */
+@@ -1065,6 +1070,12 @@
+ 		if(missed++<4)IOLog("PONG GPU ONLY: no completed GPU frame; CPU composition disabled\n");
+ 		IOLockUnlock(fLock);return kIOReturnNotReady;
+ 	}
++
++#if XNU_PONG_ADRENO_PLATFORM
++	/* zizhan: real GPU double-buffer ownership returns to the CPU panel
++	 * buffer before any CPU composition; quarantine was checked above. */
++	if(!gpuFrame)pong_scanout_cpu_frame();
++#endif
+ 
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));

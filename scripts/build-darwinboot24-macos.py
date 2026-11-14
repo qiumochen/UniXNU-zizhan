@@ -20,11 +20,15 @@ def main():
     parser.add_argument('--package', type=Path, default=pong_paths.unixnu_package())
     parser.add_argument('--output-dir', type=Path, default=pong_paths.work_root() / 'build/Pong-DarwinBoot24')
     parser.add_argument('--llvm', type=Path, default=pong_paths.llvm_toolchain())
+    parser.add_argument('--source', type=Path, default=DEVICE / 'drivers/DarwinBoot24',
+                        help='Explicit isolated loader source, retaining the default device source')
+    parser.add_argument('--export-dir', type=Path,
+                        help='Keep experimental EFI separate from the default exported loader')
     args = parser.parse_args()
     if args.llvm is None:
         raise SystemExit('missing LLVM bin directory for CLANGPDB: pass --llvm or set PONG_LLVM '
                          '(clang, lld-link, llvm-lib and llvm-rc)')
-    source = DEVICE / 'drivers/DarwinBoot24'
+    source = args.source.resolve()
     workspace = args.output_dir.resolve()
     conf = workspace / 'Conf'
     conf.mkdir(parents=True, exist_ok=True)
@@ -55,7 +59,7 @@ def main():
         print('\n'.join(log.read_text(errors='replace').splitlines()[-35:]))
         raise SystemExit(result.returncode)
     binary = workspace / 'build/DarwinBoot/RELEASE_CLANGPDB/AARCH64/DarwinBoot24.efi'
-    artifact = DEVICE / 'mac-build/darwinboot24'
+    artifact = args.export_dir.resolve() if args.export_dir else DEVICE / 'mac-build/darwinboot24'
     artifact.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(binary, artifact / binary.name)
     shutil.copyfile(log, artifact / 'build.log')

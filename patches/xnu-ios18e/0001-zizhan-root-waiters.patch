@@ -1,0 +1,72 @@
+# zizhan native root: retain the real UFS stalled-root waiting-thread diagnostic.
+# Split from the maintained 22H374 patch; no periodic samplers or fake success.
+diff --git a/osfmk/kern/thread.c b/osfmk/kern/thread.c
+index 0bfcb98..2821246 100644
+--- a/osfmk/kern/thread.c
++++ b/osfmk/kern/thread.c
+@@ -4419,3 +4419,65 @@ dtrace_thread_didexec(thread_t thread)
+ 	thread->t_dtrace_flags |= TH_DTRACE_EXECSUCCESS;
+ }
+ #endif /* CONFIG_DTRACE */
++
++#if defined(__arm64__)  /* thread_kernel_state comes in through arm/thread.h */
++
++#if __has_feature(ptrauth_calls)
++#define PONG_STRIP(p) ((uintptr_t)ptrauth_strip((void *)(p), ptrauth_key_return_address))
++#else
++#define PONG_STRIP(p) ((uintptr_t)(p))
++#endif
++
++/*
++ * zizhan bring-up: one console line per waiting thread -- wait event, block
++ * hint, continuation and the saved frame-pointer chain -- so a stalled root
++ * mount shows which thread waits on what. Frames are read only inside the
++ * thread's own kernel stack; the kernel has no slide, so addresses symbolicate
++ * directly against the kernel Mach-O.
++ */
++void pong_dump_waiting_threads(const char *why);
++void
++pong_dump_waiting_threads(const char *why)
++{
++	thread_t thread;
++	unsigned shown = 0;
++
++	printf("PONG WAITERS begin: %s\n", why);
++	lck_mtx_lock(&tasks_threads_lock);
++	queue_iterate(&threads, thread, thread_t, threads) {
++		char line[400];
++		int n;
++
++		if (!(thread->state & TH_WAIT) || shown >= 400) {
++			continue;
++		}
++		shown++;
++		n = snprintf(line, sizeof(line), "PONG WAIT tid=%llu %s hint=%d ev=0x%llx cont=0x%lx",
++		    thread_tid(thread), get_threadtask(thread) == kernel_task ? "k" : "u",
++		    (int)thread->block_hint, (unsigned long long)thread->wait_event,
++		    (unsigned long)PONG_STRIP(thread->continuation));
++		if (thread->kernel_stack != 0 && thread->machine.kstackptr != NULL) {
++			struct arm_kernel_saved_state *ss =
++			    &((thread_kernel_state_t)thread->machine.kstackptr)->machine.ss;
++			uintptr_t lo = thread->kernel_stack, hi = lo + kernel_stack_size;
++			uintptr_t fp = ss->fp;
++
++			n += snprintf(line + n, sizeof(line) - n, " lr=%lx bt", (unsigned long)PONG_STRIP(ss->lr));
++			for (int frame = 0; frame < 16 && fp >= lo && fp + 16 <= hi && (fp & 7) == 0 &&
++			    n < (int)sizeof(line) - 20; frame++) {
++				uintptr_t next = ((uintptr_t *)fp)[0];
++
++				n += snprintf(line + n, sizeof(line) - n, " %lx",
++				    (unsigned long)PONG_STRIP(((uintptr_t *)fp)[1]));
++				if (next <= fp) {
++					break;
++				}
++				fp = next;
++			}
++		}
++		printf("%s\n", line);
++	}
++	lck_mtx_unlock(&tasks_threads_lock);
++	printf("PONG WAITERS end: %u waiting threads\n", shown);
++}
++#endif /* __arm64__ */

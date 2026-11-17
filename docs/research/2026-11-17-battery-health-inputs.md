@@ -156,7 +156,86 @@
 | J171AP 29 路 watchdog 传感器 | thermalmonitord 控制轮 | **无 HID 温度服务** | 与 ageAware 发布路径分开；控制轮需要 |
 | `BootUUID`/`UPOCount` defaults | AgingController 每 boot 去重 | 由 defaults 产生，不来自电池 | 不是电池属性 |
 
-## 6. 最小可验证的下一步（只读、默认关闭）
+## 6. 真实来源对照（Android 只读，2026-11-17）
+
+只读采集：`/sys/class/power_supply/{battery,usb,wireless,...}`（`su -c cat`）与 `dumpsys battery`。本文只记录属性名、是否存在、单位和值域/格式；**不记录序列号等唯一标识**（实际属性里也没有 serial/manufacturer 属性）。
+
+### 6.1 Android 侧真实属性
+
+| 属性 | 是否存在 | 格式/说明 |
+| --- | --- | --- |
+| `capacity` | 存在 | 百分比 |
+| `charge_full` | 存在 | µAh（满充容量，随老化变化） |
+| `charge_full_design` | 存在 | µAh（设计容量） |
+| `charge_counter` | 存在 | 电荷计数 |
+| `cycle_count` | 存在 | 整数循环数 |
+| `health` | 存在 | 字符串枚举（Android 健康，不是 Apple `Battery Service Flags`） |
+| `model_name` | 存在 | 型号字符串（不是唯一序列号） |
+| `technology` | 存在 | 化学体系字符串 |
+| `status` | 存在 | 充电状态字符串 |
+| `temp` | 存在 | 0.1°C |
+| `voltage_now` / `voltage_max` / `voltage_ocv` | 存在 | µV |
+| `present` | 存在 | 0/1 |
+| `charge_type` | 存在 | 字符串（本次为 N/A） |
+
+`usb` 有 `online`、`voltage_now`、`current_now`、`input_current_limit`、`type`、`usb_type`；`wireless` 有 `online`、`present`、`voltage_now`、`current_now`。`dumpsys battery` 有 health、level、voltage、temperature、technology 字段；没有 `serial`、`manufacturer`、`manufacture date`、`authentic`/`auth`、`Battery Service Flags` 或 `UPOCount`/`WRa` 属性。
+
+### 6.2 battmgr 属性编号（源码）
+
+`drivers/PongPower/ShengBattmgr.c:16-49` 的 `kFields` 与文件头注释（Xiaomi 编号，12 起后移一位）：
+
+| battmgr 字段 | opcode / property | 当前是否请求 |
+| --- | --- | --- |
+| `BmStatus` | BATTERY_GET 0 | 是 |
+| `BmCapacity` | BATTERY_GET 4 | 是 |
+| `BmVoltage` | BATTERY_GET 7 | 是 |
+| `BmCurrent` | BATTERY_GET 9 | 是 |
+| `BmTemperature` | BATTERY_GET 13 | 是 |
+| `BmCharge` | BATTERY_GET 15 | 是 |
+| `BmCycles` | BATTERY_GET 16 | 是 |
+| `BmDesign` | BATTERY_GET 17 | 是（慢速） |
+| `BmFull` | BATTERY_GET 18 | 是（慢速） |
+| `BmTimeToFull` / `BmTimeToEmpty` | BATTERY_GET 20 / 21 | 是 |
+| `BmAuthentic` | BOARD_GET 0x03 | 是（慢速） |
+| `BmSlaveAuthentic` | BOARD_GET 0xa5 | 是（慢速） |
+| `BmPdVerified` | BOARD_GET 0x18 | 是 |
+| 文件头注释中的 health 1、SOH 5、model 19 | BATTERY_GET 1 / 5 / 19 | **否**；固件编号里有，驱动未请求 |
+
+### 6.3 对照结论
+
+| powerd / thermalmonitord 需要的键 | Android 真实值 | battmgr 可取 | 结论 |
+| --- | --- | --- | --- |
+| `NominalChargeCapacity` | `charge_full` 有值 | `BmFull`（18），已请求 | **可真实提供**（当前已发布） |
+| `DesignCapacity` | `charge_full_design` 有值 | `BmDesign`（17），已请求 | **可真实提供**（当前已发布） |
+| `CycleCount` | `cycle_count` 有值 | `BmCycles`（16），已请求 | **可真实提供**（当前已发布） |
+| `Voltage` / `StateOfCharge` | `voltage_now` / `capacity` 有值 | 7 / 4，已请求 | **可真实提供**（当前已发布） |
+| `BatteryData` 的 `UPOCount` / `WRa` | 无对应属性 | 当前表里没有；未见 UPO/WRa 的 property | **不能提供**；需要新的 gauge/board 属性或 vendor 文档 |
+| `Battery Serial` | 无 serial 属性；`model_name` 只是型号 | 当前表里没有 | **不能提供**；不能用型号冒充唯一序列号 |
+| `calibration0` / `Trusted LifeTime Max WRdc` | 无对应属性 | 无 | **只能留空**（或由 powerd/电池数据收集内部计算） |
+| `BatteryDataCollectionReady` | 不是电池属性，是系统/notify 服务 | 无 | **不是 battmgr 能补的**；需 BTM/BatteryDataCollection 服务真实 ready |
+| `health`（Android） | `Good` | 固件号 1（未请求） | 可作为**参考输入**，但不是 Apple `Battery Service Flags`；需要新请求并确认返回值格式 |
+| `SOH`（若需要） | Android 未直接给出 | 固件号 5（未请求） | 需新请求 + 设备确认 |
+| `Battery Service Flags` | **无对应属性** | 只有 `BmAuthentic`/`BmSlaveAuthentic` 两个布尔 auth 位（0x03/0xa5） | **不能直接提供**；见 6.4 |
+
+### 6.4 `Battery Service Flags` 的语义判断
+
+从 powerd 反汇编看，它不是电量/循环计数，而是一个**状态/条件位字**：
+
+- `sub_10000c474` 用 `flags & 0xC00000` 作为是否计算健康状态的**门控**。
+- `sub_10000e270` 当这两位为 1 时打印 `Invalid auth condition: recoveredflags:0x%x`，并用 `0xff3fffff` **清掉**这两位。这说明它们与认证/服务条件有关，powerd 会主动“恢复”/清除不合法的值。
+- battmgr 里能读到的是 `BmAuthentic`（board 0x03）和 `BmSlaveAuthentic`（0xa5）两个布尔，不是同一个 flags word；Android sysfs 也没有对应属性。
+- g233 观测到的 `getBatteryHealthServiceFlags=0x800003` 是 IOPS/powerd 输出侧的 flags，**不能**据此认定输入侧有 `Battery Service Flags`。
+
+结论：**`Battery Service Flags` 不能由我们“给出一个非零值”来补齐。** 没有证据表明它等于某个 battmgr 原始属性；它更像 powerd/电池数据收集根据真实认证/健康状态算出的条件字。若真实认证条件不成立（本机电池没有 Apple 认证芯片，`ui_compat18.c` 也报告 `AppleAuthCPRelay` 不适用），健康页可能按设计不可用；不能用猜测值绕过。
+
+### 6.5 证据级别
+
+- Android 属性名/值：**设备只读**（本次实际查询）。
+- battmgr property 编号/是否请求：**源码**（`ShengBattmgr.c`/`.h`）。
+- `Battery Service Flags` 的门控/清除逻辑：**反汇编确认**（`sub_10000c474` / `sub_10000e270`）。
+- `Battery Service Flags` 是否等于认证结果、以及 `Battery Serial`/UPO/WRa 的最终来源：**推测/未确认**。
+
+## 7. 最小可验证的下一步（只读、默认关闭）
 
 1. 加一个默认关闭的诊断开关（未来实现，不在本轮）：
    - `zizhan_batt_health_diag=1`：在 `AppleSmartBattery` 发布后打印 `BatteryData` 的每个 key、类型、值；打印 `AppleSmartBattery` 的全部属性名（不打印序列号/IP）。
@@ -173,14 +252,14 @@
    - 如果 `UPOCount`/`CurrentWRa` 不在 `BatteryData`：找 fuel gauge/PMIC 的真实来源；没有就不发布 ageAware。
 4. 温度 HID：只有在 J171AP 的 29 路 watchdog 能提供真实读数时，才谈 thermalmonitord 控制轮；D22 表不能复用。
 
-## 7. 明确不做
+## 8. 明确不做
 
 - 不在 Settings/用户态伪造 `Battery Service State`、`Battery Service Flags`、`UPOCount`、`WRa`、`ageAwareMitigationState`。
 - 不用 `notify_post`/`notify_set_state` 手动发布健康状态。
 - 不修改/重签 Apple 二进制；不把 IPSW 提取物提交到仓库。
 - 不把 `getBatteryHealthServiceFlags=0x800003` 当成“已有 Battery Service Flags 输入”的证据；它需要设备 ioreg 对照。
 
-## 8. 未决 / 推测
+## 9. 未决 / 推测
 
 - `BatteryDataCollectionReady` 的生产者（BTM）和它到 `Battery Service State` 的调用链：**字符串推断**，未逐行反汇编。
 - `AgingController` 从 `BatteryData` 取 UPO/WRa 的精确 key 名（`UPOCount`/`WRa` vs `kBattery...`）与缺失时的返回值（0/-1）：**字符串 + 方法名推断**，需要诊断日志确认。

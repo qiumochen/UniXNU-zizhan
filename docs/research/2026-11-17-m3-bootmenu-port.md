@@ -26,7 +26,7 @@
 
 推荐路线（按“最小增量 + 未知数”排序；A 的具体工作量见 §9，FDT/cmdline 等价性见 §10）：
 
-1. **A 先做不写入的 T1**：现有 UEFI 已经有 `type="linux"` 的 EFI stub 加载路径（`Boot.c:170-200`），按键由 `ButtonsDxe` 提供（§9.2），所以 A 不再需要裸机 PMIC 驱动，也不需要 ABL 加载 146.4 MiB kernel field。A 的主要未知变成“EFI stub 启原装安卓时 FDT/cmdline/initrd 是否等价”（§10）。
+1. **A 先做不写入的 T1**：现有 UEFI 已经有 `type="linux"` 的 EFI stub 加载路径（`Boot.c:170-200`），按键由 `ButtonsDxe` 提供（§9.2），所以 A 不再需要裸机 PMIC 驱动，也不需要 ABL 加载 146.4 MiB kernel field。A 的主要未知变成“EFI stub 启原装安卓时 FDT/cmdline/initrd 是否等价”（§10）；§10.3 已用 initrd span 差额证实 ABL 把本次 bootconfig 放在 initrd 尾部（1,166 B），因此不需要“打包时快照 bootconfig”，T1 只需读尾部验证 magic。
 2. A 的 T1 通过 → 走 A 的 T2/T3（先只读验证，再写 boot 分区）。
 3. A 的 T1 失败（安卓起不来，或 `cmdline`/`bootconfig` 不等价且无法补齐）→ 转 B：B 的菜单自己读 PM8350 GPIO6，代码约 250–350 行；Android 的 vendor_boot + boot ramdisk + bootconfig 由 ABL 按原样组装，安卓路径最保真。
 4. 两条路线都必须先验证“按键选择真的能在 zizhan 上工作”；现有设备记录（`docs/progress/2026-10-30-root-and-autoloop.md:325`）已经证明菜单可以手动选 iOS，但音量上按键的 PMIC 映射仍需设备确认。
@@ -333,14 +333,23 @@ Android 依赖的 `/chosen`/bootconfig 项：
 | dtb_size / dtb 偏移 | 5,102,291 B @0x14b3000 |
 | vendor_bootconfig | 0x1992000，size 字段 108；文本只有 85 B：`androidboot.hardware=qcom`、`androidboot.memcg=1`、`androidboot.usbcontroller=a600000.dwc3` |
 
-但当前 `/proc/bootconfig` 有 **34 行**，包含 `androidboot.slot_suffix=_b`、`androidboot.vbmeta.digest=…`、`androidboot.serialno=…`、`androidboot.verifiedbootstate=orange` 等。这些**不在 vendor_boot 的 bootconfig 段里**，而是 ABL 在启动时按 AVB/槽位/序列号动态拼出来的。所以 A 不能只靠 vendor_boot 还原最终 bootconfig；必须在打包时快照当前 `/proc/bootconfig`（只读）或保留 ABL 的 live FDT/initrd。
+但当前 `/proc/bootconfig` 有 **34 行**，包含 `androidboot.slot_suffix=_b`、`androidboot.vbmeta.digest=…`、`androidboot.serialno=…`、`androidboot.verifiedbootstate=orange` 等。这些**不在 vendor_boot 的 bootconfig 段里**，而是 ABL 在启动时按 AVB/槽位/序列号动态拼出来的。所以 A 不能只靠 vendor_boot 还原最终 bootconfig；但 ABL 已经把它放在本次 initrd 的尾部（下一段）。
+
+**但 ABL 本次启动已经把这份动态 bootconfig 放到 initrd 尾部。** 设备只读证据：
+
+- 当前 stock 启动的 `/chosen/linux,initrd-start=0xb6972000`、`end=0xb7ffe76c`，span = **23,644,012 B**。
+- vendor_boot 的 vendor_ramdisk = 21,699,616 B，boot_b 的 ramdisk = 1,943,230 B，两者之和 = 23,642,846 B。
+- 差额 = **1,166 B**；`/proc/bootconfig` 的格式化文本是 1,276 B，去掉空格/引号后的 raw 形式约 1,140 B，加 20 B 尾部（4 B size + 4 B checksum + 12 B `#BOOTCONFIG\n`）≈ 1,160 B，与 1,166 B 只差 6 B（引号/键序造成的估算误差）。
+- 因此 **ABL 把本次动态 bootconfig 追加在 initrd 末尾，并计入 `initrd-end`**。`PongBootMemoryDxe` 也按这个前提工作：`InitrdRange()`（`PongBootMemoryDxe.c:77-88`）读 start/end，`Publish()`（`:90-101`）在**整个 span 内**扫描 `PONGFAT1`（不要求 PONGFAT 从 0 开始），上限 `PONG_FAT_MAX_INITRD = SIZE_128MB`（`PongInitrd.h:4-6`）。当前 iPadOS 菜单的 span 约为 21,699,616 + 100,667,392 + 1,166 = **122,368,174 B < 128 MiB**，与它能正常找到 PONGFAT 一致。
+
+A 因此可以直接从 ABL 的 initrd 尾部取 bootconfig，不必打包快照；T1 只需读一次尾部验证 magic/size/checksum（见 §10.5）。
 
 ### 10.4 哪些能补、哪些必须保留 ABL FDT
 
 | 项 | UniXNU 能否补 | 结论 |
 | --- | --- | --- |
 | cmdline（ABL base args） | 可以（LoadOptions） | 取 `/proc/cmdline` 的 `bootconfig` 之前部分；启动模式不同时内容可能变 |
-| bootconfig（`androidboot.*`） | 只能快照 | 34 行里有 slot/vbmeta/serial 等动态值；快照会随 OTA/换槽过期 |
+| bootconfig（`androidboot.*`） | **可从 ABL 本次 initrd 尾部取** | 已由 initrd span 差额（1,166 B）和 `PongBootMemoryDxe` 的扫描逻辑支持；T1 再读一次 `#BOOTCONFIG\n` magic/size/checksum 确认。若尾部没有 magic，才退回“打包快照” |
 | initrd | 可以（LoadFile2 + 预拼 initrd） | 需按 ABL 的顺序拼 vendor_ramdisk + boot ramdisk + bootconfig trailer；vendor_ramdisk 原样保留（含其 9 字节前缀），实际顺序/尾部要在 T1 里与 stock 对照 |
 | `kaslr-seed` | 可省略 | 省略则 KASLR 关闭；不影响启动，但不等价 |
 | `memory`/`reserved-memory` | 静态 DT 已有，但需对比 | ABL 可能调整；必须逐项对照 live DT |
@@ -350,7 +359,7 @@ Android 依赖的 `/chosen`/bootconfig 项：
 
 ### 10.5 A 的 T1 探针设计（不写入）
 
-1. 镜像：现有 UEFI + 一个 `type="linux"` 条目；PONGFAT 临时扩到约 150 MiB，放 `Image`（原装内核）、`initrd.bin`（vendor_ramdisk + boot_ramdisk + bootconfig 快照）、config。
+1. 镜像：现有 UEFI + 一个 `type="linux"` 条目；PONGFAT 临时扩到约 150 MiB，放 `Image`（原装内核）、`initrd.bin`（vendor_ramdisk + boot_ramdisk + **从 ABL initrd 尾部复制的 bootconfig**）、config。bootconfig 的取法：`initrd_end` 前 12 B 应等于 `#BOOTCONFIG\n`；前 4 B 是 size，前 8 B 是 checksum；从 `end-20-size` 到 `end` 原样复制。若 magic 不匹配，才用打包时的 `/proc/bootconfig` 快照。
 2. FDT 候选：
    - (a) 先用 ABL live FDT：在 `PongBootMemoryDxe` 或 `UniXNUPrepareDeviceTree` 里从 HOB 取指针，复制并安装 `gFdtTableGuid`；这是推荐路径。
    - (b) 回退静态 DTB：清掉 `/chosen/linux,initrd-*`，把 ABL bootargs 放进 LoadOptions，bootconfig 用快照。

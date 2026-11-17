@@ -25,8 +25,8 @@
 | --- | --- | --- | --- | --- |
 | M0 | 收口 | DONE（11-17） | 8 天未提交工作按主题提交并推到 wip 分支；本页一页；20 h 无人值守窗口关闭 | 已完成：分支 `wip/2026-11-17-audio-sensors`，`a044488` 的 Porting record 44075853448、Daily-use 44075853465、Display 44075853503、Wi-Fi 44075853551 全部 SUCCESS（macOS 云端内核为手动触发，本次未运行）。中途修了 GCC 才报的告警（只加括号/类型转换，无行为变化）。 |
 | M1 | 能出声 | TODO（主线） | 用户在场：系统提示音能听到、一个 App 播放能听到、音量键能调 | ① 约用户 15 分钟，跑已封存的首声短音包（PRM34，低音量、250 ms 预算），确认功放→扬声器链路；② 通过后按 [D 服务计划](../plan/2026-11-17-d-service-iterations.md) I1→I6 做 `ZizhanAudio` 服务 + HAL |
-| M2 | 熄屏/亮屏 + 温控底线 | TODO | 熄屏/亮屏 10 次循环可触控；高负载 10 分钟不超温不死机 | M1 结束后开始；先复核 POWER-02 两个旧解阻条件是否必要 |
-| M3 | 离开电脑启动 | TODO（需用户授权写启动分区） | 不接电脑开机可选进 iPadOS，安卓数据和撤销路径保留 | 方案输入见 [双系统引导调研](../research/2026-11-17-dual-boot-loaders.md)，倾向 data-a-live 式 boot 分区菜单 |
+| M2 | 熄屏/亮屏 + 温控底线 | TODO | 熄屏/亮屏 10 次循环可触控；高负载 10 分钟不超温不死机 | M1 后开始：按 [今晚 M2 方案](../plan/2026-11-17-m2-thermal-and-screen-off.md) 的 S1 落点与 THERM-01 接线；先接默认关闭的候选核心（[总结](2026-11-17-codex-prep-summary.md)） |
+| M3 | 离开电脑启动 | TODO（需用户授权写启动分区） | 不接电脑开机可选进 iPadOS，安卓数据和撤销路径保留 | 按 [今晚 M3 评估](../research/2026-11-17-m3-bootmenu-port.md) 先做 A 的 T1；写 boot 分区需用户授权（[总结](2026-11-17-codex-prep-summary.md)） |
 
 ## 挂起（用户点名才恢复，恢复时从对应记录续）
 
@@ -39,7 +39,7 @@
 | THERM-01 | g396 两组 TSENS 读数有效；无热策略（M2 恢复） | [TSENS](2026-11-07-tsens-readonly.md) |
 | POWER-02 | 设计和只读审计完成；无真实熄屏（M2 恢复） | [方案](../plan/2026-11-07-lockscreen-suspend-design.md) |
 | NET-01 / NET-02 | 同网 28 分钟有界窗口通过；换网、自然 T1、MSI 未验 | [11-06](2026-11-06-overnight.md) |
-| POWER-01 | 电池健康页仍转圈（缺 thermalmonitord / powerd 状态） | [11-06](2026-11-06-daytime-input-power.md) |
+| POWER-01 | 电池健康页仍转圈（缺 thermalmonitord / powerd 状态） | [真实来源](../research/2026-11-17-battery-health-inputs.md)；[11-06](2026-11-06-daytime-input-power.md) |
 | UX-01 | 主屏静止首帧约 80 ms | [11-06](2026-11-06-overnight.md) |
 | BOOT-01 / GPU-01 | 罕见 CS4K 分配失败与画布映射失败，未复现 | [11-06](2026-11-06-boot-release-followup.md) |
 | BT-01 / CAM-01 / MODEM-01 / RELEASE-01 / REF-01 / BASE-01 / PERSIST-01 | 未开始或只有调研；PERSIST-01 并入 M3 | 归档台账 |

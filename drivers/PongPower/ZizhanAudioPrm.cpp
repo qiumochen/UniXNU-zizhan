@@ -71,7 +71,9 @@ void channel_state(void *context,int up){auto &o=*static_cast<Owner *>(context);
 void receive(void *context,const uint8_t *bytes,uint32_t length){auto &o=*static_cast<Owner *>(context);IOLockLock(o.lock);
  if(length<=512&&o.count<16){auto &p=o.queue[(o.head+o.count)%16];p.bytes=length;memcpy(p.data,bytes,length);++o.count;}else ++o.overflow;
  IOLockUnlock(o.lock);}
-bool tdm_commands(bool close){
+// 11-18: the worker thread runs the whole amp/WRITE path on a 16 KiB stack; keep the packet
+// builders below out of its permanent frame.
+__attribute__((noinline)) bool tdm_commands(bool close){
  auto &o=owner;if(close){if(o.tdm.phase!=ZizhanTdmHold||!o.tdm.running||o.tdm.waiting)return false;o.tdm.phase=ZizhanTdmStop;}
  for(unsigned iteration=0;iteration<(close?400u:800u);++iteration){
   Packet p={};unsigned closed,overflow;IOLockLock(o.lock);closed=o.closed;overflow=o.overflow;
@@ -89,7 +91,7 @@ bool tdm_commands(bool close){
  }
  zizhan_tdm_fail(&o.tdm,4);return false;
 }
-bool pcm_commands(bool close){
+__attribute__((noinline)) bool pcm_commands(bool close){
  auto &o=owner;o.pcm.joint=o.mode>=24?1u:0u;if(close){if(o.pcm.phase!=ZizhanPcmHold||!o.pcm.running||o.pcm.waiting)return false;o.pcm.phase=ZizhanPcmStop;}
  for(unsigned iteration=0;iteration<(close?400u:800u);++iteration){
   Packet p={};unsigned closed,overflow;IOLockLock(o.lock);closed=o.closed;overflow=o.overflow;
@@ -111,7 +113,7 @@ bool pcm_commands(bool close){
  }
  zizhan_pcm_fail(&o.pcm,4);return false;
 }
-bool memory_commands(bool unmap){
+__attribute__((noinline)) bool memory_commands(bool unmap){
  auto &o=owner;if(unmap){if(o.memory.phase!=ZizhanMemoryHeld||!o.memory.handle)return false;o.memory.phase=ZizhanMemoryUnmap;}
  else o.memory.address=zizhan_audio_dma_map_address();
  for(unsigned iteration=0;iteration<400;++iteration){
@@ -158,7 +160,7 @@ bool graph_send(uint8_t *bytes,unsigned n,uint32_t opcode,uint32_t token,uint32_
  IOLog("ZIZHAN_AUDIO_GRAPH: timeout opcode=%x token=%x port=%x\n",opcode,token,port);
  return false;
 }
-bool batch_round(bool zero){
+__attribute__((noinline)) bool batch_round(bool zero){
  auto &o=owner;uint8_t out[512];
  if(!o.dma_mapped||!o.memory.handle)return false;
  if(zero){o.zero_verified=zizhan_audio_zero_verify()?1u:0u;if(!o.zero_verified)return false;}
@@ -201,7 +203,7 @@ int16_t runtime_sample(uint64_t frame){
  * before a stable watermark, an uncovered period must fail as an underrun
  * without silence, and the last in-flight period must drain after stop.
  * No userland HAL, data pads, amplifier or output is involved. */
-bool runtime_round(){
+__attribute__((noinline)) bool runtime_round(){
  auto &o=owner;auto &r=o.runtime;
  const uint64_t tagged=zizhan_audio_dma_map_address(),base=uint32_t(tagged);
  if((tagged>>32)!=1||!base||(base&4095)||base>0xffff0000ull||!o.dma_mapped||!o.memory.handle)return false;
@@ -292,7 +294,7 @@ bool runtime_round(){
  return ok&&r.ready_before==0&&r.ready_after==1&&r.watermark_gate==1&&r.underrun_gate==1&&
         r.pack_verified==4&&r.packets==4&&r.acks==4&&r.drained==1&&r.ready_cleared==1&&r.frames==1920;
 }
-bool graph_round(){
+__attribute__((noinline)) bool graph_round(){
  auto &o=owner;uint8_t b[512];unsigned n;
  n=zizhan_mfc_device_open(b,sizeof b,0x7a300001u);
  if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300001u,ZizhanMfcPort)){return false;}++o.graph_acks;
@@ -370,7 +372,7 @@ int zero_transfer(void *context,unsigned chip){
  if((o.mode<29||o.mode>33)||chip>1||chip!=o.transfer_calls)return 0;
  ++o.transfer_calls;if(!write_commands(chip))return 0;++o.transfer_acks;return 1;
 }
-bool dma_observe(){
+__attribute__((noinline)) bool dma_observe(){
  auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
  auto data=chosen?OSDynamicCast(OSData,chosen->getProperty("pong-audio-dma")):nullptr;
  uint64_t extent[2]={};if(data&&data->getLength()==sizeof extent)memcpy(extent,data->getBytesNoCopy(),sizeof extent);if(chosen)chosen->release();

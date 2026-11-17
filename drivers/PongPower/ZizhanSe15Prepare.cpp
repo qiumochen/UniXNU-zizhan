@@ -157,18 +157,23 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
             const auto reset_result = zizhan_amp_reset::release(reset, reset_state, [](unsigned us) { IODelay(us); });
             IOLog("ZIZHAN_AMP: reset result=%u claimed=%u released=%u\n", unsigned(reset_result),
                   unsigned(reset_state.claimed), unsigned(reset_state.released));
-            ZizhanAmpIdentity observed = {};
-            ZizhanAmpSnapshot captured = {};
-            ZizhanAmpSafeOff disabled = {};
-            ZizhanAmpHandoff transferred = {};
-            ZizhanAmpReadiness ready = {};
-            ZizhanAmpB2Patch patched = {};
-            ZizhanAmpTrim calibrated = {};
-            ZizhanAmpRam loaded = {};
-            ZizhanAmpCoefficients configured = {};
-            ZizhanAmpRun executed = {};
-            ZizhanAmpOutputSetup output_setup = {};
-            ZizhanAmpBusConfig before_config = {}, after_config = {};
+            // 11-18 (n18c-p-1 panic "Invalid kernel stack pointer (probable overflow)"): these ~5 KiB of
+            // receipts sat on the 16 KiB kernel stack under the PRM worker frame; an IOLog at an ADSP WRITE
+            // that took the os_log -> kqueue wakeup path then ran off the stack, usually ending as a cold
+            // watchdog hang. prepare() runs at most once at a time (the PRM and SE15 entries are exclusive
+            // and latched per boot), so keep them in static storage and clear them on every entry.
+            static struct Receipts {
+                ZizhanAmpIdentity observed; ZizhanAmpSnapshot captured; ZizhanAmpSafeOff disabled;
+                ZizhanAmpHandoff transferred; ZizhanAmpReadiness ready; ZizhanAmpB2Patch patched;
+                ZizhanAmpTrim calibrated; ZizhanAmpRam loaded; ZizhanAmpCoefficients configured;
+                ZizhanAmpRun executed; ZizhanAmpOutputSetup output_setup; ZizhanAmpBusConfig before_config, after_config;
+            } receipts;
+            memset(&receipts, 0, sizeof receipts);
+            auto &observed = receipts.observed; auto &captured = receipts.captured; auto &disabled = receipts.disabled;
+            auto &transferred = receipts.transferred; auto &ready = receipts.ready; auto &patched = receipts.patched;
+            auto &calibrated = receipts.calibrated; auto &loaded = receipts.loaded; auto &configured = receipts.configured;
+            auto &executed = receipts.executed; auto &output_setup = receipts.output_setup;
+            auto &before_config = receipts.before_config; auto &after_config = receipts.after_config;
             if (reset_result == zizhan_amp_reset::Ok) {
                 GeniI2c bus = {};
                 bus.io = {[](void *p, uint32_t at) { return static_cast<Page *>(p)->read(at); },

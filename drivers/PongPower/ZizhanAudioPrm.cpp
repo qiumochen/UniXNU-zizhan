@@ -587,7 +587,7 @@ void worker(void *,wait_result_t){
 extern "C" void zizhan_audio_prm_probe(void){
  unsigned mode=0,audio=0,prepare=0,adsp=0,observe=0;
  if(!PE_parse_boot_argn("zizhan_audio_prm",&mode,sizeof mode)||mode<1||mode>38)return;
- if(mode==34){unsigned attended=0;if(!PE_parse_boot_argn("zizhan_audio_attended",&attended,sizeof attended)||attended!=1){IOLog("ZIZHAN_AUDIO_PULSE: SKIP attended=0 no_owner=1\n");return;}}
+ if(mode==34){unsigned attended=0,dry=0;PE_parse_boot_argn("zizhan_pulse_dry",&dry,sizeof dry);if((!PE_parse_boot_argn("zizhan_audio_attended",&attended,sizeof attended)||attended!=1)&&dry!=1){IOLog("ZIZHAN_AUDIO_PULSE: SKIP attended=0 no_owner=1\n");return;}}
  PE_parse_boot_argn("pong_audio",&audio,sizeof audio);PE_parse_boot_argn("zizhan_se15_prepare",&prepare,sizeof prepare);PE_parse_boot_argn("pong_adsp",&adsp,sizeof adsp);
  if(mode>=7)PE_parse_boot_argn("zizhan_se15_observe",&observe,sizeof observe);
  auto node=IORegistryEntry::fromPath("/arm-io/pong-touch",gIODTPlane);auto data=node?OSDynamicCast(OSData,node->getProperty("compatible")):nullptr;

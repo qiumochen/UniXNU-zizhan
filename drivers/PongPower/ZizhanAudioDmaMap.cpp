@@ -5,10 +5,13 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <libkern/c++/OSData.h>
+#include <kern/thread.h>
+#include <pexpert/pexpert.h>
 #include "ZizhanAudioDmaMap.h"
 #include "../PongAdreno/ArmSmmu4K/ArmSmmu4KAudit.h"
 extern "C" bool pong_smmu_lease_lock(void);
 extern "C" void pong_smmu_lease_unlock(void);
+extern "C" int pong_klog_flush(int reason) __attribute__((weak));
 namespace {
 struct Owner {
  struct Write {size_t at;uint64_t value;unsigned bits;};Write trace[32]={};unsigned trace_count=0,trace_overflow=0;
@@ -17,6 +20,7 @@ struct Owner {
  ArmSmmu4KConfig lower={};ArmSmmu4KResult built={};ArmSmmu4KContextConfig config={};
  ArmSmmu4KRange range={};unsigned char visited[16]={};ArmSmmu4KAuditRegion audit_region={};ArmSmmu4KAuditConfig audit={};ArmSmmu4KAuditResult audited={};
  ArmSmmu4KIo io={};zizhan_audio_dma_map::State state;
+ volatile unsigned watch_stop=0,watch_running=0;
  uint64_t foreign_roots[78][2]={};unsigned namespace_reads=0,active_banks=0;
 };
 Owner owner;
@@ -99,6 +103,24 @@ bool failed(const char *stage){
  if(!owner.state.attempted){release_safe();}unlock();return false;
 }
 }
+namespace {
+// zizhan_dma_watch=1 (diagnostics): poll the owned context FSR/FAR/FSYNR0 and global GFSR every ~1 ms while
+// the map is installed; log every change and copy the console to the UFS klog (reason 7) so a later
+// hang still shows any SMMU fault that preceded it. Read-only MMIO; stopped before the map is released.
+void dma_watch(void *,wait_result_t){
+ auto &o=owner;const unsigned cb=(o.state.pages+o.state.bank)*4096;uint32_t last_fsr=~0u,last_g=~0u;unsigned polls=0;
+ for(unsigned ms=0;ms<120000&&!o.watch_stop;++ms){
+  uint32_t fsr=0,g=0,syn=0;uint64_t far=0;(void)read32(&o,cb+0x58,&fsr);(void)read32(&o,0x48,&g);++polls;
+  if(fsr!=last_fsr||g!=last_g){(void)read64(&o,cb+0x60,&far);(void)read32(&o,cb+0x68,&syn);
+   IOLog("ZIZHAN_AUDIO_DMAWATCH: t_ms=%u fsr=%x far=%llx fsynr0=%x gfsr=%x\n",ms,fsr,far,syn,g);last_fsr=fsr;last_g=g;
+   if(ms&&pong_klog_flush)(void)pong_klog_flush(7);}
+  IOSleep(1);
+ }
+ IOLog("ZIZHAN_AUDIO_DMAWATCH: end polls=%u fsr=%x gfsr=%x\n",polls,last_fsr,last_g);
+ __atomic_store_n(&o.watch_running,0u,__ATOMIC_RELEASE);
+}
+void dma_watch_stop(){auto &o=owner;o.watch_stop=1;for(unsigned i=0;i<200&&__atomic_load_n(&o.watch_running,__ATOMIC_ACQUIRE);++i)IOSleep(2);}
+}
 extern "C" bool zizhan_audio_dma_map_begin(void){
  auto &o=owner;if(o.once++)return false;
  auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);auto data=chosen?OSDynamicCast(OSData,chosen->getProperty("pong-audio-dma")):nullptr;
@@ -137,10 +159,14 @@ extern "C" bool zizhan_audio_dma_map_begin(void){
  IOLog("ZIZHAN_AUDIO_DMAMAP: audit complete=%u leaves=%lu descriptors=%lu real_owned_tables=1\n",o.audited.complete,static_cast<unsigned long>(o.audited.lower.leaf_pages),static_cast<unsigned long>(o.audited.lower.descriptor_reads));
  IOLog("ZIZHAN_AUDIO_DMAMAP: PASS installed=1 base=%llx bytes=%llu table=%llx pages=%lu slot=%u bank=%u context_readback=%u tlb=%u fault=%x fault_mask=c00001fe masked_fault=%x data=0 audio_output=0\n",
   o.base,o.bytes,o.table_pa,static_cast<unsigned long>(o.built.table_pages),o.state.slot,o.state.bank,o.state.programmed.readback_valid,o.state.programmed.tlb_synchronized,o.state.programmed.fault_status,o.state.programmed.fault_status&0xc00001feu);
+ {unsigned watch=0;thread_t thread=nullptr;
+  if(PE_parse_boot_argn("zizhan_dma_watch",&watch,sizeof watch)&&watch==1){o.watch_running=1;
+   if(kernel_thread_start(dma_watch,nullptr,&thread)==KERN_SUCCESS)thread_deallocate(thread);else o.watch_running=0;}}
  return true;
 }
 extern "C" bool zizhan_audio_dma_map_end(void){
  auto &o=owner;if(!o.lock_held||!o.state.installed)return false;
+ dma_watch_stop();
  if(!zizhan_audio_dma_map::restore(o.io,o.config,o.state))return failed("restore");
  IOLog("ZIZHAN_AUDIO_DMAMAP: PASS installed=0 stream_restored=1 context_retired=1 prior_context_restored=0 uncertain=0 slot=%u bank=%u tlb=%u disabled=%u native_idle_readback=1 data=0 audio_output=0\n",
   o.state.slot,o.state.bank,o.state.disabled.tlb_synchronized,o.state.disabled.disabled_verified);

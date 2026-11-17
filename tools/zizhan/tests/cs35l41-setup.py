@@ -43,7 +43,7 @@ constexpr unsigned kIOMapAnywhere=1,kIOMapInhibitCache=2,kIOMapReadOnly=4;
 static int gIODTPlane;
 using thread_t=void*;using wait_result_t=int;
 constexpr int KERN_SUCCESS=0;
-static bool PE_parse_boot_argn(const char *key,void *out,size_t bytes){if(!strcmp(key,"zizhan_audio_checkpoint")||!strcmp(key,"zizhan_pulse_hold"))return false;
+static bool PE_parse_boot_argn(const char *key,void *out,size_t bytes){if(!strcmp(key,"zizhan_audio_checkpoint")||!strcmp(key,"zizhan_pulse_hold")||!strcmp(key,"zizhan_pulse_dry")||!strcmp(key,"zizhan_pulse_nopup"))return false;
  assert(bytes==4);unsigned v=0;
  if(!strcmp(key,"zizhan_se15_prepare"))v=mode;
  else if(!strcmp(key,"pong_audio"))v=audio;

@@ -1001,8 +1001,9 @@ static int pulse_data(void *p){NativePulse *c=p;return c->transfer->once(c->tran
 void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 #define AMP_CHECKPOINT(chip,stage) do{if(out->pulse_profile&&zizhan_amp_checkpoint){zizhan_amp_checkpoint((chip),(stage));}}while(0)
 unsigned zizhan_amp_pulse_hold_us; /* 0 unless the kernel sets zizhan_pulse_hold=<ms> (attended only). */
+unsigned zizhan_amp_pulse_flags; /* bit0 dry (no AMP enable/volume), bit1 skip the native pup/pdn patch. */
 static void pulse_pause(void *p,unsigned us){NativePulse *c=p;c->clock->pause_us(c->clock->context,us);}
-static ZizhanPulseOps pulse_ops(NativePulse *p){ZizhanPulseOps o={p,pulse_read,pulse_write,pulse_now,pulse_uncertain,pulse_data,pulse_pause,zizhan_amp_pulse_hold_us};return o;}
+static ZizhanPulseOps pulse_ops(NativePulse *p){ZizhanPulseOps o={p,pulse_read,pulse_write,pulse_now,pulse_uncertain,pulse_data,pulse_pause,zizhan_amp_pulse_hold_us,zizhan_amp_pulse_flags&1u};return o;}
 static int run_debug_snapshot(GeniI2c *bus,const ZizhanAmpClock *clock,ZizhanAmpRun *out,unsigned slot,uint64_t begin){
  if(!out->core_debug){return 0;}if(slot>=6)return ZizhanAmpArgument;const unsigned chip=out->failed_chip;
  for(unsigned i=0;i<15;++i){if(clock->now_us(clock->context)-begin>=8000000)return ZizhanAmpTimeout;
@@ -1091,7 +1092,8 @@ static int silent_run(unsigned enabled,unsigned verified,GeniI2c *bus,const Zizh
    // Only internal GLOBAL clock/power gate. AMP/BST and the whole ASP
    // enables register are read-back disabled;no output interface writes.
    reason=run_state(chip,bus,clock,coeff,out,0);if(reason)goto fail;
-   if(out->pulse_profile){AMP_CHECKPOINT(chip,2);reason=zizhan_pulse_patch(&pulse_io,&out->pulse[chip],1);if(reason){reason=ZizhanAmpProtocol;goto fail;}AMP_CHECKPOINT(chip,3);}
+   if(out->pulse_profile&&(zizhan_amp_pulse_flags&2u)){out->pulse[chip].patch_on=1;}
+   else if(out->pulse_profile){AMP_CHECKPOINT(chip,2);reason=zizhan_pulse_patch(&pulse_io,&out->pulse[chip],1);if(reason){reason=ZizhanAmpProtocol;goto fail;}AMP_CHECKPOINT(chip,3);}
    reason=run_write(bus,clock,0x2014,coeff->after_state[chip][0]|1u,out);if(reason)goto fail;
    out->global_active[chip]=1;reason=run_state(chip,bus,clock,coeff,out,0);if(reason)goto fail;++out->global_on[chip];
    AMP_CHECKPOINT(chip,4);
@@ -1232,7 +1234,8 @@ static int silent_run(unsigned enabled,unsigned verified,GeniI2c *bus,const Zizh
   if(out->global_profile){
    reason=run_write(bus,clock,0x2014,coeff->after_state[chip][0],out);if(reason)goto fail;
    out->global_active[chip]=0;reason=run_state(chip,bus,clock,coeff,out,0);if(reason)goto fail;++out->global_off[chip];
-   if(out->pulse_profile){if(zizhan_pulse_patch(&pulse_io,&out->pulse[chip],0)){reason=ZizhanAmpProtocol;goto fail;}AMP_CHECKPOINT(chip,14);}
+   if(out->pulse_profile&&(zizhan_amp_pulse_flags&2u)){out->pulse[chip].patch_off=1;}
+   else if(out->pulse_profile){if(zizhan_pulse_patch(&pulse_io,&out->pulse[chip],0)){reason=ZizhanAmpProtocol;goto fail;}AMP_CHECKPOINT(chip,14);}
   }
   if(out->asp_rx_profile){
    reason=run_write(bus,clock,0x4800,0,out);if(reason)goto fail;out->asp_rx_active[chip]=0;

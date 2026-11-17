@@ -16,6 +16,8 @@ typedef struct {
   * DSP pipeline can play the finite tone out; NULL pause or 0 keeps the original timing. */
  void (*pause)(void *,unsigned);
  unsigned hold_us;
+ /* Silent diagnostics: never write AMP/BST enable or volume; only the data transfer and fault reads. */
+ unsigned dry;
 } ZizhanPulseOps;
 typedef struct {
  unsigned attempted,acknowledged,patch_on,patch_off,enabled,disabled,data_ack,complete,reason,reads;
@@ -58,6 +60,10 @@ static inline int zizhan_pulse_run(const ZizhanPulseOps *o,ZizhanPulseReceipt *r
   if(i==8)r->original_volume=value;else if(value!=expected[i])return ZizhanPulseGuard;}
  if((r->original_volume&0x3fffu)!=0x267cu)return ZizhanPulseGuard;
  r->original_power=0x3300;rc=zizhan_pulse_faults(o,r,0);if(rc)return rc;
+ if(o->dry){const uint64_t start=o->now(o->context);
+  if(o->transfer(o->context)!=1)rc=ZizhanPulseData;
+  else{r->data_ack=1;rc=o->now(o->context)-start>=250000?ZizhanPulseTimeout:zizhan_pulse_faults(o,r,1);}
+  r->disabled=1;r->enabled_us=o->now(o->context)-start;r->reason=rc;if(!rc)r->complete=1;return rc;}
  // Native index793 = -12dB (817 is0dB); fixed finite -36dBFS data.
  const uint32_t volume=(r->original_volume&~0x3ff8u)|0x3f40u;
  rc=zizhan_pulse_write(o,r,0x6000,volume);if(rc)return rc;

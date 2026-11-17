@@ -9,18 +9,20 @@ struct Device{
  static int write(void *p,uint32_t reg,uint32_t v){auto &d=*static_cast<Device *>(p);assert(!d.uncertain);++d.commands;if(d.fail==d.commands){d.uncertain=true;return 0;}d.regs[reg]=v;return 1;}
  static uint64_t now(void *p){return ++static_cast<Device *>(p)->time;}
  static int bad(void *p){return static_cast<Device *>(p)->uncertain;}
- static int data(void *p){auto &d=*static_cast<Device *>(p);assert(d.regs[0x2018]==0x3321&&d.regs[0x6000]==0x3f44);d.time+=10000;if(d.test==9)d.time+=250000;if(d.test==10)d.regs[0x10090]|=0x100;return d.test==8?0:1;}
- ZizhanPulseOps ops(){return {this,read,write,now,bad,data,nullptr,0};}
+ static int data(void *p){auto &d=*static_cast<Device *>(p);if(d.test==11)assert(d.regs[0x2018]==0x3300&&d.regs[0x6000]==0x267c);else assert(d.regs[0x2018]==0x3321&&d.regs[0x6000]==0x3f44);d.time+=10000;if(d.test==9)d.time+=250000;if(d.test==10)d.regs[0x10090]|=0x100;return d.test==8?0:1;}
+ ZizhanPulseOps ops(){return {this,read,write,now,bad,data,nullptr,0,test==11?1u:0u};}
 };
 int main(){
  unsigned commands=0;
- for(unsigned test=0;test<11;++test){Device d;d.test=test;auto o=d.ops();ZizhanPulseReceipt r={};
+ for(unsigned test=0;test<12;++test){Device d;d.test=test;auto o=d.ops();ZizhanPulseReceipt r={};
   if(test==1){assert(zizhan_pulse_run(&o,&r)==ZizhanPulseGuard&&!d.commands);continue;}
   assert(!zizhan_pulse_patch(&o,&r,1)&&r.patch_on);d.regs[0x2014]=1;
   if(test==2){d.regs[0x13004]=1;}if(test==3)d.regs[0x28007d0]=1;if(test==4)d.regs[0x4c48]=0;
   if(test==5){d.regs[0x10010]|=0x100;}if(test==6)d.regs[0x10090]|=0x80000000;
   if(test==7)d.regs[0x6000]=0;
   int rc=zizhan_pulse_run(&o,&r);
+  if(test==11){unsigned writes=r.attempted;assert(!rc&&r.complete&&!r.enabled&&r.disabled&&r.data_ack&&d.regs[0x2018]==0x3300&&d.regs[0x6000]==0x267c&&writes==5);
+   d.regs[0x2014]=0;assert(!zizhan_pulse_patch(&o,&r,0)&&r.patch_off);continue;}
   if(!test){assert(!rc&&r.complete&&r.enabled&&r.disabled&&r.data_ack&&d.regs[0x2018]==0x3300&&d.regs[0x6000]==0x267c);d.regs[0x2014]=0;
    assert(!zizhan_pulse_patch(&o,&r,0)&&r.patch_off&&r.attempted==16&&r.acknowledged==16);commands=d.commands;
   }else{assert(rc&&!r.complete);if(test>=8)assert(r.enabled&&r.disabled&&d.regs[0x2018]==0x3300&&d.regs[0x6000]==0x267c);else assert(!r.enabled);}

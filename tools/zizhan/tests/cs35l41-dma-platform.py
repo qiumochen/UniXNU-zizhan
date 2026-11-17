@@ -37,6 +37,14 @@ extern "C" void pong_smmu_lease_unlock(){++unlocks;}
 static int model_write32(size_t at,uint32_t value){++writes;if(program_fail||restore_fail)return 1;if((at&4095)==0x58)regs[at/4]=(regs[at/4]&~(value&0xc00001feu))|0x400;else regs[at/4]=value;if(!(at&4095)&&at>=0x80000)regs[at/4]&=~0x1000u;if((at&4095)==0x10)regs[at/4]|=0x60;if(tcr2_bad&&at==(128+74)*4096+0x10)regs[at/4]^=0x100;if(sctlr_rao&&at==(128+74)*4096)regs[at/4]|=0x20000000;if(cbar_bad&&at==0x1000+74*4)regs[at/4]^=0x100;return 0;}
 static uint64_t model_read64(size_t at){uint64_t value=*reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(regs)+at);if(namespace_unstable&&at==(128+1)*4096+0x20)regs[(128+1)*4096/4]^=1;return value;}
 static void IOLog(const char *fmt,...){char b[512];va_list a;va_start(a,fmt);vsnprintf(b,sizeof b,fmt,a);va_end(a);logs.emplace_back(b);}
+using wait_result_t=int;using thread_t=void *;using thread_continue_t=void (*)(void *,wait_result_t);enum{KERN_SUCCESS=0};
+static void IOSleep(unsigned){}static int kernel_thread_start(thread_continue_t,void *,thread_t *){return 1;}static void thread_deallocate(thread_t){}
+static bool PE_parse_boot_argn(const char *,void *,size_t){return false;}
+#ifdef __APPLE__
+extern "C" __attribute__((weak)) int pong_klog_flush(int){return -1;} /* ld64 rejects undefined weak refs */
+#else
+extern "C" int pong_klog_flush(int) __attribute__((weak));
+#endif
 struct OSData {size_t getLength(){return missing?0:16;}const void *getBytesNoCopy(){return extent;}};
 struct IORegistryEntry {static IORegistryEntry *fromPath(const char *p,int){assert(!strcmp(p,"/chosen"));++chosen;static IORegistryEntry e;return &e;}OSData *getProperty(const char *p){assert(!strcmp(p,"pong-audio-dma"));static OSData d;return &d;}void release(){}};
 #define OSDynamicCast(type,v) static_cast<type *>(v)

@@ -18,11 +18,14 @@
  * bank-valid bit invalidates every sensor in that bank.
  *
  * Semantics: a sample older than two periods (or with a time that goes
- * backwards) is stale and holds the current caps; any invalid/missing bank
- * blocks release; a valid over-temperature reading clamps even when the
- * other bank is invalid. Release needs `release_samples` consecutive fresh
- * samples below the release threshold, and each released level starts a new
- * streak. Missing readings are never turned into 0 C. */
+ * backwards) is reported stale, but it **never prevents clamping**: any
+ * valid over-temperature reading in it still sets the cap immediately. A
+ * stale/backwards sample only blocks release and clears the recovery
+ * streaks. A backwards timestamp re-bases the clock to the new time, so
+ * later samples can become fresh again under the new baseline. Release
+ * needs `release_samples` consecutive fresh samples below the release
+ * threshold; a valid over-temperature reading clamps even when the other
+ * bank is invalid. Missing readings are never turned into 0 C. */
 
 enum {
  ZizhanThermalBanks=2u, ZizhanThermalSensors=16u,
@@ -32,6 +35,8 @@ enum {
 };
 
 enum { ZizhanThermalFresh=1, ZizhanThermalStale=0, ZizhanThermalInvalid=-1 };
+enum { ZizhanThermalClockFresh=0, ZizhanThermalClockStale=1,
+       ZizhanThermalClockBackwards=2 };
 
 typedef struct {
  uint64_t time_us;
@@ -92,17 +97,21 @@ static inline int zizhan_thermal_config_ok(const ZizhanThermalConfig *c){
  return 1;
 }
 
-/* Sample is stale when its time is before the last accepted one (out of
- * order or 64-bit wrap) or more than two periods after it. Stale holds the
- * caps and clears both streaks; a newer in-order sample updates the clock. */
+/* Classify the sample clock. Fresh: in order and at most two periods after
+ * the last accepted one. Stale: in order but more than two periods later.
+ * Backwards: before the last accepted time (out-of-order or 64-bit wrap).
+ * Both non-fresh cases clear the streaks and move the baseline to now, so a
+ * later sample can be fresh again; neither prevents a clamp in the caller. */
 static inline int zizhan_thermal_time_ok(const ZizhanThermalConfig *c,ZizhanThermalState *s,
                                          uint64_t now){
- if(!s->have_last){s->last_time_us=now;s->have_last=1;return 1;}
- if(now<s->last_time_us){s->cpu_fresh=0;s->gpu_fresh=0;return 0;}
- if(now-s->last_time_us>c->period_us*2u){
-  s->last_time_us=now;s->cpu_fresh=0;s->gpu_fresh=0;return 0;
+ if(!s->have_last){s->last_time_us=now;s->have_last=1;return ZizhanThermalClockFresh;}
+ if(now<s->last_time_us){
+  s->last_time_us=now;s->cpu_fresh=0;s->gpu_fresh=0;return ZizhanThermalClockBackwards;
  }
- s->last_time_us=now;return 1;
+ if(now-s->last_time_us>c->period_us*2u){
+  s->last_time_us=now;s->cpu_fresh=0;s->gpu_fresh=0;return ZizhanThermalClockStale;
+ }
+ s->last_time_us=now;return ZizhanThermalClockFresh;
 }
 
 /* Max valid temperature of one group; all_valid is cleared for any missing
@@ -128,22 +137,24 @@ static inline int zizhan_thermal_step(const ZizhanThermalConfig *c,ZizhanThermal
                                       const ZizhanThermalSample *x){
  if(!s||!x||!zizhan_thermal_config_ok(c))return ZizhanThermalInvalid;
  const int banks_ok=x->bank_valid[0]&&x->bank_valid[1];
- if(!zizhan_thermal_time_ok(c,s,x->time_us))return ZizhanThermalStale;
+ const int clock=zizhan_thermal_time_ok(c,s,x->time_us);
  const unsigned need=c->release_samples?c->release_samples:1u;
  int32_t cpu_max,gpu_max;int cpu_all,cpu_any,gpu_all,gpu_any;
  zizhan_thermal_scan(x,(unsigned)ZizhanThermalCpuSensors,1,&cpu_max,&cpu_all,&cpu_any);
  zizhan_thermal_scan(x,(unsigned)ZizhanThermalGpuSensors,0,&gpu_max,&gpu_all,&gpu_any);
  if(cpu_any&&cpu_max>=c->cpu_clamp_mc){
   s->cpu_level=c->cpu_max_level;s->cpu_fresh=0;
- }else if(s->cpu_level>0&&banks_ok&&cpu_all&&cpu_max<c->cpu_release_mc){
+ }else if(clock==ZizhanThermalClockFresh&&s->cpu_level>0&&banks_ok&&cpu_all&&
+          cpu_max<c->cpu_release_mc){
   if(++s->cpu_fresh>=need){if(s->cpu_level)--s->cpu_level;s->cpu_fresh=0;}
  }else s->cpu_fresh=0;
  if(gpu_any&&gpu_max>=c->gpu_clamp_mc){
   s->gpu_level=c->gpu_max_level;s->gpu_fresh=0;
- }else if(s->gpu_level>0&&banks_ok&&gpu_all&&gpu_max<c->gpu_release_mc){
+ }else if(clock==ZizhanThermalClockFresh&&s->gpu_level>0&&banks_ok&&gpu_all&&
+          gpu_max<c->gpu_release_mc){
   if(++s->gpu_fresh>=need){if(s->gpu_level)--s->gpu_level;s->gpu_fresh=0;}
  }else s->gpu_fresh=0;
- return ZizhanThermalFresh;
+ return clock==ZizhanThermalClockFresh?ZizhanThermalFresh:ZizhanThermalStale;
 }
 
 #endif

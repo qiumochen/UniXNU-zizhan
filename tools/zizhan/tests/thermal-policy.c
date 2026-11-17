@@ -212,6 +212,52 @@ static void test_gpu_missing(void){
  CHECK(st.gpu_level==ZizhanThermalGpuLevels,"missing gpu sensor holds cap");
 }
 
+static void test_slow_sampling_still_clamps(void){
+ ZizhanThermalState st;zizhan_thermal_init(&st);
+ ZizhanThermalSample s=base(1000000);step(&st,1000000,&s);
+ /* Every sample is 3 periods after the last: stale, but a hot reading must
+  * still clamp and the cap must never be released by stale cold samples. */
+ s=base(4000000);cpu(&s,4,110000);
+ CHECK(step(&st,4000000,&s)==ZizhanThermalStale,"3-period hot returns stale");
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels,"3-period hot still clamps");
+ for(unsigned n=1;n<=4;++n){
+  s=base(4000000ull+3000000ull*n);
+  CHECK(step(&st,s.time_us,&s)==ZizhanThermalStale,"3-period cold stale");
+ }
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels,"3-period sampling never releases");
+ CHECK(st.cpu_fresh==0,"3-period stale clears streak");
+}
+
+static void test_backwards_rebase_and_recover(void){
+ ZizhanThermalState st;zizhan_thermal_init(&st);
+ ZizhanThermalSample s=base(10000000);step(&st,10000000,&s);
+ /* Clock goes backwards: the hot reading still clamps, the baseline moves
+  * to the new time, and three fresh cold samples release one level. */
+ s=base(9000000);cpu(&s,4,110000);
+ CHECK(step(&st,9000000,&s)==ZizhanThermalStale,"backwards hot returns stale");
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels,"backwards hot still clamps");
+ s=base(10000000);step(&st,10000000,&s);
+ s=base(11000000);step(&st,11000000,&s);
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels,"backwards rebase two fresh no release");
+ s=base(12000000);
+ CHECK(step(&st,12000000,&s)==ZizhanThermalFresh,"backwards rebase third fresh");
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels-1,"backwards rebase releases after three");
+}
+
+static void test_stale_cold_no_streak(void){
+ ZizhanThermalState st;zizhan_thermal_init(&st);
+ ZizhanThermalSample s=base(1000000);cpu(&s,4,110000);step(&st,1000000,&s);
+ s=base(4000000);
+ CHECK(step(&st,4000000,&s)==ZizhanThermalStale,"stale cold returns stale");
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels,"stale cold holds cap");
+ CHECK(st.cpu_fresh==0,"stale cold does not advance streak");
+ s=base(5000000);step(&st,5000000,&s);
+ s=base(6000000);step(&st,6000000,&s);
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels,"two fresh after stale no release");
+ s=base(7000000);step(&st,7000000,&s);
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels-1,"third fresh after stale releases");
+}
+
 int main(void){
  test_mapping();
  test_normal();
@@ -227,6 +273,9 @@ int main(void){
  test_invalid_config();
  test_first_sample_hot();
  test_gpu_missing();
+ test_slow_sampling_still_clamps();
+ test_backwards_rebase_and_recover();
+ test_stale_cold_no_streak();
  printf("%s: %d failure(s)\n",failures?"FAIL":"PASS",failures);
  return failures?1:0;
 }

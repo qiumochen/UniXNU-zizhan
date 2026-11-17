@@ -50,7 +50,7 @@ int qcom_qmp_step(QcomQmp *q)
         kick(q);
         q->state = QcomQmpLinkWait;
     }
-        /* fall through: the ack may already be there */
+        /* fall through - the ack may already be there */
     case QcomQmpLinkWait:
         if (r[D_MCORE_LINK_ACK] != UP) return q->state;
         r[D_MCORE_CH] = UP;

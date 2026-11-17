@@ -101,6 +101,124 @@
 | 设备 | 10 分钟有界负载：日志含 ≥1 次真实封顶/恢复，温度不越过 110/95°C，自动返回 Android，无 panic |
 | 不算通过 | 只读到温度、只降低频率但没有恢复、或只跑 host 测试 |
 
+### 1.7 THERM-01 接线设计（只写方案，不改内核源码）
+
+#### 1.7.1 CPU：EPSS 三域上限与触摸 boost 的优先级
+
+`drivers/ArmCpu/PongCpuPolicy.h` 已经有一个 8 ms/32 ms 的 EPSS worker：
+
+- `:150-170` 从 EPSS LUT 填 `d.khz[]`/`d.levels`/`d.cap_khz`；不同核心数的 boost 行保留索引但 `khz=0`，选择循环会跳过。
+- `:186-201` `pong_cpu_boost_ms`（默认 400 ms）和触摸计数 `pong_touch_activity`；boost 开始对三个域调用 `setTop(d)`。
+- `:242` `if(boosted) requested = d.cap_khz`（触摸 boost 直接推到域上限）。
+- `:243-247` `cap` 先取 `d.cap_khz`，再用 EPSS `0x30c/4 bit2` 的硬件上限压低。
+- `:249-258` 在 `khz[i] <= cap` 的 LUT 行里选 `requested`；最后写 `*d.pdmem=selected` 和 `d.regs[0x320/4]=selected`（perf-lock + 当前档）。
+- `:278-285` `pong_cpu_policy` 默认 1，`kernel_thread_start(worker)`。
+
+**接线方案（看过源码 + 推测映射）**：
+
+1. 在 `ZizhanThermalService`（新头文件，或 `ZizhanTsensProbe.h` 扩展）里持有 `ZizhanThermalState`，把 `cpu_level` 以 `volatile uint8_t`/atomic 发布为 `pong_cpu_thermal_level`（0 = 不封顶，20 = 最低）。
+2. 在 `PongCpuPolicy.h` 的域循环里加一个 `thermalCapKhz(d, level)`：
+   - 收集 `d.khz[i] != 0` 的可用行（排除 boost 行）；
+   - `rank = (level * (usable - 1) + 10) / 20`；取第 `rank` 个可用行的 `khz`；
+   - `level==0` 返回 0（不封顶）。
+3. 在 `:243-247` 的 `cap` 计算之后、`:249` 选择之前：
+
+   ```c
+   const unsigned thermal = thermalCapKhz(d, pong_cpu_thermal_level);
+   if (thermal && thermal < cap) cap = thermal;
+   if (requested > cap) requested = cap;   /* 触摸 boost 不能越过温控 */
+   ```
+
+   `:242` 的 boost `requested=d.cap_khz` 保留，但后面的 clamp 必须覆盖它；这样温控永远压过 boost。
+4. L3：`l3Mode==1` 在 `:182` 无条件投最高档，会绕过温控；THERM-01 模式应使用 `pong_l3=2`（`:261-274` 跟随最快域）或把 L3 的 `want` 也按温控比例压低。**这是设计选择，未改代码。**
+
+#### 1.7.2 GPU：DCVS 的 top/floor 上限
+
+`drivers/PongAdreno/PongAdrenoPlatform.cpp`：
+
+- `:343` `pong_gpu_level` 是启动档；`:386-390` `pong_gpu_dcvs=1` 默认启动 DCVS 线程。
+- `:421` `dcvsMHz(level)=PongAdrenoPowerLevels[13-level].hz`：level 13 = 最高，level 1 = 最低。
+- `:424-431` `top`（`pong_gpu_max_level`，默认 13）、`floor`（`pong_gpu_dcvs_min`，默认 3）、`levelFor` 都用 `top`。
+- `:503` 触摸 boost `want=top`；`:508-512` 先 clamp 到 `[floor,top]`，再 `PongAdrenoGmuSetLevel(&gmu,want,PongAdrenoPowerLevels[13-want].bus,&error)`。
+
+**接线方案**：
+
+1. 温控核心的 `gpu_level`（0 = 不封顶，12 = 最低）→ `thermalTop = 13 - gpu_level`。
+2. `dcvs` 每轮（或每 16 ms）读 `pong_gpu_thermal_level`，令：
+
+   ```c
+   unsigned top = min(boot_top, 13 - pong_gpu_thermal_level);
+   unsigned floor = min(boot_floor, top);
+   ```
+
+   这样 `levelFor`、触摸 boost `want=top` 和最终 clamp 都被温控限制；`:512` 的 `PongAdrenoGmuSetLevel` 不需要新接口。
+3. `gpu_level==0` 时 `thermalTop=13`，完全保持现有 DCVS；`gpu_level==12` 时 top=1（最低档）。
+4. `pong_gpu_max_level` 仍可作更低的硬上限；温控取两者较小值。
+
+#### 1.7.3 采样：从 g396 的一次性观察改成 1 s 周期
+
+`drivers/ArmDTPlatform/ZizhanTsensProbe.h`：
+
+- `:24-86` `worker`：等 `rootvnode` 最多 120 s，睡 5 s，映射两 bank 的 SROT/TM，调用 `observe()`（`ZizhanTsensCore.h:56-74`），打印 32 路，然后 `thread_terminate`。
+- `:88-111` `start`：只认 `zizhan_tsens=1`，校验 `zizhan-tsens-v2` ADT，启动线程。
+- `ArmDTPlatform.cpp:235` 在 `pong_cpu_start` 后调用 `zizhan_tsens::start(provider)`。
+
+**接线方案**：
+
+1. 保留 `observe()` 和 ADT 校验；新增 `ZizhanThermalService`（可在同一头文件）持有 `ZizhanThermalState` 和 `ZizhanThermalConfig`。
+2. `worker` 在 root 就绪 + 5 s 后进入周期：
+
+   ```c
+   for (;;) {
+     build_sample();                 // 两 bank -> ZizhanThermalSample
+     int status = zizhan_thermal_step(&cfg, &state, &sample);
+     if (mode == 2) apply_caps(state.cpu_level, state.gpu_level);
+     log_if_changed_or_10s(status, ...);
+     IOSleep(1000);
+   }
+   ```
+
+   `IOSleep` 保证有界、不忙等；退出条件：`rootvnode` 消失、超过 `zizhan_thermal_max_s`（建议默认 86400 = 24 h）或线程被显式停止，退出时 `thread_terminate` + `thread_block`。不是无限 WFI，也不阻止真实 panic。
+3. 采样样本：
+   - `bank_valid[i] = (out.state == Pass || Invalid)`；`Disabled/InReset/UnsupportedVersion` → 0。
+   - `valid_mask[i]` 的 bit n = `out.sensors[n].state == Pass`；`temp_mc = milli_celsius`。
+   - `time_us = mach_absolute_time` 转 µs；`period_us = 1,000,000`。
+4. 不能把 invalid 填 0°C；policy 的 invalid/stale 语义已经是 fail-safe。
+
+#### 1.7.4 开关、日志与命令行
+
+**建议 boot-arg**：
+
+| 参数 | 行为 |
+| --- | --- |
+| 缺省 / `zizhan_thermal=0` | 不启动周期采样（保留 `zizhan_tsens=1` 的一次性诊断） |
+| `zizhan_thermal=1` | 1 s 周期采样，只记录，不写 CPU/GPU |
+| `zizhan_thermal=2` | 1 s 周期采样 + 应用 CPU/GPU 封顶 |
+
+`zizhan_tsens=1` 与 `zizhan_thermal` 同时给时，以 `zizhan_thermal` 为准，避免两个线程同时读 TSENS。
+
+**日志格式（建议，紧凑）**：
+
+```text
+ZIZHAN_THERMAL: t=123456789 us mode=2 cpu=20 gpu=0 max0=46900 max1=39500 valid=0xffff/0xffff stale=0 reason=CPU_HOT bank=0 sensor=6
+```
+
+字段：时间、mode、CPU/GPU cap 档位、两 bank 最大值（m°C）、两 bank valid mask、stale 状态、触发原因（`CPU_HOT`/`GPU_HOT`/`HOLD_STALE`/`INVALID`/`RELEASE`/`NONE`）、触发的 bank/sensor。只在 cap 变化、stale/invalid 或每 10 s 打一行；32 路全量日志只在 `zizhan_thermal=1` 的调试轮开启。
+
+**命令行长度**：`ci_boot_ufs.sh:36-40` 用 `LEN <= 1020` 检查（DarwinBoot24 拒绝 >1023）。`zizhan_thermal=2` 约 17 字节；如果当前包接近上限，优先去掉已被替代的 `zizhan_tsens=1`（约 14 字节），或使用短别名 `zth=2`（6 字节）。任何参数加入前都要跑这个长度检查；不要用 `ALLOW_LONG_CMDLINE=1` 绕过。
+
+#### 1.7.5 改动清单与验证边界
+
+| 文件 | 改动 | 量级 | 级别 |
+| --- | --- | --- | --- |
+| `drivers/ArmDTPlatform/ZizhanThermalService.h`（建议新） | 周期线程、build_sample、mode/log、发布 cap 原子 | 150–250 行 | 设计 |
+| `ZizhanTsensProbe.h` / `ArmDTPlatform.cpp` | 接入周期模式（保留 one-shot 诊断） | 20–40 行 | 看过源码 |
+| `drivers/ArmCpu/PongCpuPolicy.h` | `thermalCapKhz` + cap/requested clamp | 20–30 行 | 看过源码 + 推测映射 |
+| `drivers/PongAdreno/PongAdrenoPlatform.cpp` | 读 `pong_gpu_thermal_level`，clamp top/floor/want | 10–20 行 | 看过源码 |
+| 启动参数/日志 | `zizhan_thermal`、长度检查、日志行 | 10 行 + 打包检查 | 设计 |
+
+验证边界：先在主机用 g396 真实读数回放（见 `tools/zizhan/tests/thermal-policy.c` 的 `test_real_idle_g396`）和 110°C 单点封顶；接线后先 `zizhan_thermal=1` 只读 60 s，再 `=2` 做有界负载。任何设备轮都需要独立返回路径；本设计不改变真实 panic、不写 TSENS 阈值/IRQ、不伪造 thermal 服务。
+
 ## 2. 熄屏/亮屏（POWER-02 MVP）
 
 ### 2.1 两个旧“解阻条件”是否必要

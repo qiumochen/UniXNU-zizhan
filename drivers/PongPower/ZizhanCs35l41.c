@@ -1000,7 +1000,9 @@ static int pulse_data(void *p){NativePulse *c=p;return c->transfer->once(c->tran
  * NULL by default and in host tests; no effect on any other profile. */
 void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 #define AMP_CHECKPOINT(chip,stage) do{if(out->pulse_profile&&zizhan_amp_checkpoint){zizhan_amp_checkpoint((chip),(stage));}}while(0)
-static ZizhanPulseOps pulse_ops(NativePulse *p){ZizhanPulseOps o={p,pulse_read,pulse_write,pulse_now,pulse_uncertain,pulse_data};return o;}
+unsigned zizhan_amp_pulse_hold_us; /* 0 unless the kernel sets zizhan_pulse_hold=<ms> (attended only). */
+static void pulse_pause(void *p,unsigned us){NativePulse *c=p;c->clock->pause_us(c->clock->context,us);}
+static ZizhanPulseOps pulse_ops(NativePulse *p){ZizhanPulseOps o={p,pulse_read,pulse_write,pulse_now,pulse_uncertain,pulse_data,pulse_pause,zizhan_amp_pulse_hold_us};return o;}
 static int run_debug_snapshot(GeniI2c *bus,const ZizhanAmpClock *clock,ZizhanAmpRun *out,unsigned slot,uint64_t begin){
  if(!out->core_debug){return 0;}if(slot>=6)return ZizhanAmpArgument;const unsigned chip=out->failed_chip;
  for(unsigned i=0;i<15;++i){if(clock->now_us(clock->context)-begin>=8000000)return ZizhanAmpTimeout;

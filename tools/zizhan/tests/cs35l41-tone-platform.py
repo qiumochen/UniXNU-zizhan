@@ -12,6 +12,7 @@ harness=r'''
 #include <cstdint>
 #include <cstring>
 #include "ZizhanAudioTone.h"
+static bool PE_parse_boot_argn(const char *,void *,size_t){return false;}
 using boolean_t=int;using ppnum_t=uint64_t;
 static uint64_t tagged=0x1f0000000ull,clock_ticks=0;static uint32_t words[16384];
 static bool managed,map_fail;static unsigned maps,releases;

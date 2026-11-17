@@ -12,6 +12,10 @@ typedef struct {
  uint64_t (*now)(void *);
  int (*uncertain)(void *);
  int (*transfer)(void *);
+ /* Optional (attended diagnostics): keep AMP enabled hold_us after the data ack so the
+  * DSP pipeline can play the finite tone out; NULL pause or 0 keeps the original timing. */
+ void (*pause)(void *,unsigned);
+ unsigned hold_us;
 } ZizhanPulseOps;
 typedef struct {
  unsigned attempted,acknowledged,patch_on,patch_off,enabled,disabled,data_ack,complete,reason,reads;
@@ -66,6 +70,9 @@ static inline int zizhan_pulse_run(const ZizhanPulseOps *o,ZizhanPulseReceipt *r
  if(o->now(o->context)-begin>=100000){rc=ZizhanPulseTimeout;goto stop;}
  if(o->transfer(o->context)!=1){rc=ZizhanPulseData;goto stop;}r->data_ack=1;
  if(o->now(o->context)-begin>=250000){rc=ZizhanPulseTimeout;goto stop;}
+ if(o->pause&&o->hold_us&&o->hold_us<=300000u){
+  for(unsigned waited=0;waited<o->hold_us&&!o->uncertain(o->context);waited+=10000u){o->pause(o->context,10000u);}
+ }
  rc=zizhan_pulse_faults(o,r,1);
 stop:
  // On uncertainty,the caller's real shared reset immediately contains the

@@ -331,12 +331,17 @@ bool graph_round(){
  o.dma_restored=zizhan_audio_dma_map_end()?1u:0u;
  return o.dma_restored!=0;
 }
-bool write_commands(unsigned sequence=0,bool silence=false){
+bool write_commands(unsigned sequence=0,bool silence=false,bool again=false){
  auto &o=owner;if(!o.zero_verified||o.memory.phase!=ZizhanMemoryHeld||!o.memory.handle)return false;
  if(o.mode>=33&&!o.tone_prepared)return false;
- if(sequence){if(o.write.phase!=ZizhanWriteDone||sequence>3||sequence!=o.write.sequence+1)return false;o.write={};}
+ // again (PRM34 zizhan_tone_repeat only): resend the same completed buffer with the same sequence.
+ if(again){if(o.mode!=34||silence||o.write.phase!=ZizhanWriteDone||o.write.sequence!=sequence)return false;o.write={};}
+ else if(sequence){if(o.write.phase!=ZizhanWriteDone||sequence>3||sequence!=o.write.sequence+1)return false;o.write={};}
  o.write.sequence=sequence;
- o.write.address=zizhan_audio_dma_map_address()+(silence?16384u:0u);o.write.handle=o.memory.handle;
+ // zizhan_pre_off=<bytes> (diagnostics): offset of the PRM34 zero pre-roll inside the 64 KiB map,
+ // page aligned and below 48 KiB; default 16 KiB. 11-17: the first ADSP read at 16 KiB hangs the SoC.
+ unsigned preroll=16384u;if(silence){unsigned value=0;if(PE_parse_boot_argn("zizhan_pre_off",&value,sizeof value)&&value<=49152u&&!(value&4095u))preroll=value;}
+ o.write.address=zizhan_audio_dma_map_address()+(silence?preroll:0u);o.write.handle=o.memory.handle;
  for(unsigned iteration=0;iteration<400;++iteration){
   Packet p={};unsigned closed,overflow;IOLockLock(o.lock);closed=o.closed;overflow=o.overflow;
   if(o.count){p=o.queue[o.head];o.head=(o.head+1)%16;--o.count;}IOLockUnlock(o.lock);
@@ -355,7 +360,13 @@ bool write_commands(unsigned sequence=0,bool silence=false){
 int zero_transfer(void *context,unsigned chip){
  auto &o=*static_cast<Owner *>(context);
  if(o.mode==34){const unsigned order[]={2,0,3,1};if(o.transfer_calls>=4||chip!=order[o.transfer_calls])return 0;
-  const unsigned sequence=o.transfer_calls++;if(!write_commands(sequence,chip>=2))return 0;++o.transfer_acks;return 1;}
+  const unsigned sequence=o.transfer_calls++;if(!write_commands(sequence,chip>=2))return 0;
+  // zizhan_tone_repeat=<n> (attended diagnostics, n<=20): queue the finite tone n more times while AMP is on.
+  // The pulse keeps its 250 ms enable budget; acks of repeats are not counted as protocol acks.
+  if(chip<2){unsigned repeat=0;if(PE_parse_boot_argn("zizhan_tone_repeat",&repeat,sizeof repeat)&&repeat<=20){
+   const unsigned acks=o.write_ack;for(unsigned i=0;i<repeat;++i)if(!write_commands(sequence,false,true)){o.write_ack=acks;return 0;}
+   o.write_ack=acks;IOLog("ZIZHAN_AUDIO_WRITE: repeated=%u sequence=%u\n",repeat,sequence);}}
+  ++o.transfer_acks;return 1;}
  if((o.mode<29||o.mode>33)||chip>1||chip!=o.transfer_calls)return 0;
  ++o.transfer_calls;if(!write_commands(chip))return 0;++o.transfer_acks;return 1;
 }

@@ -4,6 +4,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <mach/vm_param.h>
 #include <kern/clock.h>
+#include <pexpert/pexpert.h>
 #include "ZizhanAudioDmaMap.h"
 #include "ZizhanAudioTone.h"
 extern "C" boolean_t pmap_valid_page(ppnum_t);
@@ -16,7 +17,8 @@ bool access(bool clear){
     (!clear&&phase)||(clear&&(phase!=1||owned_base!=base)))return false;
  // Claim once before any possible store. Failed partial preparation is
  // never reusable; caller retains DSP/memory ownership until reset.
- if(!clear){phase=3;owned_base=base;}
+ if(!clear){phase=3;owned_base=base;unsigned x=0;
+  if(PE_parse_boot_argn("zizhan_tone_x",&x,sizeof x)){zizhan_audio_tone::tone_shift=x==2?1u:x==4?2u:x==8?3u:0u;}}
  for(unsigned i=0;i<16;++i)if(pmap_valid_page((ppnum_t)((base>>12)+i)))return false;
  auto memory=IODeviceMemory::withRange(base,65536);
  auto map=memory?memory->map(kIOMapAnywhere|kIOMapWriteCombineCache):nullptr;
@@ -37,7 +39,7 @@ bool access(bool clear){
  __asm__ volatile("dsb sy":::"memory");
 #endif
  map->release();if(ok)phase=clear?2u:1u;
- IOLog("ZIZHAN_AUDIO_TONE_BUFFER: %s clear=%u reason=%u pages=%u reads=%u writes=%u verified=%u bytes=11520 frames=960 rate=96000 channels=3 tone_hz=1000 peak_q31=33554432 taper_frames=96 normal_nc=1 unmanaged=1 output_enables=0\n",ok?"PASS":"FAIL",clear?1u:0u,r.reason,r.pages,r.reads,r.writes,r.verified);
+ IOLog("ZIZHAN_AUDIO_TONE_BUFFER: %s clear=%u reason=%u pages=%u reads=%u writes=%u verified=%u bytes=11520 frames=960 rate=96000 channels=3 tone_hz=1000 peak_q31=%u taper_frames=96 normal_nc=1 unmanaged=1 output_enables=0\n",ok?"PASS":"FAIL",clear?1u:0u,r.reason,r.pages,r.reads,r.writes,r.verified,33554432u<<zizhan_audio_tone::tone_shift);
  return ok;
 }
 }

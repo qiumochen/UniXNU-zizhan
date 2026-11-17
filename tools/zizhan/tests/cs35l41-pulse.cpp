@@ -10,7 +10,7 @@ struct Device{
  static uint64_t now(void *p){return ++static_cast<Device *>(p)->time;}
  static int bad(void *p){return static_cast<Device *>(p)->uncertain;}
  static int data(void *p){auto &d=*static_cast<Device *>(p);assert(d.regs[0x2018]==0x3321&&d.regs[0x6000]==0x3f44);d.time+=10000;if(d.test==9)d.time+=250000;if(d.test==10)d.regs[0x10090]|=0x100;return d.test==8?0:1;}
- ZizhanPulseOps ops(){return {this,read,write,now,bad,data};}
+ ZizhanPulseOps ops(){return {this,read,write,now,bad,data,nullptr,0};}
 };
 int main(){
  unsigned commands=0;

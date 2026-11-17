@@ -85,6 +85,7 @@ struct IORegistryEntry{
 };
 #define OSDynamicCast(type,value) static_cast<type *>(value)
 static bool PE_parse_boot_argn(const char *key,void *out,size_t size){assert(size==4);unsigned value;
+ if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat"))return false;
  if(!strcmp(key,"zizhan_audio_attended"))value=attended;else if(!strcmp(key,"zizhan_audio_prm"))value=mode;else if(!strcmp(key,"pong_audio"))value=audio;
  else if(!strcmp(key,"zizhan_se15_prepare"))value=prepare_mode;else if(!strcmp(key,"zizhan_se15_observe"))value=observe_mode;else{assert(!strcmp(key,"pong_adsp"));value=adsp;}
  memcpy(out,&value,4);return value!=0;

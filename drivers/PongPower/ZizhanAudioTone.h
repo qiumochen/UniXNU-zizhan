@@ -10,6 +10,8 @@ namespace zizhan_audio_tone {
  * taper starts/ends at zero. No runtime float,streaming or volume control.
  * This is data preparation only; it has no power/codec/output operation. */
 static constexpr uint32_t Bytes=11520,Extent=65536,Frames=960;
+/* zizhan_tone_x=2|4|8 (attended diagnostics) scales the peak by 6/12/18 dB; set once before prepare. */
+inline unsigned tone_shift=0;
 static const int32_t sine[96]={
  0,2194688,4379648,6546176,8684544,10785792,12840704,14840832,16777216,18641920,20426752,22124032,
  23726592,25227520,26620416,27899392,29059072,30094080,31000320,31773696,32411136,32909568,33267456,33482496,
@@ -24,7 +26,7 @@ static inline uint32_t sample(unsigned word){
  if(word>=Bytes/4||word%3==2)return 0;
  const unsigned frame=word/3,tail=Frames-1-frame;
  unsigned ramp=frame<tail?frame:tail;if(ramp>96)ramp=96;
- const int64_t scaled=int64_t(sine[frame%96])*ramp/96;
+ const int64_t scaled=(int64_t(sine[frame%96])*(int64_t(1)<<tone_shift))*ramp/96;
  // Signed24 in32 MSB: preserve low8zero even through integer taper.
  return uint32_t((scaled/256)*256);
 }

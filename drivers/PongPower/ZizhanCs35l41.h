@@ -280,6 +280,7 @@ int zizhan_cs35l41_native_core_transfer(unsigned,unsigned,GeniI2c *,const Zizhan
  * actual IRQ edge/status and saved exact mask restoration,never output enable. */
 /* Diagnostics only; see ZizhanCs35l41.c. */
 extern void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
+extern unsigned zizhan_amp_pulse_hold_us;
 int zizhan_cs35l41_native_pulse_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_iv_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,

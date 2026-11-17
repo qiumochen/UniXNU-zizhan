@@ -78,7 +78,8 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
     if((mode>=35&&mode<=39)&&(!combined||!transfer||!transfer->once)){IOLog("ZIZHAN_AUDIO_TRANSFER: SKIP missing-zero-callback writes=0\n");return;}
     if(mode==39){unsigned attended=0;if(!PE_parse_boot_argn("zizhan_audio_attended",&attended,sizeof attended)||attended!=1){IOLog("ZIZHAN_AUDIO_PULSE: SKIP attended=0 output_enables=0\n");return;}
         unsigned checkpoint=0;if(PE_parse_boot_argn("zizhan_audio_checkpoint",&checkpoint,sizeof checkpoint)&&checkpoint==1){
-            zizhan_amp_checkpoint=amp_checkpoint;IOLog("ZIZHAN_AUDIO_CHECKPOINT: armed klog=%u\n",pong_klog_flush?1u:0u);}}
+            zizhan_amp_checkpoint=amp_checkpoint;IOLog("ZIZHAN_AUDIO_CHECKPOINT: armed klog=%u\n",pong_klog_flush?1u:0u);}
+        unsigned hold=0;if(PE_parse_boot_argn("zizhan_pulse_hold",&hold,sizeof hold)&&hold>=1&&hold<=300){zizhan_amp_pulse_hold_us=hold*1000u;IOLog("ZIZHAN_AUDIO_PULSE: hold_ms=%u\n",hold);}}
     ZizhanAmpSpeakerCalibration speaker_cal={1,sizeof(ZizhanAmpSpeakerCalibration),{0,0}};
     if(mode>=29){
         const bool top_present=PE_parse_boot_argn("zizhan_cal_t",&speaker_cal.resistance[0],sizeof(uint32_t));

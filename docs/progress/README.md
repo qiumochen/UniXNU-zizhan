@@ -1,5 +1,9 @@
 # Development notes
 
+[当前台账](STATUS.md) · [11-14 回到主线与系统应用目标](2026-11-14-system-app-resume.md) · [本批无人值守交付与历史](2026-11-14-app-unattended.md) · [主线应用修复调研](../research/2026-11-14-main-app-repair-directions.md) · [Weather/Safari晚间接续调查](../research/2026-11-14-weather-safari-followup.md)
+
+一小时人工验证： [传感器、GNSS、音频与折叠检查点](2026-11-14-sensors-gps-audio-fold.md)
+
 Dated notes from the zizhan bring-up, in Chinese, kept as written during the work: each run (k*, u*, t*, g*) with its boot arguments, result and root cause.
 
 Paths in the notes refer to the author's workspace:
@@ -10,6 +14,74 @@ Paths in the notes refer to the author's workspace:
 - Logs (`logs/*.txt`) and photos other than those in `docs/evidence/` are not published.
 
 ## 最新交接
+
+- [2026-11-17 UI-STATUS-03 电池右上工作UI](2026-11-17-ui-status-03.md)：无诊断917B UI-only包、wholeOS读回、Home+电池设置页135×120全宽采样；当前安装statusbar-work-v1，weather回退保留。
+- [2026-11-17 音频单图实机 A/B](2026-11-17-audio-graph-device.md)：MFC/SAL/TDM + WR_SHMEM→MFC 双图生命周期、真实MAP、4×480零数据V2DONE；AMP/BST/TX保持关闭。
+- [2026-11-17 音频有限运行时入口实机](2026-11-17-audio-runtime-device.md)：mode38 控制页生产者水位、Ready门控、欠载拒填、4×480 ring批次V2DONE、stop排空与清理；未接HAL/未出声。
+- [20小时无人值守计划](../plan/2026-11-17-20h-unattended.md)：音频单图、至多五轮音频静音资格、默认关闭运行时、UI电池收口与传感器限时解阻；仅规划，未启动。
+- [Zizhan系统音频服务设计](../plan/2026-11-17-zizhan-audio-service.md)：D增量的独立service/HAL bundle、生产者水位ABI、Ready门控与设备验收；未实现/未上机。
+- [2026-11-16 音频环取数与格式接线](2026-11-16-audio-ring-wiring.md)：48k/2ch HAL环取数、24-bit打包、2880B/480帧有限批次、TDM子图MFC成员核对与双kernel；未接单图/HAL服务/首声。
+- [2026-11-16 夜间UI与音频批次](2026-11-16-night-ui-audio.md)：无诊断UI候选、传感器阻塞判断与11520B/960帧四槽WRITE/DONE核心；设备状态与后续边界。
+
+- [下一轮静音无人值守计划](../plan/2026-11-16-next-unattended.md)：两小时顺序、交付与停止条件；任务状态见STATUS，本次仅规划。
+
+- [2026-11-15 功放实际OTP易失trim](2026-11-15-amp-volatile-trim.md)：独立mode12按每颗本轮OTP8展开98允许位域，masked保留与精确读回，不编程OTP/启输出。
+- [2026-11-15 功放RAM传输计划](2026-11-15-amp-ram-transfer.md)：保护固件4字节分块、完整有序读回校验与8项控制，实际输入59752字节；仅host工具，未传输或启DSP。
+- [2026-11-15 功放RAM加载候选](2026-11-15-amp-ram-load.md)：默认关闭mode13，同轮真实初始化后固定RAM写/全读回，私有临时启动输入与45秒界限，不启DSP或出声。
+- [2026-11-15 算法身份与保护参数](2026-11-15-amp-protection-coefficients.md)：独立mode16先核两颗实际22字算法身份/base，再原机T/B保护参数受限RAM写/完整读回；不启DSP或声音。
+- [2026-11-15 HALO无声执行](2026-11-15-amp-silent-run.md)：默认关闭mode17，原机速率/MPU设置、真实心跳推进与核心停止，GLOBAL/AMP/BST输出保持关闭。
+- [2026-11-15 原机音频时钟与后端](2026-11-15-audio-clock-route.md)：实际TDM后端/overlay输入已留存，静态48k双声道与96k三通道分组待活动PCM采样核对，原生时钟资格未验。
+- [本机TDM端点无输出时钟资格](2026-11-15-audio-tdm-clock.md)：实际Forte标定关系、TDM模块/参数、图六步生命周期与PLL观测。
+- [统一时钟租约与功放无声执行器](2026-11-15-audio-silent-owner.md)：默认关闭同线程组合、原机PLL与真实心跳/清理门槛，首声前停止。
+- [2026-11-15 音频PRM控制链](2026-11-15-audio-prm.md)：默认关闭的APM readiness与digital core单次请求/释放，不设频率、不接pin/codec/graph，实际completion分别判定。
+
+- [2026-11-15 功放原机B2补丁](2026-11-15-amp-b2-patch.md)：独立mode11固定补丁/逐项读回/关闭ACK与禁止状态，不启动DSP或声音。
+
+- [2026-11-15 SLPI真实cmd-db采集](2026-11-15-slpi-cmd-db.md)：实际保留区定位，默认关闭只读双copy/稳定解析/完整私有导出；继承资源票和SLPI启动分别待验。
+
+- [2026-11-15 已知屏蔽状态候选](2026-11-15-amp-owned-readiness.md)：独立mode10 exact readiness与实际快照入口，保留raw80/完整guard；本批仅主机，心跳到期不派设备轮。
+
+- [2026-11-15 功放GENI配置证据](2026-11-15-amp-irq-config.md)：mode9实机确认master80被mask、enabled-pending0和来源/活动/数据均0；诊断通过但OTP仍跳过，下一严格masked-state分类候选。
+
+- [2026-11-15 功放RX-LAST来源交接](2026-11-15-amp-source-handoff.md)：mode8实机slave RX-LAST已清/DMA0，但master80持续，交接失败/OTP跳过；排除只缺slave确认，下一核bit7语义/实际配置。
+
+- [2026-11-15 功放RX初始化](2026-11-15-amp-rx-setup.md)：mode7实机RX15/16读回通过；master80持续且slave RX-LAST08000000未确认，handoff失败/OTP跳过，下一source-first交接。
+
+- [2026-11-15 功放RX有界交接](2026-11-15-amp-rx-handoff.md)：mode6实机一次确认清bit26但RXIRQ80持续，按deadline失败/OTP跳过；真实watermark0/RFR e留证，下一核RX初始化语义。
+
+- [2026-11-15 功放快照Busy入口](2026-11-15-amp-bus-entry.md)：实机确认idle/SE0/RXFIFO0，仅RX watermark/RX IRQ4000080置位；完整OTP仍未取得，下一步有限清理交接。
+
+- [2026-11-15 功放清除使能位](2026-11-15-amp-safe-off.md)：两颗实机4次清零写/精确读回通过；随后OTP前置Busy未采到数据，返回与失败证据分开保留。
+
+- [2026-11-15 功放OTP实机快照候选](2026-11-15-amp-otp-snapshot.md)：mode4主机与新双kernel通过；实机发现AMP/boost/HALO位未清，按门槛在OTP前中止并正常返回，完整快照未通过。
+
+- [2026-11-15 功放OTP离线计划](2026-11-15-amp-otp-plan.md)：原机五种表/100字段/688位解析和易失trim位流控制通过；未采逐颗OTP或执行钥匙/trim/声音。
+
+- [2026-11-15 功放保护内存计划](2026-11-15-amp-memory-plan.md)：静态HALO算法解码、T/B系数地址/跨别名边界和原机B2差异，只有host计划，无硬件执行。
+
+- [2026-11-15 原机功放保护输入](2026-11-15-amp-original-inputs.md)：11文件私有来源/hash、HALO/WMDR/场景离线framing及9项控制；尚无加载写计划或声音资格。
+
+- [2026-11-15 CS35L41数字启动与身份](2026-11-15-amp-boot-identity.md)：本机模块复位/供电绑定依据、iPadOS两颗35a40/B2与OTP通过，最终重新reset；声音仍待现场。
+
+- [2026-11-15 GENI时序/FIFO](2026-11-15-geni-timing.md)：实际XO/DFS选择、polling准备及实机配置回读通过；reset未变/未发I2C，功放身份与声音未验。
+
+- [2026-11-15 SE15时钟/引脚设置](2026-11-15-se15-clock-pin.md)：默认关闭有界实现，实机clock vote/GENI可读/pin回读通过；reset未变、未发I2C或识别功放。
+
+- [2026-11-15 SE15平台前置](2026-11-15-se15-platform.md)：cape时钟匹配、默认关闭只读入口、实机发现关门/GPIO模式与预期SKIP；未访问SE或功放。
+
+- [2026-11-15 CS35L41只读身份](2026-11-15-cs35l41-identity.md)：本机live DT/IRQ差异、32位大端身份核心、实际GENI失败回放及双kernel；尚未接SE15平台初始化或上机。
+
+- [2026-11-15 RPMh整组发送](2026-11-15-rpmh-batch.md)：共享TCS4有限payload、真实完成/超时保留策略和两个owner入口；host/双kernel通过，无设备调用。
+
+- [2026-11-15 SLPI启动请求核心](2026-11-15-slpi-power-lease.md)：真实cmd-db格式解析、ARC/BCM编码、完整VCD分组和保留baseline的失败边界；尚未绑定硬件owner或启动SLPI。
+
+- [2026-11-15 SLPI共用资源](2026-11-15-slpi-shared-resources.md)：单actor有限QMP事务、互斥下SMEM分配和精确固件入口；新双kernel/host通过，SLPI时钟/带宽前置仍须落实。
+
+- [2026-11-15 共用IPCC接收器](2026-11-15-ipcc-routing.md)：默认关闭的ADSP/SLPI通知路由、首事件窗口修正、实际owner/ADSP回放及双配置构建；设备中断资格另验。
+
+- [2026-11-15 SLPI 离线 preflight](2026-11-15-slpi-preflight.md)：原机备份固件与25MiB carveout核对、实际MDT解析器放置和8项负控制；SLPI/SSC尚未启动。
+
+- [2026-11-15 Hall 只读观察器](2026-11-15-hall-observer.md)：默认关闭 GPIO62 采样、实际 probe host 回放与双配置内核构建，尚未上机；[硬件适配计划](../plan/2026-11-15-ipados-hardware-adaptation.md)规定 GNSS、传感器、音频和外屏的后续范围。
 
 - [2026-11-09 累计发布与验证](2026-11-09-publication.md)：设备仓库累计提交快进main、推送前验证与精确SHA CI状态。
 
@@ -53,3 +125,6 @@ Paths in the notes refer to the author's workspace:
 - [2026-11-01 电池](2026-11-01-battery.md)。
 
 旧 `src.noindex` 路径用于理解历史记录；新 Mac 工作区按根目录 [CLAUDE.md](../../CLAUDE.md) 建立，直接在 clone 内编辑、提交。
+
+- [2026-11-16 内屏状态栏与传感器电源交接前置](2026-11-16-statusbar-sensor-receipts.md)
+- [2026-11-16 SLPI专属传输项接续](2026-11-16-slpi-transport-resume.md)：继承票阻塞与独立remote3 SMEM/SMP2P/GLINK元数据前置；功能与设备结果以当前台账为准。

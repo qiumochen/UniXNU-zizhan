@@ -206,7 +206,7 @@ python3 <UniXNU-checkout>/scripts/porting-record.py check --device "$ZIZHAN_SRC/
 - fairplayd、IOPlatformUUID 和 MobileGestalt 的等待要沿同步 XPC / 内核栈查，不能靠伪造服务绕过。ADT 种子用于软件身份；本公开交接不复制任何值。
 - GPU 客户端退出的用户映射生命周期修复已有 unmap / release 与 pmap_disconnect 兜底；更完整的 VM-object BO 方案尚待研究，不能靠禁用真实 panic 掩盖错误。
 - 修改已应用的 XNU 补丁先处理旧补丁 / 缓存，再重建；应用应使用 forward，防止重叠补丁被反向撤销。
-- 连续轮次发热会污染 ramoops；cycle 先冷却到 35 °C。尚无完整温控，不能把长时间稳定运行当作已验证。
+- 轮次记录当前电池温度，但不等待温度阈值后才启动；连续负载可能污染 DRAM ramoops，优先使用新鲜 pinned klog，并在证据中保留温度。尚无完整温控，不能把长时间稳定运行当作已验证。
 
 ## 已知问题与接续入口
 

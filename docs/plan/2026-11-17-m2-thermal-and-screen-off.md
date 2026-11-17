@@ -176,6 +176,22 @@ STATUS 归档对 POWER-02 记过两个条件（[archive](../progress/2026-11-17-
 - “返回成功”表示“请求已接受”还是“硬件已完成”未定义；S1 应明确为**接受**，完成态留给 S2/S3 的显式日志/通知。**推测**。
 - 本任务只读源码，没有改补丁、驱动或用户态。
 
+#### 参数含义（DSC 反汇编，2026-11-17）
+
+从 22H374 的 `IOMobileFramebuffer.framework` 提取并反汇编：
+
+| 地址 / 证据 | 事实 | 级别 |
+| --- | --- | --- |
+| `_IOMobileFramebufferRequestPowerChange` @0x1b6fe1620 | 公共 C 函数，`x0` = framebuffer 对象，`w1` = 调用者的 power 参数；它 `ldr x2,[x0,#0x970]` 后 `br x2`，把参数原样交给下层 | 反汇编确认 |
+| `_kern_RequestPowerChange` @0x1b6fe4664 | `mov w8,w1; str x8,[sp,#0x10]`；`ldr w0,[x19,#0x14]`；`add x2,sp,#0x10`；`mov w1,#0xc`；`mov w3,#0x1`；`x4=x5=0`；`bl 0x1bc008f90` | 反汇编确认 |
+| 由上一行 | selector **12**、`scalarInputCount = 1`、`in[0]` = 调用者的 32 位参数、**`in[1]` 不传**（结构输入/输出为 0） | 反汇编确认 |
+| `w1 == 0` 分支 @0x1b6fe4690-0x1b6fe46c8 | 先发 CoreAnalytics `com.apple.TritiumVSHCompensation.CumulativeOnTime`（type 3），再以 selector 17、scalar 3 调一次；`w1 == 1` 没有这个分支 | 反汇编确认 |
+| `libramrod.dylib` / `QuartzCore` | 两者都 import `_IOMobileFramebufferRequestPowerChange`；libramrod 有 `IOMobileFramebufferRequestPowerChange failed: %x` 日志，QuartzCore 有同名符号字符串 | 字符串/符号确认 |
+| `CoreBrightness` / `BacklightServices` | CoreBrightness 只 import `IOMobileFramebufferCreateDisplayList/GetBlock/GetMainDisplay/GetServiceObject/OpenByName`，**不 import** RequestPowerChange；BacklightServices 没有该符号 | 符号确认 |
+| `CADisplayPowerAssertion` @0x1845a92e0 | 用的是 Mach IPC 到 display state 服务（`_mach_msg_stub`），不是 selector 12 | 反汇编确认 |
+
+**结论**：selector 12 只有一个 scalar，`in[0]` 是调用者参数；`in[1]` 不参与。但**没有找到直接调用方和 0/1 常量**：`libramrod`/`QuartzCore` 只是 import，`CADisplayPowerAssertion` 走 Mach IPC，CoreBrightness/BacklightServices 不 import。`in[0]==1` = on、`0` = off 仍是**推测**；`0` 的 CoreAnalytics 分支只能说明它是有特殊意义的“非 on”值，不能单独证明 off。**分类规则暂不改**，等设备 raw 日志或确认的调用方。
+
 > S1 状态机候选已在分支 `codex/2026-11-17-m2-m3-prep` 主机验证（`drivers/ArmDTPlatform/ZizhanDisplayPower.h` + `tools/zizhan/tests/display-power.py`，Mac `cc` 与 `zizhan-ci:gcc14-clang`，ASan/UBSan，0 failure）；**未接线、未上机**。
 
 ### 2.4 风险与回退

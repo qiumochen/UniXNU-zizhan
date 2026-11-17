@@ -125,8 +125,11 @@ typedef struct {
 } ZizhanDisplayPower;
 
 /* SPECULATIVE 22H374 encoding: in[0]==1 on, in[0]==0 off, anything else
- * unknown. This is the only function to replace when a device log proves a
- * different field/value. Do not add guesses for in[1] here. */
+ * unknown. Disassembly of IOMobileFramebuffer's _kern_RequestPowerChange
+ * (0x1b6fe4664) confirms selector 12 sends exactly one scalar (in[0]) and no
+ * in[1]; the caller's 0/1 value constants are still unconfirmed. This is the
+ * only function to replace when a device log or a confirmed caller proves the
+ * encoding. Do not add guesses for in[1] here. */
 static inline ZizhanDisplayTarget zizhan_display_classify(uint32_t count,const uint64_t *in){
  if(!in||count==0)return ZizhanDisplayTargetUnknown;
  if(in[0]==1)return ZizhanDisplayTargetOn;

@@ -1,6 +1,18 @@
 # ADSP 共享内存 WRITE 间歇挂死调研
 
-日期：2026-11-18（UTC+8）。源码基线：`f385720`；写作前 worktree 干净，本文是本次唯一新增的仓库文件。本文只做只读源码、DT 与公开内核对照，不包含手机操作、不运行 `adb`/`fastboot`/任何 cycle 或安装脚本，也不构建内核或镜像。
+日期：2026-11-18（UTC+8）。源码基线：`f385720`；本文初稿是本次唯一新增的仓库文件，根因更新后另新增 `docs/research/2026-11-18-kernel-stack-audit.md`。本文只做只读源码、DT、日志与公开内核对照，不包含手机操作、不运行 `adb`/`fastboot`/任何 cycle 或安装脚本，也不构建内核或镜像。
+
+> **2026-11-18 02:36 结论更正（优先阅读）**
+>
+> 根因已经由 `n18c-p-1`（PRM34 dry，`zizhan_write_probe=1`）的完整 panic 确认：**不是 SMMU/ADSP 共享内存故障，也不是 checkpoint flush 或 100 ms 超时，而是内核栈溢出**。panic 原文是 `panic(cpu 5 caller ...): Invalid kernel stack pointer (probable overflow)`，panicked thread 为 `kernel_task` tid 200；协调者用 `work/m1-firstsound/build-wp/kernel` 的 `atos` 得到调用链 `Call_continuation → worker → prepare → zizhan_cs35l41_native_pulse_transfer → silent_run → zero_transfer → write_commands → IOLog → _IOLogv → os_log_with_args → _os_log_with_args_internal → log_queue_log → log_payload_send → __firehose_buffer_tracepoint_reserve → oslogwakeup → selwakeup → knote → knote_post → knote_enqueue → kqueue_threadreq_initiate`。
+>
+> 旧帧：PRM worker `0x1330`（4912 B）、`prepare` `0x1950`（6480 B）、`silent_run` `0x470`（1136 B）、`zero_transfer` `0x50`（80 B）、`write_commands` `0x540`（1344 B），再加上 IOLog→kqueue 的 `0x710`（1808 B），合计 **0x3d90 = 15760 B**，只剩约 624 B 余量；只要 `logd` 正在等日志、`IOLog` 走进 kqueue 唤醒，就越过 16 KiB 栈。溢出后的 panic 经常也写不完，所以大多数轮表现为 Gunyah 冷咬而不是完整 panic。
+>
+> 修复：`8d18d71` 把 `prepare` 的 amp 回执移到清零的静态存储，并给 PRM packet builder 加 `noinline`；`prepare` `0x1950→0x360`、worker `0x1330→0x540`。修复后同一链为 `0x540+0x360+0x470+0x50+0x4e0+0x710 = 0x1950 = 6480 B`。`1b535fd` 是默认关闭的 WRITE 延迟/slow probe 与 ADSP fatal klog，`a259237` 是 porting 记录；修复内核 sha256 为 `b698195262435c57427defdce8f7f9f9a61e92e26f1ba6db169e53704188a603`。**修复后 r（PRM34 dry）、s（PRM33）、t（PRM34 dry+checkpoint）全部 PASS**：r 4 条、s 2 条、t 4 条 WRITE 都是 `done≈10–12 ms`，t 的 checkpoint flush 也都返回（`flushed=0 us≈14–21 ms`）。
+>
+> §0–§11 保留为“发现根因前”的排除过程；**§12 是最终根因**，§13 是参考。新的栈审计见 `docs/research/2026-11-18-kernel-stack-audit.md`。
+
+> **阅读提示**：下面 §0–§11 中的 H1（16 KiB 越界）、H2（SMMU fault）、H8（checkpoint flush）、100 ms 超时、H13（“首块 WRITE 路径挂住 SoC”）都是根因发现前的假设/症状描述；它们的排除过程仍有价值，但不要再把它们当作根因。
 
 ## 0. 结论摘要
 
@@ -34,6 +46,8 @@
 这 7 轮把“偏移”“amp 保持/重复”“amp pulse 路径”混在一起，不能据此宣布“与偏移无关”。当时最具体、最可检验的触发**假设**是：**16 KiB 预滚让 ADSP 的首写/首读越过 64 KiB MEM_MAP 边界**；最具体的放大**假设**是：**SMMU 故障之后没有任何 owner 清 FSR/GFSR、恢复或管理 TBU**。这两条可以同时成立：前者制造故障，后者把故障变成整机挂死。[11-17 推断；已被 n18 的 A/B 分组削弱]
 
 **建议的下一个最小实验**：h/i/j 已回（2026-11-18 01:36–01:52）：i（2000 ms、无 flush）4 条 WRITE 全部 `done us≈11 ms`；h-1/h-2（100 ms）和 j（2000 ms + send flush）都在 92 s 看门狗复位前挂死，j 的 `send ... sequence=0` 已落盘、没有 `done`/`fail`。因此 100 ms 超时不是充分解释；当前最强假设是 **H13：首块 WRITE 路径本身在 DONE 前挂住 SoC**。先重跑 i 的 2000 ms/无 flush 条件数次，并在 send flush 之后加一行确认，区分“DSP 不回 DONE”与“flush 自身未返回”。安全收尾仍按 §11 C，但它不是 j 的已证触发。
+
+**02:36 更新**：H13 也被 §12 取代。`n18c-p-1` 的完整 panic 证明根因是 PRM worker 在 16 KiB 栈上执行 `prepare/write_commands`，`IOLog` 走进 kqueue 唤醒时栈溢出；A/B 的“DONE 不回”只是日志链在 `send` 后溢出。
 
 > **2026-11-18 现场修正**：协调者屏幕观察到 ckpt 轮 `stage9 ... us=14257`（flushed 行）之后还有 WRITE send；hold 轮 `stage9 us=20594` 后卡住；rep 轮 `stage10 us=15980` 后卡住。说明 flush 已返回、WRITE 已发出；`amp-pulse-1116-v1` 没有任何 checkpoint/klog flush 也挂死。正确分组是 **A = 第一条 WRITE（pre-roll sequence 0）已发、未见 WRITE_DONE**；**B = stage 10 后在 `pulse_run`（第二条 WRITE 前后）**。H8（checkpoint flush 不返回）撤回；flush 只保留为次要扰动。详见 §9 和 §11。
 
@@ -754,6 +768,8 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 
 ### 9.6 对 §6 假设清单的修正
 
+> **2026-11-18 02:36 更新**：下表的 H9–H13 排序是根因发现前的排除记录；最终根因是内核栈溢出（§12）。H13 的“首块 WRITE 路径挂住 SoC”是症状描述，不是机制。
+
 | 假设 | 夜间数据 | 修正 |
 | --- | --- | --- |
 | H1 16 KiB 越过 64 KiB | a-1/a-3 都是默认 16 KiB 且 4 写通过；a-2 也是 16 KiB，属 A 组；ckpt 16 KiB、hold 0 都挂 | **不再支持“16 KiB 是确定性触发”**；保留为真实 WRITE 的潜在边界风险，但当前 A/B 不是它 |
@@ -768,7 +784,7 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 | **H10（降级/未证）未完成 WRITE 时拆 graph/UNMAP/关时钟** | j 在 2 s 超时前已挂，未进入失败收尾。当前 `f385720` 在 `!amp_pass` 时 line 473 短路、line 476 `break`，line 496 的 `pcm_commands(true)` 不执行；graph/clock 未释放，SMMU map 由 `zizhan_audio_dma_map_retain()` 保留，只有 amp core 关闭和数据脚恢复。协调者描述的 STOP/CLOSE/释放时钟路径与此不符，需以设备内核 `064f32a5` 实际代码为准 | 仍是协议风险（mainline 不等待 DONE；Qualcomm NOC 文档称 unclocked 访问可致命），但不是 j 的已证触发；不能写成“已发生” |
 | **H11（降级）首块 WRITE_DONE 的启动/预缓冲延迟 >100 ms** | i 的首块 DONE 为 11 ms；j 在 2 s 内没有 DONE；现有样本没有“100–2000 ms 才 DONE” | 没有证据支持“首块只是稍慢”；A 组是 **DONE 不回且整机先挂**，不是 100 ms 预算不够 |
 | **H12（次要，j 待分离）klog flush 时序扰动** | 4 MiB FUA / `gHost.lock` / SMMU lease 仍在音频线程；j 的 `send` 行已落盘，但没有 flush 后确认行，无法判断 send flush 是返回后 DSP 才挂，还是 flush 自身未返回 | 卫生问题，需移出关键路径；j 的归属未定，不能把 H12 排除也不能当主因 |
-| **H13（新，首要）首块 WRITE 路径本身在 DONE 前挂住 SoC** | j 的 `send sequence=0` 已发出、2 s 内无 DONE/fail，92 s 后看门狗复位；i 用同样地址 `1f9e3f000`、同样 token 编码，首块 11 ms 完成；SMMU `fsr=400 gfsr=0` 无变化 | 当前最强解释：不是 host 超时，而是 DSP/GLINK/SMMU/共享内存消费路径的竞态；下一步先分离 send、flush、DSP 消费三段时间 |
+| **H13（新，已被 §12 取代）首块 WRITE 路径本身在 DONE 前挂住 SoC** | j 的 `send sequence=0` 已发出、2 s 内无 DONE/fail，92 s 后看门狗复位；i 用同样地址 `1f9e3f000`、同样 token 编码，首块 11 ms 完成；SMMU `fsr=400 gfsr=0` 无变化 | 症状描述；最终原因是 `IOLog`→kqueue 栈溢出（§12），不是 DSP/GLINK/SMMU 消费竞态 |
 
 ### 9.7 结论与下一步
 
@@ -799,9 +815,11 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 
 ## 11. WRITE_DONE 语义与失败收尾调研（2026-11-18）
 
-（编号按协调者要求保留为 §11；原 §10 参考已移到 §12，因此本节前没有 §10。）
+（编号按协调者要求保留为 §11；原 §10 参考已移到 §13，因此本节前没有 §10。）
 
 ### 11.0 h/i/j 实测对照（2026-11-18 01:36–01:52）
+
+> 这些轮的最终根因见 §12：`IOLog`/kqueue 路径把 16 KiB 内核栈用尽；本节保留 WRITE_DONE 语义与“send 后没有 done”的记录。
 
 这几轮由协调者运行；本文只读 `$ZIZHAN_SRC/logs/n18-{h,i,j}-*`，没有碰手机。各轮都是 `zizhan_audio_prm=34`、`zizhan_pulse_dry=1`、`zizhan_ipcc_route=1`、`pong_klog_period=2`，source revision `f385720`，只改 WRITE_DONE 预算和 flush：
 
@@ -944,9 +962,75 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 - `q6apm: Add support for early buffer mapping on DSP`：`https://lkml.iu.edu/2602.0/07700.html`
 - 本机 h/i/j 日志（仓库外，相对 `$ZIZHAN_SRC`）：`logs/n18-h-1.klog.txt`、`logs/n18-i-1.klog.txt`、`logs/n18-j-1.klog.txt`、`logs/n18-{h,i,j}-1.cycle.out`、`logs/n18-{h,i,j}-1.supervisor.json`、`logs/n18-{h,i,j}-1.source.diff`
 
-## 12. 参考
+## 12. 根因：内核栈溢出（2026-11-18 02:36 更新）
 
-### 12.1 本机 live DT（仓库外，相对 `$ZIZHAN_SRC`）
+### 12.1 证据链
+
+**完整 panic**
+
+- `$ZIZHAN_SRC/logs/n18c-p-1.klog.txt`（PRM34 dry，boot args 含 `zizhan_write_ms=2000`、`zizhan_write_probe=1`）保留了 reason 2 的 panic，而不是只有冷咬：
+  `panic(cpu 5 caller 0xfffffff00944b230): Invalid kernel stack pointer (probable overflow). at pc 0xfffffff008d5a0d4, lr 0xfffffff009070894`。
+- `Panicked thread: ... tid: 200`，任务为 `pid 0: kernel_task`；panic 里还有 `CORE 5 is the one that panicked`。
+- 协调者用 `work/m1-firstsound/build-wp/kernel` 的 `atos` 符号化出的调用链是：
+  `Call_continuation → (PRM) worker → prepare → zizhan_cs35l41_native_pulse_transfer → silent_run → zero_transfer → write_commands → IOLog → _IOLogv → os_log_with_args → _os_log_with_args_internal → log_queue_log → log_payload_send → __firehose_buffer_tracepoint_reserve → oslogwakeup → selwakeup → knote → knote_post → knote_enqueue → kqueue_threadreq_initiate`。
+- 这条链的最后一帧正好是 `kqueue_threadreq_initiate`；也就是说，不是 DSP 返回了坏数据，而是 **AP 在打印“WRITE send/rx/done”这类日志时把内核栈用完了**。
+
+**帧大小（旧 build-wp，`xcrun llvm-objdump -d --disassemble-symbols=...` 读 `sub sp` 序言）**
+
+| 帧 | 大小 | 说明 |
+| --- | ---: | --- |
+| `worker`（PRM） | `0x1330` = 4912 B | 内联了所有 packet builder |
+| `prepare` | `0x1950` = 6480 B | `ZizhanAmpIdentity/Snapshot/SafeOff/...` 等 ~5 KiB 回执在栈上 |
+| `silent_run` | `0x470` = 1136 B | amp/TDM/pulse 运行 |
+| `zero_transfer` | `0x50` = 80 B | 回调包装 |
+| `write_commands` | `0x540` = 1344 B | WRITE V2 packet + `bytes[512]` |
+| `IOLog`→`kqueue_threadreq_initiate` | `0x710` = 1808 B | `IOLog 0x20 + os_log_with_args 0x50 + internal 0x320 + log_queue_log 0x140 + log_payload_send 0x70 + firehose 0x90 + oslogwakeup 0x10 + selwakeup 0x20 + knote 0x40 + knote_post 0x60 + knote_enqueue 0x30 + kqueue_threadreq_initiate 0x40` |
+| **合计** | **`0x3d90` = 15760 B** | 16 KiB = 16384 B，余量只有 624 B |
+
+624 B 的余量不足以覆盖栈对齐、异常/中断帧和 `os_log` 内部的临时对象；而且这条链只有在 `logd` 正在等日志、`IOLog` 走 `oslogwakeup → selwakeup → kqueue` 时才会出现，所以是**间歇**的。溢出后 panic 自身也可能写不完，于是大多数轮表现为 Gunyah 冷咬；只有 `n18c-p-1` 这次幸运地留下了完整 panic。
+
+**为什么 PRM33 也会挂**
+
+- 协调者报告 `n18c-q-1`（PRM33）也挂过。`prepare`、`silent_run`、`write_commands` 和 `IOLog` 链在 PRM33 同样存在；PRM33 只是没有 100 ms 这个额外差异，不能把根因限定为 PRM34。
+
+### 12.2 为什么之前看起来像 SMMU/ADSP/flush
+
+- A 组的“WRITE send 后没有 DONE”是**日志链在 send 行之后溢出**；`send` 行能落盘，`rx/done` 行没有机会打印，看起来就像 DSP 没有回 DONE。
+- B 组的 stage 10 之后挂死，也只是栈溢出发生在 `pulse_run`/第二条 WRITE 的某条 `IOLog` 上；不是第二条 WRITE 的 DSP 语义。
+- `pong_klog_flush` 的 4 MiB FUA 写会占用同一线程、持 `gHost.lock`，并且让 `IOLog` 更容易撞上 `logd` 等待；它是**时序放大器**，不是根因。`amp-pulse-1116-v1` 没有任何 checkpoint/klog flush 也挂死，已经排除了“flush 是必要条件”。
+- SMMU `FSR=0x400/GFSR=0` 一直干净，是因为根本没有走到 SMMU fault；DSP 侧也没有返回错误，AP 是在自己的日志路径上溢出的。
+
+### 12.3 被哪些轮否定
+
+| 旧假设 | 否定它的证据 | 结论 |
+| --- | --- | --- |
+| H1：16 KiB 预滚越过 64 KiB | n18-a-1/a-3、i（2000 ms）都用 16 KiB 首块并通过；SMMU 无 fault | 不是根因；几何风险仍可保留为独立边界测试 |
+| H2：SMMU fault/terminate 把 SoC 挂住 | 所有有 `dma_watch` 的轮 `fsr=400 gfsr=0`；panic 是内核栈 | 不是本次根因；SMMU 编程差异仍是独立风险 |
+| H8：checkpoint 同步 4 MiB flush 不返回 | `flushed=` 在 flush 完成后才打印；1116-v1 无 checkpoint 也挂；panic 栈链不含 `pong_klog_flush` | 撤回；flush 只是放大时序 |
+| 100 ms WRITE_DONE 超时过短 | i（2000 ms）通过、4 条 `done≈11 ms`；j（2000 ms + flush）仍挂；panic 发生在 `write_commands` 的 `IOLog` | 不是根因；100 ms 只是 code smell |
+| H13：首块 WRITE 路径本身挂住 SoC | `n18c-p-1` 的 panic 直接落在 `IOLog`→kqueue；同一路径的 `write_commands` 在 i 中正常完成 | H13 是症状描述，已被 §12 的栈溢出取代 |
+
+### 12.4 修复与当前状态
+
+- `8d18d71`（`fix(audio): keep the amp/WRITE path inside the 16 KiB kernel stack`）：
+  - `ZizhanSe15Prepare.cpp` 的 amp 回执改为 `static struct Receipts`，每次进入 `memset` 清零；
+  - `ZizhanAudioPrm.cpp` 的 `tdm_commands`/`pcm_commands`/`memory_commands`/`batch_round`/`runtime_round`/`graph_round`/`dma_observe` 加 `noinline`，把 packet builder 移出 worker 的永久帧；
+  - build-fix 读回：`prepare 0x360`、PRM worker `0x540`、`write_commands 0x4e0`、`silent_run 0x470`、`zero_transfer 0x50`、IOLog 链 `0x710`，合计 **0x1950 = 6480 B**。
+- `1b535fd`：默认关闭的 WRITE 延迟/slow probe 与 ADSP fatal klog；本 panic 轮的 `zizhan_write_probe=1` 来自这里。
+- `a259237`：porting 记录。
+- 修复内核 `work/m1-firstsound/build-fix/kernel` 的 sha256 是 `b698195262435c57427defdce8f7f9f9a61e92e26f1ba6db169e53704188a603`；协调者在 02:33 后启动 r（PRM34 dry）、s（PRM33）、t（PRM34 dry+checkpoint）静音验证。
+  - `n18d-r-1`（PRM34 dry，`zizhan_write_ms=2000`、`zizhan_write_probe=1`）：**PASS**；4 条 WRITE 全部 `send→rx→done`，`done us=11070/11859/11081/10221`，最后 `DMAMAP installed=0`、`PRM PASS`。
+  - `n18d-s-1`（PRM33）：**PASS**；2 条 WRITE 全部 `done us=11373/10616`，最后 `DMAMAP installed=0`、`PRM PASS`。
+  - `n18d-t-1`（PRM34 dry+checkpoint，`zizhan_audio_checkpoint=1`）：**PASS**；4 条 WRITE 全部 `send→rx→done`，`done us=11060/12271/10057/11056`；`stage=9/10` 的 `flushed=0` 都出现（`us≈14–21 ms`），最后 `DMAMAP installed=0`、`PRM PASS`。checkpoint 观察者不再是变量。
+
+### 12.5 残余风险
+
+- 修复只压缩了 audio/PRM 这条链；`nativeAdrenoMailboxPoller` 仍有 3696 B 的单帧，和 `runCore→dispatch→submit→retireCompleted→release` 链合计约 6688 B；若错误路径再进 `IOLog`，约 8496 B。详见 `docs/research/2026-11-18-kernel-stack-audit.md`。
+- 这份根因文档的证据来自 `n18c-p-1` 的 panic、r/s/t 的 fix 轮和 build-wp/build-fix 的只读反汇编；没有手机操作、没有构建。当前状态：**栈帧 HOST_VERIFIED，r/s/t DEVICE_VERIFIED（PRM34 dry、PRM33、PRM34 dry+checkpoint）**。
+
+## 13. 参考
+
+### 13.1 本机 live DT（仓库外，相对 `$ZIZHAN_SRC`）
 
 - `work/hardware-20261115/audio-dma-live-dt-v1.dts:29241–29255`：`msm-audio-ion`（SID `0x1801`、sid-mask `<0 0xf>`、pool `0x10000000+0x10000000`）。
 - `work/hardware-20261115/audio-dma-live-dt-v1.dts:18960–18978`：apps SMMU（`qcom,context-fault-retry`、`num-context-banks-override`、`num-smr-override`、`handoff-smrs`、全局/上下文 IRQ）。
@@ -954,7 +1038,7 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 - `work/hardware-20261115/audio-dma-live-dt-v1.dts:12500–12528`：fastrpc SID `0x1803/0x1804/0x1805` 与 `"stall-disable","HUPCF"`。
 - `work/hardware-20261115/audio-dma-live-dt-v1.dts:11298–11321`：`qcom,gpr`、`audio-pkt`、`q6prm`。
 
-### 12.2 厂商 audio-kernel（公开 SM8475/taro-S 镜像）
+### 13.2 厂商 audio-kernel（公开 SM8475/taro-S 镜像）
 
 - `https://github.com/ASUS-SM8475/vendor_qcom_opensource_audio-kernel/blob/taro-S/dsp/msm_audio_ion.c`
   - `#L36`：`MSM_AUDIO_SMMU_SID_OFFSET 32`
@@ -962,7 +1046,7 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
   - `#L830–L913`：probe，`sid = args[0] & sid_mask`、`sid << 32`
   - `#L574–L585`、`#L680–L750`：`hyp_assign_phys` 与 `IOCTL_MAP_HYP_ASSIGN`
 
-### 12.3 主线 Linux
+### 13.3 主线 Linux
 
 - `https://github.com/torvalds/linux/blob/master/sound/soc/qcom/qdsp6/q6apm-dai.c`
   - `#L42`：`SID_MASK_DEFAULT 0xF`
@@ -994,11 +1078,11 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 - `https://github.com/torvalds/linux/blob/master/drivers/iommu/io-pgtable-arm.c`
   - `#L1012–L1078`：coherent walk 的 TCR/MAIR
 
-### 12.4 2026-08 stage-2/SCM 澄清
+### 13.4 2026-08 stage-2/SCM 澄清
 
 - `https://lkml.rescloud.iu.edu/2608.3/03890.html`：`qcom,q6apm-dai: add stage-2 (SCM/VMID) access model`。要点：ADSP 是 stage-1 + `iommus`；只有 modem/mDSP 的 stage-2 保护上下文才用 `qcom,vmids` + SCM assign。
 
-### 12.5 本仓库代码
+### 13.5 本仓库代码
 
 - `drivers/PongPower/ZizhanAudioDmaMap.cpp:107–178`：watch、extent、identity range、config、install、end、address。
 - `drivers/PongAdreno/ArmSmmu4K/ArmSmmu4KContext.c:50–70`：CBAR/CBA2R/TCR/TCR2/TTBR/MAIR/SCTLR 编码。
@@ -1016,7 +1100,7 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 - `drivers/PongPower/ZizhanAudioBatch.c:35–43`：batch slot 地址/sequence。
 - `$ZIZHAN_SRC/uefi-pong/Platforms/Nothing/DarwinBootPkg/Driver/DarwinBoot.c:746–755`、`:792–794`：64 KiB `EfiReservedMemoryType` 分配与 chosen 填写（仓库外）。
 
-### 12.6 既往记录
+### 13.6 既往记录
 
 - `docs/progress/STATUS.md`：M1 行，5/7 挂死、2 轮跑通、下一步。
 - `docs/progress/2026-11-15-audio-silent-owner.md`：mode25/26/27 的 SMMU 实际 ID、slot/bank、原 SCTLR、ASID 守卫、CBAR restore panic。

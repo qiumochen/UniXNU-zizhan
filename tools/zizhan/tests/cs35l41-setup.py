@@ -43,7 +43,7 @@ constexpr unsigned kIOMapAnywhere=1,kIOMapInhibitCache=2,kIOMapReadOnly=4;
 static int gIODTPlane;
 using thread_t=void*;using wait_result_t=int;
 constexpr int KERN_SUCCESS=0;
-static bool PE_parse_boot_argn(const char *key,void *out,size_t bytes){
+static bool PE_parse_boot_argn(const char *key,void *out,size_t bytes){if(!strcmp(key,"zizhan_audio_checkpoint"))return false;
  assert(bytes==4);unsigned v=0;
  if(!strcmp(key,"zizhan_se15_prepare"))v=mode;
  else if(!strcmp(key,"pong_audio"))v=audio;
@@ -52,6 +52,7 @@ static bool PE_parse_boot_argn(const char *key,void *out,size_t bytes){
  memcpy(out,&v,4);return v!=0;
 }
 static void IOLog(const char *fmt,...){char text[512];va_list ap;va_start(ap,fmt);vsnprintf(text,sizeof(text),fmt,ap);va_end(ap);logs.emplace_back(text);}
+extern "C" __attribute__((weak)) int pong_klog_flush(int){return -1;}
 static void *current_thread(){return (void*)1;}
 static void thread_set_thread_name(void*,const char*){}
 static int kernel_thread_start(void(*worker)(void*,int),void *ctx,thread_t *out){++threads;if(thread_fail)return 1;worker(ctx,0);*out=(void*)1;return 0;}

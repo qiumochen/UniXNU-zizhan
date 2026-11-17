@@ -58,6 +58,15 @@ struct RamInput {
     }
     ~RamInput(){if(bytes)IOFree(bytes,size);}
 };
+extern "C" int pong_klog_flush(int reason) __attribute__((weak));
+// zizhan_audio_checkpoint=1 (diagnostics only): log each pulse stage and copy the console to the UFS klog
+// synchronously (reason 6), so a hang that ends in the cold watchdog bite still names its last stage.
+void amp_checkpoint(unsigned chip,unsigned stage){
+    const uint64_t begin=nowUs();
+    IOLog("ZIZHAN_AUDIO_CHECKPOINT: chip=%u stage=%u\n",chip,stage);
+    const int flushed=pong_klog_flush?pong_klog_flush(6):-1;
+    IOLog("ZIZHAN_AUDIO_CHECKPOINT: chip=%u stage=%u flushed=%d us=%llu\n",chip,stage,flushed,(unsigned long long)(nowUs()-begin));
+}
 void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const ZizhanAudioTransfer *transfer=nullptr) {
     using namespace zizhan_se15_setup;
     thread_set_thread_name(current_thread(), "zizhan_se15_prep");
@@ -67,7 +76,9 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
     const bool source_handoff=mode>=8,rx_setup=mode>=7,handoff=mode>=6,safeoff=mode>=5;
     const bool snapshot=mode>=4,identity=mode>=3,timing=mode>=2;
     if((mode>=35&&mode<=39)&&(!combined||!transfer||!transfer->once)){IOLog("ZIZHAN_AUDIO_TRANSFER: SKIP missing-zero-callback writes=0\n");return;}
-    if(mode==39){unsigned attended=0;if(!PE_parse_boot_argn("zizhan_audio_attended",&attended,sizeof attended)||attended!=1){IOLog("ZIZHAN_AUDIO_PULSE: SKIP attended=0 output_enables=0\n");return;}}
+    if(mode==39){unsigned attended=0;if(!PE_parse_boot_argn("zizhan_audio_attended",&attended,sizeof attended)||attended!=1){IOLog("ZIZHAN_AUDIO_PULSE: SKIP attended=0 output_enables=0\n");return;}
+        unsigned checkpoint=0;if(PE_parse_boot_argn("zizhan_audio_checkpoint",&checkpoint,sizeof checkpoint)&&checkpoint==1){
+            zizhan_amp_checkpoint=amp_checkpoint;IOLog("ZIZHAN_AUDIO_CHECKPOINT: armed klog=%u\n",pong_klog_flush?1u:0u);}}
     ZizhanAmpSpeakerCalibration speaker_cal={1,sizeof(ZizhanAmpSpeakerCalibration),{0,0}};
     if(mode>=29){
         const bool top_present=PE_parse_boot_argn("zizhan_cal_t",&speaker_cal.resistance[0],sizeof(uint32_t));
@@ -210,6 +221,7 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                                             if(both_off&&data_pin.open(0xf17c000,0x1000,true)&&zizhan_audio_data_pin::connect(data_pin,data_state)){
                                                 combined->data_connected=1;
                                                 IOLog("ZIZHAN_AUDIO_DATA_PIN: connected=1 pin=124 config=%x io=%x original=%x/%x native_ALT1_8mA=1 latch_writes=0 outputs_off=1\n",data_pin.read(0),data_pin.read(4),data_state.config,data_state.io);
+                                                if(mode==39&&zizhan_amp_checkpoint)zizhan_amp_checkpoint(0,0);
                                                 if(mode==39)zizhan_cs35l41_native_pulse_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==38)zizhan_cs35l41_native_iv_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==37)zizhan_cs35l41_native_mailbox_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);

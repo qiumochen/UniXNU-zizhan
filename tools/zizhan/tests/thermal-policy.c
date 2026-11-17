@@ -258,6 +258,31 @@ static void test_stale_cold_no_streak(void){
  CHECK(st.cpu_level==ZizhanThermalCpuLevels-1,"third fresh after stale releases");
 }
 
+/* g396 one-shot real idle readings, docs/evidence/2026-11-07-tsens-readonly.txt:
+ * bank0 sensor 0..15 and bank1 sensor 0..15, decoded milliC, all VALID. */
+static void test_real_idle_g396(void){
+ static const int32_t bank0[16]={39800,41000,39800,41000,41800,42200,46900,39800,
+                                 39800,39400,39000,41400,41800,40600,38200,39400};
+ static const int32_t bank1[16]={39100,38700,39500,38300,39100,37500,35500,36300,
+                                 37500,38700,38300,35900,36300,37500,36700,37100};
+ ZizhanThermalSample s;
+ memset(&s,0,sizeof s);
+ s.time_us=1000000;s.bank_valid[0]=1;s.bank_valid[1]=1;
+ s.valid_mask[0]=0xffffu;s.valid_mask[1]=0xffffu;
+ for(unsigned i=0;i<16;++i){s.temp_mc[0][i]=bank0[i];s.temp_mc[1][i]=bank1[i];}
+ ZizhanThermalState st;zizhan_thermal_init(&st);
+ CHECK(step(&st,1000000,&s)==ZizhanThermalFresh,"g396 real idle fresh");
+ CHECK(st.cpu_level==0&&st.gpu_level==0,"g396 real idle no cap");
+
+ /* Only cpu-1-1 (bank0 sensor 6) is changed to 110 C. */
+ ZizhanThermalState hot;zizhan_thermal_init(&hot);
+ ZizhanThermalSample h=s;
+ h.temp_mc[0][6]=110000;
+ CHECK(step(&hot,1000000,&h)==ZizhanThermalFresh,"g396 one hot fresh");
+ CHECK(hot.cpu_level==ZizhanThermalCpuLevels,"g396 one cpu-1 hot clamps");
+ CHECK(hot.gpu_level==0,"g396 one cpu-1 hot leaves gpu");
+}
+
 int main(void){
  test_mapping();
  test_normal();
@@ -276,6 +301,7 @@ int main(void){
  test_slow_sampling_still_clamps();
  test_backwards_rebase_and_recover();
  test_stale_cold_no_streak();
+ test_real_idle_g396();
  printf("%s: %d failure(s)\n",failures?"FAIL":"PASS",failures);
  return failures?1:0;
 }

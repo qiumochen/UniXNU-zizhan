@@ -91,6 +91,8 @@
 4. **不做**：不写 TSENS 阈值/IRQ、不关闭真实 panic、不发布假 thermalmonitord 服务、不用 125°C 占位当策略、不把 Android `scaling_max_freq` 当 XNU 阈值、不照搬 data-a-live 的 SM8850 body 表。
 5. **v2（标定后再细化）**：在 Android 上跑一次有界负载，记录“TSENS 温度 → `thermal-cpufreq-*/cur_state`、`gpu/cur_state`”的实际阶梯，形成 zizhan 自己的 table；再用同一 table 做 XNU 的分档封顶。data-a-live 的做法证明“vendor 阶梯 → XNU 限频”是可行的，但它的数值只属于 SM8850。
 
+> 候选核心已落地：`drivers/ArmDTPlatform/ZizhanThermalPolicy.h` + `tools/zizhan/tests/thermal-policy.py`，已在分支 `codex/2026-11-17-m2-m3-prep` 主机验证（Mac `cc` 与 `zizhan-ci:gcc14-clang`，`-Wall -Wextra -Werror -fsanitize=address,undefined`，0 failure）；**未接线、未上机**。
+
 ### 1.6 验收
 
 | 级别 | 内容 |

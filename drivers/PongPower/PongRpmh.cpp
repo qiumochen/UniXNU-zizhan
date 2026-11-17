@@ -7,6 +7,8 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <kern/clock.h>
+#include "ZizhanRpmhBatch.h"
+#include "ZizhanRpmhReceipt.h"
 
 namespace {
 struct Window {
@@ -21,6 +23,8 @@ struct Window {
 };
 Window rsc;
 IOLock *powerLock,*smmuLeaseLock;
+zizhan_rpmh::BatchState batchState;
+zizhan_rpmh::CompletionJournal completionJournal;
 uint64_t now() {uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;}
 bool fail(const char *s) {IOLog("PongRpmh: %s\n",s);return false;}
 bool wait(Window &w,size_t o,uint32_t mask,uint32_t value,unsigned ms) {uint64_t end=now()+ms;do {if((w.r(o)&mask)==value)return true;IOSleep(1);}while(now()<end);return false;}
@@ -48,8 +52,28 @@ extern "C" void pong_rpmh_init(void) {
 extern "C" bool pong_rpmh_vote(uint32_t address,uint32_t value) {
  if(!powerLock)return false;
  IOLockLock(powerLock);
- bool ok=(rsc.v||rsc.open(0x17a20000,0x10000))&&rawVote(address,value);
+ bool ok=!batchState.uncertain&&(rsc.v||rsc.open(0x17a20000,0x10000))&&rawVote(address,value);
+ if(ok)(void)completionJournal.record(&address,&value,1);else completionJournal.fail();
  IOLockUnlock(powerLock);return ok;
 }
+// Explicit candidate API only; no SLPI boot hook or baseline adoption.
+extern "C" bool pong_rpmh_batch(const uint32_t *addresses,const uint32_t *values,unsigned count) {
+ if(!powerLock||!zizhan_rpmh::arguments(addresses,values,count))return false;
+ IOLockLock(powerLock);
+ bool ok=false;
+ if(!batchState.uncertain&&(rsc.v||rsc.open(0x17a20000,0x10000))) {
+  const auto result=zizhan_rpmh::batch(rsc,batchState,addresses,values,count,now,[](unsigned us){IODelay(us);});
+  ok=result==zizhan_rpmh::Ok;
+  if(ok)(void)completionJournal.record(addresses,values,count);else if(batchState.uncertain)completionJournal.fail();
+  if(!ok)IOLog("ZIZHAN_RPMH_BATCH: FAIL result=%u retained=%u\n",unsigned(result),unsigned(batchState.uncertain));
+ }
+ IOLockUnlock(powerLock);return ok;
+}
+extern "C" bool pong_rpmh_completed_request(uint32_t address,zizhan_rpmh::CompletedRequest *out) {
+ if(out)*out={};if(!powerLock||!out)return false;
+ IOLockLock(powerLock);const bool ok=!batchState.uncertain&&completionJournal.get(address,out);
+ IOLockUnlock(powerLock);return ok;
+}
+
 extern "C" bool pong_smmu_lease_lock(void){if(!smmuLeaseLock)return false;IOLockLock(smmuLeaseLock);return true;}
 extern "C" void pong_smmu_lease_unlock(void){if(smmuLeaseLock)IOLockUnlock(smmuLeaseLock);}

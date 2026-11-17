@@ -27,6 +27,8 @@
 extern "C" bool pong_smmu_lease_lock(void);
 extern "C" void pong_smmu_lease_unlock(void);
 extern "C" boolean_t pmap_valid_page(ppnum_t);
+extern "C" int pong_klog_flush(int reason) __attribute__((weak));
+extern "C" {extern volatile int32_t native_adsp_stats[16];extern char native_adsp_text[96];}
 namespace {
 struct Packet {unsigned bytes;uint8_t data[512];};
 struct Runtime {
@@ -333,6 +335,15 @@ __attribute__((noinline)) bool graph_round(){
  o.dma_restored=zizhan_audio_dma_map_end()?1u:0u;
  return o.dma_restored!=0;
 }
+// Every finished or failed WRITE logs its send-to-result latency. A failure flushes the klog before the
+// caller stops the stream, so a hang during that teardown still leaves the failure on UFS.
+// zizhan_write_flush=1 (silent diagnostics) also flushes after each send and each WRITE_DONE.
+unsigned write_flush_armed(){unsigned v=0;return PE_parse_boot_argn("zizhan_write_flush",&v,sizeof v)&&v==1?1u:0u;}
+bool write_report(bool done,unsigned sequence,uint64_t now){auto &o=owner;
+ const unsigned long long us=o.write.began_us&&now>=o.write.began_us?now-o.write.began_us:0;
+ IOLog("ZIZHAN_AUDIO_WRITE: %s sequence=%u reason=%u us=%llu sent=%u ack=%u\n",done?"done":"fail",sequence,o.write.reason,us,o.write.sent,o.write.ack);
+ if((!done||write_flush_armed())&&pong_klog_flush)(void)pong_klog_flush(8);
+ return done;}
 bool write_commands(unsigned sequence=0,bool silence=false,bool again=false){
  auto &o=owner;if(!o.zero_verified||o.memory.phase!=ZizhanMemoryHeld||!o.memory.handle)return false;
  if(o.mode>=33&&!o.tone_prepared)return false;
@@ -344,20 +355,31 @@ bool write_commands(unsigned sequence=0,bool silence=false,bool again=false){
  // page aligned and below 48 KiB; default 16 KiB. 11-17: the first ADSP read at 16 KiB hangs the SoC.
  unsigned preroll=16384u;if(silence){unsigned value=0;if(PE_parse_boot_argn("zizhan_pre_off",&value,sizeof value)&&value<=49152u&&!(value&4095u))preroll=value;}
  o.write.address=zizhan_audio_dma_map_address()+(silence?preroll:0u);o.write.handle=o.memory.handle;
+ // zizhan_write_ms=<ms> (silent diagnostics): PRM34 WRITE_DONE budget, default 100 ms, 100..2000.
+ uint64_t limit=100000;if(o.mode==34){unsigned ms=0;if(PE_parse_boot_argn("zizhan_write_ms",&ms,sizeof ms)&&ms>=100&&ms<=2000)limit=ms*1000ull;}
+ const unsigned flush=write_flush_armed();
+ // zizhan_write_probe=1 (silent diagnostics): a WRITE_DONE normally takes ~11 ms. At 30 ms and 500 ms
+ // without it, log the ADSP SMP2P/GLINK/IPCC view once each and flush, before a possible SoC hang.
+ unsigned probe=0;if(!PE_parse_boot_argn("zizhan_write_probe",&probe,sizeof probe)||probe!=1)probe=0;unsigned probed=0;
  for(unsigned iteration=0;iteration<400;++iteration){
   Packet p={};unsigned closed,overflow;IOLockLock(o.lock);closed=o.closed;overflow=o.overflow;
   if(o.count){p=o.queue[o.head];o.head=(o.head+1)%16;--o.count;}IOLockUnlock(o.lock);
-  if(closed||overflow){zizhan_write_fail(&o.write,5);return false;}
+  if(closed||overflow){zizhan_write_fail(&o.write,5);return write_report(false,sequence,now_us());}
   if(p.bytes){const int accepted=zizhan_write_receive(&o.write,p.data,p.bytes);if(accepted==1)++o.write_ack;
    IOLog("ZIZHAN_AUDIO_WRITE: rx bytes=%u accepted=%d phase=%u remote=%u ignored=%u\n",p.bytes,accepted,o.write.phase,o.write.remote,o.write.ignored);}
-  const uint64_t now=now_us();if(o.mode==34&&o.write.phase==ZizhanWriteWaiting&&now-o.write.began_us>=100000)zizhan_write_fail(&o.write,4);zizhan_write_tick(&o.write,now);
-  if(o.write.phase==ZizhanWriteFailed){return false;}if(o.write.phase==ZizhanWriteDone)return true;
+  const uint64_t now=now_us();if(o.mode==34&&o.write.phase==ZizhanWriteWaiting&&now-o.write.began_us>=limit)zizhan_write_fail(&o.write,4);zizhan_write_tick(&o.write,now);
+  if(probe&&o.write.phase==ZizhanWriteWaiting&&probed<2&&now-o.write.began_us>=(probed?500000u:30000u)){++probed;
+   IOLog("ZIZHAN_AUDIO_WRITE: slow sequence=%u us=%llu stage=%d slave=%x ipcc=%d glink_rx=%d queued=%u closed=%u crash=\'%s\'\n",sequence,(unsigned long long)(now-o.write.began_us),
+    native_adsp_stats[0],(unsigned)native_adsp_stats[3],native_adsp_stats[2],native_adsp_stats[9],o.count,o.closed,native_adsp_text);
+   if(pong_klog_flush)(void)pong_klog_flush(8);}
+  if(o.write.phase==ZizhanWriteFailed){return write_report(false,sequence,now);}if(o.write.phase==ZizhanWriteDone)return write_report(true,sequence,now);
   uint8_t bytes[512];const unsigned n=zizhan_write_next(&o.write,now,bytes);
   if(n){++o.write_sent;IOLog("ZIZHAN_AUDIO_WRITE: send bytes=%u token=%x address=%llx handle=%x data_bytes=%u zero_only=%u data_pads=%u audio_output=%u sequence=%u\n",n,o.write.token,o.write.address,o.write.handle,ZizhanWriteBytes,o.mode>=33&&!silence?0u:1u,o.mode>=29?1u:0u,o.mode==34&&!silence?1u:0u,sequence);
-   if(sheng_adsp_send(o.channel,bytes,n)){zizhan_write_fail(&o.write,5);return false;}}
+   if(sheng_adsp_send(o.channel,bytes,n)){zizhan_write_fail(&o.write,5);return write_report(false,sequence,now);}
+   if(flush&&pong_klog_flush)(void)pong_klog_flush(8);}
   IOSleep(10);
  }
- zizhan_write_fail(&o.write,4);return false;
+ zizhan_write_fail(&o.write,4);return write_report(false,sequence,now_us());
 }
 int zero_transfer(void *context,unsigned chip){
  auto &o=*static_cast<Owner *>(context);

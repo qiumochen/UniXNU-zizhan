@@ -39,6 +39,7 @@ extern "C" int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint3
 // up (bit per client) | version agreed << 14 | link broken << 15, [12] channel opens nobody serves, [13] last SCM x0, [14] its x1,
 // [15] votes: lcx index | lmx index << 8 | RSC done interrupts << 16
 extern "C" {volatile int32_t native_adsp_stats[16]; char native_adsp_text[96];}
+extern "C" int pong_klog_flush(int reason) __attribute__((weak));
 
 // Adapted from UniXNU-sheng AdspProbe.cpp, 0e1f6e5. Board inputs from
 // Pong live DT and NothingOSS cape-adsp-pas; protocol identifiers preserved.
@@ -673,7 +674,8 @@ void adspThread(void *, wait_result_t) {
             zizhan_ipcc_observe(observed_ns,
                 static_cast<uint32_t>(__atomic_load_n(&native_adsp_stats[2], __ATOMIC_RELAXED)));
         }
-        if(gSlave & kFatal){IOLog("PongAdsp: fatal %s\n",native_adsp_text);for(unsigned i=0;i<gClientCount;i++)if(gClients[i].client.state)gClients[i].client.state(gClients[i].context,0);return;}
+        // The fatal line is the last evidence before a possible SoC hang: persist it at once (klog reason 9).
+        if(gSlave & kFatal){IOLog("PongAdsp: fatal %s\n",native_adsp_text);if(pong_klog_flush)(void)pong_klog_flush(9);for(unsigned i=0;i<gClientCount;i++)if(gClients[i].client.state)gClients[i].client.state(gClients[i].context,0);return;}
     }
 }
 }  // namespace

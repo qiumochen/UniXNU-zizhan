@@ -85,11 +85,17 @@ struct IORegistryEntry{
 };
 #define OSDynamicCast(type,value) static_cast<type *>(value)
 static bool PE_parse_boot_argn(const char *key,void *out,size_t size){assert(size==4);unsigned value;
- if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat")||!strcmp(key,"zizhan_pulse_dry"))return false;
+ if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat")||!strcmp(key,"zizhan_pulse_dry")||!strcmp(key,"zizhan_write_ms")||!strcmp(key,"zizhan_write_flush")||!strcmp(key,"zizhan_write_probe"))return false;
  if(!strcmp(key,"zizhan_audio_attended"))value=attended;else if(!strcmp(key,"zizhan_audio_prm"))value=mode;else if(!strcmp(key,"pong_audio"))value=audio;
  else if(!strcmp(key,"zizhan_se15_prepare"))value=prepare_mode;else if(!strcmp(key,"zizhan_se15_observe"))value=observe_mode;else{assert(!strcmp(key,"pong_adsp"));value=adsp;}
  memcpy(out,&value,4);return value!=0;
 }
+#ifdef __APPLE__
+extern "C" __attribute__((weak)) int pong_klog_flush(int){return -1;} /* ld64 rejects undefined weak refs */
+#else
+extern "C" int pong_klog_flush(int) __attribute__((weak));
+#endif
+extern "C" {volatile int32_t native_adsp_stats[16];char native_adsp_text[96];}
 struct ShengAdspChannel{};
 static ShengAdspClient client;static void *client_context;
 extern "C" ShengAdspChannel *sheng_adsp_channel(const char *name,uint32_t size,uint32_t count,int init,const ShengAdspClient *c,void *ctx){

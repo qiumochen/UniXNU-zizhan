@@ -23,7 +23,7 @@ int main(){
  unsigned installed_writes=0,total_writes=0;
  for(unsigned test=0;test<4;++test){Fake f;auto snap=zizhan_audio_dma::inspect(range.physical,range.bytes,[&](unsigned at){return f.r[at/4];});assert(!snap.plan.error);
   const unsigned cb=(snap.pages+snap.plan.bank)*4096;f.r[cb/4]=snap.sctlr[snap.plan.bank]=0x2000230a;
-  if(test==1)f.r[(0x800+snap.plan.slot*4)/4]^=1;if(test==2)f.r[(cb+0x58)/4]=2;if(test==3)f.stuck=true;
+  if(test==1){f.r[(0x800+snap.plan.slot*4)/4]^=1;}if(test==2)f.r[(cb+0x58)/4]=2;if(test==3)f.stuck=true;
   zizhan_audio_dma_map::State state;auto io=f.io();bool ok=zizhan_audio_dma_map::install(io,snap,c,state);
   if(!test){if(!ok)fprintf(stderr,"install fail phase%u attempted%u program%u pphase%u writes%u\n",state.phase,state.attempted,state.program_status,state.programmed.phase,f.writes);assert(ok&&state.installed&&state.uncertain);installed_writes=f.writes;
    f.retiring=true;assert(zizhan_audio_dma_map::restore(io,c,state)&&state.restored&&!state.installed&&!state.uncertain);

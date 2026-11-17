@@ -9,7 +9,7 @@ int zizhan_batch_init(ZizhanAudioBatch *s,uint64_t base,uint32_t handle,unsigned
 }
 int zizhan_batch_init_ex(ZizhanAudioBatch *s,uint64_t base,uint32_t handle,unsigned extent,
                          unsigned bytes,unsigned frames,unsigned count,uint64_t now){
- if(!s||s->magic)return 0;memset(s,0,sizeof *s);s->magic=BATCH_MAGIC;s->phase=ZizhanBatchFailed;
+ if(!s||s->magic){return 0;}memset(s,0,sizeof *s);s->magic=BATCH_MAGIC;s->phase=ZizhanBatchFailed;
  if(!handle||extent!=65536||!bytes||bytes>extent||(bytes&3u)||!frames||bytes%frames||
     !count||count>4||(base>>32)!=1||!(uint32_t)base||
     (base&4095)||(uint32_t)base>0xffff0000u){s->reason=1;return 0;}
@@ -29,11 +29,11 @@ void zizhan_batch_tick(ZizhanAudioBatch *s,uint64_t now){
  if(!s||s->magic!=BATCH_MAGIC||s->phase==ZizhanBatchDone||s->phase==ZizhanBatchFailed)return;
  if(now<s->began_us||now-s->began_us>=500000||
     (s->phase==ZizhanBatchWaiting&&(now<s->write.began_us||now-s->write.began_us>=100000))){
-  if(s->phase==ZizhanBatchWaiting)s->write.uncertain=1;fail(s,4);
+  if(s->phase==ZizhanBatchWaiting){s->write.uncertain=1;}fail(s,4);
  }
 }
 unsigned zizhan_batch_next(ZizhanAudioBatch *s,uint64_t now,uint8_t out[512]){
- if(!s||!out||s->magic!=BATCH_MAGIC)return 0;zizhan_batch_tick(s,now);
+ if(!s||!out||s->magic!=BATCH_MAGIC){return 0;}zizhan_batch_tick(s,now);
  if(s->phase!=ZizhanBatchReady||s->stopping||s->submitted>=s->total||!(s->prepared&(1u<<s->submitted)))return 0;
  memset(&s->write,0,sizeof s->write);s->write.address=s->base+s->stride*s->submitted;
  s->write.handle=s->handle;s->write.sequence=s->submitted;s->write.bytes=s->bytes;
@@ -42,7 +42,7 @@ unsigned zizhan_batch_next(ZizhanAudioBatch *s,uint64_t now,uint8_t out[512]){
  ++s->submitted;s->uncertain=1;s->phase=ZizhanBatchWaiting;return n;
 }
 int zizhan_batch_receive(ZizhanAudioBatch *s,const uint8_t *data,unsigned bytes,uint64_t now){
- if(!s||!data||s->magic!=BATCH_MAGIC)return 0;zizhan_batch_tick(s,now);
+ if(!s||!data||s->magic!=BATCH_MAGIC){return 0;}zizhan_batch_tick(s,now);
  if(s->phase!=ZizhanBatchWaiting)return 0;
  const int result=zizhan_write_receive(&s->write,data,bytes);
  if(result<0){fail(s,s->write.reason);return -1;}
@@ -51,7 +51,7 @@ int zizhan_batch_receive(ZizhanAudioBatch *s,const uint8_t *data,unsigned bytes,
  return result;
 }
 void zizhan_batch_stop(ZizhanAudioBatch *s){
- if(!s||s->magic!=BATCH_MAGIC)return;s->stopping=1;
+ if(!s||s->magic!=BATCH_MAGIC){return;}s->stopping=1;
  if(s->phase==ZizhanBatchReady)s->phase=ZizhanBatchDone;
 }
 void zizhan_batch_send_failed(ZizhanAudioBatch *s){

@@ -93,7 +93,7 @@ struct ShengAdspChannel{};
 static ShengAdspClient client;static void *client_context;
 extern "C" ShengAdspChannel *sheng_adsp_channel(const char *name,uint32_t size,uint32_t count,int init,const ShengAdspClient *c,void *ctx){
  ++registrations;assert(!strcmp(name,"adsp_apps")&&size==512&&count==16&&init==1);
- if(channel_fail)return nullptr;client=*c;client_context=ctx;if(!down)client.state(ctx,1);static ShengAdspChannel ch;return &ch;
+ if(channel_fail){return nullptr;}client=*c;client_context=ctx;if(!down)client.state(ctx,1);static ShengAdspChannel ch;return &ch;
 }
 extern "C" int sheng_adsp_send(ShengAdspChannel *,const void *bytes,uint32_t length){
  ++sends;if(send_fail)return -1;if(drop)return 0;GprPacket request;assert(!gpr_decode((const uint8_t *)bytes,length,&request));
@@ -115,7 +115,7 @@ extern "C" int sheng_adsp_send(ShengAdspChannel *,const void *bytes,uint32_t len
   unsigned n=gpr_encode(reply,512,&p,payload,32);client.receive(client_context,reply,n);return 0;
  }
  if(request.src_port==ZizhanPcmPort){
-  ++pcm_sends;assert(mode>=23&&tdm_sends==4&&request.dst_port==(pcm_sends==2?ZizhanPcmShmem:1u));
+  ++pcm_sends;assert(mode>=23&&tdm_sends==4&&request.dst_port==(pcm_sends==2?(unsigned)ZizhanPcmShmem:1u));
   if(mode>=24&&pcm_sends>=5){assert(length==72&&zizhan_tdm_le32((const uint8_t *)bytes+56)==2&&zizhan_tdm_le32((const uint8_t *)bytes+60)==ZizhanPcmSg&&zizhan_tdm_le32((const uint8_t *)bytes+64)==ZizhanTdmSg);}
   if(pcm_sends>=5)assert(silent_calls==1);else assert(!silent_calls);
   uint8_t payload[8]={},reply[512];for(unsigned i=0;i<4;++i)payload[i]=(uint8_t)(request.opcode>>(8*i));if(pcm_reject==pcm_sends)payload[4]=5;
@@ -130,7 +130,7 @@ extern "C" int sheng_adsp_send(ShengAdspChannel *,const void *bytes,uint32_t len
   GprPacket p={};p.src_domain=2;p.dst_domain=3;p.src_port=1;p.dst_port=ZizhanTdmPort;p.token=request.token;p.opcode=GPR_OP_BASIC_RESULT;
   unsigned n=gpr_encode(reply,512,&p,payload,8);client.receive(client_context,reply,n);return 0;
  }
- unsigned expected_port=mode>=4?(request.opcode==GPR_OP_APM_GET_SPF_STATE?3u:7u):mode==3?7u:ZizhanPrmPort;
+ unsigned expected_port=mode>=4?(request.opcode==GPR_OP_APM_GET_SPF_STATE?3u:7u):mode==3?7u:(unsigned)ZizhanPrmPort;
  assert(request.src_port==expected_port&&request.src_domain==3&&request.dst_domain==2);
  if(mode>=4)assert(time_us>=1000000&&request.token==0);
  uint8_t payload[8]={},reply[512];GprPacket p={};p.src_domain=2;p.dst_domain=3;p.src_port=request.dst_port;p.dst_port=request.src_port;p.token=request.token;

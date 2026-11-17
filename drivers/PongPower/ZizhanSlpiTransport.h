@@ -35,14 +35,14 @@ template<class Read,class Clock> Result capture(unsigned enabled,unsigned board,
   unsigned matches=0;
   for(unsigned i=0;i<count;++i){const uint32_t e=toc+32+i*48;uint32_t at=0,bytes=0,hosts=0,line=0;
    if(!get(e,at)||!get(e+4,bytes)||!get(e+12,hosts)||!get(e+16,line))break;
-   if(!at||!bytes)continue;if(hosts!=0x00030000&&hosts!=3)continue;
+   if(!at||!bytes){continue;}if(hosts!=0x00030000&&hosts!=3)continue;
    if(++matches>1||at&7||at>toc||bytes>toc-at||bytes<64||line>4096||(line&(line-1))){error=Corrupt;break;}
    uint32_t pmagic=0,phosts=0,pbytes=0;
    if(!get(at,pmagic)||!get(at+4,phosts)||!get(at+8,pbytes)||!get(at+12,s.free_uncached)||!get(at+16,s.free_cached))break;
    if(pmagic!=0x54525024||phosts!=hosts||pbytes!=bytes||s.free_uncached<32||s.free_uncached>s.free_cached||s.free_cached>bytes){error=Corrupt;break;}
    s.offset=at;s.bytes=bytes;s.cacheline=line?line:8u;
   }
-  if(error!=Ok)break;if(!matches){error=NoPartition;break;}
+  if(error!=Ok){break;}if(!matches){error=NoPartition;break;}
   auto item=[&](uint32_t id,uint32_t at,uint32_t bytes){
    if(!bytes||at<s.offset+32||at>s.offset+s.bytes||bytes>s.offset+s.bytes-at){error=Corrupt;return false;}
    for(unsigned n=0;n<5;++n)if(id==ItemIds[n]){
@@ -79,7 +79,7 @@ template<class Read,class Clock> Result capture(unsigned enabled,unsigned board,
   for(unsigned n=0;n<2&&error==Ok;++n)if(s.items[n].present){
    if(s.items[n].bytes<340){error=Corrupt;break;}
    for(unsigned i=0;i<85;++i)if(!get(s.items[n].offset+i*4,s.smp2p[n][i]))break;
-   if(error!=Ok)break;const uint32_t *words=s.smp2p[n];const unsigned total=words[3]&0xffff,valid=words[3]>>16;
+   if(error!=Ok){break;}const uint32_t *words=s.smp2p[n];const unsigned total=words[3]&0xffff,valid=words[3]>>16;
    s.smp2p_valid[n]=words[0]==0x504d5324&&(words[1]&0xff)==1&&words[2]==(n?0x30000u:3u)&&total<=16&&valid<=total;
    if(!n&&s.smp2p_valid[0])for(unsigned i=0;i<valid;++i){
     const char expected[16]="slave-kernel";uint32_t name[4]={};memcpy(name,expected,16);
@@ -96,7 +96,7 @@ template<class Read,class Clock> Result capture(unsigned enabled,unsigned board,
        (s.descriptor[n*2]&7)||(s.descriptor[n*2+1]&7)){error=Corrupt;break;}
    }
   }
-  if(error!=Ok)break;++out.copies;
+  if(error!=Ok){break;}++out.copies;
  }
  if(error==Ok&&memcmp(&passes[0],&passes[1],sizeof(Snapshot)))error=Changed;
  out.result=error;

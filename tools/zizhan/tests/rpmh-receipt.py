@@ -20,7 +20,7 @@ int main(){
  assert(!j.get(0x101,&out)&&!j.get(0x100,nullptr));
  j.fail();assert(!j.get(0x100,&out)&&!out.address&&!j.record(a,v,1));
  for(unsigned bad=0;bad<5;++bad){CompletionJournal k;uint32_t x[]={0x100,0x104},y[]={1,2};
-  if(bad==0)x[0]=0;if(bad==1)x[0]=0x101;if(bad==2)x[1]=x[0];
+  if(bad==0){x[0]=0;}if(bad==1)x[0]=0x101;if(bad==2)x[1]=x[0];
   assert(!k.record(bad==3?nullptr:x,bad==4?nullptr:y,2)&&k.invalid&&!k.count&&!k.sequence);
  }
  CompletionJournal full;

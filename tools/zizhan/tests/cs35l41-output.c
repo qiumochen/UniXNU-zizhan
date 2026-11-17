@@ -13,7 +13,7 @@ static void prepare_output(Fake *f,ZizhanAmpCoefficients *coeff){
 }
 int main(int argc,char **argv){static Fake f;ZizhanAmpCoefficients coeff;ZizhanAmpOutputSetup out;(void)prepare_coeff;
  for(unsigned i=0;i<sizeof firmware;++i)firmware[i]=(uint8_t)(i*37u+19u);
- for(unsigned i=0;i<sizeof top_coeff;++i)top_coeff[i]=(uint8_t)(i*17+3);for(unsigned i=0;i<sizeof bottom_coeff;++i)bottom_coeff[i]=(uint8_t)(i*29+7);
+ for(unsigned i=0;i<sizeof top_coeff;++i){top_coeff[i]=(uint8_t)(i*17+3);}for(unsigned i=0;i<sizeof bottom_coeff;++i)bottom_coeff[i]=(uint8_t)(i*29+7);
  if(argc==4){read_file(argv[1],firmware,sizeof firmware);read_file(argv[2],top_coeff,sizeof top_coeff);read_file(argv[3],bottom_coeff,sizeof bottom_coeff);output_fw_hash=output_coeff_hash=actual_hash;}
  const unsigned flags=ZizhanAmpExclusiveSe15|ZizhanAmpPinsVerified|ZizhanAmpResetReleased|ZizhanAmpUnmanagedSupplyTopology;
  const ZizhanAmpClock clock={&f,now,pause_us};unsigned write_at[28]={};
@@ -21,8 +21,8 @@ int main(int argc,char **argv){static Fake f;ZizhanAmpCoefficients coeff;ZizhanA
  const uint32_t top[]={0x2424,0x7500,0x40,3,3,0x200,0x32,8,9,0xa0,0x2678,4,1,0};
  const uint32_t bottom[]={0x2424,0x7500,0x40,3,3,0x401,0x32,8,8,0xa0,0x2678,4,1,0};
  for(unsigned test=0;test<9;++test){prepare_output(&f,&coeff);unsigned before=f.commands,enabled=1,verified=flags;
-  if(test==1)enabled=0;if(test==2)verified=0;if(test==3)coeff.readbacks[1]=949;if(test==4)coeff.transport.controller_uncertain=1;
-  if(test==5)coeff.after_state[0][2]=0x100;if(test==6)f.state[1][2]=0x100;if(test==7)f.output_bad=1;if(test==8)f.clock_step=1000000;
+  if(test==1){enabled=0;}if(test==2)verified=0;if(test==3)coeff.readbacks[1]=949;if(test==4)coeff.transport.controller_uncertain=1;
+  if(test==5){coeff.after_state[0][2]=0x100;}if(test==6)f.state[1][2]=0x100;if(test==7)f.output_bad=1;if(test==8)f.clock_step=1000000;
   int rc=zizhan_cs35l41_output_setup(enabled,verified,&f.bus,&clock,&coeff,&out);
   if(!test){if(rc||out.status!=ZizhanAmpPass)fprintf(stderr,"output rc=%d status=%u reason=%u chip=%u index=%u attempted=%u ack=%u reads=%u/%u before=%x after=%x time=%llu\n",rc,out.status,out.reason,out.failed_chip,out.failed_index,out.attempted,out.acknowledged,out.readbacks[0],out.readbacks[1],out.before[out.failed_chip][out.failed_index],out.after[out.failed_chip][out.failed_index],(unsigned long long)out.elapsed_us);
    assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted==28&&out.acknowledged==28&&out.readbacks[0]==14&&out.readbacks[1]==14&&f.output_writes==28);

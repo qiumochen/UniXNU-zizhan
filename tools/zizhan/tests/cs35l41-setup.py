@@ -156,7 +156,7 @@ int main(int argc,char **argv){
   lease.sent=lease.acknowledged=3;
   if(test=="silent-proof")lease.clock_request_ack=0;
   if(test=="silent-missing")ram_missing=true;
-  if(test=="prerun-missing")cal_missing=true;if(test=="prerun-bad")cal_bad=true;
+  if(test=="prerun-missing"){cal_missing=true;}if(test=="prerun-bad")cal_bad=true;
   if(mode==34)zizhan_amp_native_core_run(&lease,&receipt);else if(mode==33)zizhan_amp_native_core_capture(&lease,&receipt);else if(mode==32)zizhan_amp_asp_format_run(&lease,&receipt);else if(mode==31)zizhan_amp_asp_rx_run(&lease,&receipt);else if(mode==30)zizhan_amp_native_rates_run(&lease,&receipt);else if(mode==29)zizhan_amp_native_protection_run(&lease,&receipt);else zizhan_amp_silent_clock_run(&lease,&receipt);
   assert(!threads&&!receipt.amp_pass);
   if(test=="silent-proof")assert(!maps&&!receipt.invoked&&receipt.release_safe);

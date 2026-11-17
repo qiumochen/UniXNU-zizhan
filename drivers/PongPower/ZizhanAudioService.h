@@ -16,7 +16,7 @@ typedef struct {
  volatile ZizhanAudioControl *control;ZizhanAudioStream stream;
 } ZizhanAudioService;
 static inline void zizhan_service_fail(ZizhanAudioService *s,unsigned reason){
- if(!s)return;s->reason=reason;s->phase=ZizhanServiceFailed;
+ if(!s){return;}s->reason=reason;s->phase=ZizhanServiceFailed;
  if(s->control)s->control->state&=~(ZizhanAudioOutputReady|ZizhanAudioOutputRunning);
 }
 static inline int zizhan_service_init(ZizhanAudioService *s,volatile ZizhanAudioControl *control,

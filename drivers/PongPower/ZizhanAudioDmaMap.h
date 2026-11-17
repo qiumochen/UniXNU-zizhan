@@ -41,7 +41,7 @@ static inline bool install(const ArmSmmu4KIo &io,const zizhan_audio_dma::Snapsho
  s.installed=1;s.phase=3;return true;
 }
 static inline bool restore(const ArmSmmu4KIo &io,const ArmSmmu4KContextConfig &config,State &s){
- if(!s.installed||s.restored)return false;const unsigned cb=(s.pages+s.bank)*4096;s.phase=4;
+ if(!s.installed||s.restored){return false;}const unsigned cb=(s.pages+s.bank)*4096;s.phase=4;
  // Revalidate actual ownership before the FIRST restore write. The global
  // host lock does not serialize firmware actors or grant a stale lease.
  uint32_t id0=0,smr=0,s2cr=0;

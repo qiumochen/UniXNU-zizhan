@@ -40,14 +40,14 @@ static inline int zizhan_audio_ready(const volatile ZizhanAudioControl *c){
  return zizhan_audio_control_valid(c)&&(c->state&ZizhanAudioOutputReady);
 }
 static inline void zizhan_audio_publish_written(volatile ZizhanAudioControl *c,uint64_t written){
- if(!c)return;c->written_seq=c->written_seq+1;
+ if(!c){return;}c->written_seq=c->written_seq+1;
  __atomic_thread_fence(__ATOMIC_RELEASE);c->out_written=written;
  __atomic_thread_fence(__ATOMIC_RELEASE);c->written_seq=c->written_seq+1;
 }
 static inline int zizhan_audio_written_stable(const volatile ZizhanAudioControl *c,uint64_t *written){
- if(!c||!written)return 0;const uint32_t first=c->written_seq;
- if(first&1u)return 0;const uint64_t value=c->out_written;const uint32_t second=c->written_seq;
- if(first!=second||(second&1u))return 0;*written=value;return 1;
+ if(!c||!written){return 0;}const uint32_t first=c->written_seq;
+ if(first&1u){return 0;}const uint64_t value=c->out_written;const uint32_t second=c->written_seq;
+ if(first!=second||(second&1u)){return 0;}*written=value;return 1;
 }
 static inline int zizhan_audio_has_frames(const volatile ZizhanAudioControl *c,uint64_t frame,unsigned frames){
  uint64_t written;if(!frames||frame>UINT64_MAX-frames)return 0;

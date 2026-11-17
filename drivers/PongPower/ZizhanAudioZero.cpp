@@ -14,7 +14,7 @@ extern "C" bool zizhan_audio_zero_verify(void){
  for(unsigned i=0;i<16;++i)if(pmap_valid_page((ppnum_t)((base>>12)+i))){IOLog("ZIZHAN_AUDIO_ZERO: FAIL managed_page=%u reads=0 writes=0\n",i);return false;}
  auto memory=IODeviceMemory::withRange(base,65536);
  auto map=memory?memory->map(kIOMapAnywhere|kIOMapWriteCombineCache|kIOMapReadOnly):nullptr;
- if(memory)memory->release();if(!map){IOLog("ZIZHAN_AUDIO_ZERO: FAIL CPU-map reads=0 writes=0\n");return false;}
+ if(memory){memory->release();}if(!map){IOLog("ZIZHAN_AUDIO_ZERO: FAIL CPU-map reads=0 writes=0\n");return false;}
  const auto words=reinterpret_cast<volatile uint64_t *>(map->getVirtualAddress());
  zizhan_audio_zero::Receipt r;
  const bool ok=zizhan_audio_zero::verify(base,65536,[](uint64_t page){return pmap_valid_page((ppnum_t)page)!=0;},

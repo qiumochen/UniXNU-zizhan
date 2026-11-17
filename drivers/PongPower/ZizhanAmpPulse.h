@@ -22,8 +22,8 @@ static inline int zizhan_pulse_read(const ZizhanPulseOps *o,ZizhanPulseReceipt *
  ++r->reads;return o->read(o->context,reg,v)?0:ZizhanPulseIo;
 }
 static inline int zizhan_pulse_write(const ZizhanPulseOps *o,ZizhanPulseReceipt *r,uint32_t reg,uint32_t v){
- if(r->attempted>=16)return ZizhanPulseGuard;++r->attempted;
- if(!o->write(o->context,reg,v))return ZizhanPulseIo;++r->acknowledged;return 0;
+ if(r->attempted>=16){return ZizhanPulseGuard;}++r->attempted;
+ if(!o->write(o->context,reg,v)){return ZizhanPulseIo;}++r->acknowledged;return 0;
 }
 /* Exact original native pup/pdn patch. Parent calls on before GLOBAL_EN,
  * off after GLOBAL_EN0. A key-close ACK is not a hardware-lock claim. */

@@ -74,6 +74,8 @@ struct IODeviceMemory {
   }
   void release(){delete this;}
 };
+// Darwin weak_import nullness cannot be modelled by a host stub that has a body; GCC would flag the kernel guard.
+#pragma GCC diagnostic ignored "-Waddress"
 /* ACTUAL_OWNER */
 extern "C" int armcpu_spi_attach(uint32_t id,bool edge,void (*handler)(void *),void *context,
                                    uint32_t *,uint64_t *) {
@@ -216,6 +218,8 @@ static int zizhan_ipcc_subscribe(uint32_t id,void(*handler)(void*,uint32_t),void
  if(reply==99&&attempts<3)return attempts==1?kIOReturnBusy:kIOReturnNotReady;
  return reply==99?0:reply;
 }
+// Darwin weak_import nullness cannot be modelled by a host stub that has a body; GCC would flag the kernel guard.
+#pragma GCC diagnostic ignored "-Waddress"
 /* ACTUAL_ADSP */
 int main(int argc,char **argv){
  assert(argc==2);

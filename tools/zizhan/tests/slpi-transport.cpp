@@ -29,7 +29,7 @@ static void setup(bool items=true){
 int main(){
  unsigned good_reads=0;
  for(unsigned test=0;test<18;++test){setup(test!=3);Receipt r;uint64_t time=0;unsigned reads=0,watched=0;const unsigned in=test==3?0:offset(481),tx=test==3?0:offset(479),rx=test==3?0:offset(480);
-  if(test==4)put(Bytes-4096,0);if(test==5)put(Bytes-4096+8,85);
+  if(test==4){put(Bytes-4096,0);}if(test==5)put(Bytes-4096+8,85);
   if(test==6)put(Bytes-4096+44,0x20000); // ADSP partition is not SLPI.
   if(test==7){put(Bytes-4096+8,2);memcpy(memory.data()+Bytes-4096+80,memory.data()+Bytes-4096+32,48);}
   if(test==8)put(0x10020,0); // Item canary.

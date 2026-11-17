@@ -54,7 +54,7 @@ bool clock_pins_isolated(unsigned data_pads=0){
  const unsigned pins[]={121,123,122,124};for(unsigned i=0;i<(data_pads?4u:2u);++i){const unsigned pin=pins[i];
   auto memory=IODeviceMemory::withRange(0xf100000ull+pin*0x1000ull,0x1000);
   auto map=memory?memory->map(kIOMapAnywhere|kIOMapInhibitCache|kIOMapReadOnly):nullptr;
-  if(memory)memory->release();if(!map)return false;
+  if(memory){memory->release();}if(!map)return false;
   auto reg=reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress());const uint32_t first=*reg;
 #if defined(__aarch64__) && defined(KERNEL)
   __asm__ volatile("dmb oshld":::"memory");
@@ -295,37 +295,37 @@ bool runtime_round(){
 bool graph_round(){
  auto &o=owner;uint8_t b[512];unsigned n;
  n=zizhan_mfc_device_open(b,sizeof b,0x7a300001u);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300001u,ZizhanMfcPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300001u,ZizhanMfcPort)){return false;}++o.graph_acks;
  n=zizhan_mfc_device_config(b,sizeof b,0x7a300002u);
- if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300002u,ZizhanMfcPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300002u,ZizhanMfcPort)){return false;}++o.graph_acks;
  n=zizhan_pcm_open_to_mfc(b,sizeof b,0x7a300003u);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300003u,ZizhanPcmPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300003u,ZizhanPcmPort)){return false;}++o.graph_acks;
  n=zizhan_pcm_media_packed48(b,sizeof b,0x7a300004u);
- if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300004u,ZizhanPcmPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300004u,ZizhanPcmPort)){return false;}++o.graph_acks;
  o.dma_mapped=zizhan_audio_dma_map_begin()?1u:0u;
  if(!o.dma_mapped||!memory_commands(false))return false;
  if(o.mode==37){o.tone48_prepared=zizhan_audio_tone48_prepare()?1u:0u;if(!o.tone48_prepared)return false;}
  n=zizhan_graph_command(b,sizeof b,ZizhanMfcPort,0x7a300005u,AR_OP_GRAPH_PREPARE,ZizhanMfcSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300005u,ZizhanMfcPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300005u,ZizhanMfcPort)){return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanMfcPort,0x7a300006u,AR_OP_GRAPH_START,ZizhanMfcSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300006u,ZizhanMfcPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300006u,ZizhanMfcPort)){return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a300007u,AR_OP_GRAPH_PREPARE,ZizhanPcmSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300007u,ZizhanPcmPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300007u,ZizhanPcmPort)){return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a300008u,AR_OP_GRAPH_START,ZizhanPcmSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300008u,ZizhanPcmPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300008u,ZizhanPcmPort)){return false;}++o.graph_acks;
  IOLog("ZIZHAN_AUDIO_GRAPH: RUNNING device_sg=%x stream_sg=%x mfc=%x tdm=%x data=0 audio_output=0\n",
   ZizhanMfcSg,ZizhanPcmSg,ZizhanMfcIid,ZizhanTdmIid);
  if(o.mode==36||o.mode==37){if(!batch_round(o.mode==36))return false;}
  else if(o.mode==38){if(!runtime_round())return false;}
  else IOSleep(1000);
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a300009u,AR_OP_GRAPH_STOP,ZizhanPcmSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a300009u,ZizhanPcmPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a300009u,ZizhanPcmPort)){return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a30000au,AR_OP_GRAPH_CLOSE,ZizhanPcmSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a30000au,ZizhanPcmPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a30000au,ZizhanPcmPort)){return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanMfcPort,0x7a30000bu,AR_OP_GRAPH_STOP,ZizhanMfcSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a30000bu,ZizhanMfcPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a30000bu,ZizhanMfcPort)){return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanMfcPort,0x7a30000cu,AR_OP_GRAPH_CLOSE,ZizhanMfcSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a30000cu,ZizhanMfcPort))return false;++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a30000cu,ZizhanMfcPort)){return false;}++o.graph_acks;
  if(o.mode==37){o.tone48_cleared=zizhan_audio_tone48_clear()?1u:0u;if(!o.tone48_cleared)return false;}
  if(!memory_commands(true))return false;
  o.dma_restored=zizhan_audio_dma_map_end()?1u:0u;
@@ -344,7 +344,7 @@ bool write_commands(unsigned sequence=0,bool silence=false){
   if(p.bytes){const int accepted=zizhan_write_receive(&o.write,p.data,p.bytes);if(accepted==1)++o.write_ack;
    IOLog("ZIZHAN_AUDIO_WRITE: rx bytes=%u accepted=%d phase=%u remote=%u ignored=%u\n",p.bytes,accepted,o.write.phase,o.write.remote,o.write.ignored);}
   const uint64_t now=now_us();if(o.mode==34&&o.write.phase==ZizhanWriteWaiting&&now-o.write.began_us>=100000)zizhan_write_fail(&o.write,4);zizhan_write_tick(&o.write,now);
-  if(o.write.phase==ZizhanWriteFailed)return false;if(o.write.phase==ZizhanWriteDone)return true;
+  if(o.write.phase==ZizhanWriteFailed){return false;}if(o.write.phase==ZizhanWriteDone)return true;
   uint8_t bytes[512];const unsigned n=zizhan_write_next(&o.write,now,bytes);
   if(n){++o.write_sent;IOLog("ZIZHAN_AUDIO_WRITE: send bytes=%u token=%x address=%llx handle=%x data_bytes=%u zero_only=%u data_pads=%u audio_output=%u sequence=%u\n",n,o.write.token,o.write.address,o.write.handle,ZizhanWriteBytes,o.mode>=33&&!silence?0u:1u,o.mode>=29?1u:0u,o.mode==34&&!silence?1u:0u,sequence);
    if(sheng_adsp_send(o.channel,bytes,n)){zizhan_write_fail(&o.write,5);return false;}}

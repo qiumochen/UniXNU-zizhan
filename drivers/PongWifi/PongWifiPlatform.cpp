@@ -716,7 +716,7 @@ extern "C" bool pong_rpmh_batch(const uint32_t *addresses,const uint32_t *values
 }
 
 extern "C" bool pong_rpmh_completed_request(uint32_t address,zizhan_rpmh::CompletedRequest *out) {
- if(out)*out={};if(!powerLock||!out)return false;
+ if(out){*out={};}if(!powerLock||!out)return false;
  IOLockLock(powerLock);const bool ok=!batchState.uncertain&&completionJournal.get(address,out);
  IOLockUnlock(powerLock);return ok;
 }

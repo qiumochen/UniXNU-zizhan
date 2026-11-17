@@ -24,11 +24,11 @@ struct CompletionJournal {
   if(fresh>64-count){invalid=true;return false;}
   const uint64_t next=++sequence;
   for(unsigned i=0;i<n;++i){unsigned at=0;while(at<count&&entries[at].address!=addresses[i])++at;
-   if(at==count)++count;entries[at]={addresses[i],values[i],next};}
+   if(at==count){++count;}entries[at]={addresses[i],values[i],next};}
   return true;
  }
  bool get(uint32_t address,CompletedRequest *out)const{
-  if(!out)return false;*out={};if(invalid||!address||(address&3))return false;
+  if(!out){return false;}*out={};if(invalid||!address||(address&3))return false;
   for(unsigned i=0;i<count;++i)if(entries[i].address==address){*out=entries[i];return true;}
   return false;
  }

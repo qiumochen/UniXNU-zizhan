@@ -18,7 +18,7 @@ template<class Pin> bool restore(Pin &pin,State &s,bool reset_held){
  if(!reset_held)return false;
  // Actual shared reset must already be asserted by the caller.
  pin.write(0,s.config);s.restored=pin.read(0)==s.config&&(pin.read(4)&2)==(s.io&2);
- if(s.restored)s.connected=false;return s.restored;
+ if(s.restored){s.connected=false;}return s.restored;
 }
 }
 #endif

@@ -27,8 +27,8 @@ int main(void){
  }
  for(unsigned corrupt=0;corrupt<8;++corrupt){
   ready(&s);zizhan_prm_next(&s,300,out);unsigned length=reply(&s,rx,AR_OP_PRM_REQUEST_DONE,0,0);
-  if(corrupt==0)rx[4]=9;if(corrupt==1)rx[5]=9;if(corrupt==2)rx[8]^=1;if(corrupt==3)rx[12]^=1;
-  if(corrupt==4)rx[16]^=1;if(corrupt==5)rx[20]^=1;if(corrupt==6)length--;if(corrupt==7)rx[length++]=0;
+  if(corrupt==0){rx[4]=9;}if(corrupt==1)rx[5]=9;if(corrupt==2)rx[8]^=1;if(corrupt==3)rx[12]^=1;
+  if(corrupt==4){rx[16]^=1;}if(corrupt==5)rx[20]^=1;if(corrupt==6)length--;if(corrupt==7)rx[length++]=0;
   assert(!zizhan_prm_receive(&s,rx,length)&&s.phase==ZizhanPrmRequestWait&&!s.lease_held);
   zizhan_prm_tick(&s,2000300);assert(s.phase==ZizhanPrmFailed&&s.uncertain&&!zizhan_prm_next(&s,2000301,out));
  }

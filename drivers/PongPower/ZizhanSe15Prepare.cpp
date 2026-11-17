@@ -54,7 +54,7 @@ struct RamInput {
             size=length;bytes=static_cast<uint8_t *>(IOMalloc(size));
             if(bytes)memcpy(bytes,data->getBytesNoCopy(),size);
         }
-        if(chosen)chosen->release();return bytes!=nullptr;
+        if(chosen){chosen->release();}return bytes!=nullptr;
     }
     ~RamInput(){if(bytes)IOFree(bytes,size);}
 };
@@ -483,7 +483,7 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
 void worker(void *context,wait_result_t){prepare(static_cast<unsigned>(reinterpret_cast<uintptr_t>(context)));}
 } // namespace
 static void owned_clock_run(const ZizhanPrmState *lease,ZizhanAudioSilentReceipt *receipt,unsigned mode,const ZizhanAudioTransfer *transfer=nullptr){
-    if(!receipt)return;memset(receipt,0,sizeof *receipt);receipt->release_safe=1;
+    if(!receipt){return;}memset(receipt,0,sizeof *receipt);receipt->release_safe=1;
     if(!lease||lease->phase!=ZizhanPrmClockReleaseReady||!lease->native_framework||!lease->native_wire||!lease->clock_mode||
        !lease->framework_ready||!lease->lease_held||!lease->clock_held||!lease->request_ack||!lease->clock_request_ack||
        lease->sent!=3||lease->acknowledged!=3||lease->reason||lease->uncertain){

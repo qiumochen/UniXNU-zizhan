@@ -12,7 +12,7 @@ static unsigned prepare_run(Fake *f,ZizhanAmpCoefficients *coeff,ZizhanAmpHash h
 typedef struct {Fake *f;ZizhanAmpRun *out;unsigned calls,test;} TransferContext;
 static int transfer_zero(void *context,unsigned chip){TransferContext *c=context;assert(chip==c->calls++&&chip<2);
  assert(c->f->state[chip][2]==1&&(c->f->state[chip][0]&1)&&!(c->f->state[chip][1]&0x31)&&c->out->samples[chip]==49&&c->out->heartbeat_changes[chip]>=10);
- if(c->test==1&&chip==0)return 0;if(c->test==2&&chip==1)return 0;
+ if(c->test==1&&chip==0){return 0;}if(c->test==2&&chip==1)return 0;
  if(c->test==7)c->f->iv_bad=1;
  if(c->test==4)c->f->state[chip][2]^=0x100;
  if(c->test==5)c->f->run_freeze=1;
@@ -23,7 +23,7 @@ typedef struct {Fake *f;unsigned calls,test;} PulseContext;
 static int transfer_pulse(void *p,unsigned chip){PulseContext *c=p;const unsigned order[]={2,0,3,1};assert(c->calls<4&&chip==order[c->calls]);
  const unsigned real=chip%2;assert(c->f->state[real][2]==1&&c->f->state[real][0]==1);
  assert(c->f->state[real][1]==(chip>=2?0x3300u:0x3321u));++c->calls;c->f->time+=10000;
- if(c->test==1&&chip==2)return 0;if(c->test==2&&chip==0)return 0;if(c->test==3&&chip==0)c->f->time+=250000;
+ if(c->test==1&&chip==2){return 0;}if(c->test==2&&chip==0)return 0;if(c->test==3&&chip==0)c->f->time+=250000;
  return 1;
 }
 int main(int argc,char **argv){
@@ -37,9 +37,9 @@ int main(int argc,char **argv){
  const ZizhanAmpClock clock={&f,now,pause_us};unsigned commands=0;
  for(unsigned test=0;test<11;++test){
   unsigned before=prepare_run(&f,&coeff,coeff_hash,fw_hash),enabled=1;
-  if(test==1)enabled=0;if(test==2)coeff.readbacks[1]=949;if(test==3)coeff.identity[1][12]++;
-  if(test==4)f.run_freeze=1;if(test==5)f.run_bad_mpu=1;if(test==6)f.run_fault=1;
-  if(test==7)f.state[0][1]|=1;if(test==8)f.clock_step=2000000;
+  if(test==1){enabled=0;}if(test==2)coeff.readbacks[1]=949;if(test==3)coeff.identity[1][12]++;
+  if(test==4){f.run_freeze=1;}if(test==5)f.run_bad_mpu=1;if(test==6)f.run_fault=1;
+  if(test==7){f.state[0][1]|=1;}if(test==8)f.clock_step=2000000;
   if(test==9)f.stall_command=before+85,f.frozen=1;
   if(test==10)coeff.transport.controller_uncertain=1;
   int rc=zizhan_cs35l41_run(enabled,flags,&f.bus,&clock,&coeff,&out);
@@ -90,7 +90,7 @@ int main(int argc,char **argv){
  for(unsigned test=0;test<10;++test){
   unsigned before=prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_observed=1;f.run_pll[0]=f.run_pll[1]=0x10;
   if(test>=1&&test<=6)f.run_bad_pll=test;
-  if(test==7)f.run_freeze=1;if(test==8)f.run_halo_state=1;if(test==9)f.clock_step=5000000;
+  if(test==7){f.run_freeze=1;}if(test==8)f.run_halo_state=1;if(test==9)f.clock_step=5000000;
   int rc=zizhan_cs35l41_clocked_run(1,flags,&f.bus,&clock,&coeff,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.clocked_profile);
    assert(out.attempted_writes==94&&out.acknowledged_writes==94);
@@ -121,7 +121,7 @@ int main(int argc,char **argv){
  unsigned global_commands=0;
  for(unsigned test=0;test<3;++test){
   unsigned before=prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;f.run_allow_global=1;
-  if(test==1)f.run_asp_enabled=1;if(test==2)f.state[0][1]|=1;
+  if(test==1){f.run_asp_enabled=1;}if(test==2)f.state[0][1]|=1;
   int rc=zizhan_cs35l41_global_pll_capture(1,flags,&f.bus,&clock,&coeff,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==18&&out.acknowledged_writes==18&&f.run_global_writes==4&&!f.run_core_writes);
    global_commands=f.commands-before;
@@ -135,8 +135,8 @@ int main(int argc,char **argv){
  }
  for(unsigned test=0;test<6;++test){
   prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;f.run_allow_global=1;f.run_lock=1;
-  if(test==1)f.run_lock=0;if(test==2)f.run_bad_mpu=1;if(test==3)f.run_freeze=1;
-  if(test==4)f.run_asp_enabled=1;if(test==5)f.run_halo_state=1;
+  if(test==1){f.run_lock=0;}if(test==2)f.run_bad_mpu=1;if(test==3)f.run_freeze=1;
+  if(test==4){f.run_asp_enabled=1;}if(test==5)f.run_halo_state=1;
   int rc=zizhan_cs35l41_global_silent_run(1,flags,&f.bus,&clock,&coeff,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==100&&out.acknowledged_writes==100&&!out.observed_mpu_profile);
    for(unsigned c=0;c<2;++c)assert(out.global_on[c]==1&&out.global_off[c]==1&&!out.global_active[c]&&out.started[c]==1&&out.stopped[c]==1&&out.samples[c]==100&&out.heartbeat_changes[c]==99&&out.pll_lock_samples[c]==64&&!out.asp_enables[c]&&!f.state[c][0]&&f.state[c][1]==0x3300);
@@ -156,7 +156,7 @@ int main(int argc,char **argv){
  for(unsigned test=0;test<23;++test){
   prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;f.run_allow_global=f.run_lock=f.run_observed=1;
   if(test>=1&&test<=20)f.run_bad_index=test;
-  if(test==21)f.run_profile_change=1;if(test==22)f.run_freeze=1;
+  if(test==21){f.run_profile_change=1;}if(test==22)f.run_freeze=1;
   int rc=zizhan_cs35l41_global_observed_run(1,flags,&f.bus,&clock,&coeff,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==100&&out.observed_mpu_profile);
    for(unsigned c=0;c<2;++c)assert(out.mpu_stable_readbacks[c]==20&&out.samples[c]==100&&out.heartbeat_changes[c]>=10&&out.global_off[c]==1&&!out.global_active[c]&&!out.asp_enables[c]&&out.stopped[c]);
@@ -183,7 +183,7 @@ int main(int argc,char **argv){
  for(unsigned test=0;test<6;++test){
   unsigned before=prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;f.run_allow_global=f.run_lock=f.run_observed=f.run_native_frame=f.run_calibration=1;
   ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};
-  if(test==1)cal.version=0;if(test==2)cal.resistance[0]=0;if(test==3)cal.resistance[1]=0xffffff;
+  if(test==1){cal.version=0;}if(test==2)cal.resistance[0]=0;if(test==3)cal.resistance[1]=0xffffff;
   if(test==4)f.run_bad_calibration=1;
   int rc=zizhan_cs35l41_native_protection_run(1,flags,&f.bus,&clock,&coeff,test==5?NULL:&cal,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==111&&out.acknowledged_writes==111);
@@ -194,7 +194,7 @@ int main(int argc,char **argv){
  for(unsigned test=0;test<18;++test){
   prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;
   f.run_allow_global=f.run_lock=f.run_observed=f.run_native_frame=f.run_calibration=f.run_native_rates=1;
-  if(test>=2)f.run_bad_native_rate=test-1;if(test==1)f.run_freeze=1;
+  if(test>=2){f.run_bad_native_rate=test-1;}if(test==1)f.run_freeze=1;
   ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};
   int rc=zizhan_cs35l41_native_rates_run(1,flags,&f.bus,&clock,&coeff,&cal,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==143&&out.acknowledged_writes==143);
@@ -206,7 +206,7 @@ int main(int argc,char **argv){
  for(unsigned test=0;test<4;++test){
   prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;
   f.run_allow_global=f.run_lock=f.run_observed=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=1;
-  if(test==1)f.run_freeze=1;if(test>=2)f.run_rx_bad=test-1;
+  if(test==1){f.run_freeze=1;}if(test>=2)f.run_rx_bad=test-1;
   ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};
   int rc=zizhan_cs35l41_asp_rx_run(1,flags,&f.bus,&clock,&coeff,&cal,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==147&&out.acknowledged_writes==147&&!f.run_asp_enabled);
@@ -219,7 +219,7 @@ int main(int argc,char **argv){
   prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;
   f.run_allow_global=f.run_lock=f.run_observed=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=f.run_format_profile=1;
   f.run_format_value[0]=f.run_format_value[1]=0x181802a2;
-  if(test==1)f.run_format_bad=1;if(test==2)f.run_freeze=1;
+  if(test==1){f.run_format_bad=1;}if(test==2)f.run_freeze=1;
   ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};
   int rc=zizhan_cs35l41_asp_format_run(1,flags,&f.bus,&clock,&coeff,&cal,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==149&&out.acknowledged_writes==149);
@@ -307,7 +307,7 @@ int main(int argc,char **argv){
   f.run_mode=1;f.run_pll[0]=f.run_pll[1]=0x10;
   f.run_allow_global=f.run_lock=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=f.run_format_profile=f.run_observed=1;
   f.run_format_value[0]=f.run_format_value[1]=0x181802a2;f.mailbox_test=1;f.mailbox_mask[0]=f.mailbox_mask[1]=0xffffffff;
-  if(test==1||test==2)f.iv_bad=test;if(test==3)f.state[0][1]&=~0x1000u;
+  if(test==1||test==2){f.iv_bad=test;}if(test==3)f.state[0][1]&=~0x1000u;
   ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};TransferContext context={&f,&out,0,test==4?7u:0u};ZizhanAudioTransfer transfer={&context,transfer_zero};
   int rc=zizhan_cs35l41_native_iv_transfer(1,flags,&f.bus,&clock,&coeff,&cal,&transfer,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&context.calls==2&&out.attempted_writes==149&&f.iv_reads==8);

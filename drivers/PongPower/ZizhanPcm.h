@@ -35,8 +35,8 @@ static inline int zizhan_pcm_receive(ZizhanPcmState *s,const uint8_t *data,unsig
  if(p.payload_bytes!=8||zizhan_tdm_le32(p.payload)!=s->opcode){zizhan_pcm_fail(s,2);return -1;}
  s->status=zizhan_tdm_le32(p.payload+4);if(s->status){zizhan_pcm_fail(s,3);return -1;}
  s->waiting=0;++s->ack;if(s->phase==ZizhanPcmOpen)s->opened=1;
- if(s->phase==ZizhanPcmStart)s->running=1;if(s->phase==ZizhanPcmStop)s->running=0;
- if(s->phase==ZizhanPcmClose)s->opened=0;++s->phase;return 1;
+ if(s->phase==ZizhanPcmStart){s->running=1;}if(s->phase==ZizhanPcmStop)s->running=0;
+ if(s->phase==ZizhanPcmClose){s->opened=0;}++s->phase;return 1;
 }
 static inline void zizhan_pcm_tick(ZizhanPcmState *s,uint64_t now){
  if(s->waiting&&(now<s->began_us||now-s->began_us>=2000000))zizhan_pcm_fail(s,4);

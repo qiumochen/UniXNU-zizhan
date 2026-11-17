@@ -16,7 +16,7 @@ bool access(bool clear){
  for(unsigned i=0;i<16;++i)if(pmap_valid_page((ppnum_t)((base>>12)+i)))return false;
  auto memory=IODeviceMemory::withRange(base,65536);
  auto map=memory?memory->map(kIOMapAnywhere|kIOMapWriteCombineCache):nullptr;
- if(memory)memory->release();if(!map)return false;
+ if(memory){memory->release();}if(!map)return false;
  auto words=reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress());
  unsigned reads=0,writes=0,reason=0;
  for(unsigned at=0;at<ZizhanTone48Extent;at+=4){++reads;

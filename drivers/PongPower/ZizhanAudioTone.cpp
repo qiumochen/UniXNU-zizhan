@@ -20,7 +20,7 @@ bool access(bool clear){
  for(unsigned i=0;i<16;++i)if(pmap_valid_page((ppnum_t)((base>>12)+i)))return false;
  auto memory=IODeviceMemory::withRange(base,65536);
  auto map=memory?memory->map(kIOMapAnywhere|kIOMapWriteCombineCache):nullptr;
- if(memory)memory->release();if(!map)return false;
+ if(memory){memory->release();}if(!map)return false;
  auto words=reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress());
  zizhan_audio_tone::Receipt r;
  const bool ok=zizhan_audio_tone::buffer(base,65536,clear,[](uint64_t p){return pmap_valid_page((ppnum_t)p)!=0;},

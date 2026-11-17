@@ -23,7 +23,7 @@ int main(void){
  at=40;for(unsigned i=0;i<5;++i){assert(zizhan_tdm_le32(tx+at)==ZizhanTdmIid&&zizhan_tdm_le32(tx+at+4)==ids[i]&&zizhan_tdm_le32(tx+at+8)==sizes[i]&&!zizhan_tdm_le32(tx+at+12));
   if(!i)assert(!memcmp(tx+at+16,tdm,sizeof tdm));
   if(i==1)assert(zizhan_tdm_le32(tx+at+16)==96000&&tx[at+20]==24&&tx[at+22]==3&&zizhan_tdm_le32(tx+at+24)==1);
-  if(i==2)assert(zizhan_tdm_le32(tx+at+16)==1);if(i==3)assert(zizhan_tdm_le32(tx+at+16)==2);
+  if(i==2){assert(zizhan_tdm_le32(tx+at+16)==1);}if(i==3)assert(zizhan_tdm_le32(tx+at+16)==2);
   if(i==4)assert(!zizhan_tdm_le32(tx+at+16)&&!zizhan_tdm_le32(tx+at+20)&&zizhan_tdm_le32(tx+at+24)==4&&!zizhan_tdm_le32(tx+at+28));
   at+=16+((sizes[i]+7)&~7u);
  }assert(at==n&&n==200);

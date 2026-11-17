@@ -10,7 +10,7 @@ static unsigned reply(ZizhanWriteState *s,uint8_t out[512],unsigned test){
  zizhan_write_put32(body+4,(uint32_t)(s->address>>32));zizhan_write_put32(body+8,s->handle);
  GprPacket p={0};p.src_domain=2;p.dst_domain=3;p.src_port=ZizhanPcmShmem;
  p.dst_port=ZizhanPcmPort;p.token=s->token;p.opcode=AR_OP_WRITE_DONE;
- if(test==1)p.token++;if(test==2)body[10]^=1;if(test==3)body[12]=1;
+ if(test==1){p.token++;}if(test==2)body[10]^=1;if(test==3)body[12]=1;
  return gpr_encode(out,512,&p,body,test==4?16:32);
 }
 static void put16(int16_t *ring,unsigned frame,unsigned channel,int16_t value){

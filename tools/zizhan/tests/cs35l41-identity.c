@@ -53,7 +53,7 @@ static const uint32_t patch_regs[]={0x4100,0x4310,0x4400,0x381c,0x2bc20e0,0x2bc2
 static int rate_slot(uint32_t reg){for(unsigned i=0;i<16;++i)if(reg==0x2b80080+(i%8)*8+(i>=8?0x200:0))return (int)i;return -1;}
 static int debug_slot(uint32_t reg){for(unsigned i=0;i<15;++i)if(reg==zizhan_cs35l41_debug_register(i))return (int)i;return -1;}
 static int mpu_slot(uint32_t reg){const uint32_t regs[]={0,4,8,12,20,24,28,32,36,44,48,52,56,60,68,72,76,80,84,92};
- for(unsigned i=0;i<20;++i)if(reg==0x2bc3000+regs[i])return (int)i;return -1;}
+ for(unsigned i=0;i<20;++i){if(reg==0x2bc3000+regs[i])return (int)i;}return -1;}
 static int ram_slot(uint32_t reg){
  const uint32_t base[]={0x02000000,0x0200009c,0x020003cc,0x02000a14,0x02c00000,0x03800000};
  const unsigned size[]={72,528,1596,1260,6000,20420};unsigned slot=0;
@@ -147,7 +147,7 @@ static uint32_t rd(void *ctx, uint32_t reg) {
             if(f->reg==0x2800804)return swap(f->run_lrclk_delay[i]^(f->run_bad_frame?1u:0u));
             if(f->reg==0x2800800)return swap(f->run_us_bypass[i]);
             if(f->reg==0x2800268)return swap(f->run_cal_r[i]^(f->run_bad_calibration?1u:0u));
-            if(f->reg==0x2800274)return swap(f->run_cal_checksum[i]);if(f->reg==0x2800270)return swap(f->run_cal_status[i]);
+            if(f->reg==0x2800274){return swap(f->run_cal_checksum[i]);}if(f->reg==0x2800270)return swap(f->run_cal_status[i]);
             if(debug_slot(f->reg)>=0)return swap(0x40000000u+(unsigned)debug_slot(f->reg)+((f->state[i][2]&1)?0x10000u:0));
             if(f->reg>=0x10090&&f->reg<=0x1009c)return swap(f->reg==0x10098&&f->run_lock?2u:0u);
             if(f->reg>=0x10010&&f->reg<=0x1001c)return 0;

@@ -17,7 +17,7 @@ typedef struct {
 } ZizhanAudioStream;
 static inline int zizhan_stream_init(ZizhanAudioStream *s,uint64_t base,uint32_t handle,
                                      unsigned count,unsigned ring_frames,uint64_t start_frame,uint64_t now){
- if(!s||s->magic)return 0;memset(s,0,sizeof *s);
+ if(!s||s->magic){return 0;}memset(s,0,sizeof *s);
  if(ring_frames!=ZizhanRingFrames||!count||count>4)return 0;
  if(!zizhan_batch_init_ex(&s->batch,base,handle,65536,ZizhanRingPcmBytes,ZizhanRingPcmFrames,count,now))return 0;
  s->magic=0x5a535452u;s->ring_frames=ring_frames;s->next_frame=start_frame;s->phase=ZizhanStreamReady;return 1;
@@ -43,7 +43,7 @@ static inline int zizhan_stream_receive(ZizhanAudioStream *s,const uint8_t *data
  return result;
 }
 static inline void zizhan_stream_stop(ZizhanAudioStream *s){
- if(!s||s->magic!=0x5a535452u)return;zizhan_batch_stop(&s->batch);
+ if(!s||s->magic!=0x5a535452u){return;}zizhan_batch_stop(&s->batch);
  if(s->phase!=ZizhanStreamFailed)s->phase=ZizhanStreamDone;
 }
 static inline int zizhan_stream_done(const ZizhanAudioStream *s){

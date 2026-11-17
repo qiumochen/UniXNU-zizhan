@@ -35,7 +35,7 @@ int main(int argc,char **argv){assert(argc==2);
  if(!strcmp(argv[1],"changed")){tagged=0x1f0001000ull;assert(!zizhan_audio_tone_clear()&&maps==1);return 0;}
  if(!strcmp(argv[1],"corrupt")){words[10]^=1;uint32_t before=words[10];assert(!zizhan_audio_tone_clear()&&words[10]==before&&maps==2&&releases==2);return 0;}
  assert(!strcmp(argv[1],"pass"));assert(zizhan_audio_tone_clear()&&maps==2&&releases==2);
- for(uint32_t v:words)assert(!v);assert(!zizhan_audio_tone_clear()&&!zizhan_audio_tone_prepare()&&maps==2);
+ for(uint32_t v:words){assert(!v);}assert(!zizhan_audio_tone_clear()&&!zizhan_audio_tone_prepare()&&maps==2);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='zizhan-tone-platform-') as temp:

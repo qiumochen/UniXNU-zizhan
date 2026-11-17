@@ -55,7 +55,7 @@ int main() {
     }
     for(unsigned test=0;test<6;++test){
         Page pin;pin.words[0]=1;zizhan_audio_sck::State state;
-        if(test==1)pin.words[0]=4;if(test==2)pin.words[4]=1;if(test==3)pin.refuse=true;
+        if(test==1){pin.words[0]=4;}if(test==2)pin.words[4]=1;if(test==3)pin.refuse=true;
         const bool connected=zizhan_audio_sck::connect(pin,state);
         if(test==1||test==2)assert(!connected&&!state.claimed&&pin.writes.empty());
         else if(test==3)assert(!connected&&state.claimed);

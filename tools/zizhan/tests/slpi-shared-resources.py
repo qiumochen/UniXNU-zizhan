@@ -38,7 +38,7 @@ static void *vfs_context_ucred(vfs_context_t p){return p;}
 static void *vfs_context_proc(vfs_context_t p){return p;}
 static int vnode_open(const char *path,int flags,int a,int b,vnode_t *out,vfs_context_t ctx){
  assert(zizhan_dsp_firmware_path(path)&&flags==FREAD&&!a&&!b&&ctx);++opens;
- if(open_error)return open_error;*out=(void*)2;return 0;
+ if(open_error){return open_error;}*out=(void*)2;return 0;
 }
 static int vnode_close(vnode_t p,int flags,vfs_context_t ctx){assert(p&&flags==FREAD&&ctx);++closes;return 0;}
 static int vnode_getattr(vnode_t p,struct vnode_attr *a,vfs_context_t ctx){assert(p&&ctx);a->va_data_size=file_size;return attr_error;}

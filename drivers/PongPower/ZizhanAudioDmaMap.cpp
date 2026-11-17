@@ -96,7 +96,7 @@ bool failed(const char *stage){
  // A partially programmed context may still refer to these real tables.
  // Retain all storage/MMIO until actual reset,without blocking other actors
  // on the global lock. No new audio trial is allowed in this boot.
- if(!owner.state.attempted)release_safe();unlock();return false;
+ if(!owner.state.attempted){release_safe();}unlock();return false;
 }
 }
 extern "C" bool zizhan_audio_dma_map_begin(void){
@@ -104,14 +104,14 @@ extern "C" bool zizhan_audio_dma_map_begin(void){
  auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);auto data=chosen?OSDynamicCast(OSData,chosen->getProperty("pong-audio-dma")):nullptr;
  uint64_t extent[2]={};if(data&&data->getLength()==sizeof extent)memcpy(extent,data->getBytesNoCopy(),sizeof extent);if(chosen)chosen->release();
  o.base=extent[0];o.bytes=extent[1];if(!o.base||(o.base&4095)||o.bytes!=65536||o.base>0x100000000ull-o.bytes)return failed("UEFI-extent");
- if(!pong_smmu_lease_lock())return failed("global-owner");o.lock_held=1;
+ if(!pong_smmu_lease_lock()){return failed("global-owner");}o.lock_held=1;
  auto memory=IODeviceMemory::withRange(0x15000000,0x100000);o.map=memory?memory->map(kIOMapAnywhere|kIOMapInhibitCache):nullptr;if(memory)memory->release();
- if(!o.map)return failed("MMIO-map");o.registers=reinterpret_cast<volatile uint8_t *>(o.map->getVirtualAddress());
+ if(!o.map){return failed("MMIO-map");}o.registers=reinterpret_cast<volatile uint8_t *>(o.map->getVirtualAddress());
  auto capture=zizhan_audio_dma::inspect(o.base,o.bytes,[&](unsigned at){uint32_t value=0;(void)read32(&o,at,&value);return value;});
  if(capture.status!=zizhan_audio_dma::Pass||capture.plan.error||capture.plan.reuse||capture.plan.migrate)return failed("fresh-exclusive-plan");
  if(!exclusive_asid(capture))return failed("ASID-namespace");
  o.tables=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryPhysicallyContiguous)|IOOptionBits(kIOMemoryMapperNone),65536,4096);
- if(!o.tables)return failed("table-allocation");IOByteCount span=0;o.table_pa=o.tables->getPhysicalSegment(0,&span,kIOMemoryMapperNone);
+ if(!o.tables){return failed("table-allocation");}IOByteCount span=0;o.table_pa=o.tables->getPhysicalSegment(0,&span,kIOMemoryMapperNone);
  if(!o.table_pa||(o.table_pa&4095)||span<65536||o.table_pa>0x1000000000ull-65536||!(o.table_pa+65536<=o.base||o.base+o.bytes<=o.table_pa))return failed("table-extent");
  o.lower={32,36,o.table_pa,16};o.range={o.base,o.base,o.bytes,ArmSmmu4KRead|ArmSmmu4KWrite,0,2};
  if(ArmSmmu4KBuild(&o.lower,&o.range,1,static_cast<uint64_t *>(o.tables->getBytesNoCopy()),16,&o.built)!=ArmSmmu4KSuccess)return failed("native4K-tables");

@@ -17,8 +17,8 @@ int main(){
  for(unsigned test=0;test<11;++test){Device d;d.test=test;auto o=d.ops();ZizhanPulseReceipt r={};
   if(test==1){assert(zizhan_pulse_run(&o,&r)==ZizhanPulseGuard&&!d.commands);continue;}
   assert(!zizhan_pulse_patch(&o,&r,1)&&r.patch_on);d.regs[0x2014]=1;
-  if(test==2)d.regs[0x13004]=1;if(test==3)d.regs[0x28007d0]=1;if(test==4)d.regs[0x4c48]=0;
-  if(test==5)d.regs[0x10010]|=0x100;if(test==6)d.regs[0x10090]|=0x80000000;
+  if(test==2){d.regs[0x13004]=1;}if(test==3)d.regs[0x28007d0]=1;if(test==4)d.regs[0x4c48]=0;
+  if(test==5){d.regs[0x10010]|=0x100;}if(test==6)d.regs[0x10090]|=0x80000000;
   if(test==7)d.regs[0x6000]=0;
   int rc=zizhan_pulse_run(&o,&r);
   if(!test){assert(!rc&&r.complete&&r.enabled&&r.disabled&&r.data_ack&&d.regs[0x2018]==0x3300&&d.regs[0x6000]==0x267c);d.regs[0x2014]=0;

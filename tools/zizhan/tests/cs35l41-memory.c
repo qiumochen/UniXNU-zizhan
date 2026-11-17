@@ -10,7 +10,7 @@ static unsigned reply(ZizhanMemoryState *s,uint8_t *out,uint32_t op,uint32_t fir
 int main(void){
  uint8_t tx[512],rx[512];GprPacket p;
  for(unsigned test=0;test<8;++test){ZizhanMemoryState s={0};s.address=0x1f0000000ull;
-  if(test==1)s.address=0;if(test==2)s.address++;
+  if(test==1){s.address=0;}if(test==2)s.address++;
   unsigned n=zizhan_memory_next(&s,100,tx);
   if(test==1||test==2){assert(!n&&s.phase==ZizhanMemoryFailed&&!s.sent);continue;}
   assert(n==44&&!gpr_decode(tx,n,&p)&&p.src_port==ZizhanMemoryPort&&p.dst_port==1&&p.opcode==AR_OP_MEM_MAP);

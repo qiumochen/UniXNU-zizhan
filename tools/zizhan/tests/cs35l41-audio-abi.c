@@ -25,9 +25,9 @@ int main(void){
  assert(zizhan_audio_written_stable(&c,&w)&&w==480);
  for(unsigned test=0;test<8;++test){
   ZizhanAudioControl b=fresh();
-  if(test==0)b.version++;if(test==1)b.rate=44100;if(test==2)b.out_channels=1;
-  if(test==3)b.in_channels=1;if(test==4)b.ring_frames++;if(test==5)b.lead_frames=0;
-  if(test==6)b.lead_frames=b.ring_frames;if(test==7)b.ticks_per_frame_q32=0;
+  if(test==0){b.version++;}if(test==1)b.rate=44100;if(test==2)b.out_channels=1;
+  if(test==3){b.in_channels=1;}if(test==4)b.ring_frames++;if(test==5)b.lead_frames=0;
+  if(test==6){b.lead_frames=b.ring_frames;}if(test==7)b.ticks_per_frame_q32=0;
   assert(!zizhan_audio_control_valid(&b));
  }
  zizhan_audio_publish_written(NULL,1);

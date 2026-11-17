@@ -23,7 +23,7 @@ template<typename Pin> bool restore(Pin &pin,State &s){
  // live clock from a running amplifier:caller asserts shared reset first.
  pin.write(0,s.config);pin.write(4,s.io);
  s.restored=pin.read(0)==s.config&&(pin.read(4)&2)==(s.io&2);
- if(s.restored)s.connected=false;return s.restored;
+ if(s.restored){s.connected=false;}return s.restored;
 }
 }
 #endif

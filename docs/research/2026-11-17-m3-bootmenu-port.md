@@ -7,7 +7,7 @@
 
 - data-a-live：`https://github.com/yechenan/data-a-live`，提交 `7c779bd99b918c1820235442a41fec0c000afb60`（2026-11-11）。下文行号均指该提交的 `bootmgr/`。
 - zizhan 备份：`$ZIZHAN_SRC/../backup/2026-10-28-V14.0.15.0/boot_a.img.gz`、`boot_b.img.gz`（各 201,326,592 B，即 192 MiB 分区整镜像）。
-- zizhan 设备树：`$ZIZHAN_SRC/work-dt/live.dts`（2026-11-01 从手机导出的 live FDT）与本次只读 `/proc/device-tree` 查询。
+- zizhan 设备树：`$ZIZHAN_SRC/../work-dt/live.dts`（2026-11-01 从手机导出的 live FDT）与本次只读 `/proc/device-tree` 查询。
 - 现有 iPadOS 临时启动镜像：`out/statusbar-inner-1116-v3/pong-xnu-initial.img`（102,572,032 B）。
 
 ## 1. 结论
@@ -24,11 +24,12 @@
 | 音量上是 **PM8350 GPIO6（SPMI）**，不是 TLMM GPIO | `live.dts:32346-32353`、`pinctrl@8800` |
 | ABL bootargs 里没有 data-a-live 用来判断“正常开机”的三个词 | 设备只读 `/proc/device-tree/chosen/bootargs` |
 
-推荐路线（按风险从低到高）：
+推荐路线（按“最小增量 + 未知数”排序；A 的具体工作量见 §9）：
 
-1. **先做不写入的 `fastboot boot` 探针**，一次证明/否证三个未知：ABL 入口 EL、`cntvct_el0` 是否可用、PM8350 GPIO6 是否能在裸机菜单里读到。
-2. 探针通过 → 按 §6 的 B 方案移植 `bootmgr`，只写一次 boot 分区。
-3. 探针失败（PMIC 读不到，或 EL/计数器不可用）→ 转 A 方案：在现有 uefi-zizhan 菜单里加“启动安卓”项，复用已经工作的按键和显示。
+1. **先做 B 的不写入探针（T1）**：一次 `fastboot boot` 证明/否证 ABL 入口 EL、`cntvct_el0`、PM8350 GPIO6 读取，以及 ABL 能否加载 146.4 MiB 的 kernel field。B 的代码量最小，而且 Android 的 vendor_boot + boot ramdisk + bootconfig 由 ABL 按原样组装，安卓路径最保真。
+2. 探针通过 → B 进 T2（iOS 格子）/ T3（写 boot_b）。
+3. 探针失败（EL/计数器/PMIC/加载上限任一）→ 转 A：UEFI 的 `type="linux"` 加载路径已经实现（`Boot.c:170-200`），可以直接用 EFI stub 启原装内核；但 A **没有现成按键**（`zizhan.dsc` 不含 KeypadDxe，`KeypadDeviceLib` 没有实现），还要自己拼 vendor_boot 的 initrd/bootconfig。A 不是“按键现成”的捷径。
+4. 若 T1 证明 B 的 PMIC 读不可行、而 A 的 keypad 可补，则 A 优先；两者都要先解决 PMIC 读键。
 
 ## 2. zizhan 原装 boot 镜像结构（电脑端实测）
 
@@ -247,21 +248,48 @@ VOLUP: 0/1
 
 撤销：`fastboot flash boot_b <原装 boot_b.img>`。ABL、vbmeta、vendor_boot、dtbo、init_boot 都不动。
 
-## 9. A 方案（备选）：在现有 UEFI 菜单里加“启动安卓”
+## 9. A 方案：在现有 UEFI 菜单里加“启动安卓”（工作量评估）
 
-如果 T1 的 SPMI/EL 探针失败，A 方案不需要裸机输入/显示：
+### 9.1 已经存在的能力（源码事实）
 
-- 现有链路：ABL 加载 gzip(UEFI) + PONGFAT ramdisk → BootShim 把固件复制到 FD_BASE → UniXNU 菜单（`Menu.c`）用 ConIn 选条目 → DarwinBoot 启 XNU。
-- 要加的是一条 “Android” 条目：把原装内核放到 boot 镜像的已知偏移（例如 field 内 2 MiB 处），UEFI 在 ExitBootServices 后关 MMU、按 arm64 协议跳过去（x0=ABL FDT，x1-x3=0），initrd 保持 ABL 的 stock ramdisk。
-- 需要新增：BootShim 把“原始 field 基址”传给 UEFI（现在 `BootShim.S:19-34` 只保留 x0=FDT，没有保存自己的加载地址），以及一个 `UniXNUActionLinux` 的跳转例程。
-- 代价：UEFI 固件 3 MiB + EDK2 启动时间；好处：按键/显示/菜单全部现成，且不需要 SPMI。
+- 菜单与显示：`zizhan.dsc:56-63` 已把帧缓冲固定为 2160×1916×32；`Menu.c:166-205` 用 `gST->ConIn` 读键；GOP 由 BootShim/UEFI 提供。
+- **Linux 加载已经实现**：`Config.c:1139` 支持 `type = "linux"`；`Boot.c:170-200` 对 efi/linux 条目做 `LoadImage` → `LoadOptions` → `StartImage`；`Inject.c:454-566` 把 initrd 发布成 `LINUX_EFI_INITRD_MEDIA_GUID` 的 `EFI_LOAD_FILE2_PROTOCOL`；`Boot.c:137-141` 从 `gFdtTableGuid` 取固件树，`:214` 在返回后恢复。也就是说，原装内核的 EFI stub 可以直接被当作 EFI 镜像启动，initrd 走 LoadFile2。
+- 配置现状：`Resources/Configs/zizhan.toml` 只有 `boot_shim/uefi_fd/boot_image`，**没有 menu 条目**；菜单条目来自 FAT 卷扫描（`Config.c:30` 注释），`timeout` 默认 5 s、`fallback_timeout` 默认 10 s（`Config.c:1388-1390`）。
+
+### 9.2 按键现状：不是“现成”，而是缺失
+
+- `Silicon/Silicium/SiliciumPkg` 里确实有 `KeypadDxe`（`KeypadDxe.c:306` 安装 `SimpleTextIn`/`SimpleTextInputEx`）、`KeypadController.c:71` 的 `GetKeys`、`KeypadDeviceDxe.c:21` 安装 `KeypadDeviceProtocol`。
+- 但 `zizhan.dsc` 的 `[Components]`（`:85-92`）和 `zizhan.fdf` **都没有包含 KeypadDxe/KeypadDeviceDxe**；全仓库 `*.dsc/*.fdf/*.inc` 搜不到 “Keypad”。
+- `KeypadDeviceLib` 只有头文件（`Silicon/Silicium/SiliciumPkg/Include/Library/KeypadDeviceLib.h`），仓库里没有实现；`KeypadDeviceDxe.c:7-10` 引用的 `KeypadDeviceReset/GetKeys` 没有定义，所以现在即使加进 DSC 也链接不过。
+- 后果：zizhan 固件没有物理按键输入。`Menu.c:110-120` 在 `CountInputDevices()==0` 时把 `HasInput` 置 false，用 `FallbackTimeout`（默认 10 s）倒计时并轮换高亮，然后启动默认条目。dual-boot 调研里“音量/电源键可用”的说法**不被当前固件源码支持**，需要设备实测确认（USB 键盘或串口控制台是另一条路径）。
+
+### 9.3 增加“启动安卓”要改哪些文件
+
+| 项 | 改动 | 量级 |
+| --- | --- | --- |
+| 按键 | 写一个 `KeypadDeviceLib` 实现（PM8350 GPIO6 + PON 电源键，SPMI PMIC arbiter 读），把 `KeypadDeviceDxe.inf`/`KeypadDxe.inf` 加进 `zizhan.dsc` + `zizhan.fdf`，在 `KeypadController.c` 的映射里把音量上加成 `SCAN_UP` | 约 300–500 行 + 构建集成 |
+| 内核/initrd | 把原装内核（44.53 MiB，EFI stub PE）和**预拼好的 Android initrd**（vendor_boot 的 vendor_ramdisk ≈20.3 MiB + boot ramdisk 1.85 MiB + bootconfig trailer）放进 PONGFAT；PONGFAT 从 96 MiB 扩到约 150 MiB。分区预算：3.0 (UEFI) + 150 + 4 KiB sig + 4 KiB vbmeta + 4 KiB footer ≈ 153 MiB < 192 MiB | 主机打包器约 100 行 |
+| 配置 | `zizhan.toml` 加一个 `type="linux"` 条目（path/initrd/args）；args 取当前 ABL bootargs（`/proc/cmdline` 的 `bootconfig` 之前部分） | 约 10 行 |
+| BootShim 基址 | `BootShim.S:1-34` 的 `adr x1, _Payload` 已经把运行时 payload 地址放进 x1/x4，但复制后没有保存；若采用“内核嵌在 boot field”而非 FAT 文件，需要在 `br x5` 前把 x1 存到固定 scratch | 约 4 行；**FAT 文件设计不需要** |
+
+### 9.4 A 与 B 的对比
+
+| 维度 | A（UEFI + EFI stub） | B（裸机 bootmgr） |
+| --- | --- | --- |
+| 按键 | 写 KeypadDeviceLib + 两个 DXE + 构建集成（300–500 行） | 菜单内 SPMI 读取（约 50–100 行） |
+| Android initrd | 自己拼 vendor_ramdisk + boot ramdisk + bootconfig（主机约 100 行） | ABL 按原样组装（0 行） |
+| 内核放置 | FAT 文件（PONGFAT 需扩到约 150 MiB） | boot field 2 MiB 处（`mkboot.py` 现成） |
+| 启动路径未知 | EFI stub 能否在 zizhan 上启 Android（未验证） | EL / CNTVCT / ABL 146.4 MiB field（未验证） |
+| 代码总量 | 约 400–600 行 | 约 250–350 行 |
+
+结论：A **不是**明显更简单；它的价值是绕开 ABL 大 field/EL 风险，而且 Linux EFI 加载代码已经存在。若 keypad 能补上，A 是 B 失败后的主候选。
 
 ## 10. 需要用户决定
 
 1. 是否授权在 T3 写一次 boot 分区；写 `boot_b`（当前槽，推荐）还是 `boot_a`（不活动槽）+ 切槽。
 2. 默认进哪个系统：安卓（推荐，iOS 需按键）还是 iPadOS。
-3. 是否接受“先做 T1 裸机探针”的一次 `fastboot boot`（不写 flash）。
-4. 如果 SPMI 读不通，是否接受 A 方案（改 UEFI 菜单）或 B0（安卓里设标志，开机不按键）。
+3. 是否接受“先做 T1 裸机探针”的一次 `fastboot boot`（不写 flash）；A 方案的 EFI stub 启动 Android 也需要另一次不写入的 `fastboot boot` 验证。
+4. 如果 SPMI 读不通，是否接受 A 方案的真实工作量（KeypadDeviceLib 约 300–500 行 + vendor_boot initrd 打包约 100 行 + PONGFAT 扩容），还是选 B0（安卓里设标志，开机不按键）。
 5. iOS 格子的更新方式：沿用 `update_ios.sh` 的“清头→写内容→写头→读回”，还是先只支持整镜像重刷。
 
 ## 11. 下一步（最小可执行）
@@ -269,4 +297,5 @@ VOLUP: 0/1
 1. 在 `$ZIZHAN_SRC/work/codex-1117/` 里做 T1 探针镜像（复用 data-a-live `menu.c`，改 FB/EL/normal_mode，加 PMIC 读取和调试行）；只构建，不写手机。
 2. 用户授权后，后部 USB-A `fastboot boot` 跑一次 T1，记录屏幕照片、EL、CNTVCT、PMIC 读数、安卓是否正常返回。
 3. 按 T1 结果在 B1 / A / B0 中定一条，再进入 T2。
+4. 若走 A，先用一次不写入的 `fastboot boot` 验证 EFI stub 能启原装内核（此时可先不做按键，只验证 Linux 条目），再补 KeypadDeviceLib。
 

@@ -16,7 +16,7 @@
 | `/sys/class/thermal/thermal_message/*` | `board_sensor_temp=29738`（29.738°C）、`cpu_nolimit_temp` 等 vendor HAL 状态 | 设备只读观察 |
 | `/sys/devices/system/cpu/cpufreq/policy*` | policy0 hw 2.016 GHz；policy4 max 2.5728 GHz（hw 2.7456）；policy7 max 2.2464 GHz（hw 3.1872） | 设备只读观察 |
 | `/vendor/etc/thermal-*.conf` | **加密/非明文**，无法直接取阈值 | 设备只读观察 |
-| `$ZIZHAN_SRC/work-dt/live.dts` | TSENS 资源、温区映射、DT trip 点 | 设备只读观察 + 电脑端解析 |
+| `$ZIZHAN_SRC/../work-dt/live.dts` | TSENS 资源、温区映射、DT trip 点 | 设备只读观察 + 电脑端解析 |
 | `docs/progress/2026-11-07-tsens-readonly.md` | g396：两 bank 各 16 路 VALID，32 个有效读数（bank0 38.2–46.9°C，bank1 35.5–39.5°C） | 设备只读观察（历史） |
 | `configs/zizhan-thermal-sm8475.json` | TSENS 资源/地址/中断输入；明确“无热控制资格” | 电脑端验证 |
 
@@ -62,26 +62,34 @@
 - `gpu` 冷却设备 `max_state=12`；
 - policy4 `scaling_max_freq=2,572,800` < `cpuinfo_max_freq=2,745,600`；policy7 `2,246,400` < `3,187,200`。说明 vendor 热/性能栈已经在限制，但**限制发生的温度点**在加密配置里。
 
-**C. vendor `thermal-*.conf` 不可读**
+**C. vendor `thermal-*.conf` 在当前手上不可读**
 
-`thermal-normal.conf`、`thermal-normal-unfold.conf`、`thermal-l18a-normal.conf`、`thermal-map.conf` 的 `file` 均为 `data`，前 16 字节相同（`6e8160ae0e20bed702cc43ac7ed8e572`），`strings` 无有意义文本；这是加密/混淆格式。`porting.toml` 也已记录“vendor normal/map policies are not readable as plaintext”。**因此不能从这些文件抄阈值，也不能把 DT 的 125°C 占位当成策略。**
+`thermal-normal.conf`、`thermal-normal-unfold.conf`、`thermal-l18a-normal.conf`、`thermal-map.conf` 的 `file` 均为 `data`，前 16 字节相同（`6e8160ae0e20bed702cc43ac7ed8e572`），`strings` 无有意义文本；这是加密/混淆格式。`porting.toml` 也已记录“vendor normal/map policies are not readable as plaintext”。
+
+但 data-a-live 的记录说明它那一代的这类 conf **是可解密的**：它的 `pandora_therm.c:48-53` 明确写阈值来自 `mi_thermald` 的 `thermal-normal.conf`，明文取自 `thermalcheck raw/data/decrypt.txt`。我们目前没有对应的解密工具/明文，所以只能用 DT 硬保护 trip 和 Android 的可观测行为；**不能把 DT 的 125°C 占位当成策略**。解密路径是 zizhan 后续可以立项调查的输入，不是本轮已获得的数据。
 
 ### 1.4 同类项目怎么做
 
+- **data-a-live（`7c779bd`，`wsl/`；本文初版漏查，现更正）**：有完整温度链，分三层。
+  - **来源**：14 个 NTC 热敏电阻经 PMK8850 的 `vadc@9000`（`qcom,spmi-adc5-gen4`）thermal monitor 的 SDAM 槽读取；通道表在 `pandora_therm.c:55-76`（SDAM0 0x090 slots 1-7，SDAM1 0x091 slots 0-6），启用序列按 Linux `adc_tm5_gen3_configure`（`:167-200`）。NTC 码→温度用 `pandora_ntc.h:15-40`（100 kΩ 上拉、`pandora_ntc_table.h` 的 168 点表，表值单位 1/1024°C）。SoC die/junction 另走 TSENS：`pandora_cpu.c:437-497`。
+  - **单位与周期**：内部 millidegree；每 1 s 读一次 SDAM（`PT_PERIOD_MS=1000`，`pandora_therm.c:62,117`），10 s 打一行汇总（`:63`）。HID 服务默认 ReportInterval 1,000,000 µs（`PandoraThermalHID.cpp:63`），thermalmonitord 可通过 `kIOHIDReportIntervalKey` 改成 100–10000 ms（`PandoraThermalHID.cpp:128-143`）。
+  - **怎么交给 iOS**：`PandoraThermalHID.cpp:47-61` 发布 `PrimaryUsagePage 0xff00 / PrimaryUsage 5` 的 `IOHIDEventService`，每个 sensor 一个 `PandoraHIDTemperature`；`copyEvent(kIOHIDEventTypeTemperature)` 返回摄氏度 16.16 fixed（`:112-126`）。thermalmonitord 的 HidSensors 按 `Product` 与 `D22AP-Info.plist` 的 `matchName` 配对（`:5-10` 注释）。另有 `AppleVTempDispatcher`（`:188-226`）接收 thermalmonitord 算出的虚拟温度，写回 `pandora_therm_ios_temp` 用于日志对照。
+  - **限频动作与阈值**：`pt_rule`（`pandora_therm.c:54-70`）是 mi_thermald 的 body 温度阶梯：cpu0 25–50°C 15 档、cpu6 25–50°C 15 档、gpu 35–50°C 6 档，带 2–3°C 清除滞回；`pt_limit()`（`:83-105`）只在“六个 PMIC 输入 + gauge 都有效”时动作，调 `pandora_cpu_body_cap()`（`pandora_cpu.c:654-669`）和 `pandora_gpu_body_top`（`pandora_gpu.c:3718-3719`，应用点 `:3894`）。阈值来自解密的 `thermal-normal.conf`，不是自定。
+  - **失效处理**：SDAM 读失败只记 5 次并继续（`pandora_therm.c:549-555`）；`pt_limit` 只在整组读数有效时动作（`:585-590`）；HID 没值就返回 0、不发布（`PandoraThermalHID.cpp:115-119`）；105/114/118°C junction 规则保留为最后保护（`pandora_cpu.c:524-529`）。没有把缺失读数填成 0°C。
+  - **已知副作用**：完整 D22 传感器集会让 thermalmonitord 跑控制轮，并按其 iPhone X plist 把背光压到最低（`pandora_therm.c:382-385` 注释，usb10/usb11/spk7）；所以默认关闭（`pandora_therm.c:385-398`），需要 `pandora_therm=2` + `pandora_therm_ios=1` 才发布。
 - **SM-T733（`T733Thermal.cpp`，经 [R1](../research/2026-11-07-device-reference-directions.md) 引用）**：按完整传感器组计算状态；有样本过期时间、热/冷滞回；缺有效读数时**保持限制**而不是解除；GPU consumer 还检查 worker 样本年龄。这是本机最值得借的“失效安全”语义。
-- **data-a-live**：本次 clone 的 `7c779bd` 里没有独立温度驱动（`bootmgr/`、`xnu/`、`docs/` 均无 thermal/tsens 源码）；它把热问题留给 Android，不能作为 zizhan 策略来源。
 - **UniXNU-sheng**：`sheng/package/` 里没有热策略；只有 RPMh level 查询（`QcomRpmh.h`）和 CPU/GPU 探测。可借“level→index”的资源投票方式，不借阈值。
 
 ### 1.5 建议的 THERM-01 v1（底线，不是完整曲线）
 
-1. **采样**：沿用 g396 的两 bank 只读路径；周期 1 s，单次最多 32 个 sensor，读取有界；记录 `source sample time`、`consumer read time`、VALID、bank 覆盖。
-2. **新鲜度**：同 SM-T733 语义——样本超过 2 个周期未更新 → 视为 stale，**保持当前封顶**；任何一 bank invalid/缺失 → 不解除封顶；恢复后需连续 3 个新鲜样本才允许降一档。
-3. **动作**：
+1. **采样**：沿用 g396 的两 bank 只读路径；周期 1 s，单次最多 32 个 sensor，读取有界；记录 `source sample time`、`consumer read time`、VALID、bank 覆盖。这里借 data-a-live 的“每秒读、10 秒汇总”节奏，但**不借它的 SM8850 地址、NTC 表或 14 路通道**。
+2. **新鲜度**：同 SM-T733 语义——样本超过 2 个周期未更新 → 视为 stale，**保持当前封顶**；任何一 bank invalid/缺失 → 不解除封顶；恢复后需连续 3 个新鲜样本才允许降一档。data-a-live 的 `measured && gauge` 门控是同一原则的实例。
+3. **动作**（只做底线，不做 mi_thermald 的完整 body 曲线）：
    - CPU：任一 `cpu-1-*` ≥110°C 或任一 `cpu-0-*` ≥110°C → 三个 EPSS/PDMEM 域降到最低可用档；<105°C 且连续新鲜 → 恢复。
    - GPU：`gpuss-0/1` 任一 ≥95°C → GPU 降到最低档（cooling level 12 的方向）；<90°C 恢复。
    - 115°C `reset-mon` 不动，保留内核/硬件最后保护。
-4. **不做**：不写 TSENS 阈值/IRQ、不关闭真实 panic、不发布假 thermalmonitord 服务、不用 125°C 占位当策略、不把 Android `scaling_max_freq` 当 XNU 阈值。
-5. **v2（标定后再细化）**：在 Android 上跑一次有界负载，记录“TSENS 温度 → `thermal-cpufreq-*/cur_state`、`gpu/cur_state`”的实际阶梯，形成 zizhan 自己的 table；再用同一 table 做 XNU 的分档封顶。这样阈值来自本机 vendor 行为，不是凭空数字。
+4. **不做**：不写 TSENS 阈值/IRQ、不关闭真实 panic、不发布假 thermalmonitord 服务、不用 125°C 占位当策略、不把 Android `scaling_max_freq` 当 XNU 阈值、不照搬 data-a-live 的 SM8850 body 表。
+5. **v2（标定后再细化）**：在 Android 上跑一次有界负载，记录“TSENS 温度 → `thermal-cpufreq-*/cur_state`、`gpu/cur_state`”的实际阶梯，形成 zizhan 自己的 table；再用同一 table 做 XNU 的分档封顶。data-a-live 的做法证明“vendor 阶梯 → XNU 限频”是可行的，但它的数值只属于 SM8850。
 
 ### 1.6 验收
 
@@ -136,9 +144,43 @@ STATUS 归档对 POWER-02 记过两个条件（[archive](../progress/2026-11-17-
 - **唤醒后黑屏**：保留最后一帧与 DSI 状态；先恢复 DPU，再重发 `0x11/0x29`；仍失败则回 fastboot（人工返回路径）。
 - **触控恢复失败**：把触控线程重启与首帧分开记录，不能因为画面回来就宣称触控通过。
 
-## 3. 建议的执行顺序
+## 3. 电池健康页与热服务（POWER-01 关联）
+
+这一节只写依据和可验证的假设，不把“提供温度”写成“健康页会好”。
+
+### 3.1 已记录的现状
+
+| 证据 | 内容 |
+| --- | --- |
+| `porting.toml` 的 power findings | “The health spinner follows batteryDataUnavailable: thermalmonitord never publishes com.apple.thermalmonitor.ageAwareMitigationState and powerd lacks Battery Service State.” |
+| `docs/progress/2026-11-01-battery.md:92,101` | powerd 从电池的 NominalChargeCapacity、DesignCapacity、CycleCount、Serial、Battery Service Flags 计算 “Battery Service State”；`getManagementState=0` 是在 `deviceSupportsCPMS=0` 时读 `com.apple.thermalmonitor.ageAwareMitigationState`；thermalmonitord pid 37 在跑但从不发布该 key。 |
+| `docs/progress/2026-11-06-daytime-input-power.md` | 默认包的 `pong_adsp=0` 不提供 ADSP 电池链；调查健康页前必须先核对实际启动参数；不得注入成功状态。 |
+
+### 3.2 data-a-live 的做法给出的线索
+
+- 它的 HID 温度服务确实能让 thermalmonitord 进入控制轮：在 HID 传感器发布后，thermalmonitord 按 D22 plist 的背光控制把屏幕压到最低（`pandora_therm.c:382-385` 注释，usb10/usb11/spk7）。这说明“有完整传感器集 → thermalmonitord 计算”这条链在 XNU 上是通的。
+- 但 thermalmonitord 只在**每个 watchdog 传感器都拿到值**的轮次才跑控制（`pandora_therm.c:344-348` 注释）；缺传感器时它记日志并跳过，不会补零。
+- 它没有记录 `ageAwareMitigationState` 是否因此出现；这仍是一个待验证点，不是已知结果。
+
+### 3.3 可验证的假设（按优先级）
+
+| 假设 | 依据 | 最小验证 | 若成立 |
+| --- | --- | --- | --- |
+| H1：`ageAwareMitigationState` 由 thermalmonitord 在控制轮里发布；只要传感器集完整，它就会出现 | 3.2 的控制轮证据 + zizhan 的“从不发布”现状 | 诊断启动，发布一套真实温度的 HID 服务；用 `notifyutil -g com.apple.thermalmonitor.ageAwareMitigationState` 读 key，并 `ioreg -l` 看 thermal 服务 | 只能说明管理状态来源通了，不等于健康页完成 |
+| H2：powerd 的 `"Battery Service State"` 由电池数据独立计算，温度 HID 不会直接产生它 | `2026-11-01-battery.md:92`（powerd 从容量/循环/序列号算） | 同一轮里读 `IOPSCopyPowerSourcesByType` 字典，确认该 key 是否出现 | 健康页仍会转圈；需要单独修 powerd 输入 |
+| H3：完整 D22 传感器集有背光副作用（亮度被压到最低） | data-a-live 的 usb10/usb11/spk7 | 诊断轮观察 `CoreBrightness`/背光值；默认关闭，只在 boot arg 下开启 | 必须把 HID 作为默认关闭的诊断能力，不能直接进日用 |
+| H4：zizhan 的电池链还需要 `pong_adsp=2`（真实 ADSP 电池数据）才具备 powerd 的输入 | `2026-11-06-daytime-input-power.md`、`2026-11-06-fold-power-audit.md:60` | 对照启动参数与 IOPS/BatteryData 实际存在性 | 温度 HID 单独的收益更有限，需和电池链一起验 |
+
+### 3.4 结论边界
+
+- 提供真实温度来源**有可能**让 thermalmonitord 从“只跑不发布”变成“跑并发布 ageAware”，从而解开 `getManagementState` 这一项；但这是 H1，未验证。
+- 健康页还依赖 powerd 的 `"Battery Service State"`（H2），它和温度没有直接关系；因此**不能承诺“有温度就能修好健康页”**。
+- 任何验证都只读 notify/IOPS/ioreg，不注入 key、不伪造“正常”；不把 HID 副作用带进默认启动。
+
+## 4. 建议的执行顺序
 
 1. THERM-01 v1 先做主机实现 + 现有 g396 路径扩展（不改默认行为），再做一次有界设备负载；通过后才有“温控底线”。
-2. POWER-02 MVP 在 M1 之后、且有人在场时做首次 off/on（面板命令和返回都需要人看）；无人值守只做主机与只读复核。
-3. 两项都不得与 M1 首声测试争用手机；今晚手机保持 Android。
+2. POWER-01 的 H1/H2 验证放在 THERM-01 采样可用之后：先确认 thermalmonitord 能不能收到真实温度，再谈健康页。
+3. POWER-02 MVP 在 M1 之后、且有人在场时做首次 off/on（面板命令和返回都需要人看）；无人值守只做主机与只读复核。
+4. 三项都不得与 M1 首声测试争用手机；今晚手机保持 Android。
 

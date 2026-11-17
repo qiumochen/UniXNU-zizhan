@@ -139,6 +139,43 @@ STATUS 归档对 POWER-02 记过两个条件（[archive](../progress/2026-11-17-
 
 每步都必须有“失败回安卓/回亮屏”的路径；不允许用无限 WFI、halt 或 panic 表示“已熄屏”。
 
+#### S1 落点（只读源码定位）
+
+**现在的请求处理确实是“直接返回成功”。**
+
+| 位置 | 事实 | 级别 |
+| --- | --- | --- |
+| `patches/xnu-ipados18/0001-pong-darwin24.patch:5128` | 定义 selector `kFBMethodRequestPowerChange = 12`（已按 22H374 framework 核对） | 看过源码 |
+| `patches/xnu-ipados18/0001-pong-darwin24.patch:6512` | `case kFBMethodRequestPowerChange` 与 `SwapSignal/SwapCancel/ChangeFrameInfo` 一起 `return kIOReturnSuccess;`，没有解析、没有状态变化 | 看过源码 |
+| `patches/xnu-ipados18/0020-zizhan-display-power-observer.patch`（hunk `@@ -1556,8 +1559,13 @@`） | 在 case 里调用 `zizhan_display_power_observe(args->scalarInputCount, in, args->structureInputSize)`，但注释明确 “hardware-transition=UNIMPLEMENTED”，仍返回成功 | 看过源码 |
+| `patches/xnu-ipados18/0021-zizhan-display-owner-accounting.patch`（hunk `@@ -1564,6 +1610,7 @@`） | 再加 `fOwner->observePowerOwner()`（软件 drain 计数），仍无硬件事务 | 看过源码 |
+| `drivers/ArmDTPlatform/ZizhanPowerAudit.h:102-121` | observer 只在 `zizhan_power_observe=1` 时记录 `SKIP observe-only=1 … hardware-transition=UNIMPLEMENTED`；通过 `ArmDTPlatform.cpp:26` 的 `#include "ZizhanPowerAudit.h"` 进入构建 | 看过源码 |
+
+**短按电源键现在走到哪里。**
+
+| 位置 | 事实 | 级别 |
+| --- | --- | --- |
+| `patches/xnu-ipados18/0001-pong-darwin24.patch:117-260` | 新建 `bsd/dev/pong_buttons.c`：读 PMIC PON 与 PM830 GPIO6，16 ms 轮询；`look()` 在变化时 `pong_touch_post(PONG_BUTTON_DOWN/UP, code, …)` | 看过源码 |
+| 同文件 ~`:1223-1276`、`:1297` | `pong_goodix.c` 把按钮事件放进独立队列，暴露 `/dev/pong-buttons`；`pong_buttons_device_ready()` 检查它 | 看过源码 |
+| `userland/touch.c:374-460` | `buttons_thread` 读 `/dev/pong-buttons`，finger 0/1/2 映射到 `HID_USAGE_POWER 0x30`、`VOLUME_UP 0xe9`、`VOLUME_DOWN 0xea`（`:59-64`），用 `IOHIDVirtualServiceClientDispatchEvent` 发给 consumer HID 服务；短按因此已经到 SpringBoard/powerd | 看过源码 |
+| `patches/xnu-ipados18/0010-pong-power-key-reset.patch:16-21,30-41` | 3 s 长按逻辑：`reset_ms` 默认 3000，按住期间累计 `power_down_at`，到点调用 `pong_button_reset_hook`；**短按不触发**（只有 `held >= reset_ms`） | 看过源码 |
+| `drivers/ArmDTPlatform/PongBootReset.h:211-241` | 安装 `buttonReset()`：标记 bootloader、flush klog、warm reset 进 fastboot；这是长按的返回路径，不是短按 | 看过源码 |
+
+**S1 要改的落点（尚未改代码）。**
+
+| 文件 / 函数 | 改动 | 量级 |
+| --- | --- | --- |
+| 新增 `patches/xnu-ipados18/0023-zizhan-display-power-request.patch`（改 `MiniIOMobileFramebuffer.cpp` 的 `kFBMethodRequestPowerChange` case） | 解析 `scalarInputCount`/`in[]`，调用新的 `zizhan_display_power_request(count, in, size)`；malformed → `kIOReturnBadArgument`，被协调器拒绝 → `kIOReturnNotReady`/`kIOReturnUnsupported`，只有“接受并排队”才返回成功 | 30–60 行 |
+| 新增 `drivers/ArmDTPlatform/ZizhanDisplayPower.h`（或扩 `ZizhanPowerAudit.h`） | 只做 S1 的接受/拒绝状态机：sequence、target on/off、bounded queue、三态日志；**不碰 DSI/DPU/背光** | 80–150 行 |
+| `drivers/ArmDTPlatform/ArmDTPlatform.cpp` | include + 安装 hook（照 `:26` 的 PowerAudit 方式） | 1–5 行 |
+| `userland/touch.c`、`pong_buttons.c`、`0010` | S1 不需要改；短按 HID 与 3 s 长按已经存在 | 0 |
+
+**待确认（推测，不是结论）**
+
+- `kFBMethodRequestPowerChange` 的 `in[0]`/`in[1]` 语义没有解码；observer 只记录 raw 值（`ZizhanPowerAudit.h:115-120`）。需要用 `zizhan_power_observe=1` 的设备日志看短按/off/on 的实际参数，才能确定 target 字段。**推测**。
+- “返回成功”表示“请求已接受”还是“硬件已完成”未定义；S1 应明确为**接受**，完成态留给 S2/S3 的显式日志/通知。**推测**。
+- 本任务只读源码，没有改补丁、驱动或用户态。
+
 ### 2.4 风险与回退
 
 - **黑屏但面板仍供电**：MVP 可接受，但必须注明不是低功耗；若要进一步下电，走 rail/reset 序列，单独验收。

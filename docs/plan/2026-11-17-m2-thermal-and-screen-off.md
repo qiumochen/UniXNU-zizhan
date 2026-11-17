@@ -155,7 +155,7 @@ STATUS 归档对 POWER-02 记过两个条件（[archive](../progress/2026-11-17-
 
 | 位置 | 事实 | 级别 |
 | --- | --- | --- |
-| `patches/xnu-ipados18/0001-pong-darwin24.patch:117-260` | 新建 `bsd/dev/pong_buttons.c`：读 PMIC PON 与 PM830 GPIO6，16 ms 轮询；`look()` 在变化时 `pong_touch_post(PONG_BUTTON_DOWN/UP, code, …)` | 看过源码 |
+| `patches/xnu-ipados18/0001-pong-darwin24.patch:117-260` | 新建 `bsd/dev/pong_buttons.c`：读 PMIC PON 与 PM8350 GPIO6，16 ms 轮询；`look()` 在变化时 `pong_touch_post(PONG_BUTTON_DOWN/UP, code, …)` | 看过源码 |
 | 同文件 ~`:1223-1276`、`:1297` | `pong_goodix.c` 把按钮事件放进独立队列，暴露 `/dev/pong-buttons`；`pong_buttons_device_ready()` 检查它 | 看过源码 |
 | `userland/touch.c:374-460` | `buttons_thread` 读 `/dev/pong-buttons`，finger 0/1/2 映射到 `HID_USAGE_POWER 0x30`、`VOLUME_UP 0xe9`、`VOLUME_DOWN 0xea`（`:59-64`），用 `IOHIDVirtualServiceClientDispatchEvent` 发给 consumer HID 服务；短按因此已经到 SpringBoard/powerd | 看过源码 |
 | `patches/xnu-ipados18/0010-pong-power-key-reset.patch:16-21,30-41` | 3 s 长按逻辑：`reset_ms` 默认 3000，按住期间累计 `power_down_at`，到点调用 `pong_button_reset_hook`；**短按不触发**（只有 `held >= reset_ms`） | 看过源码 |
@@ -175,6 +175,8 @@ STATUS 归档对 POWER-02 记过两个条件（[archive](../progress/2026-11-17-
 - `kFBMethodRequestPowerChange` 的 `in[0]`/`in[1]` 语义没有解码；observer 只记录 raw 值（`ZizhanPowerAudit.h:115-120`）。需要用 `zizhan_power_observe=1` 的设备日志看短按/off/on 的实际参数，才能确定 target 字段。**推测**。
 - “返回成功”表示“请求已接受”还是“硬件已完成”未定义；S1 应明确为**接受**，完成态留给 S2/S3 的显式日志/通知。**推测**。
 - 本任务只读源码，没有改补丁、驱动或用户态。
+
+> S1 状态机候选已在分支 `codex/2026-11-17-m2-m3-prep` 主机验证（`drivers/ArmDTPlatform/ZizhanDisplayPower.h` + `tools/zizhan/tests/display-power.py`，Mac `cc` 与 `zizhan-ci:gcc14-clang`，ASan/UBSan，0 failure）；**未接线、未上机**。
 
 ### 2.4 风险与回退
 

@@ -4,6 +4,7 @@
  * or submission scanout_gate. Only a real completed GPU copy retires a frame.
  */
 #include "PongAdrenoScanout.h"
+#include "ZizhanShotTiming.h"
 #include "../PongPower/PongDsiLease.h"
 #include "../PongPower/ZizhanPanelPool.h"
 #include "../PongPower/ZizhanPanelProgram.h"
@@ -35,8 +36,10 @@ task_t client;
 PongScanoutModeInfo mode{};
 bool waiting=false,workerReady=false,poisoned=false;
 uint64_t sequence=0,completed=0;
-/* per-stage timing (absolute time), reported every 64 frames */
+/* Per-stage 64-frame windows. Keep routine summaries sparse so a busy display
+ * does not evict startup/application failures from the persistent log rings. */
 uint64_t tMapped=0,tPrepare=0,tPickup=0,tMap=0,tUser=0,tRelease=0,tWindow=0,tLast=0,tMoving=0;unsigned tFrames=0,tGaps[6]={};
+static uint32_t scanoutLogMs=5000;static bool scanoutLogArgs;static uint64_t scanoutLogNext;
 /* Frame-to-frame intervals under 17/25/34/50/90 ms and pauses (90 ms or more: nothing was moving). The rate over the moving
  * frames alone is the animation frame rate; the window rate also counts the idle time between swipes. */
 static const unsigned kGapMs[5]={17,25,34,50,90};
@@ -1065,7 +1068,7 @@ extern "C" IOReturn pong_scanout_call(task_t owner,unsigned op,const void *in,si
         uint32_t(mode.width),uint32_t(mode.height),mode.format,token,pending.evict,dbN?uint32_t(db[pending.target].offset):0u};
     IOLockUnlock(scanout_gate);return kIOReturnSuccess;
 }
-/* zizhan screenshots (docs/progress/2026-11-01-120hz-and-cadence.md section 12): pong_shot=<s> takes, from s seconds after boot,
+/* zizhan screenshots (docs/progress/2026-11-01-120hz-and-cadence.md section 12): pong_shot=<s> takes, from s seconds after the first zero-copy frame,
  * pong_shot_n (default 6) captures pong_shot_ms (default 1000) apart of the zero-copy frame just flipped: every 16th pixel of every
  * 16th row (135 x 120 of 2160 x 1916), read through an uncached mapping once the frame's GPU work retired (copied frames too: with an
  * app in front CoreAnimation's canvas is not a pool slot). A thread prints each as
@@ -1076,8 +1079,31 @@ extern "C" IOReturn pong_scanout_call(task_t owner,unsigned op,const void *in,si
  * pong_shot_rect=<x>,<y>,<w>,<h>: instead capture that region at full resolution (step 1), so text is readable.
  *   The console ring and the pinned klog are a few MiB: the capture is refused when w*h exceeds SHOT_MAX_PIXELS. */
 static uint32_t shotAt,shotN=6,shotMs=1000,shotTaken,shotHud,shotStep=16,shotRect[4];static uint64_t shotNext;static bool shotArgs,shotThread;
+static uint32_t shotIdle;static bool shotIdleThread;
 enum {SHOT_MAX_W=544,SHOT_MAX_H=480,SHOT_MAX_PIXELS=130000};
 static uint8_t shotPix[SHOT_MAX_H][SHOT_MAX_W*3];static unsigned shotW,shotH;static uint64_t shotWhen;static volatile uint32_t shotReady;
+static void shotCapture(uint64_t phys,uint32_t stride);
+static void shotIdleCapture(void *,wait_result_t)
+{
+    const uint64_t stop=deadline(600000);
+    while(mach_absolute_time()<stop) {
+        IOSleep(100);
+        if(!scanout_gate || !IOLockTryLock(scanout_gate))continue;
+        if(!shotAt || shotTaken>=shotN){IOLockUnlock(scanout_gate);break;}
+        /* The presenter never selects dbShown as a write target. A current
+         * copy/flip is skipped; this path reads only the last latched pool
+         * buffer and never touches display registers or fabricates a frame. */
+        if(dbOn && dbShown>0 && unsigned(dbShown)<dbN && dbFlipped<0 &&
+            (!pending.offered || pending.done) && !poisoned && !shotReady &&
+            mach_absolute_time()>=shotNext) {
+            char note[128];int n=snprintf(note,sizeof note,"PONG SHOT idle: reading last latched pool buffer %d at %llu us\n",dbShown,us(mach_absolute_time()));
+            dpuLine(note,n);
+            shotCapture(db[dbShown].phys,db[dbShown].stride?db[dbShown].stride:uint32_t(mode.stride));
+        }
+        IOLockUnlock(scanout_gate);
+    }
+    thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);
+}
 static void shotPrint(void *,wait_result_t)
 {
     static char line[256];
@@ -1085,7 +1111,8 @@ static void shotPrint(void *,wait_result_t)
         IOSleep(100);
         const uint32_t n=shotReady;
         if(n) {
-            IOLog("PONG SHOT %u begin %u %u at %llu\n",n,shotW,shotH,us(shotWhen));
+            int header=snprintf(line,sizeof line,"PONG SHOT %u begin %u %u at %llu\n",n,shotW,shotH,us(shotWhen));
+            dpuLine(line,header);
             for(unsigned y=0;y<shotH;++y) {
                 for(unsigned x=0;x<shotW;x+=32) {
                     int k=snprintf(line,sizeof line,"PONG SHOT %u %u %u ",n,y,x);
@@ -1095,6 +1122,8 @@ static void shotPrint(void *,wait_result_t)
                 }
                 if(y%8==7)IOSleep(5);   /* let the log drain */
             }
+            int end=snprintf(line,sizeof line,"PONG SHOT %u end chunks %u\n",n,shotH*((shotW+31)/32));
+            dpuLine(line,end);
             shotReady=0;
             if(n>=shotN)break;
         }
@@ -1105,6 +1134,7 @@ static void shotCapture(uint64_t phys,uint32_t stride)
 {
     if(!shotArgs) {
         shotArgs=true;(void)PE_parse_boot_argn("pong_shot",&shotAt,sizeof shotAt);
+        (void)PE_parse_boot_argn("pong_shot_idle",&shotIdle,sizeof shotIdle);
         (void)PE_parse_boot_argn("pong_shot_n",&shotN,sizeof shotN);(void)PE_parse_boot_argn("pong_shot_hud",&shotHud,sizeof shotHud);(void)PE_parse_boot_argn("pong_shot_ms",&shotMs,sizeof shotMs);
         (void)PE_parse_boot_argn("pong_shot_step",&shotStep,sizeof shotStep);
         if(shotStep<1)shotStep=1;if(shotStep>64)shotStep=64;
@@ -1120,14 +1150,26 @@ static void shotCapture(uint64_t phys,uint32_t stride)
             }
             if(field==4){shotRect[0]=v[0];shotRect[1]=v[1];shotRect[2]=v[2];shotRect[3]=v[3];}
         }
-        if(shotAt)nanoseconds_to_absolutetime(uint64_t(shotAt)*1000000000ull,&shotNext);
-        if(shotAt)IOLog("PONG SHOT: %u captures from %u s, %u ms apart, step %u, rect %u,%u,%u,%u (first zero-copy frame at %llu us)\n",
-            shotN,shotAt,shotMs,shotStep,shotRect[0],shotRect[1],shotRect[2],shotRect[3],us(mach_absolute_time()));
+        const uint64_t origin=mach_absolute_time();
+        if(shotAt) {
+            uint64_t delay=0;nanoseconds_to_absolutetime(uint64_t(shotAt)*1000000000ull,&delay);
+            shotNext=zizhan_shot_deadline(origin,delay);
+            char schedule[256];
+            int n=snprintf(schedule,sizeof schedule,"PONG SHOT: %u captures %u s after first zero-copy frame, %u ms apart, step %u, rect %u,%u,%u,%u (origin %llu us, deadline %llu us)\n",
+                shotN,shotAt,shotMs,shotStep,shotRect[0],shotRect[1],shotRect[2],shotRect[3],us(origin),us(shotNext));
+            if(n>0)dpuLine(schedule,n<(int)sizeof schedule?n:(int)sizeof schedule-1);
+            if(shotIdle==1 && !shotIdleThread) {
+                thread_t thread=THREAD_NULL;
+                if(kernel_thread_start(shotIdleCapture,nullptr,&thread)==KERN_SUCCESS) {
+                    thread_deallocate(thread);shotIdleThread=true;
+                } else IOLog("PONG SHOT idle: no optional capture thread; live-frame path retained\n");
+            }
+        }
     }
     if(!shotAt || shotTaken>=shotN || shotReady)return;
     const uint64_t now=mach_absolute_time();
     if(now<shotNext)return;
-    uint64_t step=0;nanoseconds_to_absolutetime(uint64_t(shotMs)*1000000ull,&step);shotNext=now+step;
+    uint64_t step=0;nanoseconds_to_absolutetime(uint64_t(shotMs)*1000000ull,&step);shotNext=zizhan_shot_deadline(now,step);
     if(!shotThread) {
         thread_t thread=THREAD_NULL;
         if(kernel_thread_start(shotPrint,nullptr,&thread)!=KERN_SUCCESS){IOLog("PONG SHOT: no print thread\n");shotAt=0;return;}
@@ -1392,16 +1434,26 @@ static int finish()
     }
     if(tFrames==0)tWindow=mach_absolute_time();   /* wall time of the 64-frame window: the frame rate actually shown */
     if(++tFrames==64) {
-        const uint64_t span=us(mach_absolute_time()-tWindow);
-        const unsigned moving=tGaps[0]+tGaps[1]+tGaps[2]+tGaps[3]+tGaps[4];
-        char text[300];int n=snprintf(text,sizeof(text),"PONG SCANOUT TIMING: 64 frames in %llu ms (%llu.%llu fps; moving %u at %llu fps; gaps %u/%u/%u/%u/%u/%u) avg us prepare=%llu pickup=%llu map=%llu user=%llu release=%llu coh=%u skips=%u/%u/%u/%u\n",
-            span/1000,span?64000000ull/span:0,span?(640000000ull/span)%10:0,moving,tMoving?moving*1000000ull/tMoving:0,
-            tGaps[0],tGaps[1],tGaps[2],tGaps[3],tGaps[4],tGaps[5],us(tPrepare)/64,us(tPickup)/64,us(tMap)/64,us(tUser)/64,us(tRelease)/64,native_adreno_io_coherent,native_adreno_coherent_skips[0],
-            native_adreno_coherent_skips[1],native_adreno_coherent_skips[2],native_adreno_coherent_skips[3]);
-        if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
+        if(!scanoutLogArgs) {
+            scanoutLogArgs=true;
+            (void)PE_parse_boot_argn("pong_scanout_log_ms",&scanoutLogMs,sizeof scanoutLogMs);
+            if(scanoutLogMs>60000)scanoutLogMs=60000;
+        }
+        const uint64_t reportNow=mach_absolute_time();
+        if(reportNow>=scanoutLogNext) {
+            uint64_t interval=0;nanoseconds_to_absolutetime(uint64_t(scanoutLogMs)*1000000ull,&interval);
+            scanoutLogNext=zizhan_shot_deadline(reportNow,interval);
+            const uint64_t span=us(mach_absolute_time()-tWindow);
+            const unsigned moving=tGaps[0]+tGaps[1]+tGaps[2]+tGaps[3]+tGaps[4];
+            char text[300];int n=snprintf(text,sizeof(text),"PONG SCANOUT TIMING: 64 frames in %llu ms (%llu.%llu fps; moving %u at %llu fps; gaps %u/%u/%u/%u/%u/%u) avg us prepare=%llu pickup=%llu map=%llu user=%llu release=%llu coh=%u skips=%u/%u/%u/%u\n",
+                span/1000,span?64000000ull/span:0,span?(640000000ull/span)%10:0,moving,tMoving?moving*1000000ull/tMoving:0,
+                tGaps[0],tGaps[1],tGaps[2],tGaps[3],tGaps[4],tGaps[5],us(tPrepare)/64,us(tPickup)/64,us(tMap)/64,us(tUser)/64,us(tRelease)/64,native_adreno_io_coherent,native_adreno_coherent_skips[0],
+                native_adreno_coherent_skips[1],native_adreno_coherent_skips[2],native_adreno_coherent_skips[3]);
+            if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
+            pong_scanout_summary_copies(1);
+            dbStats("64");
+        }
         tFrames=0;tPrepare=tPickup=tMap=tUser=tRelease=0;tMoving=0;for(unsigned &g:tGaps)g=0;
-        pong_scanout_summary_copies(1);   /* the running total too: many copies spread through the log */
-        dbStats("64");
     }
     IOLockUnlock(scanout_gate);return ok?1:0;
 }

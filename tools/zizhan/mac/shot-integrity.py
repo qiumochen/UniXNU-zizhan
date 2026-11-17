@@ -50,7 +50,7 @@ def png_rows(path):
     return width, height, rows
 
 
-def verify(log_path, directory=None):
+def verify(log_path, directory=None, identifiers=None):
     text = log_path.read_bytes().decode("latin-1")
     shots = {}
     for number, width, height in re.findall(r"PONG SHOT (\d+) begin (\d+) (\d+) at \d+", text):
@@ -77,6 +77,11 @@ def verify(log_path, directory=None):
                 raise ValueError("conflicting shot pixels")
             shot["pixels"][coordinate] = pixel
     results = []
+    if identifiers is not None:
+        wanted = set(identifiers)
+        if not wanted or not wanted <= shots.keys():
+            raise ValueError("requested capture header is absent")
+        shots = {identifier: shot for identifier, shot in shots.items() if identifier in wanted}
     for identifier, shot in sorted(shots.items()):
         width, height = shot["geometry"]
         if len(shot["pixels"]) != width * height:

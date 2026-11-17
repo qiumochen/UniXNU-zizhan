@@ -46,6 +46,13 @@ def main():
         path.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
         rejects(lambda: checker.verify(log))
         path.write_bytes(original)
+        # A later incomplete capture does not invalidate earlier verified
+        # pixels, while whole-round integrity must still fail.
+        log.write_text(records.rsplit("PONG SHOT 2 0 0", 1)[0] + "PONG SHOT 2 0 0 2060a0\n")
+        rejects(lambda: checker.verify(log))
+        assert checker.verify(log, identifiers=[1])["status"] == "PASS"
+        rejects(lambda: checker.verify(log, identifiers=[2]))
+        rejects(lambda: checker.verify(log, identifiers=[3]))
         log.write_text(records + "\nPONG SHOT 1 0 0 000000\n")
         rejects(lambda: checker.verify(log))
         log.write_text("PONG SHOT 1 begin 3 1 at 1\nPONG SHOT 1 0 0 2060a0\n")

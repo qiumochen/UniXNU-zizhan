@@ -14,6 +14,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
     args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="zizhan-shot-timing-") as temporary:
+        executable = Path(temporary) / "shot-timing"
+        subprocess.run([args.cc, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                        "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                        "-I", str(ROOT / "drivers/PongAdreno"),
+                        str(ROOT / "tools/zizhan/tests/shot-timing.c"),
+                        "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
+    print("PASS: screenshot delay survives fastboot counter offsets and saturates safely")
     subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests/frame-latency.py")], check=True)
     subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests/shot-integrity.py")], check=True)
     subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests/brightness-curve.py"),

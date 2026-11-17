@@ -17,25 +17,25 @@
 | --- | --- | --- | --- | --- | --- |
 | amp-pulse-1116-v1 | 16 KiB | 无 | 无 klog | 未知 | 挂（92 s） |
 | amp-pulse-1117-klog | 16 KiB | 无 | 无 checkpoint，最后 DATA_PIN | DATA_PIN 后、第一条 WRITE 前；可能是周期 klog flush | 挂 |
-| amp-pulse-1117-ckpt | 16 KiB | 无 | stage 9 | stage 9 checkpoint flush（WRITE 未发） | 挂 |
+| amp-pulse-1117-ckpt | 16 KiB | 无 | stage 9（屏幕见 flushed + send） | **A：第一条 WRITE 已发、未见 DONE** | 挂 |
 | amp-pulse-1117-pre0 | 0 | 无 | 全通过 | — | 跑通，-36 dBFS，无声 |
 | amp-pulse-1117-loud | 0 | `tone_x=8` | 全通过 | — | 跑通，-18 dBFS，无声 |
-| amp-pulse-1117-rep | 0 | `tone_repeat=10` | stage 10 | 第一条 WRITE 返回后、stage 10 checkpoint flush | 挂 |
-| amp-pulse-1117-hold | 0 | `pulse_hold=300` | stage 9 | stage 9 checkpoint flush（WRITE 未发） | 挂 |
+| amp-pulse-1117-rep | 0 | `tone_repeat=10` | stage 10（屏幕见 flushed） | **B：stage 10 后在 `pulse_run`/第二条 WRITE 前后** | 挂 |
+| amp-pulse-1117-hold | 0 | `pulse_hold=300` | stage 9（屏幕见 flushed） | **A：第一条 WRITE 已发、未见 DONE** | 挂 |
 
-> 上表的“推断挂点”已按 2026-11-18 n18 夜间轮修正：stage 行先于 checkpoint 的 `pong_klog_flush(6)`；缺少 `stage=N flushed=` 时，挂点在 flush，不在 WRITE 或 `pulse_run`。详见 §9.1。
+> 上表的“推断挂点”已按 2026-11-18 现场屏幕证据更正：`stage=N flushed=` 是 flush **完成之后**才打印的，且只会被**下一次** flush 写进 UFS klog；klog 尾部停在 `stage=N` 是正常现象。正确分组见 §9.1：A = 第一条 WRITE 已发出、未见 WRITE_DONE；B = stage 10 之后在 `zizhan_pulse_run`（第二条 WRITE 前后）。
 
 因此：
 
 - **16 KiB 预滚的 3/3 轮都挂（11-17 小样本；n18 a-1/a-3 同为 16 KiB 且 4 写通过，见 §9.6）**，且当时都停在第一条 zero WRITE 附近；
 - **0 预滚、无额外 hold/repeat 的 2/2 轮跑通**（其中 `loud` 另加了 `tone_x=8` 增益，严格说不是完全相同的输入）；
-- **0 预滚、加 hold/repeat 的 2/2 轮也挂**，其中 `rep` 停在第一条 WRITE **返回之后**的 stage 10 checkpoint flush；`hold` 停在 stage 9 checkpoint flush、第一条 WRITE 未发。
+- **0 预滚、加 hold/repeat 的 2/2 轮也挂**，其中 `rep` 在 stage 10 之后、`pulse_run`/第二条 WRITE 前后（B 组）；`hold` 的第一条 WRITE 已发出、未见 DONE（A 组）。
 
-这 7 轮把“偏移”“amp 保持/重复”“amp pulse 路径”混在一起，不能据此宣布“与偏移无关”。当时最具体、最可检验的触发**假设**是：**16 KiB 预滚让 ADSP 的首写/首读越过 64 KiB MEM_MAP 边界**；最具体的放大**假设**是：**SMMU 故障之后没有任何 owner 清 FSR/GFSR、恢复或管理 TBU**。这两条可以同时成立：前者制造故障，后者把故障变成整机挂死。[11-17 推断；已被 §9 夜间数据否定/削弱]
+这 7 轮把“偏移”“amp 保持/重复”“amp pulse 路径”混在一起，不能据此宣布“与偏移无关”。当时最具体、最可检验的触发**假设**是：**16 KiB 预滚让 ADSP 的首写/首读越过 64 KiB MEM_MAP 边界**；最具体的放大**假设**是：**SMMU 故障之后没有任何 owner 清 FSR/GFSR、恢复或管理 TBU**。这两条可以同时成立：前者制造故障，后者把故障变成整机挂死。[11-17 推断；已被 n18 的 A/B 分组削弱]
 
-**建议的下一个最小实验**：先按 §9.7 去掉 checkpoint 的同步 4 MiB `pong_klog_flush(6)`（或改成 console-only/≤64 KiB、非阻塞 worker），用同一 a 臂（mode34、dry、16K、route1）重跑；若不再挂，H8 得到直接验证。只有在“无 checkpoint 的真实 WRITE 仍挂”时，才回到 §7 的 **0 与 16 KiB 单条 zero WRITE + SMMU/GFSR/TBU 只读诊断**。
+**建议的下一个最小实验**：h/i/j 已回（2026-11-18 01:36–01:52）：i（2000 ms、无 flush）4 条 WRITE 全部 `done us≈11 ms`；h-1/h-2（100 ms）和 j（2000 ms + send flush）都在 92 s 看门狗复位前挂死，j 的 `send ... sequence=0` 已落盘、没有 `done`/`fail`。因此 100 ms 超时不是充分解释；当前最强假设是 **H13：首块 WRITE 路径本身在 DONE 前挂住 SoC**。先重跑 i 的 2000 ms/无 flush 条件数次，并在 send flush 之后加一行确认，区分“DSP 不回 DONE”与“flush 自身未返回”。安全收尾仍按 §11 C，但它不是 j 的已证触发。
 
-> **2026-11-18 夜间实测修正**：n18 的 checkpointed 挂死全部停在 `ZIZHAN_AUDIO_CHECKPOINT: stage=N` 之后、对应的 `stage=N flushed=` 行之前；stage 9 的挂死没有 WRITE send，stage 10 的挂死已经 send+rx。直接证据指向 **`pong_klog_flush(6)` 的同步 4 MiB UFS 写**，而不是 ADSP WRITE 或 SMMU fault。详见 §9。前文 §6 的 H1/H2/H4 因果性不再成立，保留为历史假设；不要把本节之前的“16 KiB 边界/terminate/amp pulse”当作已证根因。
+> **2026-11-18 现场修正**：协调者屏幕观察到 ckpt 轮 `stage9 ... us=14257`（flushed 行）之后还有 WRITE send；hold 轮 `stage9 us=20594` 后卡住；rep 轮 `stage10 us=15980` 后卡住。说明 flush 已返回、WRITE 已发出；`amp-pulse-1116-v1` 没有任何 checkpoint/klog flush 也挂死。正确分组是 **A = 第一条 WRITE（pre-roll sequence 0）已发、未见 WRITE_DONE**；**B = stage 10 后在 `pulse_run`（第二条 WRITE 前后）**。H8（checkpoint flush 不返回）撤回；flush 只保留为次要扰动。详见 §9 和 §11。
 
 ## 1. 证据等级与来源
 
@@ -198,9 +198,9 @@ o.config.shared_asid = 1;
 | --- | --- | --- |
 | `CBAR` | `0x1f300` | type=1（S1 trans, S2 bypass），S1_MEMATTR=WB，S1_BPSHCFG=NSH |
 | `CBA2R` | `0x1` | AArch64 VA64，无 stage-2 VMID |
-| `TCR` | `0x80000000 | 0x3500 | 32` | TG1=4K，SH0=inner，ORGN0/IRGN0=WBWA，T0SZ=32 |
+| `TCR` | `0x80000000 \| 0x3500 \| 32` | TG1=4K，SH0=inner，ORGN0/IRGN0=WBWA，T0SZ=32 |
 | `TCR2` | `0x38071` | PASIZE=36，SEP=7，AS=1（16-bit ASID），TBI0/TBI1=1 |
-| `TTBR0` | `0x1801 << 48 | root_pa` | ASID `0x1801`，root 在 36-bit PA |
+| `TTBR0` | `0x1801 << 48 \| root_pa` | ASID `0x1801`，root 在 36-bit PA |
 | `TTBR1` | `0x1801 << 48` | EPD1=1，禁用 |
 | `MAIR0` | `0xff44` | index0=NC，index1=WBWA |
 | `SCTLR` | `0x27` | M, TRE, AFE, CFRE；**CFCFG=0, CFIE=0, HUPCF=0, ASIDPNE=0** |
@@ -305,11 +305,11 @@ Waipio 的 `qcom,context-fault-retry`（`arm-smmu.c:910–945`）检查 `NO_STAL
 对应源码 `drivers/PongPower/ZizhanCs35l41.c:1194–1211`。因此：
 
 - **stage 9 挂** = 第一条 WRITE 还没有返回（或返回前 AP 已经不能继续）。
-- **stage 10 挂** = 第一条 WRITE 已经返回，且 `run_state` 已经返回（stage 10 日志在这之后）。**但 stage 10 行之后还有一次 checkpoint flush；只有 `stage=10 flushed=` 出现后才进入 amp 的 `zizhan_pulse_run()`。** 缺少 flushed 行时，挂点在 checkpoint flush，不在 `pulse_run`。
+- **stage 10 挂** = 第一条 WRITE 已经返回，且 `run_state` 已经返回（stage 10 日志在这之后）。stage 10 行之后还有一次 checkpoint flush；**现场 rep 看到 `stage10 us=15980`（flushed）之后才卡住**，所以挂点在随后的 `zizhan_pulse_run()`（第二条 WRITE 前后），不是 flush。klog 尾部没有 flushed 行是正常的：它只在下一次 flush 落盘。
 
-`rep` 轮停在 stage 10，是“WRITE 返回后、stage 10 checkpoint flush”；`hold`/`ckpt` 停在 stage 9，是“stage 9 checkpoint flush、第一条 WRITE 未发”。这两类不应该合并成同一个“ADSP 处理 WRITE 挂死”。[事实]
+`rep` 轮停在 stage 10，是“第一条 WRITE 已 DONE、stage 10 后在 `pulse_run`/第二条 WRITE 前后”；`hold`/`ckpt` 停在 stage 9，是“第一条 WRITE 已发出、DONE 未回”。这两类不应该合并成同一个“ADSP 处理 WRITE 挂死”。[事实]
 
-> **2026-11-18 修正**：`rep` 的 stage 10 **没有 `flushed=` 行**，所以它停在 stage 10 checkpoint flush，不是 amp `pulse_run`；`hold`/`ckpt` 的 stage 9 也没有 flushed 行，第一条 WRITE 从未发出。逐条以 §9.1 的表为准。
+> **2026-11-18 现场修正**：`rep` 的 `stage10 flushed=...` 在屏幕上出现后才卡住，不是 flush；`ckpt` 的 `stage9 flushed=...` 之后还有 WRITE send。klog 尾部缺少 flushed 行是正常现象；逐条以 §9.1 的现场表为准。
 
 ### 4.2 16 KiB 与 0 的混淆
 
@@ -322,7 +322,7 @@ mode 34 的 `zero_transfer`（`ZizhanAudioPrm.cpp:360–371`）顺序是 `{2,0,3
 
 在 `preroll=16384`、`bytes=11520` 时，第一条 zero WRITE 覆盖 `[base+16384, base+27904)`；它本身没有到 64 KiB 末尾。**但如果 ADSP 在第一次 WRITE 时按 `MEM_MAP` 的整个 64 KiB region 做初始化/预取，而不是只读 `buf_size`，那么 `base+16384 + 65536 = base+81920`，越过 `base+65536` 的映射末尾 16 KiB。** 0 预滚时，`base+0 + 65536 = base+65536`，恰好落在映射末尾，不越界。这个几何关系与“16 KiB 3/3 挂、0 预滚无额外变量 2/2 过”吻合。[推断，需单条 16 KiB WRITE 验证]
 
-反之，0 预滚 + hold/repeat 的 2/2 挂不能用这个几何解释：第一条 zero WRITE 在 `base+0`，整区预取也恰好不越界。`rep` 的 stage 10 在 WRITE 返回之后，但它的 `stage=10 flushed=` 行缺失，实际挂点是 **stage 10 checkpoint flush**，不是 `pulse_run`；`hold`/`ckpt` 的 stage 9 也没有 flushed 行，WRITE 未发。它们不是“amp/TDM/pulse 已经运行”的证据；amp/TDM 仍可能是“无声”的独立问题。`hold` 的全局 `zizhan_amp_pulse_hold_us` 在 boot arg 解析时已经设置，但 `pulse_ops` 要到 stage 10 之后才构造；它是否在 stage 9 之前改变了 amp/TDM 状态，目前未知。[事实 + 未知]
+反之，0 预滚 + hold/repeat 的 2/2 挂不能用这个几何解释：第一条 zero WRITE 在 `base+0`，整区预取也恰好不越界。`rep` 的 stage 10 在第一条 WRITE DONE 之后，现场 `stage10 us=15980`（flushed）后卡住，实际挂点是 **`pulse_run`/第二条 WRITE 前后**（B 组）；`hold`/`ckpt` 的 `stage9 flushed=...` 后还有第一条 WRITE send，挂点是首块 DONE 未回（A 组）。它们不是“amp/TDM/pulse 已经从第一条 WRITE 前就运行”的证据；B 组重新把 pulse/amp 纳入候选，A 组则不是 pulse。[事实 + 未知]
 
 ### 4.3 不能从日志推断“send 没发生”
 
@@ -458,7 +458,7 @@ mode 34 的 `zero_transfer`（`ZizhanAudioPrm.cpp:360–371`）顺序是 `{2,0,3
 
 **证据**
 
-- `rep` 轮停在 stage 10：第一条 WRITE 已返回，但 `stage=10 flushed=` 行缺失；挂点在 stage 10 checkpoint flush，**不是** `zizhan_pulse_run()`（`ZizhanCs35l41.c:1207–1211` 的 pulse 在这行 flush 之后才执行）。
+- `rep` 轮停在 stage 10：第一条 WRITE 已返回，现场 `stage10 us=15980`（flushed）后卡住；挂点在 **`zizhan_pulse_run()`/第二条 WRITE 前后**（`ZizhanCs35l41.c:1207–1211`）。H4 因此重新成为 B 组候选。
 - `hold` 轮带 `pulse_hold=300`，停在 stage 9；`zizhan_amp_pulse_hold_us` 在 boot arg 解析时已设置，但 `pulse_ops` 在 stage 10 之后才构造，是否影响 stage 9 的 amp 预脉冲状态未知。
 - 2 轮成功都是 0 预滚、无 hold/repeat；2 轮 0 预滚挂死都带 hold 或 repeat。样本小，但 amp 变量与挂死相关。
 - 两轮成功“无声”说明 amp/TDM 的数据路径本身也还没被听觉验证；V2DONE 早于真实播放是既往观察。
@@ -531,7 +531,7 @@ mode 34 的 `zero_transfer`（`ZizhanAudioPrm.cpp:360–371`）顺序是 `{2,0,3
 
 ## 7. 建议的下一个最小实验
 
-> **2026-11-18 调整**：先做 §9.7 的“去掉 checkpoint 同步 4 MiB flush”对照；本节的 SMMU 0/16 KiB A/B 只在无 checkpoint 的真实 WRITE 仍挂时使用。当前证据显示 checkpointed 轮根本没有发出 WRITE，或第一条 WRITE 已成功。
+> **2026-11-18 调整**：h/i/j 已读（§9.7、§11.0）：i（2000 ms）通过、4 条 `done` 约 11 ms；h/j 挂，j 在 send 后 2 s 内无 DONE。本节的 SMMU 0/16 KiB A/B 只在确认首块 DONE 不是“host 超时/失败收尾”问题后使用；checkpoint flush 只保留为次要扰动。
 
 ### 7.1 只读诊断改动（不改变行为）
 
@@ -559,7 +559,7 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 | A | 0 | 1 条 zero | dry | 基线：0 预滚单条应过 |
 | B | 16384 | 1 条 zero | dry | H1：16 KiB 单条是否挂 |
 | C | 0 | 4 条（zero/tone 顺序同 mode 34） | dry | 区分“单条”与“4 次 transfer 时序” |
-| D | 0 | 4 条 | hold/repeat + checkpoint | H8：复现 stage 10 checkpoint flush；若要去掉观察者效应，D 组应关闭 checkpoint |
+| D | 0 | 4 条 | hold/repeat + checkpoint | B 组：复现 stage 10 后的 `pulse_run`/第二条 WRITE；checkpoint 只保留日志 |
 | E | 0 | 1 条 zero | dry + `ipcc_route=0` | H7 对照 |
 
 每组都：
@@ -580,7 +580,7 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 | `FSR.ASF` + `FAR≈0x1_f9e3b000` | 高 tag 没被剥离/输入宽度不匹配 | 查 DSP tag 语义；不要改 SMR mask |
 | `GFSR.USF=1` + `GFSYNR1≠0x1801` | 未匹配 SID | 查 tag/stream；补正确 SMR 或修 tag |
 | `GFSR.USF=1` + `GFSYNR1=0x1801` | 全局 fault 的 SID 对，但 SMR/S2CR 状态不对 | 查发布顺序/读回；H2 |
-| 无任何 fault，C/D 仍挂 | 若 C/D 带 checkpoint，先按 H8 处理；SMMU 不是直接触发 | 关闭 checkpoint 后重跑；再转 H3/H4（token/amp/TDM） |
+| 无任何 fault，C/D 仍挂 | SMMU 不是直接触发；B 组（D）指向 pulse/第二条 WRITE | 先看 h/i/j 的 `done`/`fail` 与 flush 标记；2 s 内无 DONE 时转 H13（DSP/GLINK/SMMU 消费路径），不要先归因于 100 ms 超时 |
 | E 与 A 相同 | IPCC 路由不是触发 | 排除 H7 |
 | E 只在 route1 挂 | IPCC/GLINK 路径相关 | 查 GIC trigger、32 条预算、共享 receiver |
 
@@ -593,12 +593,12 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 
 ## 8. 未决问题
 
-> **2026-11-18 n18 后**：checkpointed 挂死已定位到 §9 的同步 klog flush；以下 SMMU/16 KiB/amp 问题只在“去掉 checkpoint 的真实 WRITE 仍挂”时优先，不要再用 checkpointed 轮回答它们。
+> **2026-11-18 n18 后**：checkpointed 挂死应按 §9 的 **A/B** 分组回答：A = 首块 WRITE 已发、DONE 未回；B = 首块 DONE 后 `pulse_run`/第二条 WRITE。klog flush 是次要扰动，不是主因；以下 SMMU/16 KiB/amp 问题在 A/B 的安全收尾之后仍有必要。
 
 1. ADSP 在第一次 WRITE 时到底读 `buf_size` 还是整个 `MEM_MAP` region？没有 DSP 固件源码/总线 trace，只有几何相关性。
 2. 16 KiB 3/3 挂是否真的是“越界 fault”，还是 DSP 对非零预滚地址的另一种行为？需要 A/B 单条实验。
-3. `rep` 的 stage 10 挂是否完全在 checkpoint flush 的 UFS 写，还是 `gHost.lock` 等待？需要把 checkpoint 的 `flushed=` 与 UFS 命令日志对齐。
-4. `hold` 的 stage 9 挂是否只是 checkpoint flush？去掉 checkpoint 后若仍在 stage 9，才需要查 hold 参数/amp-TDM 状态；现有 n18 数据不能回答。
+3. `rep` 的 stage 10 挂是否在 `pulse_run` 的哪一步、第二条 WRITE 的 DONE 前后？需要 `done|fail sequence= us=` 日志（新诊断内核 064f32a5）。
+4. `hold` 的 stage 9 挂是否在首块 WRITE_DONE 未回，还是 send 本身/GLINK 失败？需要 h/i/j 的 send/done 日志；现有 klog 不能回答。
 5. `CB_ACTLR[73]` 的实际值是多少？是否继承了固件旧值？只读一次即可回答。
 6. `sCR0` 的 `GFIE/USFCFG` 在当前 boot 是否仍为 `0x200406`？只读一次即可回答。
 7. `lpass_tbu` 是否在挂死前进入 halt/ECATS？只读 base+0x0/+0x20 可回答。
@@ -619,82 +619,67 @@ ZIZHAN_AUDIO_DMAWATCH: t_ms=... fsr=... far=... fsynr0=... gfsr=... gfsynr0=... 
 
 **d-2 不能算音频挂死**：`logs/n18-d-2.txt` 的 CONSOLE 只有头、没有正文（`size=0x42904`），DIAG 的 `sig=41400244` 与正常 `43474244` 不符、`size=0x4000ED8`；`n18-d-2.cycle.out` 明确 `klog not written (state 0, flushes 0, reason 0)`，没有 `dma_watch`、没有 audio 行。它是 **ramoops/早期启动损坏**，不是 mode33 的 WRITE 挂死。mode33 的唯一有效轮 d-1 通过。不要把 d-2 计入“mode33 也挂”。
 
-所有 checkpointed 轮的关键是 **`stage=N flushed=` 行是否出现**。`amp_checkpoint()`（`ZizhanSe15Prepare.cpp:61–68`）先打 `stage=N`，再同步调用 `pong_klog_flush(6)`，最后才打 `stage=N flushed=...`。实际日志：
+**先撤回一个错误推断**：`amp_checkpoint()`（`ZizhanSe15Prepare.cpp:61–68`）的顺序是 `IOLog(stage=N)` → `pong_klog_flush(6)` → `IOLog(stage=N flushed=...)`。`flushed=` 行在 flush **完成之后**才打印，因此它**不可能出现在同一次 flush 写进 UFS 的 klog 里**；只有下一次 flush 才会把它带上。klog 尾部停在 `stage=N` 是正常现象，**不能**说明 flush 没返回。n18-results 里由 klog 统计出的 `writes`/send 行也不能用来判断 checkpoint 之后的顺序；checkpoint 写在 send 之前，send 行本来就可能不在这次 klog 数据里。
 
-| 轮 | stage 9 | stage 9 flushed | WRITE send | WRITE rx | stage 10 | stage 10 flushed | 结论 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| n18-a-1 | 3026 | 3027 | 3028 | 3031 | 3033 | 3037 | 4 writes 全过 |
-| n18-a-2 | 2610 | **无** | **无** | 无 | 未到 | — | 挂在 stage 9 flush，WRITE 未发生 |
-| n18-a-3 | 2735 | 2736 | 2737 | 2739 | 2740 | 2742 | 4 writes 全过 |
-| n18-b-1 | 2660 | 2665 | 2666 | 2668 | 2670 | **无** | 第一条 WRITE 已成功，挂在 stage 10 flush |
-| n18-b-2 | 2795 | **无** | **无** | 无 | 未到 | — | 挂在 stage 9 flush，WRITE 未发生 |
-| n18-c-1 | 3004 | 3037* | 3038 | 3042 | 3044 | **无** | 第一条 WRITE 已成功，挂在 stage 10 flush |
-| n18-c-2 | 2617 | 2651 | 2652 | 2653 | 2654 | 2657 | 4 writes 全过 |
-| amp-pulse-1117-ckpt | 2832 | **无** | **无** | 无 | 未到 | — | 挂在 stage 9 flush，WRITE 未发生 |
-| amp-pulse-1117-hold | 2735 | **无** | **无** | 无 | 未到 | — | 挂在 stage 9 flush，WRITE 未发生 |
-| amp-pulse-1117-rep | 2544 | 2548 | 2549 | 2550 | 2551 | **无** | 第一条 WRITE 已成功，挂在 stage 10 flush |
-| amp-pulse-1117-pre0 | 2987 | 2990 | 2991 | 2992 | 2993 | 2994 | 4 writes 全过 |
-| amp-pulse-1117-loud | 2490 | 2494 | 2495 | 2496 | 2497 | 2500 | 4 writes 全过 |
+**现场屏幕证据（协调者，优先级高于 klog 尾部）**：
 
-`*` c-1 的 `stage=9 flushed=0 us=34240` 与控制台里的一条 launchd 行粘在同一行，但内容存在；stage 10 的 flushed 行不存在。
+| 轮 | 屏幕最后看到 | 分组 |
+| --- | --- | --- |
+| amp-pulse-1117-ckpt | `stage9 ... us=14257`（flushed 行）→ 一条 `ZIZHAN_AUDIO_WRITE: send` → 重启 | **A**：第一条 WRITE 已发出，未见 WRITE_DONE |
+| amp-pulse-1117-hold | `stage9 ... us=20594` → 卡住 | **A**：第一条 WRITE 已发出，未见 WRITE_DONE |
+| amp-pulse-1117-rep | `stage10 ... us=15980` → 卡住 | **B**：stage 10 后在 `pulse_run`，第二条 WRITE 前后 |
+| amp-pulse-1116-v1 | 无 checkpoint/klog | 未知；但**没有**任何 klog flush 也挂死 |
+| amp-pulse-1117-klog | 无 checkpoint，最后 DATA_PIN | 未知；周期 klog，和 A/B 不能直接归类 |
 
-**结论（事实）**：
+按同一代码路径，n18 的有效轮可以这样归组：
 
-- **stage 9 挂死**（a-2、b-2、ckpt、hold）：stage 9 行之后没有 `flushed=`，**没有 WRITE send**。不是“ADSP 处理 WRITE 挂死”；第一条 WRITE 根本没有发出。
-- **stage 10 挂死**（b-1、c-1、rep）：stage 9 flush 完成，第一条 WRITE 已 send+rx，stage 10 行之后没有 `flushed=`。挂点在 **stage 10 的 checkpoint flush**，不是 `zizhan_pulse_run()`；`pulse_run` 在这行 flush 之后才执行。
-- **通过轮**（a-1、a-3、c-2、pre0、loud）：stage 9/10 都有 `flushed=0`，且 4 条 WRITE 全部 send+rx。**同一个 token、同一个 SMMU context、同一个 16 KiB/0 地址都能完成 4 写**。
-- **所有有 `dma_watch` 的 n18 轮**（d-2 无 watch/klog，已排除）的 `ZIZHAN_AUDIO_DMAWATCH` 都是 `fsr=400 gfsr=0`，没有变化、没有 fault；通过轮最后有 `DMAWATCH: end polls=... fsr=400 gfsr=0`，挂死轮没有 end 行（map 未释放）。SMMU 侧没有 fault 的迹象。
+| 组 | 轮次 | 最后的 checkpoint | 第一条 WRITE | 说明 |
+| --- | --- | --- | --- | --- |
+| **A** | ckpt、hold（屏幕确认）；n18-a-2、b-2（klog-only，A 候选） | stage 9 | **已发，未见 DONE** | ckpt/hold 有屏幕 send/flushed 证据；a-2/b-2 没有 send 行，只能按同一代码路径归为 A 候选，不能单独证明 send 已发 |
+| **B** | n18-b-1、c-1、rep | stage 10 | 已 send+rx | 第一条 DONE 后进入 `pulse_run`，第二条 WRITE（sequence 1）前后 |
+| **C（通过）** | n18-a-1、a-3、c-2、pre0、loud | stage 9/10 都有 flushed | 4 条 WRITE 全 send+rx | 同一 token、SMMU context、16 KiB/0 地址都能完成 4 写 |
+| 其他 | n18-d-1 通过 2 写；n18-d-2 无效 | — | — | d-2 是 ramoops/早期启动损坏，不能算 mode33 挂死 |
 
-这不是“send 日志丢失”的推断：`AMP_CHECKPOINT(chip,9)` 在 `transfer->once()` **之前**，`AMP_CHECKPOINT(chip,10)` 在 `zizhan_pulse_run()` **之前**；flush 不返回，后面的 WRITE/pulse 就不会执行。因此 stage 9 的 WRITE 未发、stage 10 的 `pulse_run` 未跑，是代码顺序 + 缺失 flushed 行共同证明的。[事实]
+**A 组的关键新事实（协调者核对）**：PRM 29–33（同样 amp core 运行、同样在 sample 49 做 WRITE）历史上共 6 轮 12 条 WRITE，**0 挂**；n18 新增 mode 26/27/28 共 10 轮，**0 挂**。只有 PRM 34 挂（约 8/14）。PRM 34 与 33 在第一条 WRITE 处的一个实质差异是：`write_commands()` 里 **mode 34 独有 100 ms 的 WRITE_DONE 超时**（其他模式 2 s，`ZizhanAudioPrm.cpp:351`）。**但 h/i/j 表明 2000 ms 也会挂（j），所以这个差异不是充分条件**。如果 host 活着到超时，`write_commands()` 返回 false，`zero_transfer()` 返回 0，amp `stop_fail`；当前 `f385720` 随后在 PRM line 473/476 短路并 `break`，保留 graph/clock/map，不执行 `pcm_commands(true)`（见 §9.6 H10、§11.3）。h/j 都在超时前挂死，因此“超时后失败收尾”不是已发生事实。
 
-### 9.2 为什么是 `pong_klog_flush`，不是 ADSP/SMMU
+**SMMU 侧**：所有有 `dma_watch` 的有效 n18 轮都是 `fsr=400 gfsr=0`，没有变化、没有 fault；通过轮最后有 `DMAWATCH: end polls=... fsr=400 gfsr=0`，挂死轮没有 end 行。**SMMU fault 不是 A/B 组的证据**；A 组是 WRITE 已发、DONE 未回；B 组是第一条 DONE 已回、第二条 WRITE 前后。
 
-`amp_checkpoint()` 的同步调用链：
+> **A 组的证据强度**：`amp-pulse-1117-ckpt`/`hold` 有现场屏幕的 `flushed=` + `send`，可以确认首块 WRITE 已发；`n18-a-2`/`b-2` 只有 klog，klog 尾部没有 send 行，不能排除 send 行未落盘，也不能单独证明 send 已发出。把它们放在 A 是“同一 stage 9/同一代码路径”的归类，不是已证事实。`h-1`/`h-2` 同样只有 klog、没有 send 行，见 §11.0。
 
-```
-amp_checkpoint(stage)
-  IOLog("ZIZHAN_AUDIO_CHECKPOINT: stage=N")
-  pong_klog_flush(6)          // 同步，阻塞在调用线程
-  IOLog("... stage=N flushed=...")
-```
+### 9.2 H8 撤回：klog flush 是次要扰动，不是主因
 
-`pong_klog_flush()`（`drivers/NativeUfs/PongUfsTransport.cpp:327–342`）：
+上一版把“klog 尾部没有 `stage=N flushed=`”当成 flush 未返回，这是错误的：
 
-- `IOLockLock(gHost.lock)`（非 panic 路径）
-- 从 ramoops `0x85200000` 拷贝 **4 MiB**（`kKlogBytes=0x400000`，`kKlogData4k=1024`）到 UFS 的 pinned klog 区
-- 以 `kDataMax=131072`（128 KiB）为一块，调用 `hostWrite4kLocked()` 做 **WRITE(10) + FUA**
-- 最终写 1 个 header block；`PONG KLOG` 启动行明确写着 `1025 blocks`（1 header + 1024 data）
-- `hostWrite4kLocked()` 每块给 1 s 超时（`RootCommands.h:303–314`），但 **`IOLockLock(gHost.lock)` 没有超时**
+- `amp_checkpoint()` 的顺序是 `IOLog(stage=N)` → `pong_klog_flush(6)` → `IOLog(stage=N flushed=...)`；`flushed=` 在 flush 完成后打印，**同一次 flush 的 klog 不可能包含它**，只有下一次 flush 才会带上。
+- 现场屏幕明确看到 ckpt 的 `stage9 ... us=14257`（flushed 行）之后还有 WRITE send，hold 的 `stage9 us=20594`、rep 的 `stage10 us=15980` 也都是 flushed 行之后才卡住。**flush 返回了，WRITE 已发出。**
+- `amp-pulse-1116-v1` 没有任何 checkpoint/klog flush，同样挂死；这直接排除“checkpoint flush 是必要条件”。
 
-这条 flush **不是被动观察者**：它在音频/amp 线程里执行，执行时：
+因此 **H8（“checkpoint 同步 4 MiB flush 不返回”）撤回**。`pong_klog_flush(6)` 仍然是一个**次要扰动**：它确实在音频/amp 线程里同步写 4 MiB（`PongUfsTransport.cpp:288,327–342`；`PONG KLOG ... 1025 blocks`），持 `gHost.lock`，而 audio map 同时持有 `pong_smmu_lease_lock`（`ZizhanAudioDmaMap.cpp:129`）；UFS 的 `completeTransfer` 也用 `gHost.lock`（`:696–713`），Wi-Fi 初始化还要拿同一把 SMMU lease。它会改变时序、放大 UFS/APFS 启动窗口的延迟，所以应当移出关键路径或改成有界/异步；但现场证据表明它不是本次挂死的直接原因，不能再用它解释 A/B 组。
 
-- audio map 已经从 `zizhan_audio_dma_map_begin()` 取得 **全局 `pong_smmu_lease_lock`**（`ZizhanAudioDmaMap.cpp:129`），并且要到 `zizhan_audio_dma_map_end()` 才释放（`:167–173`）；
-- UFS 的 `PongUfsBlock::completeTransfer()` 也使用同一个 `gHost.lock`（`PongUfsTransport.cpp:696–713`）；
-- SpringBoard/launchd/APFS 正在做 SystemOS/Data 的 UFS I/O：`PONG_UFS IO t=30s` 的 `SystemOS/Data` 计数很大，日志附近有 `tx_flush`/APFS 行；
-- Wi-Fi 初始化也在这个窗口，`PongWifiPlatform.cpp:432` 同样要拿 `pong_smmu_lease_lock`。
+**正确的主线**：
 
-因此最直接的读法是：**音频线程在 `pong_klog_flush(6)` 里被 UFS/`gHost.lock` 卡住 → 没有 `flushed=` → 音频线程不释放 SMMU lease → Wi-Fi/其他 SMMU writer/启动路径等待；如果 UFS/NoC 的阻塞扩散到 AP，Gunyah 冷咬在约 60 s 后发生。** 后半段（UFS 命令、`gHost.lock` 等待、NoC 背压、pinger 如何停止）没有直接日志，仍属推断；前半段（没有 `flushed=`、没有 WRITE、或 WRITE 已成功）是事实。
+- **A 组**：第一条 WRITE（pre-roll，sequence 0）已发出，`WRITE_DONE` 未回；`amp-pulse-1117-ckpt`/`hold` 的屏幕证据属此组。
+- **B 组**：第一条 WRITE 已 `DONE`，进入 stage 10 后的 `pulse_run`，在第二条 WRITE（sequence 1）前后挂；`rep` 的 `stage10 us=15980` 属此组。
+- **差异线索（已降级）**：PRM 29–33 的 12 条 WRITE 0 挂、n18 mode 26/27/28 的 10 轮 0 挂，只有 PRM 34 约 8/14 挂；PRM 34 在 `write_commands()` 里独有 **100 ms WRITE_DONE 超时**（`ZizhanAudioPrm.cpp:351`），其他模式是 2 s。但 i（2000 ms）通过、j（2000 ms + flush）仍挂，且 j 在 2 s 内没有 DONE；**超时值不是充分条件**。下一步是分离 j 的 send flush 与 DSP 消费，见 §11.0。
 
-**为什么 `dma_watch`/FSR/GFSR 干净**：stage 9 挂死时 WRITE 未发出；stage 10 挂死时第一条 WRITE 已成功、DSP 已回 rx。两种情况下都没有 ADSP 共享内存 DMA 在进行，SMMU 自然没有 fault。之前把“`fault=400`”当作故障、把“stage 9 后第一条 WRITE 挂”当作 ADSP 读共享内存，都是被 checkpoint 的同步 flush 误导。
+**为什么 SMMU 还是干净的**：A 组是 WRITE 已发但 DONE 未回，B 组是第一条 DONE 已回、第二条 WRITE 前后；两种情况都没有报告 `FSR/GFSR` 故障，`dma_watch` 也没有变化。SMMU fault 仍然不是当前证据；但“DSP/GLINK 在 DONE 前挂死”或“j 的 send flush 未返回”都可能不留下 SMMU fault。Qualcomm 平台文档说 unclocked access 会触发 fatal NoC error，但本案还没有抓到这类日志（见 §11 B/C）。
 
-**4 MiB 有多大**：`PONG KLOG` 启动行是 `1025 blocks`；每次 checkpoint 都把整个 4 MiB ramoops（console+diag）重新写一遍，不是只写新增 console（`PongBootReset.h:183` 的注释写“~1 MB”，但 `kKlogBytes=0x400000` 是 4 MiB，以代码为准）。通过轮的 `flushed=0 us=13–20 ms` 说明正常时 UFS 能很快完成；挂死轮没有这个完成时间，说明 flush 没有返回，而不是“返回了但音频失败”。klog 文件里的 `reason 6`/300–321 KB 是 **上一次成功 checkpoint** 的头和部分数据；当前 stage 的 header 是最后写的，挂死时没有更新，这也和“flush 未返回”一致。
+### 9.3 其他子系统的活动：没有唯一触发器
 
-### 9.3 其他子系统的活动：只有 UFS/klog 是共同项
-
-按“WRITE 是否实际发出”分组：**A = stage 9 挂、0 send**（a-2、b-2、ckpt、hold）；**B = stage 10 挂、1 send+rx**（b-1、c-1、rep）；**C = 通过、4 send+rx**（a-1、a-3、c-2、pre0、loud）。只有 B 的第一条 WRITE 和 C 的 4 条 WRITE 真正走到 ADSP；A 的第一条 WRITE 未发。下面的对照以这三组为骨架。
+按现场屏幕和代码路径分组：**A = 第一条 WRITE（pre-roll sequence 0）已发出、未见 DONE**（ckpt、hold；n18 a-2/b-2 同路径）；**B = 第一条 DONE 已回、stage 10 后在 `pulse_run` 的第二条 WRITE 前后**（b-1、c-1、rep）；**C = 通过、4 条 WRITE 全 send+rx**（a-1、a-3、c-2、pre0、loud）。klog 的 send 行不能作为 A 组“未发”的证据：checkpoint 写在 send 之前，send 行可能不在这次 klog 数据里。
 
 按每个锚点的前 ~300 行/整段 live log 对照（脚本在 `$ZIZHAN_SRC/work/codex-1118/parse_logs2.py`，原始摘要 `log-summary2.jsonl`）：
 
 | 子系统 | 挂死轮的观察 | 通过轮的观察 | 判断 |
 | --- | --- | --- | --- |
-| UFS/klog | 锚点前最后一个 `PONG_UFS IO t=30s`；SystemOS/Data 大量读写；`tx_flush`/APFS 行；**当前 checkpoint 的 `flushed=` 缺失** | 同样有 t=30s/35s 和大量 UFS 活动；`flushed=0` 存在 | **唯一共同且紧贴锚点的事件是 checkpoint 的 4 MiB FUA flush**，不是 `PONG_UFS IO` 本身；正常 UFS 统计不能排除它 |
+| UFS/klog | 锚点前最后一个 `PONG_UFS IO t=30s`；SystemOS/Data 大量读写；`tx_flush`/APFS 行；当前 checkpoint 的 `flushed=` 不在本次 klog 中（正常） | 同样有 t=30s/35s 和大量 UFS 活动；`flushed=0` 存在 | **不是唯一触发器**；4 MiB FUA flush 仍是次要扰动（会改变启动窗口时序），但现场已看到 flushed 行和 send，不能拿它解释 A/B |
 | SpringBoard/launchd | a-2/c-1/ckpt 的 `Pong UI18: native home request accepted=1` / `main queue wake completed backlight=1 lockscreen=1` 在锚点前 2–7 行；b-1/b-2/hold/rep 没有 home/wake 行 | a-1/a-3/c-2/loud 的 home/wake 在锚点后 26–88 行；pre0 在锚点前 27–28 行；`amp-tone-1116-v1` 在锚点前 3–4 行且通过 | 不是唯一项；只是 startup 窗口的邻近事件。`amp-tone` 是清楚的负控制 |
 | GPU ADRENO/DCVS/BO/scanout | `PONG ADRENO: DCVS started` 在很早（约锚点前 2000–2600 行）；最后一个 `PONG GPU DCVS` 约在锚点前 500–1600 行（取决于该轮采样/日志量）；`Pong Metal: real Vulkan-backed device created` 常见于锚点前 28–103 行（a-3 为 -225；hold/rep 无）；没有 `PONG DBUF: flip` | 同样的 DCVS/Metal 行；首个 `PONG DBUF: flip`/`GPU frame completed` 在锚点后 2353–2795 行 | 不是唯一项；GPU 首次 DCVS 报告不紧邻挂点；首个 UI flip 在挂死前未发生，但这只是挂死的结果。没有证据表明 GPU DCVS 是触发器 |
 | Wi-Fi | `Pong WiFi: waiting for en0 link`、`wifid[...]` 在 a-2/c-1/hold 的锚点前 2–12 行；b-1/b-2/rep/ckpt 较远 | c-2 通过轮的 wifid 也在锚点前 2 行；a-1/a-3/loud 也有 wifid | 不是唯一项；Wi-Fi 与 SpringBoard 启动同窗，不能单独归因 |
 | IPCC | sample 3 `at_ns≈44.2–44.9 s`，`unknown=0`、`budget=0`；挂死轮没有 sample 4（因为日志在 ~50 s 结束） | sample 3 相近，sample 4 `at_ns≈54.2–54.9 s` 存在 | 计数健康；route0/1 都挂；不是 IPCC 丢消息/风暴。sample 4 缺失是日志终止，不是计数异常 |
-| ADSP/GLINK | `PongAdsp` 到 stage 9/10；b-1/c-1/rep 的 WRITE send+rx 成功；没有 DSP fatal/GLINK 错误 | 同样 stage；4 条 WRITE send+rx | ADSP 在 stage 10 挂死前仍能处理第一条 WRITE；不是“DSP 读共享内存立刻挂” |
-| UFS transport | `PONG_UFS` 启动行正常、`PONG KLOG 1025 blocks`；t=30s 统计 `busy=0ms`、`longest=29–50ms`；`tx_flush` | 同样的启动行和 t=30/35s 统计 | `busy=0ms` 是采样统计，不能排除单次 flush 卡住；没有 UFS error 行 |
-| 电源/autoreset | `PONG_AUTORESET: SpringBoard up at 17s`；210 s deadline；`pong_klog_period` 在 n18 包中未设置 | 同样 | pinger 不是 checkpoint flush 的直接持有者（period=0），但它的停止是下游；不能据此证明“pinger 先停” |
+| ADSP/GLINK | A 组第一条 WRITE 已发、DONE 未回；B 组第一条 WRITE 已 send+rx，第二条 WRITE 前后卡住；没有 DSP fatal/GLINK 错误 | C 组 4 条 WRITE send+rx | A 是**首块 DONE 未回**，B 是**首块 DONE 后第二块**；不是简单的“DSP 读共享内存立刻挂” |
+| UFS transport | `PONG_UFS` 启动行正常、`PONG KLOG 1025 blocks`；t=30s 统计 `busy=0ms`、`longest=29–50ms`；`tx_flush` | 同样的启动行和 t=30/35s 统计 | 没有 UFS error 行；klog flush 是次要扰动，不是 A/B 的主因 |
+| 电源/autoreset | `PONG_AUTORESET: SpringBoard up at 17s`；210 s deadline；`pong_klog_period` 在 n18 包中未设置 | 同样 | pinger 的停止是下游；不能据此证明“pinger 先停”，也不能反推 checkpoint flush |
 
 **关键负控制**：`amp-tone-1116-v1` 在 home/wake 后 3–4 行就 send（`-4/-3`），且**通过**；`pre0` 在 home/wake 后 27–28 行 send，也通过。这直接否定了“只要音频 WRITE 紧邻 SpringBoard home/backlight 就挂”的简单时序假设。挂死与 home/wake 的接近只是同一 startup 窗口内的相关，不是充分条件。
 
@@ -721,7 +706,8 @@ amp_checkpoint(stage)
 读法：
 
 - **所有 checkpointed live 挂死都在 `PONG_UFS IO t=30s` 之后、`t=35s` 之前；都在 IPCC sample 3（≈44–45 s）之后、sample 4（≈54–55 s）之前。** 两个计时器的零点不同（UFS monitor 与 IPCC `at_ns` 有固定偏移），所以不要把 30 s 和 44 s 当成同一时钟；它们只是独立地把锚点夹在同一个 ~10 s 窗口。`amp-pulse-1117-klog` 没有 checkpoint，另列为周期 klog 旁证；`1116-v1` 没有 klog，仍未知。
-- **通过轮也在同一个窗口**（a-1/a-3/c-2/pre0/loud 的锚点同样在 t=30–35 s、sample 3–4 之间），所以“时间窗”本身不区分挂/过；区分是 **checkpoint flush 是否返回**。
+- **通过轮也在同一个窗口**（a-1/a-3/c-2/pre0/loud 的锚点同样在 t=30–35 s、sample 3–4 之间），所以“时间窗”本身不区分挂/过；区分是 **A/B 的首块/第二块 WRITE_DONE 是否返回**，以及 send flush 是否返回。
+- **h/i/j 新轮也落在同一窗口**：h-1/h-2/j 的最后一个 `PONG_UFS IO` 都是 `t=30s`，没有 `t=35s`；i 继续到 `t=165s` 并完成 4 条 WRITE。挂死不是“i 的 DONE 稍慢”，而是 h/j 在同一个启动窗口内提前终止。
 - **不是 GPU DCVS 首次报告**：`PONG ADRENO: DCVS started` 在早期（约锚点前 2000 行），第一个 `PONG GPU DCVS` 在锚点前约 500–700 行；通过/挂死都有，且没有紧邻。
 - **首个 `PONG DBUF: flip`/`PONG SCANOUT: GPU frame completed` 在所有通过轮都出现在音频锚点之后**（+2353～+2795 行）；挂死轮没有 flip。这只能说明挂死发生在 **SpringBoard 的首个 UI frame 之前**，不能反推是 GPU/flip 导致。
 - 这个窗口对应 **SpringBoard/launchd/Metal/wifid/APFS 启动 + 首批 UFS I/O**；`PONG_AUTORESET: SpringBoard up at 17s` 更早。**挂死与 startup 的 UFS 负载同窗，而不是与某个单一 SpringBoard/GPU 事件同点。**
@@ -730,13 +716,14 @@ amp_checkpoint(stage)
 
 用户关心的“AP 是否在访问未开时钟/未上电寄存器”逐项核对：
 
-**UFS klog（真正可疑的 AP 阻塞路径）**
+**UFS klog（次要扰动；不是 A/B 的主因）**
 
 - `amp_checkpoint` 在音频/amp 线程同步调用 `pong_klog_flush(6)`；`pong_klog_flush` 取 `gHost.lock` 并写 **4 MiB FUA**（`PongUfsTransport.cpp:288,327–342`）。
 - UFS block I/O 的 `completeTransfer` 也取 `gHost.lock`（`:696–713`）；SpringBoard/launchd/APFS 正在 t=30 s 附近做大量 UFS 读写（`PONG_UFS IO t=30s`、`tx_flush`）。
 - `gHost.lock` 是普通 `IOLock`，**`pong_klog_flush` 的 `IOLockLock` 没有超时**；`hostWrite4kLocked` 每 128 KiB 只有 1 s 命令超时（`RootCommands.h:303–314`），最坏 32 块 ×1 s = 32 s，加上锁等待/APFS 竞争可超过 60 s 冷咬窗口。这不是“未开时钟寄存器”，而是 **长同步 UFS I/O + 无超时锁 + startup I/O 竞争**。
+- 但现场屏幕已看到 flushed 行和 send，`amp-pulse-1116-v1` 无 checkpoint 也挂死；因此它是**时序扰动/次要放大**，不能解释 A/B 组的主挂点。保留它是为了说明为什么“去掉 checkpoint”仍应作为卫生改进，而不是把它当根因。
 - 音频线程在 flush 期间仍持有 **全局 `pong_smmu_lease_lock`**（`ZizhanAudioDmaMap.cpp:129`，直到 `:167–173` 才释放）。Wi-Fi 的 `PongWifiPlatform.cpp:432` 也要拿同一把 lease；如果 Wi-Fi 正在启动，它会等待。**这是一条可解释的锁链：audio → klog flush → gHost.lock；audio 同时持有 SMMU lease → Wi-Fi/其他 SMMU writer 等待。** 但“锁链如何让 Gunyah 冷咬”仍未被直接日志证明；不能把 UFS 锁链写成唯一机制。
-- `PongBootReset.h:176–184` 的 pinger 在 `pong_klog_period>0` 时也会调用 `pong_klog_flush(5)`；n18 包没有设置 `pong_klog_period`，所以 n18 的 pinger 不走这条 flush。**11-17 的 `amp-pulse-1117-klog` 设置了 `pong_klog_period=5`，最后停在 DATA_PIN、没有 WRITE send，和 klog flush 阻塞的签名一致**；它是一个独立的旁证，不要和 n18 的 checkpoint flush 混为同一行。
+- `PongBootReset.h:176–184` 的 pinger 在 `pong_klog_period>0` 时也会调用 `pong_klog_flush(5)`；n18 包没有设置 `pong_klog_period`，所以 n18 的 pinger 不走这条 flush。**11-17 的 `amp-pulse-1117-klog` 设置了 `pong_klog_period=5`，最后停在 DATA_PIN、没有 WRITE send；它可能是周期 klog flush 的独立问题，也可能只是 send 行未落盘**。不能把它和 n18 的 A/B 混为一组。
 
 **SE15 / Geni I2C**
 
@@ -753,7 +740,7 @@ amp_checkpoint(stage)
 
 - `dma_watch` 每 1 ms 只读 context FSR/FAR/FSYNR0 和 GFSR（`ZizhanAudioDmaMap.cpp:107–120`），不写 SMMU；audio map 的写只在 install/restore。
 - SMMU 是 apps SMMU 常驻块；没有 clock-gate 检查，但 SMMU 访问在 install/restore 已经成功；dma_watch 没有 timeout/错误。**没有证据表明 SMMU 在未开时钟时被访问**。
-- audio map 持有全局 lease；这是 §9.2 的锁链，不是未上电寄存器。
+- audio map 持有全局 lease；这是 §9.2 的次要锁链，不是未上电寄存器。
 
 **IPCC 0x0ed18000**
 
@@ -763,47 +750,203 @@ amp_checkpoint(stage)
 **LPASS 时钟**
 
 - audio 路径通过 GPR/PRM 请求 LPASS core/macro clock，AP 本身不直接写 LPASS clock 寄存器；AP 的 `PONG GPU DCVS`/display 是 GX/DISPCC，不是 LPASS core。`PONG_AUTORESET`/SpringBoard 的 home/backlight 也不直接改 LPASS 时钟。
-- **没有发现 AP 在 WRITE 期间访问未上电 LPASS 寄存器的代码路径。** 如果 ADSP 的 PRM 时钟被外部事件影响，日志应先出现 PRM/ADSP 错误，而不是 checkpoint flush 的 `flushed=` 缺失。
+- **没有发现 AP 在 WRITE 期间访问未上电 LPASS 寄存器的代码路径。** 如果 ADSP 的 PRM 时钟被外部事件影响，日志应先出现 PRM/ADSP 错误；`flushed=` 缺失不是证据（它本来就在下一次 flush 才写）。
 
 ### 9.6 对 §6 假设清单的修正
 
 | 假设 | 夜间数据 | 修正 |
 | --- | --- | --- |
-| H1 16 KiB 越过 64 KiB | a-1/a-3 都是默认 16 KiB 且 4 写通过；a-2 是 16 KiB 但 WRITE 未发出（stage 9 flush）；b/c/ckpt/hold 也不是 16 KiB 独有 | **不再支持“16 KiB 是确定性触发”**；保留为真实 WRITE 的潜在边界风险，但当前挂死不是它 |
-| H2 SMMU fault/terminate | 所有有 dma_watch 的 n18 轮 `fsr=400 gfsr=0`，无变化；stage 9 挂死无 send；stage 10 挂死第一条 WRITE 已 send+rx | **不再支持 SMMU fault 是当前挂死原因**；SMMU 编程差异仍是潜在风险，但没有本次故障签名 |
-| H3 WRITE/MEM_MAP token | 同一 token 编码在 a-1/a-3/c-2/pre0/loud 的 4 写全部成功；挂死发生在 flush，不在 token 解析 | **不是当前挂死原因**；仍是协议一致性 bug，保留为后续修复 |
-| H4 amp/TDM/pulse | b-1/c-1/rep 的 stage 10 挂死发生在 `pulse_run()` 之前（flushed 行缺失）；a-2 等 stage 9 挂死也在 amp 输出之前 | **不是 stage 10 挂死原因**；amp/TDM 的“无声”仍是独立问题，需要可闻测试 |
+| H1 16 KiB 越过 64 KiB | a-1/a-3 都是默认 16 KiB 且 4 写通过；a-2 也是 16 KiB，属 A 组；ckpt 16 KiB、hold 0 都挂 | **不再支持“16 KiB 是确定性触发”**；保留为真实 WRITE 的潜在边界风险，但当前 A/B 不是它 |
+| H2 SMMU fault/terminate | 所有有 dma_watch 的 n18 轮 `fsr=400 gfsr=0`，无变化；A 组是 WRITE 已发/DONE 未回；B 组是首块 DONE 后第二块 | **不再支持 SMMU fault 是当前挂死原因**；SMMU 编程差异仍是潜在风险，但没有本次故障签名 |
+| H3 WRITE/MEM_MAP token | 同一 token 编码在 a-1/a-3/c-2/pre0/loud 的 4 写全部成功；A/B 的首块 token 也相同 | **不是当前挂死原因**；仍是协议一致性 bug，保留为后续修复 |
+| H4 amp/TDM/pulse | B 组（b-1/c-1/rep）是第一条 WRITE DONE 之后、stage 10 后的 `pulse_run`，第二条 WRITE（sequence 1）前后；A 组是第一条 WRITE | **B 组重新把 amp/TDM/pulse 纳入候选**；A 组在首块，不是 pulse；amp/TDM 的“无声”仍需独立验证 |
 | H5 IOVA 范围 | a-1/a-3 用 identity 0xf9e3b000 通过 4 写；无 pool IOVA 对照 | 没有证据；保留为未测差异 |
 | H6 SCM/XPU | live DT iommus、NUMS2CB=0；ADSP stage-1；无 SCM assign | 没有证据；不要加 |
 | H7 IPCC | route0/1 都挂/过；unknown/budget=0 | 不是共同触发；route0 对照已完成 |
-| **H8（新）同步 4 MiB klog flush / UFS 锁** | 所有 checkpointed 挂死缺 `flushed=`；stage 9 无 WRITE、stage 10 有 WRITE send+rx；UFS t=30 s/APFS 负载同窗；4 MiB FUA 持 `gHost.lock` | **当前最强解释**；直接证据是 flush 未返回，机制（UFS 命令/锁/NoC/pinger）仍未完全证明 |
+| **H8（撤回）同步 4 MiB klog flush / UFS 锁** | 现场屏幕已看到 `stage9 us=14257` flushed 行 + send；hold `us=20594`、rep `us=15980` 也是 flushed 后卡住；1116-v1 无 checkpoint 也挂 | **撤回**；`flushed=` 本来只在下一次 flush 落盘，klog 尾部不能证明 flush 未返回。仅保留为次要时序扰动 |
+| **H9（降级）mode34 100 ms WRITE_DONE 超时过短** | i（2000 ms）通过，4 条 `done us≈11 ms`；h-1/h-2（100 ms）挂；j（2000 ms + flush）也挂，且 `send sequence=0` 后没有 `done`/`fail` | **不是充分原因**：正常 DONE 远小于 100 ms；j 证明放宽到 2 s 也不保证。100 ms 仍是 code smell，但不能单独解释挂死 |
+| **H10（降级/未证）未完成 WRITE 时拆 graph/UNMAP/关时钟** | j 在 2 s 超时前已挂，未进入失败收尾。当前 `f385720` 在 `!amp_pass` 时 line 473 短路、line 476 `break`，line 496 的 `pcm_commands(true)` 不执行；graph/clock 未释放，SMMU map 由 `zizhan_audio_dma_map_retain()` 保留，只有 amp core 关闭和数据脚恢复。协调者描述的 STOP/CLOSE/释放时钟路径与此不符，需以设备内核 `064f32a5` 实际代码为准 | 仍是协议风险（mainline 不等待 DONE；Qualcomm NOC 文档称 unclocked 访问可致命），但不是 j 的已证触发；不能写成“已发生” |
+| **H11（降级）首块 WRITE_DONE 的启动/预缓冲延迟 >100 ms** | i 的首块 DONE 为 11 ms；j 在 2 s 内没有 DONE；现有样本没有“100–2000 ms 才 DONE” | 没有证据支持“首块只是稍慢”；A 组是 **DONE 不回且整机先挂**，不是 100 ms 预算不够 |
+| **H12（次要，j 待分离）klog flush 时序扰动** | 4 MiB FUA / `gHost.lock` / SMMU lease 仍在音频线程；j 的 `send` 行已落盘，但没有 flush 后确认行，无法判断 send flush 是返回后 DSP 才挂，还是 flush 自身未返回 | 卫生问题，需移出关键路径；j 的归属未定，不能把 H12 排除也不能当主因 |
+| **H13（新，首要）首块 WRITE 路径本身在 DONE 前挂住 SoC** | j 的 `send sequence=0` 已发出、2 s 内无 DONE/fail，92 s 后看门狗复位；i 用同样地址 `1f9e3f000`、同样 token 编码，首块 11 ms 完成；SMMU `fsr=400 gfsr=0` 无变化 | 当前最强解释：不是 host 超时，而是 DSP/GLINK/SMMU/共享内存消费路径的竞态；下一步先分离 send、flush、DSP 消费三段时间 |
 
 ### 9.7 结论与下一步
 
 **可以直接下的结论**：
 
-- 11-17 的“5/7 ADSP WRITE 挂死”至少大部分是 **checkpoint 的同步 `pong_klog_flush(6)` 造成的观察者效应**；stage 9 挂死时 WRITE 未发，stage 10 挂死时第一条 WRITE 已成功。把这两类说成“ADSP 读共享内存挂死”不成立。
-- **SMMU FSR/GFSR、IPCC 计数、ADSP/GLINK 在 n18 挂死前都没有异常**；没有证据支持 SMMU fault、IPCC 风暴或 DSP 读共享内存作为当前挂死的直接原因。
+- 11-17 的“5/7 ADSP WRITE 挂死”应按 **A/B** 分组：A = 第一条 WRITE 已发、DONE 未回；B = 第一条 DONE 后、stage 10 后的 `pulse_run`/第二条 WRITE。**不是** checkpoint flush 观察者效应；H8 撤回。
+- **SMMU FSR/GFSR、IPCC 计数在 n18 挂死前都没有异常**；没有证据支持 SMMU stage-1 fault 或 IPCC 风暴。A 更像“DSP/GLINK 在首块 DONE 前挂”，B 是“首块 DONE 后第二条 WRITE/pulse”；失败收尾/UNMAP/关时钟的风险只在 host 活着到超时时才可能发生，且需要新内核验证。这些都不一定留下 SMMU fault。
 - **音频协议本身在 n18 的通过轮完成了 4 条 WRITE send+rx**（a-1/a-3/c-2/pre0/loud）；之前 pre0/loud 的无声音不是“WRITE 没成功”，而是 amp/TDM/时序问题。
+- **PRM 29–33（12 条 WRITE）0 挂、n18 mode 26/27/28（10 轮）0 挂，只有 PRM 34 约 8/14 挂**；mode34 独有 100 ms WRITE_DONE 超时，但 h/i/j 显示 2 s 也会挂，超时值不是充分条件。
+- **h/i/j 的新对照**：i（2000 ms、无 flush）4 条 WRITE 全部 `done us≈11 ms`，含 16 KiB 首块；h-1/h-2（100 ms）与 j（2000 ms + send flush）都在 92 s 看门狗复位前挂死。j 的 `send sequence=0` 已落盘、无 `done`/`fail`；若 send flush 已返回，这就是 A 组“DONE 不回、整机先挂”的直接实例；若 flush 未返回，则是 H12。现有日志缺少 flush 后确认行，不能二选一。
 - **d-2 是无效的 ramoops/早期启动轮**；不能作为 mode33 挂死证据。mode33 的有效轮 d-1 通过。
-- **11-17 `amp-pulse-1116-v1`（无 checkpoint，klog 未写）和 `amp-pulse-1117-klog`（周期 klog 5 s，最后 DATA_PIN）仍是独立问题**；它们可能分别对应真实音频/SMMU 或 klog flush，不能由 n18 的 checkpoint 结论替代。
+- **11-17 `amp-pulse-1116-v1`（无 checkpoint，klog 未写）和 `amp-pulse-1117-klog`（周期 klog 5 s，最后 DATA_PIN）仍是独立问题**；1116 证明“无 flush 也能挂”，klog 可能是周期 flush 或 send 行未落盘，均不改变 A/B 主线。
 
 **下一步（最小、单变量）**：
 
-1. **先拆掉观察者效应**：`zizhan_audio_checkpoint=0` 或把 `amp_checkpoint` 改成 **console-only**（不调用 `pong_klog_flush`）；用同一 a 臂（mode34、dry、16K、route1）重跑 2–3 轮。若不再挂，H8 得到直接验证；若仍挂，才回到真实音频/SMMU。
-2. 若必须保留 klog：把 checkpoint 改成 **有界、非阻塞**：
+1. **先分离 j 的三种可能**：send 返回后 DSP 消费、send flush、GLINK 收包。最小改动是在 send flush 之后加一行 `ZIZHAN_AUDIO_WRITE: sent-flushed`；若该行出现后才挂，A（H13）成立；若不出现，j 归 H12。
+2. **重跑 i 条件（2000 ms、无 flush）至少 3 次**：单轮 i 通过不能证明 2 s 稳定；若仍偶发挂死，H9/H11 基本排除，转 H13 的 DSP/GLINK/SMMU 分段。
+3. **按 §11 C 的安全顺序做失败收尾**：WRITE 超时/失败时先停新写、发 FLUSH/STOP/EOS、等 DONE/stop ack，再 UNMAP/CLOSE/释放时钟；超时则保留 map/图/时钟/缓冲直到复位。不要用“100 ms 到了”作为拆资源的理由。
+4. **保留 klog 作为次要卫生项**：把 checkpoint 改成 **有界、非阻塞**：
    - 只写本次新增的 console 行（或 ≤64 KiB），不每次重写 4 MiB；
    - 从独立低优先级 worker 写，不在音频/amp 线程写；
    - 用 `IOLockTryLock`/有界重试，不让 `pong_klog_flush` 无限等 `gHost.lock`；
    - 不在持有 `pong_smmu_lease_lock` 的区间内做 4 MiB UFS 写（先释放 lease，或把 checkpoint 移到 map 之外）。
-3. 然后回到真实音频：amp 保持 + 连续数据 + 可闻测试；SMMU 只在“无 checkpoint 的真实 WRITE 仍挂”时按 §7 的只读诊断重开。
-4. 不要用 d-2 复跑 mode33；若需要 mode33 证据，先确认 ramoops/console 有效、有 `dma_watch`/klog，再计入。
+5. 然后回到真实音频：amp 保持 + 连续数据 + 可闻测试；SMMU 只在“安全收尾后真实 WRITE 仍挂”时按 §7 的只读诊断重开。
+6. 不要用 d-2 复跑 mode33；若需要 mode33 证据，先确认 ramoops/console 有效、有 `dma_watch`/klog，再计入。
 
 **边界**：本次仍只读日志和源码；没有手机操作、没有构建、没有分区写。下一步需要新内核/包和设备窗口，不能在本次 03:00 前无人值守执行。
 
-## 10. 参考
+## 11. WRITE_DONE 语义与失败收尾调研（2026-11-18）
 
-### 10.1 本机 live DT（仓库外，相对 `$ZIZHAN_SRC`）
+（编号按协调者要求保留为 §11；原 §10 参考已移到 §12，因此本节前没有 §10。）
+
+### 11.0 h/i/j 实测对照（2026-11-18 01:36–01:52）
+
+这几轮由协调者运行；本文只读 `$ZIZHAN_SRC/logs/n18-{h,i,j}-*`，没有碰手机。各轮都是 `zizhan_audio_prm=34`、`zizhan_pulse_dry=1`、`zizhan_ipcc_route=1`、`pong_klog_period=2`，source revision `f385720`，只改 WRITE_DONE 预算和 flush：
+
+| 轮 | 设置 | 结果 | 关键证据 |
+| --- | --- | --- | --- |
+| n18-h-1 | 默认 100 ms，无 send flush | 挂；92 s 后看门狗复位 | klog 没有 `ZIZHAN_AUDIO_WRITE: send`，也没有 `done`/`fail`；最后一组音频行是 `ZIZHAN_AUDIO_PULSE: flags dry=1 nopup=0` |
+| n18-h-2 | 同 h-1（重复） | 挂；92 s 后看门狗复位 | 同样没有 send/done/fail；最后音频行仍是 `ZIZHAN_AUDIO_PULSE: flags dry=1 nopup=0` |
+| n18-i-1 | `zizhan_write_ms=2000`，无 send flush | 通过；4 条 WRITE 全完成 | `sequence=0` 地址 `1f9e3f000`，`done ... us=11079`；`sequence=1..3` 分别 `11082/11075/11067 us`；最后 `DMAMAP: PASS installed=0`、`PRM: PASS` |
+| n18-j-1 | `zizhan_write_ms=2000`，`zizhan_write_flush=1` | 挂；92 s 后看门狗复位 | klog 最后一条音频行是 `send ... token=7a1b0001 address=1f9e3f000 ... sequence=0`；没有 `done`/`fail`，也没有后续 `rx` |
+
+**这组数据说明什么**
+
+- **正常首块 DONE 远小于 100 ms**：i 的首块（16 KiB 预滚、sequence 0）11 ms 完成，后续块也在 11 ms 左右。H9 的“100 ms 不够”因此不能作为唯一解释；H11 的“首块天然要 >100 ms”也没有被样本支持。
+- **2 s 预算也不保证**：j 用 2000 ms，仍在看门狗前挂死；如果 `send` 之后的 flush 已返回，那么 j 是 A 组的直接实例——**DONE 根本没回，不是回得晚**。如果 flush 没返回，j 属于 H12（klog flush 自身），不是 DSP 消费。现有诊断没有“send flush 已完成”的确认行，二者不能从这份 klog 区分。
+- **h 不能单独定性**：h-1/h-2 都没有 send 行，可能是第一条 WRITE 尚未发出、send 行未落盘，或挂死发生在 send/flush 之前；两次重复只能说明这个 100 ms 分支可重复挂死，不能把它当成“100 ms 超时后收尾挂死”的证据。
+- **同一地址、同一 token 编码既可通过也可挂**：i 用 `1f9e3f000` 通过，j 用同一地址在 send 后挂；H1（16 KiB 必然越界）和 H3（token 编码必然错）都不能解释这种差异。差异更可能在 MEM_MAP 句柄、SMMU 表/上下文状态、GLINK 投递或 DSP 消费时序。
+
+**日志解释的边界**：`h`/`j` 的 klog 都来自 UFS 副本，`n18-j-1.cycle.out`/`n18-results` 的 `klog_reason` 是 `periodic`，不是 `write`；这既可能是 send flush 写完后又有一次 2 s 周期 flush，也可能是 send flush 写到数据块后、header 前挂住。没有“flush 返回”标记时，不能把 `send` 行当成“send flush 已返回”的证明。
+
+### 11.1 A：WR_SH_MEM_EP 的首块 WRITE_DONE 何时返回
+
+**API 契约（AudioReach 公开头文件）**
+
+- `fwk/api/modules/wr_sh_mem_ep_api.h:62–77`：客户端把数据写入 `DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2` 指定的缓冲；模块从该缓冲读取；**“Once the buffer is consumed, the module raises DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2”**。
+- 同文件 `:227–260`：DONE 表示 **“the referenced write buffer has been fully consumed and is available to the client”**；`data_status` 表示是否成功消费。
+- 同文件 `:307–334`、`:354–394`：EOS 是独立的 `DATA_CMD_WR_SH_MEM_EP_EOS`，`EOS_RENDERED` 表示流末尾已被最终端点渲染/丢弃；**不是每个 WRITE 都需要 EOS**。
+
+**SPF reference implementation（AudioReach/audioreach-engine）**
+
+- `fwk/spf/containers/gen_cntr/ext/wr_sh_mem_ep/src/gen_cntr_wr_sh_mem_ep.c:341–452`：`gen_cntr_copy_gpr_client_input_to_int_buf()` 把共享内存数据拷入 container 的 **internal buffer**；只有 `actual_data_len == 0` 且该外部缓冲没有被 internal input 持有时，才调用 `gen_cntr_free_input_data_cmd()` 释放并回 DONE。
+- 同文件 `:443–452`：如果 internal input 仍持有该缓冲（`GEN_TOPO_BUF_ORIGIN_EXT_BUF` 且 `actual_data_len` 非 0），DONE **延后**，等 process 后再释放。
+- 同文件 `:1481–1559`：`gen_cntr_free_input_data_buffer_cmd_gpr_client_v2()` 在拷贝/消费完成后生成 `DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2`，填回原地址/句柄/status，并在发送前 dec refcount/invalidate cache。
+- 同文件 `:769–947`：`gen_cntr_input_data_buffer_set_up_gpr_client_v2()` 解析 `data_buf_size`、映射/失效 cache；零长度或非整数 PCM 会立即返回（带错误 status），正常缓冲进入拷贝流程。
+- 同文件 `:1009–1019`：container 的 input queue 同时处理 `DATA_BUFFER_V2` 和 `EOS`；EOS 走独立的 EOS 处理，不与每个 WRITE_DONE 合并。
+
+**因此，首块 WRITE_DONE 的语义是**：
+
+1. **不是“播放完”**；它是共享内存缓冲被 DSP **完全读取/拷入内部缓冲**，client 可以回收该缓冲。
+2. **首块可能被延迟**：如果 graph 刚 START、internal buffer 还没空间、或下游/内部 input 仍持有该缓冲，DONE 会推迟到下一次 process。**100 ms 不是协议保证**；协议层不能排除首块超过 100 ms。但“可能延迟”不等于本次实测：i 的首块是 11 ms，j 是 2 s 内完全不回。
+3. **mainline q6apm 没有 100 ms 超时**：`q6apm.c:480–500` 的 `q6apm_write_async()` 只是异步入队；`q6apm.c:591–610` 在收到 DONE 时更新 `hw_ptr`/`snd_pcm_period_elapsed`；`q6apm-dai.c:423–445` 的 `ack` 只负责按 ALSA 指针排入 WRITE，不等待固定毫秒数。**vendor/reference client 等待的是 DONE 事件，不是 100 ms。**
+
+**来源限制**：`audioreach-engine` 是公开的 generic SPF reference；SM8475 的实际 ADSP 镜像不是公开源码，具体调度可能不同。但 `wr_sh_mem_ep_api.h` 的 API 契约与 `gen_cntr_wr_sh_mem_ep.c` 的 reference 行为足以说明：**DONE 不是固定 100 ms 内必回**。
+
+**与 h/i/j 的关系**：i 证明这条 graph 的正常首块 DONE 约 11 ms；j 证明存在“send 已发出、2 s 内 DONE 完全不回”的样本；h 没有 send 行，不能用于判断 DONE 延迟。因此 A 的准确表述是：**DONE 可能不回，而且 SoC 在 host 预算耗尽前就挂死**；不是“DONE 比 100 ms 慢一点，host 提前放弃”。这也意味着把 `zizhan_write_ms` 从 100 改到 2000 只能排除 host 超时，不能修复 DSP/GLINK/SMMU 侧的挂死。
+
+### 11.2 B：有未完成 WRITE 时 STOP/CLOSE/UNMAP/关时钟
+
+**mainline q6apm 的实际收尾顺序**
+
+- `q6apm-dai.c:570–588` `q6apm_dai_close()`：若 stream 曾启动，先 `q6apm_graph_stop()`，再 `q6apm_free_fragments()`，最后 `q6apm_graph_close()`。
+- `q6apm-dai.c:860–878` `q6apm_dai_compr_free()`：`q6apm_graph_stop()` → `q6apm_free_fragments()` → `q6apm_unmap_memory_fixed_region()` → `q6apm_graph_close()` → `snd_dma_free_pages()`。
+- `q6apm-dai.c:447–473` `trigger STOP`：只设置 `state=STOPPED`、`queue_ptr=0`；**不发送 GRAPH_STOP**，真正 STOP 在 close 路径。
+- `q6apm.c:828–840` `q6apm_graph_stop()`：发送同步 `APM_CMD_GRAPH_STOP`，等待 basic result；等待在 `q6apm.c:97–121` 的 `audioreach_graph_mgmt_cmd()` → `q6apm_send_cmd_sync()`，超时是 **5 s**（`audioreach.c:617–620`）。但 `q6apm_dai_close()`/`q6apm_dai_compr_free()` **忽略** `q6apm_graph_stop()` 的返回值，STOP 超时后仍继续 free/UNMAP/CLOSE。
+- `q6apm.c:792–803` `q6apm_graph_close()` 只做 kref/port 释放，**没有每块 WRITE_DONE 的等待**。
+- `q6apm.c:372–377` `q6apm_free_fragments()` → `audioreach.c:1547–1562` `audioreach_graph_free_buf()`：在 `graph->lock` 下直接把 `rx_data.buf`/`tx_data.buf` 设为 NULL 并 `kfree`；它不等 DSP 的 per-buffer DONE。
+- `q6apm-lpass-dais.c:185–203` `q6apm_lpass_dai_shutdown()`：先 `q6apm_graph_stop()`，再 `q6apm_graph_close()`；`q6i2s_lpass_dai_shutdown()`（`:300–305`）在这之后才 `q6apm_lpass_dai_disable_clocks()`。顺序是 **STOP → CLOSE → 关时钟**，不是先关时钟。
+
+**已知竞态/失败模式**
+
+- **CVE-2026-72257**（`ASoC: qcom: q6apm: fix NULL pointer dereference in graph_callback`）：`q6apm_free_fragments()` 释放 `rx_data.buf` 后，DSP 的 late `DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2` 仍可能到达；`graph_callback()` 在旧代码里读 `buf[token].phys` 会 NULL deref。修复只是**加 NULL 检查**，不是“等所有 DONE 再 free”。这直接说明 mainline 的 close/free 路径**不保证** outstanding WRITE 已归零；它容忍 late DONE（避免 AP kernel crash），但 DSP 侧缓冲生命周期仍然没有显式握手。
+- **`q6apm-lpass-dai: close graph on prepare errors`**（上游 commit `be1fae62cf25…`）：错误路径不 close 会把 graph 留在 DSP；下一次加载同一 graph 会失败，板子要重启。说明“失败时草率停止/留下图”会造成 DSP 状态不一致。
+- **`q6apm-dai: reset queue ptr on trigger stop`**（2026-03 patchset）：STOP 不重置 `queue_ptr` 会向 rpmsg 洪泛写请求。说明“STOP 时仍有在途 WRITE”需要显式清队列/等 DONE，而不是只改状态。
+- **`q6apm: Add support for early buffer mapping`**（LKML 2026-02）：把 MAP 提前到 pcm_new、UNMAP 放到 pcm destruct；说明 map/unmap 的生命周期要与 PCM/stream 生命周期对齐，不能在仍有 WRITE 时随意 UNMAP。
+- **Qualcomm 平台文档（RB5，`Erroneous transaction on bus`）**：`NOC_ERROR`/timeout 是 fatal error，包括 **unclocked bus access**；NOC 向 TrustZone 发 FIQ。XPU violation 也明确列出“device controller 因时钟不可用而不工作”。这给出“DSP/码流在时钟关闭后取数 → NoC/XPU fatal → 整机复位”的硬件机制，但它是平台级描述，不是本案的直接日志。
+
+**AudioReach APM 的 close 序列**
+
+- `fwk/spf/apm/core/src/apm_cmd_sequencer.c:202–213`：子图处于 `STARTED` 时，`GRAPH_CLOSE` 的处理序列先发 `SPF_MSG_CMD_GRAPH_STOP`，再发 `DISCONNECT`、`CLOSE`；这是“先停再关”的方向，但**没有 per-buffer DONE 的显式等待**。container STOP 负责把内部缓冲/外部缓冲处理掉。
+- `gen_cntr_wr_sh_mem_ep.c:1568–1634` 的 flush 路径会对队列中的 `DATA_BUFFER_V2` 调 `gen_cntr_free_input_data_buffer_cmd_gpr_client_v2(..., is_flush=TRUE)`，后者在 `:1481–1559` 生成带 status 的 `DATA_BUFFER_DONE_V2`；EOS 则走独立的 `:1600–1628` 分支。也就是说，**GRAPH_FLUSH 比直接 UNMAP 更接近正确顺序**，但 host 仍要等对应的 DONE/ack，不能把“发了 FLUSH”当成“缓冲已归还”。
+
+**结论（B）**：
+
+- 厂商/主线**没有**在 `close` 里“等所有 WRITE_DONE”的硬性主机等待；它先发 STOP，再 free fragments/UNMAP/CLOSE，并假设 STOP 会让 DSP 停止取数。
+- API 契约要求 client 在 DONE 之前不得复用/释放该缓冲；mainline 的 late-DONE CVE 证明这个假设在竞态下会破。**如果 AP 在 DSP 仍持有首块缓冲时 UNMAP/关 LPASS 时钟/恢复数据脚，DSP/codec DMA 可能访问已撤销的映射或已关的时钟。** 公开源没有找到直接的 SoC 挂死/NoC 日志；Qualcomm 平台文档只说明这条路径在硬件上是 fatal，不能证明本案已经发生。
+- **与 h/i/j 的边界**：j 在 2 s 超时前就挂死，因此没有走到 `q6apm_dai_close()` 式的失败收尾；B 不能解释 j。H10 仍是“如果 host 活着走到超时”的风险，不是 j 的已证机制。i 通过则说明 STOP/CLOSE/UNMAP 的完整成功路径本身可以走通。
+
+### 11.3 C：PRM34 失败路径的安全收尾顺序（方案，只写不改）
+
+**触发**：首块 WRITE（pre-roll sequence 0）在 `write_commands()` 超时、传输失败，或 **DONE 一直不回但 AP 还活着**。
+
+**先核对当前 worktree 的失败路径（很重要）**：
+
+- 当前 `f385720`/本 worktree 在 `write_commands()` 返回 false 后，`zero_transfer()` 返回 0，amp `stop_fail` 关闭 core，`prepare()` 仍会 assert reset 并恢复 SCK/WS/data pin，`amp_pass=false`。
+- 回到 PRM 后，line 473 的 `!o.silent.amp_pass` **短路**了整个条件，line 476 直接 `break`；因此 line 496 的 `pcm_commands(true)`（GRAPH STOP/CLOSE）和 line 476 的 `memory_commands(true)` 都**不会执行**。graph/clock 没有释放，SMMU map 由 `zizhan_audio_dma_map_retain()` 保留。
+- 所以当前实际行为不是“失败后立即 STOP/CLOSE/UNMAP/关时钟”，而是“关 amp core、恢复数据脚、保留 graph/clock/map 直到复位”。这比协调者描述的路径更保守。协调者若在内核 `064f32a5` 中改了 line 473/476 或失败收尾，应以该内核的实际代码为准；本节其余部分是设计建议，不是现状描述。
+
+**安全顺序**：
+
+| 步 | 动作 | 条件/原因 |
+| --- | --- | --- |
+| 1 | 停止发新 WRITE，保留 graph、PRM clock/votes、SMMU map、UEFI 缓冲；amp core 可先关闭/assert reset，但 SCK/WS/data pin 的 mux 恢复应等 graph 停止后 | 不再增加在途缓冲；DSP 仍可能需要这些资源；pin mux 在 DSP 仍可能驱动 I2S 时切换会增加争用 |
+| 2 | 发送 `GRAPH_FLUSH` 或 `GRAPH_STOP`（优雅场景可先 `EOS`） | 让 DSP 停止/丢弃/返回在途缓冲；不要先 UNMAP |
+| 3 | 有界等待所有在途 `WRITE_DONE`（或 `EOS_RENDERED`/stop ack） | 首块用 **≥2 s** 的预算；DONE 是缓冲被消费的唯一可靠信号 |
+| 4 | 确认 outstanding=0 后，`MEM_UNMAP` | DSP 不再持有缓冲，AP 才能撤销映射 |
+| 5 | `GRAPH_CLOSE` | 图关闭在 UNMAP 之后；不要先关图再指望 DSP 返回缓冲 |
+| 6 | 释放 PRM LPASS clock/votes | 时钟必须在 DSP 不再取数之后关 |
+| 7 | 恢复 SCK/WS/data pin mux，assert amp reset | 数据脚在时钟/图停止后恢复 |
+| 8 | 退休/恢复 SMMU context，释放 `pong_smmu_lease_lock` | 最后释放共享 SMMU 资源 |
+
+**超时/不确定**：
+
+- 第 3 步超时（DSP 仍不返回 DONE/EOS/stop ack）→ **不要**执行 4–8；保留 map/缓冲/graph/clock/数据脚，标记 `uncertain=1`，要求复位。保留资源是唯一安全选项：DSP 仍可能 DMA。
+- 第 4 步 UNMAP 失败/不确定 → 保留 map/lease；不要继续 CLOSE/clock-off。
+- 第 6 步 clock release 失败 → 保留 clock，保留 map；不要用“已发 release”冒充时钟已关。
+
+**超时值**：
+
+- 首块 WRITE 不要用 100 ms 作为拆资源的触发器；`wr_sh_mem_ep_api.h` 没有 100 ms 保证，reference 会把 DONE 推迟到 internal buffer 有空/下游消费。正常样本是 11 ms（i），但这只说明通常很快，不能把 100 ms 当成协议上限。**建议首块 `zizhan_write_ms=2000`**，或者用无固定超时 + 看门狗保留资源的方案。
+- 稳态后的后续块可以使用更短超时，但失败路径仍必须走“等待/保留”，而不是立即拆资源。
+- `zizhan_write_flush=1` 的失败 flush（reason 8）应放在**安全收尾之后/之外**，不要让它持着 SMMU lease/时钟/图去写 4 MiB，避免把次要扰动放大成新的阻塞。
+- **如果 AP 在超时前已经挂死（j 的情况），本节的收尾根本不会执行**；此时唯一的安全动作是保留资源并让看门狗复位，不能指望 host 侧“先 FLUSH 再 UNMAP”的代码救场。
+
+**与 h/i/j 的对应**：
+
+| 轮 | 设置 | 实测/判定 |
+| --- | --- | --- |
+| h | 默认 100 ms；h-1/h-2 两次 | 都挂；klog 没有 send/done/fail。不能证明“100 ms 后收尾”发生，可能是 send 前/未落盘。 |
+| i | `zizhan_write_ms=2000` | 通过；首块 `done us=11079`，4 条全完成。H9（100 ms 太短）不被支持。 |
+| j | 2000 ms + 每次 send/done flush | `send sequence=0` 后无 done/fail，92 s 挂死。若 send flush 已返回，则是 A（DONE 不回）；若未返回，则是 H12。没有 `sent-flushed` 标记，不能归入 B/H10。 |
+
+**建议的代码改动（只设计，不在本窗口实现）**：
+
+- `ZizhanWriteState` 增加 outstanding 计数和 tri-state（done/timeout/transport）；`write_commands()` 超时返回“未完成”而不是直接进入 `stop_fail`。
+- PRM34 失败路径新增 `zizhan_audio_prm_fail_safe()`：先停新写 → FLUSH/STOP/EOS → 有界 drain DONE → 再 `memory_commands(true)`/`pcm_commands(true)`/`dma_map_end`/PRM release；任一步超时则 retain。
+- `zizhan_amp_native_pulse_run()` 的失败返回不能直接触发 `pcm_commands(true)`/clock release；把安全收尾集中到 PRM owner。
+- 首块 mode34 默认 `zizhan_write_ms=2000`；100 ms 只作为稳态诊断，不作为默认。
+- `pong_klog_flush` 改为有界/异步/console-only，移出 SMMU lease 区间；这是 §9.2 的次要卫生项。
+
+### 11.4 一手来源
+
+- AudioReach engine：`https://github.com/AudioReach/audioreach-engine`
+  - `fwk/api/modules/wr_sh_mem_ep_api.h:62–77`、`:227–260`、`:307–334`、`:354–394`
+  - `fwk/spf/containers/gen_cntr/ext/wr_sh_mem_ep/src/gen_cntr_wr_sh_mem_ep.c:341–452`、`:443–452`、`:769–947`、`:1009–1019`、`:1481–1559`
+  - `fwk/spf/apm/core/src/apm_cmd_sequencer.c:202–213`
+- mainline：`sound/soc/qcom/qdsp6/q6apm.c:97–121,372–377,477–515,591–610,792–803,828–840`；`q6apm-dai.c:423–445,447–473,570–582,860–878`；`q6apm-lpass-dais.c:185–203,300–305`；`audioreach.c:617–620,1547–1562`
+- Qualcomm 平台文档：`https://docs.qualcomm.com/bundle/publicresource/topics/80-88500-4/72_Erroneous_transaction_on_bus__error_and_timeout_.html`（NOC_ERROR/timeout 包含 unclocked bus access，FIQ 到 TZ；XPU violation 包含时钟不可用）
+- CVE-2026-72257：`https://app.opencve.io/cve/CVE-2026-72257`（late buffer-done 与 `q6apm_free_fragments` 的 NULL deref）
+- `q6apm-lpass-dai: close graph on prepare errors`：上游 commit `be1fae62cf253a5b67526cee9fbc07689b97c125`
+- `q6apm-dai: reset queue ptr on trigger stop`：2026-03 patchset `https://patchew.org/linux/20260309065137.949053-1-srinivas.kandagatla@oss.qualcomm.com/`
+- `q6apm: Add support for early buffer mapping on DSP`：`https://lkml.iu.edu/2602.0/07700.html`
+- 本机 h/i/j 日志（仓库外，相对 `$ZIZHAN_SRC`）：`logs/n18-h-1.klog.txt`、`logs/n18-i-1.klog.txt`、`logs/n18-j-1.klog.txt`、`logs/n18-{h,i,j}-1.cycle.out`、`logs/n18-{h,i,j}-1.supervisor.json`、`logs/n18-{h,i,j}-1.source.diff`
+
+## 12. 参考
+
+### 12.1 本机 live DT（仓库外，相对 `$ZIZHAN_SRC`）
 
 - `work/hardware-20261115/audio-dma-live-dt-v1.dts:29241–29255`：`msm-audio-ion`（SID `0x1801`、sid-mask `<0 0xf>`、pool `0x10000000+0x10000000`）。
 - `work/hardware-20261115/audio-dma-live-dt-v1.dts:18960–18978`：apps SMMU（`qcom,context-fault-retry`、`num-context-banks-override`、`num-smr-override`、`handoff-smrs`、全局/上下文 IRQ）。
@@ -811,7 +954,7 @@ amp_checkpoint(stage)
 - `work/hardware-20261115/audio-dma-live-dt-v1.dts:12500–12528`：fastrpc SID `0x1803/0x1804/0x1805` 与 `"stall-disable","HUPCF"`。
 - `work/hardware-20261115/audio-dma-live-dt-v1.dts:11298–11321`：`qcom,gpr`、`audio-pkt`、`q6prm`。
 
-### 10.2 厂商 audio-kernel（公开 SM8475/taro-S 镜像）
+### 12.2 厂商 audio-kernel（公开 SM8475/taro-S 镜像）
 
 - `https://github.com/ASUS-SM8475/vendor_qcom_opensource_audio-kernel/blob/taro-S/dsp/msm_audio_ion.c`
   - `#L36`：`MSM_AUDIO_SMMU_SID_OFFSET 32`
@@ -819,7 +962,7 @@ amp_checkpoint(stage)
   - `#L830–L913`：probe，`sid = args[0] & sid_mask`、`sid << 32`
   - `#L574–L585`、`#L680–L750`：`hyp_assign_phys` 与 `IOCTL_MAP_HYP_ASSIGN`
 
-### 10.3 主线 Linux
+### 12.3 主线 Linux
 
 - `https://github.com/torvalds/linux/blob/master/sound/soc/qcom/qdsp6/q6apm-dai.c`
   - `#L42`：`SID_MASK_DEFAULT 0xF`
@@ -851,11 +994,11 @@ amp_checkpoint(stage)
 - `https://github.com/torvalds/linux/blob/master/drivers/iommu/io-pgtable-arm.c`
   - `#L1012–L1078`：coherent walk 的 TCR/MAIR
 
-### 10.4 2026-08 stage-2/SCM 澄清
+### 12.4 2026-08 stage-2/SCM 澄清
 
 - `https://lkml.rescloud.iu.edu/2608.3/03890.html`：`qcom,q6apm-dai: add stage-2 (SCM/VMID) access model`。要点：ADSP 是 stage-1 + `iommus`；只有 modem/mDSP 的 stage-2 保护上下文才用 `qcom,vmids` + SCM assign。
 
-### 10.5 本仓库代码
+### 12.5 本仓库代码
 
 - `drivers/PongPower/ZizhanAudioDmaMap.cpp:107–178`：watch、extent、identity range、config、install、end、address。
 - `drivers/PongAdreno/ArmSmmu4K/ArmSmmu4KContext.c:50–70`：CBAR/CBA2R/TCR/TCR2/TTBR/MAIR/SCTLR 编码。
@@ -873,7 +1016,7 @@ amp_checkpoint(stage)
 - `drivers/PongPower/ZizhanAudioBatch.c:35–43`：batch slot 地址/sequence。
 - `$ZIZHAN_SRC/uefi-pong/Platforms/Nothing/DarwinBootPkg/Driver/DarwinBoot.c:746–755`、`:792–794`：64 KiB `EfiReservedMemoryType` 分配与 chosen 填写（仓库外）。
 
-### 10.6 既往记录
+### 12.6 既往记录
 
 - `docs/progress/STATUS.md`：M1 行，5/7 挂死、2 轮跑通、下一步。
 - `docs/progress/2026-11-15-audio-silent-owner.md`：mode25/26/27 的 SMMU 实际 ID、slot/bank、原 SCTLR、ASID 守卫、CBAR restore panic。

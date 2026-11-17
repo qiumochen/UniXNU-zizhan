@@ -73,6 +73,7 @@ typedef struct {
     uint8_t tx_words, rx_length;
     uint32_t tx[2], length;
     uint32_t rx;                     /* the bytes read, first byte in bits 7:0 */
+    uint32_t rx_block[5];            /* opt-in bounded read burst, FIFO lane order */
     uint32_t error_status;           /* the M_IRQ status of the last failure */
     uint32_t done, failed, timeouts, stray;
 } GeniI2c;
@@ -80,12 +81,19 @@ typedef struct {
 /* Checks the engine runs the I2C firmware with its clock and timing set (the boot loader's), selects FIFO mode with 8-bit packing and
  * enables the interrupts this core needs. Returns 0, or -1 when the engine is not usable. *config: proto << 24 | M_CLK_CFG bits 23:0. */
 int geni_i2c_prepare(GeniI2c *g, const GeniIo *io, uint8_t address, uint32_t *config);
+/* Same FIFO preparation with the external SE IRQ routes masked. The owner
+ * polls status; this does not install an interrupt handler or start a command. */
+int geni_i2c_prepare_poll(GeniI2c *g, const GeniIo *io, uint8_t address, uint32_t *config);
 int geni_i2c_start_write(GeniI2c *g, uint8_t reg, uint8_t value);
 int geni_i2c_start_read(GeniI2c *g, uint8_t reg);
 /* Multi-byte forms for devices with wider registers: write 1..8 bytes; or write 1..4 bytes (holding the stop condition), then read 1..4
  * bytes into g->rx. */
 int geni_i2c_start_write_bytes(GeniI2c *g, const uint8_t *bytes, uint32_t length);
 int geni_i2c_start_read_bytes(GeniI2c *g, const uint8_t *bytes, uint32_t length, uint32_t read_length);
+/* Separate bounded burst API for packed DSP memory:12/20 byte reads fit in
+ * qualified depth16 FIFO. Old read_bytes remains limited to4 bytes.
+ * Completion requires all requested FIFO words; short FIFO is an error. */
+int geni_i2c_start_read_block(GeniI2c *,const uint8_t *,uint32_t,uint32_t);
 /* Feeds M_IRQ status bits (already cleared by whoever read them). Returns GeniPending, GeniDone (read value in g->data) or GeniFailed. */
 int geni_i2c_event(GeniI2c *g, uint32_t status);
 /* Reads and clears the status itself, then as geni_i2c_event (for a timer poll; the interrupt handler does the same in its context). */

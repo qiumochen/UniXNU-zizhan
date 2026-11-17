@@ -6,10 +6,13 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
+#include <IOKit/IODeviceTreeSupport.h>
+#include <libkern/c++/OSData.h>
 #include <kern/thread.h>
 #include <sys/errno.h>
 #include <pexpert/pexpert.h>
 #include "ZizhanAdspWait.h"
+#include "ZizhanIpcc.h"
 extern "C" {
 kern_return_t clear_wait(thread_t, wait_result_t);
 #include "QcomGlink.h"
@@ -26,9 +29,11 @@ extern unsigned long gPhysBase, gPhysSize;
 int sheng_fw_read(void *handle, uint64_t offset, void *to, size_t length);
 void sheng_fw_close(void *handle);
 }
+#include "ZizhanDspResources.h"
+#include "ZizhanSlpiTransport.h"
 
 extern "C" int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *) __attribute__((weak_import));
-// [0] stage (see Stage; negative: the step that failed), [1] last error, [2] IPCC interrupts, [3] the DSP's slave-kernel bits (-1 no
+// [0] stage (see Stage; negative: the step that failed), [1] last error, [2] IPCC handler entries (legacy IRQs; opt-in routed doorbells), [3] the DSP's slave-kernel bits (-1 no
 // item), [4] items (bit 0 SMP2P in 443, 1 out 429, 2 GLINK 478, 3 479, 4 480, 8 our partition, 9 global partition), [5] QMP state | AOSS
 // link bits << 8, [6] RSC DRV id, [7] adsp.mbn KiB, [8] ms from the start call to "ready", [9] GLINK messages in, [10] out, [11] channels
 // up (bit per client) | version agreed << 14 | link broken << 15, [12] channel opens nobody serves, [13] last SCM x0, [14] its x1,
@@ -81,6 +86,7 @@ QcomSmemPartition gPart;
 QcomSmp2p gP2p;
 int gStopEntry = -1;
 QcomQmp gQmp;
+zizhan_dsp::LoadStateOwner gLoadStateOwner;
 QcomGlink gGlink;
 bool gGlinkStarted;
 QcomRscLayout gLayout;
@@ -125,6 +131,17 @@ void ipccIrq(void *) {
     native_adsp_stats[2] = native_adsp_stats[2] + 1;
     if (bits) wake(bits);
 }
+// IRQ-safe permanent callback for the opt-in shared receiver. Each registered
+// doorbell reaches only its own consumer; SLPI notifications are not consumed
+// or acknowledged from this ADSP callback.
+void routedIpcc(void *, uint32_t id) {
+    uint32_t bits = 0;
+    if (id == qcom_ipcc_id(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_SMP2P)) bits = kEvSmp2p;
+    else if (id == qcom_ipcc_id(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_GLINK_QMP)) bits = kEvGlink;
+    else if (id == qcom_ipcc_id(QCOM_IPCC_CLIENT_AOP, QCOM_IPCC_SIGNAL_GLINK_QMP)) bits = kEvAop;
+    __atomic_fetch_add(&native_adsp_stats[2], 1, __ATOMIC_RELAXED);
+    if (bits) wake(bits);
+}
 void rscIrq(void *) {
     const uint32_t status = rd(gRsc, kRscTcs + gLayout.irq_status) & gRscIrqBits;
     if (!status) return;
@@ -163,10 +180,7 @@ bool lockSmem() {
 }
 void unlockSmem() {wr(gMutex, 0, 0);}
 int allocItem(uint16_t item, uint32_t size) {
-    if (!lockSmem()) return -16;
-    const int rc = qcom_smem_alloc(&gSmem, &gPart, item, size);
-    unlockSmem();
-    return rc == QcomSmemExists ? 0 : rc;
+    return zizhan_dsp::allocate(gSmem, gPart, item, size, lockSmem, unlockSmem);
 }
 volatile uint8_t *item(uint16_t id, uint32_t *size) {
     uint32_t at = 0, bytes = 0;
@@ -434,6 +448,24 @@ void pumpSends() {
 // ---- the bring-up ----
 bool gIrq;
 bool attachIrqs() {
+    if (zizhan_ipcc_routing_enabled()) {
+        const uint32_t ids[] = {
+            qcom_ipcc_id(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_SMP2P),
+            qcom_ipcc_id(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_GLINK_QMP),
+            qcom_ipcc_id(QCOM_IPCC_CLIENT_AOP, QCOM_IPCC_SIGNAL_GLINK_QMP)};
+        for (uint32_t id : ids) {
+            int result;
+            for (unsigned tries = 0;; ++tries) {
+                result = zizhan_ipcc_subscribe(id, routedIpcc, nullptr);
+                if ((result != kIOReturnNotReady && result != kIOReturnBusy) || tries == 240) break;
+                IOSleep(250);
+            }
+            if (result) { fail(StDoorbells, result); return false; }
+        }
+        gIrq = true;
+        IOLog("PongAdsp: shared zizhan IPCC routing; handler stats count doorbells\n");
+        return true;
+    }
     if (!armcpu_spi_attach) return false;
     int rc = 0;
     for (unsigned tries = 0;; ++tries) {  // the GIC driver may not have started yet (as ButtonProbe found)
@@ -505,10 +537,10 @@ bool start() {
         waitUntil(1000, [] {return qcom_qmp_step(&gQmp) == QcomQmpOpen || gQmp.state < 0;});
     native_adsp_stats[5] = (native_adsp_stats[5] & ~0xff) | (gQmp.state & 0xff);
     if (gQmp.state != QcomQmpOpen) {fail(StLoadState, gQmp.state); release(dtb); release(adsp); return false;}
-    qcom_qmp_send(&gQmp, "{class: image, res: load_state, name: adsp, val: on}");
-    if (!waitUntil(1000, [] {return qcom_qmp_step(&gQmp) == QcomQmpOpen;})) {
-        qcom_qmp_abandon(&gQmp);
-        fail(StLoadState, -60); release(dtb); release(adsp); return false;
+    rc = gLoadStateOwner.send(gQmp, zizhan_dsp::Processor::Adsp, true,
+        [](uint32_t ms, auto done) { return waitUntil(ms, done); });
+    if (rc) {
+        fail(StLoadState, rc); release(dtb); release(adsp); return false;
     }
     stage(StLoadState);
 
@@ -565,6 +597,31 @@ bool startGlink() {
     return true;
 }
 
+// ---- zizhan SLPI inventory: existing ADSP actor, no second owner ----
+void slpiTransportObservation() {
+    unsigned mode=0;
+    if(!PE_parse_boot_argn("zizhan_slpi_transport",&mode,sizeof mode)||mode!=1)return;
+    auto node=IORegistryEntry::fromPath("/arm-io/pong-touch",gIODTPlane);
+    auto compatible=node?OSDynamicCast(OSData,node->getProperty("compatible")):nullptr;
+    const char identity[]="st,fts-zizhan-pri";
+    const bool board=compatible&&compatible->getLength()==sizeof identity&&!memcmp(compatible->getBytesNoCopy(),identity,sizeof identity);
+    if(node)node->release();
+    if(!board||gSmem.size!=zizhan_slpi_transport::Bytes||!gSmem.base){IOLog("ZIZHAN_SLPI_TRANSPORT: SKIP board-or-region writes=0 finished=1\n");return;}
+    if(!lockSmem()){IOLog("ZIZHAN_SLPI_TRANSPORT: SKIP shared-mutex-timeout protocol_writes=0 finished=1\n");return;}
+    zizhan_slpi_transport::Receipt receipt;
+    const auto result=zizhan_slpi_transport::capture(1,1,[](uint32_t at,uint32_t *value){
+        *value=qcom_smem_read32(&gSmem,at);
+        __asm__ volatile("dmb oshld" ::: "memory");return true;
+    },[](){uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;},receipt);
+    unlockSmem();
+    const auto &v=receipt.snapshot;
+    if(result==zizhan_slpi_transport::Ok)for(unsigned i=0;i<5;++i)IOLog("ZIZHAN_SLPI_ITEM: id=%u present=%u offset=%x bytes=%u readonly=1\n",zizhan_slpi_transport::ItemIds[i],v.items[i].present,v.items[i].offset,v.items[i].bytes);
+    // zizhan: keep each receipt below the observed 256-byte log record limit.
+    IOLog("ZIZHAN_SLPI_STATE: smp_in_valid=%u smp_out_valid=%u slave_found=%u slave_raw=%x protocol_writes=0 votes=0 pas=0 slpi_start=0 retained_unqualified=1\n",v.smp2p_valid[0],v.smp2p_valid[1],v.slave_found,v.slave_value);
+    IOLog("ZIZHAN_SLPI_TRANSPORT: %s result=%u copies=%u reads=%u partition=%x bytes=%u present=%x same_adsp_actor=1 shared_mutex=1 finished=1\n",result==zizhan_slpi_transport::Ok?"PASS":result==zizhan_slpi_transport::NoPartition?"SKIP":"FAIL",unsigned(result),receipt.copies,receipt.reads,v.offset,v.bytes,v.present);
+}
+// ---- end zizhan SLPI inventory ----
+
 void adspThread(void *, wait_result_t) {
     thread_set_thread_name(current_thread(), "pong_adsp");
     unsigned mode = 0;
@@ -582,12 +639,14 @@ void adspThread(void *, wait_result_t) {
     IOLog("PongAdsp: survey slave-kernel %d items 0x%x aoss 0x%x rsc 0x%x crash '%s'\n",native_adsp_stats[3],native_adsp_stats[4],
         native_adsp_stats[5],native_adsp_stats[6],native_adsp_text);
     if (mode < 2 || !start() || !startGlink()) return;
+    slpiTransportObservation();
     // zizhan POWER-02 candidate: IPCC is attached by start(), and client
     // registration/sends call wake(). Keep the old polling control until the
     // event path has device evidence for battery updates and remote failure.
     uint32_t eventMode = 0;
     PE_parse_boot_argn("zizhan_adsp_events", &eventMode, sizeof eventMode);
     const bool events = eventMode == 1 && gIrq;
+    const bool observeIpcc = zizhan_ipcc_routing_enabled();
     IOLog("ZIZHAN_ADSP_PM: %s idle-wait=%s pending-retry-ms=%u system-suspend=UNIMPLEMENTED\n",
           events ? "RUNNING" : "SKIP", events ? "event" : "poll-100ms",
           zizhan_adsp::timeout(events, true));
@@ -608,6 +667,12 @@ void adspThread(void *, wait_result_t) {
                   ++observations, timeout, ns / 1000000, bits, pending ? 1u : 0u);
         }
         service(bits | (events ? 0u : kEvSmp2p | kEvGlink) | (pending ? kEvSend : 0));
+        if (observeIpcc) {
+            uint64_t observed_ns = 0;
+            absolutetime_to_nanoseconds(mach_absolute_time(), &observed_ns);
+            zizhan_ipcc_observe(observed_ns,
+                static_cast<uint32_t>(__atomic_load_n(&native_adsp_stats[2], __ATOMIC_RELAXED)));
+        }
         if(gSlave & kFatal){IOLog("PongAdsp: fatal %s\n",native_adsp_text);for(unsigned i=0;i<gClientCount;i++)if(gClients[i].client.state)gClients[i].client.state(gClients[i].context,0);return;}
     }
 }

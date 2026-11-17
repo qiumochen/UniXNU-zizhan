@@ -15,7 +15,7 @@ import subprocess
 import sys
 import zlib
 
-from pong_adt_contract import audit_adt
+from pong_adt_contract import audit_adt, require_cpu_clusters
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVICE = Path(__file__).resolve().parents[1]
@@ -42,12 +42,16 @@ def main():
     parser.add_argument('--development-debug', action='store_true')
     parser.add_argument('--amfi-only-platform-code', action='store_true')
     parser.add_argument('--system-volume-auth-blob', type=Path, default=None)
+    parser.add_argument('--cs35l41-protection', type=Path, default=None)
+    parser.add_argument('--cs35l41-coefficients', type=Path, default=None)
     parser.add_argument('--data-ramdisk', type=Path, default=None,
                         help='packed DBRDISK1 APFS scratch Data seed passed as DarwinBoot initrd')
     parser.add_argument('--packed-data-ramdisk', action='store_true',
                         help='publish the supplied Data seed as PackedRAMDisk')
     parser.add_argument('--skip-image-verification', action='store_true',
                         help='skip image hashes and the single-core ADT audit; the Android boot container is still checked')
+    parser.add_argument('--require-cpu-clusters', action='store_true',
+                        help='Refuse a payload missing real E/P properties required by an AMP kernel')
     args = parser.parse_args()
     if not 0x10000000 <= args.window_size <= 0x200000000 or args.window_size % 0x200000:
         parser.error('--window-size must be 256 MiB..8 GiB, aligned to 2 MiB')
@@ -119,6 +123,8 @@ def main():
     values = [v for value in args.kernel_arg for v in value.split() if v != '-v']
     boot_args = ('-v ' if args.verbose_console else '') + f'keepsyms=1 cpus={args.cpus}'
     boot_args += ''.join(' ' + value for value in values)
+    if len(boot_args.encode('utf-8')) >= 1024:
+        parser.error('DarwinBoot24 requires fewer than 1024 UTF-8 command-line bytes; no boot image emitted')
     boot_manifest = json.dumps({
         'format': 'pong-development-boot-manifest-v1',
         'apple_personalization': False,
@@ -149,9 +155,13 @@ def main():
         *(['--amfi-only-platform-code'] if args.amfi_only_platform_code else []),
         *(['--system-volume-auth-blob', str(auth_blob_path)] if auth_blob is not None else []),
         *(['--packed-data-ramdisk'] if data_ramdisk else []),
+        *(['--cs35l41-protection', str(args.cs35l41_protection)] if args.cs35l41_protection else []),
+        *(['--cs35l41-coefficients', str(args.cs35l41_coefficients)] if args.cs35l41_coefficients else []),
         *(['--ufs-probe'] if args.ufs_probe else []),
         *(['--root-match-volume-uuid', args.root_match_volume_uuid]
           if args.root_match_volume_uuid else [])], check=True)
+    cpu_clusters = (require_cpu_clusters((payload / 'kernel.macho.adt').read_bytes(), args.cpus)
+                    if args.require_cpu_clusters else None)
     adt_audit = ({'status': 'skipped by request'} if args.skip_image_verification else
                  audit_adt((payload / 'kernel.macho.adt').read_bytes(), boot_manifest=boot_manifest))
     (out / 'adt-audit.json').write_text(json.dumps(adt_audit, indent=2) + '\n')
@@ -207,6 +217,7 @@ def main():
     extracted.unlink()
     boot.write_bytes(image)
     result = {'contains_xnu': True, 'prelinked': bool(report.get('prelink')), 'root_os_included': False,
+        'cpu_clusters': cpu_clusters,
         'adt_audit': adt_audit, 'hardware_tested': False, 'partition_writes': False, 'image_bytes': len(image),
         'image_sha256': hashlib.sha256(image).hexdigest() if not args.skip_image_verification else None,
         'kernel_sha256': report['kernel'].get('sha256'),

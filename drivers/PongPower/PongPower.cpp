@@ -9,10 +9,17 @@ void pong_rpmh_init(void);
 void sheng_adsp_probe(void);
 void sheng_audio_probe(void);
 void sheng_battery_start(void);
+void zizhan_se15_probe(void);
+void zizhan_se15_prepare_probe(void);
+void zizhan_cmd_db_probe(void);
+void zizhan_audio_prm_probe(void);
 void PongBatteryStaticInit(void);
 volatile int32_t native_battery_stats[16];
 void pong_power_start_optional(void) {
  pong_rpmh_init();
+ zizhan_se15_probe();
+ zizhan_se15_prepare_probe();
+ zizhan_cmd_db_probe();
  unsigned enabled=0;PE_parse_boot_argn("pong_adsp",&enabled,sizeof(enabled));
  if(!enabled)return;
  sheng_adsp_probe();   // pong_adsp=1: map and survey only (zizhan bring-up); 2: boot the DSP and its clients
@@ -22,5 +29,6 @@ void pong_power_start_optional(void) {
  void *h=OSMetaClass::preModLoad(g_kernel_kmod_info.name);
  if(h){PongBatteryStaticInit();if(!OSMetaClass::postModLoad(h))sheng_battery_start();}
  sheng_audio_probe();
+ zizhan_audio_prm_probe();
 }
 }

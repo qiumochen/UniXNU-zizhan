@@ -147,6 +147,10 @@ def main():
                         help='validated iOS 22H374 SystemVolume root-hash payload for /chosen')
     parser.add_argument('--packed-data-ramdisk', action='store_true',
                         help='publish a DarwinBoot PackedRAMDisk range for an ephemeral APFS Data seed')
+    parser.add_argument('--cs35l41-protection',type=Path,default=None,
+                        help='private original zizhan protection WMFW for opt-in RAM-only probe; never enables sound')
+    parser.add_argument('--cs35l41-coefficients',type=Path,default=None,
+                        help='private original T/B protection parameter directory for opt-in RAM-only probe')
     parser.add_argument('--skip-image-verification', action='store_true',
                         help='emit the DT without an additional output audit')
     args = parser.parse_args()
@@ -198,6 +202,9 @@ def main():
         # zizhan only: fixed display group/context read allowlist, no mapper
         # and no sleep capability. Historical bank must match current reads.
         ('zizhan-dsi-domain-v1', encode_dsi_domain(domain)),
+        # zizhan live DT IPCC: APSS receiver GIC SPI229 -> INTID261.
+        # Metadata does not enable the default-off shared receiver.
+        ('zizhan-ipcc-v1', struct.pack('<QII', 0x0ed18000, 0x1000, 261)),
         # zizhan resources only; the one-shot observer stays off unless explicitly requested.
         ('zizhan-tsens-v2', encode_tsens(json.loads(
             (ROOT / 'configs/zizhan-thermal-sm8475.json').read_text()))),
@@ -243,6 +250,25 @@ def main():
           if system_volume_auth_blob is not None else []),
         *empty_nvram_proxy(),
     ]
+    if args.cs35l41_protection:
+        # Private temporary boot payload only. No OS/Data/firmware installation.
+        path=args.cs35l41_protection
+        if path.stat().st_size!=34068:
+            parser.error('CS35L41 protection input size differs from retained original')
+        firmware=path.read_bytes()
+        if len(firmware)!=34068 or hashlib.sha256(firmware).hexdigest()!='c11cb3e25825c673a955a3519370ad77fbcd8bcf68808e8e34140a70caefcec4':
+            parser.error('CS35L41 protection input hash differs from retained original')
+        chosen.append(('zizhan-cs35l41-protection',firmware))
+    if args.cs35l41_coefficients:
+        if not args.cs35l41_protection:parser.error('protection firmware required with coefficients')
+        for prefix,length,digest in (
+            ('T',5060,'d6da7b1d13f986170c4258ac31f73b381473e354315182fae0a6bfdd297e9835'),
+            ('B',5148,'cd4a09de82c2d0878e99de7e28aa1a111668d7a12bffef6779c64b9f2937911b')):
+            path=args.cs35l41_coefficients/(prefix+'-cs35l41-dsp1-spk-prot.bin')
+            if path.stat().st_size!=length:parser.error('CS35L41 coefficient size mismatch')
+            data=path.read_bytes()
+            if len(data)!=length or hashlib.sha256(data).hexdigest()!=digest:parser.error('CS35L41 coefficient hash mismatch')
+            chosen.append(('zizhan-cs35l41-prot-'+prefix.lower(),data))
     chosen.append(('psci-method', b'smc\0'))
     cpus = [node(f'cpu{i}', [
         ('state', b'running\0' if i == 0 else b'stopped\0'),
@@ -286,11 +312,15 @@ def main():
         ('compatible', b'st,fts-zizhan-pri\0'),
         ('spi-base', struct.pack('<Q', 0x990000)),
         ('tlmm-base', struct.pack('<Q', 0xF000000)),
+        ('tlmm-size', struct.pack('<I', 0x200000)),
         ('gcc-base', struct.pack('<Q', 0x100000)),
         ('rsc-base', struct.pack('<Q', 0x17A20000)),
         ('cmd-db-base', struct.pack('<Q', 0x80860000)),
         ('gpio-offset', struct.pack('<I', 0x100000)),
         ('pins', struct.pack('<6I', 16, 17, 18, 19, 21, 20)),
+        ('hall-gpio', struct.pack('<I', 62)),
+        ('hall-active-low', struct.pack('<I', 1)),
+        ('hall-debounce-ms', struct.pack('<I', 15)),
         ('max-x', struct.pack('<I', 19140)), ('max-y', struct.pack('<I', 21600)),
     ])
     tree = node('device-tree', [

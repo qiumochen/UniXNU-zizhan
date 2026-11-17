@@ -1,0 +1,83 @@
+zizhan: failure-only selected kernel allocation range observation; preserve policy/error.
+--- a/osfmk/vm/vm_map.c
++++ b/osfmk/vm/vm_map.c
+@@ -22791,6 +22791,41 @@
+ 	return KERN_SUCCESS;
+ }
+ 
++/* zizhan APP-01: observe the actual selected allocation range, not the
++ * unrelated whole-map free total. Read-only and used only after failure. */
++void zizhan_vm_map_range_sizes(vm_map_t, vm_map_offset_t, vm_map_offset_t,
++    vm_map_size_t *, vm_map_size_t *, unsigned *);
++void
++zizhan_vm_map_range_sizes(vm_map_t map, vm_map_offset_t minimum,
++    vm_map_offset_t maximum, vm_map_size_t *total,
++    vm_map_size_t *largest, unsigned *entries)
++{
++    vm_map_entry_t entry;
++    vm_map_offset_t cursor = minimum;
++    *total = *largest = 0;
++    *entries = 0;
++    if (!map || maximum <= minimum) return;
++    vm_map_lock_read(map);
++    for (entry = vm_map_first_entry(map); entry != vm_map_to_entry(map);
++        entry = entry->vme_next) {
++        if (entry->vme_end <= minimum) continue;
++        if (entry->vme_start >= maximum) break;
++        if (entry->vme_start > cursor) {
++            vm_map_size_t gap = entry->vme_start - cursor;
++            *total += gap;
++            if (gap > *largest) *largest = gap;
++        }
++        if (entry->vme_end > cursor) cursor = entry->vme_end;
++        (*entries)++;
++    }
++    if (cursor < maximum) {
++        vm_map_size_t gap = maximum - cursor;
++        *total += gap;
++        if (gap > *largest) *largest = gap;
++    }
++    vm_map_unlock_read(map);
++}
++
+ void
+ vm_map_sizes(vm_map_t map,
+     vm_map_size_t * psize,
+--- a/osfmk/vm/vm_kern.c
++++ b/osfmk/vm/vm_kern.c
+@@ -69,6 +69,9 @@
+ #include <kern/thread.h>
+ #include <vm/vm_kern_internal.h>
+ #include <vm/vm_map_internal.h>
++/* zizhan failure-only range diagnostics; does not change allocator policy. */
++extern void zizhan_vm_map_range_sizes(vm_map_t, vm_map_offset_t, vm_map_offset_t,
++    vm_map_size_t *, vm_map_size_t *, unsigned *);
+ #include <vm/vm_object_internal.h>
+ #include <vm/vm_page_internal.h>
+ #include <vm/vm_compressor_xnu.h>
+@@ -916,6 +919,25 @@
+ 	kmr.kmr_return = vm_map_find_space(map, 0, map_size, mask,
+ 	    vmk_flags, &entry);
+ 	if (__improbable(KERN_SUCCESS != kmr.kmr_return)) {
++#if defined(ARM64_BOARD_CONFIG_PONG) && (DEVELOPMENT || DEBUG)
++        static uint32_t zizhan_range_failures;
++        if (map == kernel_map && vmk_flags.vmkf_range_id > KMEM_RANGE_ID_NONE &&
++            vmk_flags.vmkf_range_id <= KMEM_RANGE_ID_MAX &&
++            __atomic_fetch_add(&zizhan_range_failures, 1, __ATOMIC_RELAXED) < 16) {
++            unsigned id = vmk_flags.vmkf_range_id, entries = 0;
++            struct mach_vm_range range = kmem_ranges[id];
++            vm_map_size_t total = 0, largest = 0;
++            if (startup_phase >= STARTUP_SUB_KMEM && id >= KMEM_RANGE_ID_SPRAYQTN &&
++                map_size >= KMEM_SMALLMAP_THRESHOLD) range = kmem_large_ranges[id];
++            zizhan_vm_map_range_sizes(map, range.min_address, range.max_address,
++                &total, &largest, &entries);
++            printf("ZIZHAN KMEM: find-space FAIL kr=%d bytes=%llu mask=0x%llx flags=0x%x range=%u min=0x%llx max=0x%llx free=%llu largest=%llu entries=%u\n",
++                kmr.kmr_return, (unsigned long long)map_size, (unsigned long long)mask,
++                (unsigned)flags, id, (unsigned long long)range.min_address,
++                (unsigned long long)range.max_address, (unsigned long long)total,
++                (unsigned long long)largest, entries);
++        }
++#endif
+ 		vm_object_deallocate(object);
+ 		goto out_error;
+ 	}

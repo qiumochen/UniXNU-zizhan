@@ -16,6 +16,8 @@
 #include "PongWifiInputs.h"
 #include "PongWifiTestInputs.h"
 #include "QcomRpmh.h"
+#include "../PongPower/ZizhanRpmhBatch.h"
+#include "../PongPower/ZizhanRpmhReceipt.h"
 extern "C" {
 int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 void pong11_lx_irq_raise_all(void);
@@ -139,6 +141,8 @@ bool railReady(const PongWifiRail &r) {
  * A fresh command-status completion and idle state are required. IRQ remains
  * masked because this owner polls and has no RSC interrupt handler. */
 IOLock *powerLock,*smmuLeaseLock;
+zizhan_rpmh::BatchState batchState;
+zizhan_rpmh::CompletionJournal completionJournal;
 bool rawVote(uint32_t addr,uint32_t value) {
  constexpr unsigned b=0xd00+4*0x2a0,other=0xd00+3*0x2a0;
  unsigned caps=rsc.r(0xc),count=(caps>>12)&63,ncpt=(caps>>27)&31;
@@ -692,7 +696,28 @@ extern "C" void pong_rpmh_init(void) {
 extern "C" bool pong_rpmh_vote(uint32_t address,uint32_t value) {
  if(!powerLock)return false;
  IOLockLock(powerLock);
- bool ok=(rsc.v||rsc.open(0x17a20000,0x10000))&&rawVote(address,value);
+ bool ok=!batchState.uncertain&&(rsc.v||rsc.open(0x17a20000,0x10000))&&rawVote(address,value);
+ if(ok)(void)completionJournal.record(&address,&value,1);else completionJournal.fail();
+ IOLockUnlock(powerLock);return ok;
+}
+
+// Explicit candidate API only; no SLPI boot hook or baseline adoption.
+extern "C" bool pong_rpmh_batch(const uint32_t *addresses,const uint32_t *values,unsigned count) {
+ if(!powerLock||!zizhan_rpmh::arguments(addresses,values,count))return false;
+ IOLockLock(powerLock);
+ bool ok=false;
+ if(!batchState.uncertain&&(rsc.v||rsc.open(0x17a20000,0x10000))) {
+  const auto result=zizhan_rpmh::batch(rsc,batchState,addresses,values,count,now,[](unsigned us){IODelay(us);});
+  ok=result==zizhan_rpmh::Ok;
+  if(ok)(void)completionJournal.record(addresses,values,count);else if(batchState.uncertain)completionJournal.fail();
+  if(!ok)IOLog("ZIZHAN_RPMH_BATCH: FAIL result=%u retained=%u\n",unsigned(result),unsigned(batchState.uncertain));
+ }
+ IOLockUnlock(powerLock);return ok;
+}
+
+extern "C" bool pong_rpmh_completed_request(uint32_t address,zizhan_rpmh::CompletedRequest *out) {
+ if(out)*out={};if(!powerLock||!out)return false;
+ IOLockLock(powerLock);const bool ok=!batchState.uncertain&&completionJournal.get(address,out);
  IOLockUnlock(powerLock);return ok;
 }
 

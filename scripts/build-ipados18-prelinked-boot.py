@@ -19,6 +19,8 @@ def main():
                 help='actual Pong CPU nodes; use --cpus 1 for isolated bring-up')
  p.add_argument('--window-size',type=lambda s:int(s,0),default=0x100000000)
  p.add_argument('--kernel-arg',action='append',default=[])
+ p.add_argument('--cs35l41-protection',type=Path,default=None)
+ p.add_argument('--cs35l41-coefficients',type=Path,default=None)
  a=p.parse_args()
  if (a.output_dir/'pong-xnu-initial.img').exists():raise SystemExit('Existing boot image retained; choose another --output-dir before prelinking')
  a.output_dir.mkdir(parents=True,exist_ok=True)
@@ -72,7 +74,7 @@ def main():
    key=item.split('=',1)[0]
    opts=[old for old in opts if old.split('=',1)[0]!=key]
    opts.append(item)
- cmd=[sys.executable,str(ROOT/'scripts/build-ipados18-bootimg-local.py'),'--kernel',str(kernel),'--result',str(result),'--output-dir',str(a.output_dir),'--loader',str(ROOT/'mac-build/darwinboot24/DarwinBoot24.efi'),'--cpus',str(a.cpus),'--fat-mib','96','--window-size',hex(a.window_size),'--ufs','--root-match-volume-uuid',layout['os']['uuid'],'--development-debug','--verbose-console','--skip-image-verification']
+ cmd=[sys.executable,str(ROOT/'scripts/build-ipados18-bootimg-local.py'),'--kernel',str(kernel),'--result',str(result),'--output-dir',str(a.output_dir),'--loader',str(ROOT/'mac-build/darwinboot24/DarwinBoot24.efi'),'--cpus',str(a.cpus),'--fat-mib','96','--window-size',hex(a.window_size),'--ufs','--root-match-volume-uuid',layout['os']['uuid'],'--development-debug','--verbose-console','--skip-image-verification','--require-cpu-clusters']
  auth=ROOT/'out/ipados18/system-volume-auth-blob.bin'
  if auth.is_file():
   cmd+=['--system-volume-auth-blob',str(auth)]
@@ -83,7 +85,13 @@ def main():
   print(auth_record['reason'],file=sys.stderr)
  (a.output_dir/'system-volume-auth-blob.json').write_text(json.dumps(auth_record,indent=2)+'\n')
  cmd+=['--kernel-arg='+v for v in opts]
+ if a.cs35l41_protection:cmd+=['--cs35l41-protection',str(a.cs35l41_protection)]
+ if a.cs35l41_coefficients:cmd+=['--cs35l41-coefficients',str(a.cs35l41_coefficients)]
  env=dict(os.environ)
+ # This maintained 22H374 recipe always applies the AMP patch. Direct use of
+ # this entry point must carry the same input as ci_boot_ufs.sh; an explicit
+ # disabling override is caught by the actual emitted-ADT check above.
+ env.setdefault('PONG_ADT_CLUSTERS','1')
  if report.get('schema_version')==2:
   hardware=Path(report['hardware_dtb'])
   if not hardware.is_file():raise RuntimeError('Compiled format2 hardware DTB required')

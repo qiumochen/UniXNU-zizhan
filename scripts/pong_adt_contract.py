@@ -47,9 +47,55 @@ def parse_adt(blob):
     return nodes
 
 
+def require_cpu_clusters(blob, cpu_count):
+    """Refuse an AMP payload that lost its actual per-CPU E/P input."""
+    nodes = parse_adt(blob)
+    cpus = [props for path, props in nodes.items()
+            if path.startswith('/cpus/') and props.get('device_type') == b'cpu\0']
+    if len(cpus) != cpu_count:
+        raise ValueError('AMP ADT CPU count differs from requested payload')
+    for props in cpus:
+        if props.get('cluster-type') not in (struct.pack('<I', ord('E')),
+                                             struct.pack('<I', ord('P'))):
+            raise ValueError('AMP ADT requires real E/P cluster-type on every CPU')
+    return {'cpu_count': len(cpus), 'cluster_types': 'validated actual E/P properties'}
+
+
+def audit_zizhan_hall(properties):
+    """Validate the read-only SM8475 Hall input contract attached to pong-touch."""
+    expected = {
+        'tlmm-base': (8, 0x0f000000),
+        'tlmm-size': (4, 0x200000),
+        'gpio-offset': (4, 0x100000),
+        'hall-gpio': (4, 62),
+        'hall-active-low': (4, 1),
+        'hall-debounce-ms': (4, 15),
+    }
+    for key, (size, value) in expected.items():
+        raw = properties.get(key)
+        if raw is None or len(raw) != size or int.from_bytes(raw, 'little') != value:
+            raise ValueError('Invalid/missing Hall input property: ' + key)
+    input_offset = 0x100000 + 62 * 0x1000 + 4
+    if input_offset + 4 > expected['tlmm-size'][1]:
+        raise ValueError('Hall input register is outside the mapped TLMM resource')
+    return {'gpio': 62, 'active_low': True, 'debounce_ms': 15,
+            'register_offset': input_offset, 'readonly': True}
+
+
+def audit_zizhan_ipcc(raw):
+    if len(raw) != 16 or struct.unpack('<QII', raw) != (0x0ed18000, 0x1000, 261):
+        raise ValueError('Invalid zizhan IPCC receiver resources')
+    return {'base': 0x0ed18000, 'bytes': 0x1000, 'gic_intid': 261}
+
+
 def audit_adt(blob, *, require_manifest=True, boot_manifest=None):
     nodes = parse_adt(blob)
+    touch = nodes.get('/arm-io/pong-touch')
+    if touch and any(key.startswith('hall-') for key in touch):
+        audit_zizhan_hall(touch)
     chosen = nodes['/chosen']
+    if 'zizhan-ipcc-v1' in chosen:
+        audit_zizhan_ipcc(chosen['zizhan-ipcc-v1'])
     manifest = nodes['/chosen/manifest-properties']
 
     def width(props, key, size, required=True):

@@ -47,7 +47,7 @@ def main():
    '// no tfa98xx.cnt: not a Pong board, audio is not started\n'
    'static constexpr PongAmpField kPongAmp0[]={{0,0}};\nstatic constexpr PongAmpField kPongAmp1[]={{0,0}};\n')
  objects=[]
- for name in ('QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','PongFirmware.c','PongAdsp.cpp','PongBattery.cpp','PongAudio.cpp','PongAudioService.cpp','PongPower.cpp','PongBacklight.cpp'):
+ for name in ('QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ZizhanSlpiPower.c','ZizhanCmdDb.cpp','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','ZizhanCs35l41.c','ZizhanSe15.cpp','ZizhanSe15Prepare.cpp','ZizhanAudioPrm.cpp','ZizhanAudioDmaMap.cpp','ZizhanAudioZero.cpp','ZizhanAudioTone.cpp','ZizhanAudioTone48.cpp','ZizhanAudioBatch.c','PongFirmware.c','ZizhanIpcc.cpp','PongAdsp.cpp','PongBattery.cpp','PongAudio.cpp','PongAudioService.cpp','PongPower.cpp','PongBacklight.cpp'):
   source=ROOT/'drivers/PongPower'/name;obj=out/(source.stem+'.o');cpp=source.suffix=='.cpp'
   cmd=['xcrun','clang++' if cpp else 'clang',*flags,*(['-std=gnu++17','-fno-exceptions','-fno-rtti'] if cpp else []),'-c',str(source),'-o',str(obj)]
   r=subprocess.run(cmd,env=env,capture_output=True,text=True);(out/(source.stem+'.log')).write_text(r.stdout+r.stderr)
@@ -56,6 +56,15 @@ def main():
   if name=='PongAudioService.cpp':obj=late_init(obj,name,'PongAudioServiceStaticInit')
   if name=='PongBacklight.cpp':obj=late_init(obj,name,'PongBacklightStaticInit')
   objects.append(obj)
+ # Full builds get these shared native4K implementations from Adreno.
+ # Reduced builds must link the same implementations for optional audio.
+ if os.environ.get('XNU_PONG_ADRENO_PLATFORM')!='1':
+  for name in ('ArmSmmu4K','ArmSmmu4KContext','ArmSmmu4KProgram','ArmSmmu4KAudit'):
+   source=ROOT/'drivers/PongAdreno/ArmSmmu4K'/(name+'.c');obj=out/(name+'.o')
+   cmd=['xcrun','clang',*flags,'-c',str(source),'-o',str(obj)]
+   r=subprocess.run(cmd,env=env,capture_output=True,text=True);(out/(name+'.log')).write_text(r.stdout+r.stderr)
+   if r.returncode:raise SystemExit(r.stderr)
+   objects.append(obj)
  if os.environ.get('XNU_PONG_WIFI')!='1':
   # zizhan: without the Wi-Fi archive, the shared RPMh owner (PongRpmh.cpp) and Sheng's cmd-db/RPMh helpers come from here
   for source in (ROOT/'drivers/PongPower/PongRpmh.cpp',pong_paths.sheng_root()/'package/QcomRpmh.c'):

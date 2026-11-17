@@ -55,8 +55,8 @@ def main():
         'source': str(source), 'archive': str(archive),
         'image_verification': 'skipped by request',
         'command': command, 'runtime_qualified': False,
-        'hardware_access': 'DT-driven nub publication; optional default-off zizhan TSENS read-only observer',
-        'tsens_runtime_qualified': False}
+        'hardware_access': 'DT-driven nub publication; optional default-off zizhan TSENS and Hall read-only observers',
+        'tsens_runtime_qualified': False, 'hall_runtime_qualified': False}
     (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
     export = DEVICE / 'mac-build/armdt-platform'
     export.mkdir(parents=True, exist_ok=True)

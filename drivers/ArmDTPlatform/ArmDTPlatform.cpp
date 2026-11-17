@@ -21,6 +21,7 @@
 #include <kern/clock.h>
 #include "PongBootReset.h"
 #include "PongCpuPark.h"
+#include "ZizhanHallProbe.h"
 #include "ZizhanTsensProbe.h"
 #include "ZizhanPowerAudit.h"
 
@@ -232,6 +233,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   }
   armdt_platform_configured = 1;
   zizhan_tsens::start(provider);
+  zizhan_hall::start(provider);
   zizhan_power_audit::start(provider);
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack

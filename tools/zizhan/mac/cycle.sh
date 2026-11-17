@@ -19,15 +19,12 @@ ts() { date '+%H:%M:%S'; }
 in_fastboot() { bash "$S/fastboot-visible.sh"; }
 in_adb() { bash "$S/adb-visible.sh"; }
 
-# Cool down in Android first (battery below COOL tenths of a degree, default 35.0 C, at most 20 min). This port has no thermal
-# management, and back-to-back rounds heated the phone until nearly every ramoops line had flipped bits (g40 84% clean after a
-# break, g48 2.5%, g58 onwards about 0%).
-COOL=${COOL:-350}
+# Record the current battery temperature for correlation. APP-01 unattended
+# rounds do not wait on a thermal threshold; each round remains time-bounded.
 battery_temp() { adb shell dumpsys battery 2>/dev/null | awk '/temperature/{print $2; exit}'; }
 if in_adb; then
-  t0=$(date +%s); t=$(battery_temp)
-  while [ -n "$t" ] && [ "$t" -gt "$COOL" ] && [ $(( $(date +%s) - t0 )) -lt 1200 ]; do sleep 30; t=$(battery_temp); done
-  echo "$(ts) battery ${t:-?} (tenths C) after $(( $(date +%s) - t0 ))s of cooling"
+  t=$(battery_temp)
+  echo "$(ts) battery ${t:-?} (tenths C); temperature gate disabled"
 fi
 # klog (klog.py, boot-arg pong_klog_4k added by ci_boot_ufs.sh): reset the pinned file's header so only this round's copy counts.
 KLOG=0

@@ -431,6 +431,8 @@ buttons_thread(void *unused)
     IOHIDVirtualServiceClientRemove(keys);CFRelease(keys);CFRelease(client);close(fd);return NULL;
 }
 
+#include "zizhan-keyboard-test18.h"
+
 void
 pong_touch_start(void)
 {
@@ -450,4 +452,10 @@ pong_touch_start(void)
     pthread_t thread;
     if (!pthread_create(&thread,NULL,input_thread,NULL)) pthread_detach(thread);
     if (IOHIDEventCreateKeyboardEvent && !pthread_create(&thread,NULL,buttons_thread,NULL)) pthread_detach(thread);
+    char testargs[1024]={0},testurl[160]={0};size_t testbytes=sizeof testargs;
+    if(IOHIDEventCreateKeyboardEvent && !sysctlbyname("kern.bootargs",testargs,&testbytes,NULL,0)) {
+        testargs[sizeof testargs-1]=0;
+        if(app_type_option(testargs,"zizhan_type_url=",testurl,sizeof testurl) &&
+            !pthread_create(&thread,NULL,app_keyboard_thread,NULL))pthread_detach(thread);
+    }
 }

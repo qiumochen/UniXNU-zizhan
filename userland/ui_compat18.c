@@ -31,6 +31,10 @@
 #include <notify.h>
 #include "touch.h"
 #include "zizhan-bringup18.h"
+#include "zizhan-app-diagnostic18.h"
+#include "zizhan-network-observer18.h"
+#include "zizhan-weather-observer18.h"
+#include "zizhan-statusbar18.h"
 
 static bool software_composition;
 static bool scanout_format;
@@ -55,7 +59,7 @@ static CFURLRef pluginkit_container;
 static IMP battery_original;
 static struct {Class cls;IMP original;} statusbar_factories[5];
 static unsigned statusbar_factory_count;
-static Class statusbar_provider;
+static Class statusbar_provider,zizhan_pad_provider;
 static bool statusbar_fallback_bridge_installed;
 static bool statusbar_diagnostic_item_removed;
 static char statusbar_delegate_key;
@@ -299,8 +303,80 @@ static void phone_remove_diagnostic_item(void)
     method_setImplementation(method,(IMP)phone_diagnostic_item_enabled);
     statusbar_diagnostic_item_removed=true;
 }
+/* zizhan has an unfolded2160x1916 panel atscale2. A nil-screen selector
+ * call previously inherited Pong's phone/defaultscale3 candidate. Select
+ * the OS's full-width Pad provider instead of moving battery subviews or
+ * substituting battery values. Actualpanel gate and explicit=0 rollback;
+ * non-zizhan screens keep their original factory/provider result. */
+static bool zizhan_statusbar_enabled(void)
+{ return !boot_option("zizhan_statusbar=0"); }
+static bool zizhan_statusbar_screen(id screen)
+{
+    if(!zizhan_statusbar_enabled())return false;
+    static bool board;
+    if(!board) {
+        CFMutableDictionaryRef (*matching)(const char *)=dlsym(RTLD_DEFAULT,"IOServiceMatching");
+        uint32_t (*get)(uint32_t,CFDictionaryRef)=dlsym(RTLD_DEFAULT,"IOServiceGetMatchingService");
+        int (*release)(uint32_t)=dlsym(RTLD_DEFAULT,"IOObjectRelease");
+        if(!matching||!get||!release)return false;
+        CFMutableDictionaryRef dict=matching("IOService");
+        const void *keys[]={CFSTR("PongPanel"),CFSTR("backlight-control")};
+        const void *values[]={CFSTR("zizhan L18 primary / SM8475 DSI0"),kCFBooleanTrue};
+        CFDictionaryRef properties=CFDictionaryCreate(NULL,keys,values,2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        if(!dict||!properties){if(dict)CFRelease(dict);if(properties)CFRelease(properties);return false;}
+        CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
+        uint32_t service=get(0,dict);if(!service)return false;release(service);board=true;
+    }
+    CGRect bounds=CGRectZero;double scale=0;
+    if(screen) {
+        bounds=((CGRect(*)(id,SEL))objc_msgSend)(screen,sel_registerName("nativeBounds"));
+        scale=((double(*)(id,SEL))objc_msgSend)(screen,sel_registerName("nativeScale"));
+    }
+    return zizhan_statusbar_native_pad(1,board,screen!=nil,bounds.size.width,bounds.size.height,scale);
+}
+static double zizhan_statusbar_scale(id self,SEL selector)
+{ (void)self;(void)selector;return 2.0; }
+static Class zizhan_statusbar_provider(const char *base_name,const char *name)
+{
+    if(!zizhan_statusbar_enabled())return Nil;
+    Class base=objc_lookUpClass(base_name);if(!base)return Nil;
+    const char *names[]={"init","setupInContainerView:","sizeUpdatedFromSize:"};
+    if(!method_abi(class_getInstanceMethod(base,sel_registerName(names[0])),"@",0,"") ||
+       !method_abi(class_getInstanceMethod(base,sel_registerName(names[1])),"@",1,"@"))return Nil;
+    Class result=objc_allocateClassPair(base,name,0);if(!result)return Nil;
+    if(!class_addMethod(object_getClass((id)result),sel_registerName("referenceScreenScale"),(IMP)zizhan_statusbar_scale,"d16@0:8")) {
+        objc_disposeClassPair(result);return Nil;
+    }
+    objc_registerClassPair(result);return result;
+}
+static void zizhan_statusbar_geometry(id view,unsigned depth,unsigned *remaining)
+{
+    if(!view||!depth||!*remaining)return;--*remaining;
+    const char *name=object_getClassName(view);
+    if(name&&(strstr(name,"StatusBar")||strstr(name,"Battery"))) {
+        Method frame=class_getInstanceMethod(object_getClass(view),sel_registerName("frame"));
+        Method bounds=class_getInstanceMethod(object_getClass(view),sel_registerName("bounds"));
+        if(method_abi(frame,"{",0,"")&&method_abi(bounds,"{",0,"")) {
+            CGRect f=((CGRect(*)(id,SEL))objc_msgSend)(view,sel_registerName("frame"));
+            CGRect b=((CGRect(*)(id,SEL))objc_msgSend)(view,sel_registerName("bounds"));
+            fprintf(stderr,"Zizhan statusbar18: class=%s frame=%.2f/%.2f/%.2f/%.2f bounds=%.2f/%.2f/%.2f/%.2f\n",name,f.origin.x,f.origin.y,f.size.width,f.size.height,b.origin.x,b.origin.y,b.size.width,b.size.height);
+        }
+    }
+    id children=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
+    if(!children)return;CFIndex count=CFArrayGetCount((CFArrayRef)children);
+    for(CFIndex i=0;i<count&&*remaining;++i)zizhan_statusbar_geometry((id)CFArrayGetValueAtIndex((CFArrayRef)children,i),depth-1,remaining);
+}
+static void zizhan_statusbar_late_geometry(void *context)
+{
+    id view=(id)context;unsigned budget=256;
+    fprintf(stderr,"Zizhan statusbar18: late_geometry begin budget=256 readonly=1\n");
+    zizhan_statusbar_geometry(view,16,&budget);
+    fprintf(stderr,"Zizhan statusbar18: late_geometry end visited=%u\n",256-budget);
+    ((void(*)(id,SEL))objc_msgSend)(view,sel_registerName("release"));
+}
 static Class phone_statusbar(unsigned index,id self,SEL selector,id screen,id info)
 {
+    if(zizhan_pad_provider&&zizhan_statusbar_screen(screen))return zizhan_pad_provider;
     /* Resolve the known Pong screen before entering the native candidate
      * enumerator, matching the order used before services42. */
     // UIKit uses nil for its default display during screen construction.
@@ -334,6 +410,7 @@ static void phone_presentation(void)
     char product[64]={0};size_t size=sizeof(product);
     if(sysctlbyname("hw.product",product,&size,NULL,0) || strcmp(product,"iPhone17,1"))return;
     phone_remove_diagnostic_item();
+    zizhan_pad_provider=zizhan_statusbar_provider("_UIStatusBarVisualProvider_Pad","ZizhanStatusBar18InnerPad");
     Class base=objc_lookUpClass("_UIStatusBarVisualProvider_DynamicSplitMedium");
     if(!base)base=objc_lookUpClass("_UIStatusBarVisualProvider_Split1080");
     if(!base)return;
@@ -796,6 +873,11 @@ static void phone_gestalt_image(const struct mach_header *header,intptr_t slide)
  * for supported layouts and every screen other than Pong's real panel. */
 static Class phone_selected_class(id screen,id info)
 {
+    if(zizhan_pad_provider&&zizhan_statusbar_screen(screen)) {
+        static unsigned reported;if(__atomic_fetch_add(&reported,1,__ATOMIC_RELAXED)<3)
+            fprintf(stderr,"Zizhan statusbar18: UIKit native Pad selected scale=2 default_screen=%u\n",screen?0u:1u);
+        return zizhan_pad_provider;
+    }
     Class selected=phone_selector_original(screen,info);
     Class fallback=objc_lookUpClass("_UIStatusBarVisualProvider_Fallback");
     static unsigned decisions;
@@ -827,7 +909,7 @@ static void phone_prepare_provider(id self,SEL selector)
     Class assigned=((Class(*)(id,SEL))objc_msgSend)(self,sel_registerName("_visualProviderClass"));
     Class fallback=objc_lookUpClass("_UIStatusBarVisualProvider_Fallback");
     id current=object_getIvar(self,phone_provider_ivar);
-    if(current && object_getClass(current)==fallback) {
+    if(current && (object_getClass(current)==fallback || (object_getClass(current)==statusbar_provider && zizhan_pad_provider && zizhan_statusbar_screen(nil)))) {
         // Native callers inside UIKit can invoke this entry directly. Tear
         // down an already built diagnostic region before native discovery
         // recomputes scale/overflow flags and constructs the phone provider.
@@ -847,7 +929,7 @@ static void phone_repair_actual_bar(void *context)
     if(phone_prepare_original && phone_provider_ivar && cls &&
        ((BOOL(*)(id,SEL,Class))objc_msgSend)(bar,sel_registerName("isKindOfClass:"),cls)) {
         id current=object_getIvar(bar,phone_provider_ivar);
-        if(current && object_getClass(current)==objc_lookUpClass("_UIStatusBarVisualProvider_Fallback")) {
+        if(current && (object_getClass(current)==objc_lookUpClass("_UIStatusBarVisualProvider_Fallback") || (object_getClass(current)==statusbar_provider && zizhan_pad_provider && zizhan_statusbar_screen(nil)))) {
             phone_prepare_provider(bar,sel_registerName("_prepareVisualProviderIfNeeded"));
             ((void(*)(id,SEL))objc_msgSend)(bar,sel_registerName("setNeedsLayout"));
             current=object_getIvar(bar,phone_provider_ivar);
@@ -863,7 +945,7 @@ static void phone_layout_provider(id self,SEL selector)
     // using native teardown and preparation rather than changing its class.
     id current=object_getIvar(self,phone_provider_ivar);
     Class fallback=objc_lookUpClass("_UIStatusBarVisualProvider_Fallback");
-    if(current && object_getClass(current)==fallback) {
+    if(current && (object_getClass(current)==fallback || (object_getClass(current)==statusbar_provider && zizhan_pad_provider && zizhan_statusbar_screen(nil)))) {
         SEL reset=sel_registerName("resetVisualProvider");
         ((void(*)(id,SEL))objc_msgSend)(self,reset);
         object_setIvarWithStrongDefault(self,phone_provider_ivar,nil);
@@ -934,7 +1016,7 @@ static void phone_repair_view(id view,unsigned depth,unsigned *remaining)
        phone_prepare_original && phone_provider_ivar) {
         id current=object_getIvar(view,phone_provider_ivar);
         Class fallback=objc_lookUpClass("_UIStatusBarVisualProvider_Fallback");
-        if(current && object_getClass(current)==fallback) {
+        if(current && (object_getClass(current)==fallback || (object_getClass(current)==statusbar_provider && zizhan_pad_provider && zizhan_statusbar_screen(nil)))) {
             SEL reset=sel_registerName("resetVisualProvider"),prepare=sel_registerName("_prepareVisualProviderIfNeeded");
             Method teardown=class_getInstanceMethod(bar,reset);
             if(method_abi(teardown,"v",0,"")) {
@@ -966,6 +1048,10 @@ static void phone_repair_existing(void *unused)
     unsigned remaining=2048;CFIndex count=CFArrayGetCount((CFArrayRef)windows);
     for(CFIndex i=0;i<count && remaining;i++)
         phone_repair_view((id)CFArrayGetValueAtIndex((CFArrayRef)windows,i),16,&remaining);
+    if(boot_option("zizhan_statusbar_diag=1")) {
+        unsigned budget=256;
+        for(CFIndex i=0;i<count&&budget;++i)zizhan_statusbar_geometry((id)CFArrayGetValueAtIndex((CFArrayRef)windows,i),16,&budget);
+    }
 }
 static void phone_selector_image(const struct mach_header *header,intptr_t slide)
 {
@@ -1015,11 +1101,16 @@ static void phone_selector_image(const struct mach_header *header,intptr_t slide
  * STUI classes and a 368-byte DynamicSplit provider, not the 240-byte UIKit
  * one. Select and initialize that native implementation; never mix objects,
  * copy a 20G81 offset or replace a small fallback object's isa. */
-static Class stui_provider;
+static Class stui_provider,zizhan_stui_pad_provider;
 static Ivar stui_provider_ivar;
 static IMP stui_select_original,stui_prepare_original,stui_layout_original;
 static Class stui_selected_class(id screen,id info)
 {
+    if(zizhan_stui_pad_provider&&zizhan_statusbar_screen(screen)) {
+        static unsigned reported;if(__atomic_fetch_add(&reported,1,__ATOMIC_RELAXED)<3)
+            fprintf(stderr,"Zizhan statusbar18: SystemStatusUI native Pad selected scale=2 default_screen=%u\n",screen?0u:1u);
+        return zizhan_stui_pad_provider;
+    }
     if(stui_provider) {
         bool pong=!screen;
         if(screen) {
@@ -1042,7 +1133,7 @@ static void stui_prepare_provider(id self,SEL selector)
     Class fallback=objc_lookUpClass("STUIStatusBarVisualProvider_Fallback");
     id current=object_getIvar(self,stui_provider_ivar);
     Class assigned=((Class(*)(id,SEL))objc_msgSend)(self,sel_registerName("_visualProviderClass"));
-    if(current && object_getClass(current)==fallback) {
+    if(current && (object_getClass(current)==fallback || (object_getClass(current)==stui_provider && zizhan_stui_pad_provider && zizhan_statusbar_screen(nil)))) {
         ((void(*)(id,SEL))objc_msgSend)(self,sel_registerName("resetVisualProvider"));
         object_setIvarWithStrongDefault(self,stui_provider_ivar,nil);
         ((void(*)(id,SEL,Class))objc_msgSend)(self,sel_registerName("_setVisualProviderClass:"),Nil);
@@ -1057,7 +1148,7 @@ static void stui_repair_bar(id bar)
     Class cls=objc_lookUpClass("STUIStatusBar");
     if(!cls || !((BOOL(*)(id,SEL,Class))objc_msgSend)(bar,sel_registerName("isKindOfClass:"),cls))return;
     id current=object_getIvar(bar,stui_provider_ivar);
-    if(current && object_getClass(current)==objc_lookUpClass("STUIStatusBarVisualProvider_Fallback")) {
+    if(current && (object_getClass(current)==objc_lookUpClass("STUIStatusBarVisualProvider_Fallback") || (object_getClass(current)==stui_provider && zizhan_stui_pad_provider && zizhan_statusbar_screen(nil)))) {
         stui_prepare_provider(bar,sel_registerName("_prepareVisualProviderIfNeeded"));
         ((void(*)(id,SEL))objc_msgSend)(bar,sel_registerName("setNeedsLayout"));
     }
@@ -1066,6 +1157,19 @@ static void stui_layout_provider(id self,SEL selector)
 {
     stui_repair_bar(self);
     ((void(*)(id,SEL))stui_layout_original)(self,selector);
+    if(boot_option("zizhan_statusbar_diag=1")) {
+        static unsigned captured;
+        if(__atomic_fetch_add(&captured,1,__ATOMIC_RELAXED)<2) {
+            unsigned budget=128;zizhan_statusbar_geometry(self,12,&budget);
+        }
+        static char late_key;static unsigned scheduled;
+        if(!objc_getAssociatedObject(self,&late_key)&&__atomic_load_n(&scheduled,__ATOMIC_RELAXED)<2) {
+            objc_setAssociatedObject(self,&late_key,(id)kCFBooleanTrue,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            __atomic_fetch_add(&scheduled,1,__ATOMIC_RELAXED);
+            id retained=((id(*)(id,SEL))objc_msgSend)(self,sel_registerName("retain"));
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,20*NSEC_PER_SEC),dispatch_get_main_queue(),retained,zizhan_statusbar_late_geometry);
+        }
+    }
 }
 static bool stui_install_entry(const struct mach_header *h,intptr_t slide,uintptr_t offset,
     const uint32_t expected[4],IMP replacement,IMP *saved,const char *name)
@@ -1101,6 +1205,7 @@ static void stui_phone_image(const struct mach_header *header,intptr_t slide)
         lc=(const void *)((const char *)lc+lc->cmdsize);
     }
     if(!matched)return;
+    zizhan_stui_pad_provider=zizhan_statusbar_provider("STUIStatusBarVisualProvider_Pad","ZizhanSystemStatus18InnerPad");
     Class cls=objc_lookUpClass("STUIStatusBar"),base=objc_lookUpClass("STUIStatusBarVisualProvider_DynamicSplitMedium");
     Method prepare=cls?class_getInstanceMethod(cls,sel_registerName("_prepareVisualProviderIfNeeded")):NULL;
     Method reset=cls?class_getInstanceMethod(cls,sel_registerName("resetVisualProvider")):NULL;
@@ -1478,6 +1583,8 @@ static void open_url_on_main(void *unused)
     CFURLRef target=CFURLCreateWithBytes(NULL,(const UInt8 *)pending_open_url,strlen(pending_open_url),kCFStringEncodingUTF8,NULL);
     BOOL accepted=NO;
     SEL open=sel_registerName("openSensitiveURL:withOptions:");
+    Method openMethod=ws?class_getInstanceMethod(object_getClass(ws),open):NULL;
+    fprintf(stderr,"Pong UI18: URL workspace ABI %s\n",openMethod?method_getTypeEncoding(openMethod):"unavailable");
     if(ws && target && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),open))
         accepted=((BOOL(*)(id,SEL,id,id))objc_msgSend)(ws,open,(id)target,nil);
     fprintf(stderr,"Pong UI18: open-sensitive %s ok=%d (workspace %d)\n",pending_open_url,accepted,ws!=nil);
@@ -1487,11 +1594,19 @@ static void open_url_on_main(void *unused)
             accepted=((BOOL(*)(id,SEL,id,id))objc_msgSend)(ws,plain,(id)target,nil);
         fprintf(stderr,"Pong UI18: open-plain %s ok=%d\n",pending_open_url,accepted);
     }
-    if(!accepted && ws) {
+    /* A false synchronous return did not mean the queued URL failed in the
+     * actual Safari video round. Never redirect a custom scheme to Safari:
+     * the old fallback covered Weather with the previous browser page. */
+    const bool web=!strncmp(pending_open_url,"http://",7) || !strncmp(pending_open_url,"https://",8);
+    const char *bundle=web?"com.apple.mobilesafari":
+        !strncmp(pending_open_url,"weather:",8)?"com.apple.weather":NULL;
+    if(!accepted && ws && bundle) {
         SEL app=sel_registerName("openApplicationWithBundleID:");
-        if(((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),app))
-            accepted=((BOOL(*)(id,SEL,id))objc_msgSend)(ws,app,(id)CFSTR("com.apple.mobilesafari"));
-        fprintf(stderr,"Pong UI18: open-app safari ok=%d\n",accepted);
+        CFStringRef identifier=CFStringCreateWithCString(NULL,bundle,kCFStringEncodingUTF8);
+        if(identifier && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),app))
+            accepted=((BOOL(*)(id,SEL,id))objc_msgSend)(ws,app,(id)identifier);
+        fprintf(stderr,"Pong UI18: open-app %s returned=%d; actual page requires observation\n",bundle,accepted);
+        if(identifier)CFRelease(identifier);
     }
     if(target)CFRelease(target);
 }
@@ -2282,6 +2397,19 @@ __attribute__((constructor)) static void pong_ui18_start(void)
 {
     const char *name=getprogname();
     if(!name)return;
+    if(!strcmp(name,"weatherd")) {
+        if(boot_option("zizhan_net_diag=1")){app_network_start(name);app_weather_start();}
+        return;
+    }
+    if(!strcmp(name,"MobileSafari") || !strcmp(name,"Weather")) {
+        if(boot_option("zizhan_app_diag=1"))app_diag_start(name);
+        if(boot_option("zizhan_net_diag=1")) {
+            app_network_start(name);
+            if(!strcmp(name,"Weather"))app_weather_start();
+        }
+        return;
+    }
+    if(!strcmp(name,"SpringBoard") && boot_option("zizhan_app_diag=1"))app_diag_start(name);
     if(strcmp(name,"backboardd")==0 && boot_option("pong_backlight_diag=1")) {
         struct sigaction action={0};action.sa_sigaction=backboard_fatal;
         action.sa_flags=SA_SIGINFO|SA_RESETHAND;sigemptyset(&action.sa_mask);

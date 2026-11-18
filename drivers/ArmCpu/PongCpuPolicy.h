@@ -9,6 +9,7 @@
 #include <kern/thread.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
+#include "../ArmDTPlatform/ZizhanThermalPolicy.h"
 extern "C" uint64_t pong_cpu_idle_mach(unsigned int);
 /* zizhan touch boost (docs/progress/2026-11-01-120hz-and-cadence.md section 8): bsd/dev/pong_fts.c counts every touch report, real
  * or pong_touch_synth. A gesture's first frames were computed at the idle clock while the load windows ramped (at most doubling
@@ -49,17 +50,7 @@ static unsigned thermalLevel()
 }
 static unsigned thermalCapKhz(const Domain &d,unsigned level)
 {
-    if(!level)return 0;
-    if(level>20u)level=20u;
-    unsigned usable=0;
-    for(unsigned i=0;i<d.levels;++i)if(d.khz[i])++usable;
-    if(usable<2)return 0;
-    unsigned rank=(level*(usable-1)+10u)/20u;
-    for(unsigned i=0;i<d.levels;++i)if(d.khz[i]) {
-        if(!rank)return d.khz[i];
-        --rank;
-    }
-    return 0;
+    return zizhan_thermal_cpu_cap_khz(level,d.khz,d.levels);
 }
 static unsigned stateKhz(const Domain &d){return (d.regs[0x20/4]&255)*19200u;}
 static bool prepareL3()

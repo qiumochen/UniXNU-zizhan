@@ -306,6 +306,35 @@ static void test_tuning_default(void){
  CHECK(t.gpu_clamp_mc==95000&&t.gpu_release_mc==90000,"tune default gpu");
 }
 
+static void test_cpu_rank(void){
+ CHECK(zizhan_thermal_cpu_rank(0,20)==0,"rank level 0");
+ CHECK(zizhan_thermal_cpu_rank(20,20)==19,"rank level 20 lowest of 20");
+ CHECK(zizhan_thermal_cpu_rank(1,20)==1,"rank level 1 second highest");
+ CHECK(zizhan_thermal_cpu_rank(10,20)==10,"rank level 10 middle");
+ CHECK(zizhan_thermal_cpu_rank(99,20)==19,"rank clamps high level");
+ CHECK(zizhan_thermal_cpu_rank(20,2)==1,"rank two rows lowest");
+ CHECK(zizhan_thermal_cpu_rank(1,2)==0,"rank two rows highest");
+ CHECK(zizhan_thermal_cpu_rank(20,1)==0,"rank one row has no cap");
+}
+
+static void test_cpu_cap_direction(void){
+ static const unsigned rows[5]={300000,600000,900000,1200000,1500000};
+ static const unsigned sparse[9]={300000,600000,0,900000,0,1200000,0,0,1500000};
+ CHECK(zizhan_thermal_cpu_cap_khz(0,rows,5)==0,"cap level 0 takes no cap");
+ CHECK(zizhan_thermal_cpu_cap_khz(20,rows,5)==300000,"cap level 20 takes lowest");
+ CHECK(zizhan_thermal_cpu_cap_khz(1,rows,5)==1500000,"cap level 1 takes highest");
+ unsigned previous=~0u;
+ for(unsigned level=1;level<=20;++level){
+  const unsigned khz=zizhan_thermal_cpu_cap_khz(level,rows,5);
+  CHECK(khz&&khz<=previous,"cap monotonic with level");
+  previous=khz;
+ }
+ CHECK(zizhan_thermal_cpu_cap_khz(20,sparse,9)==300000,"cap sparse level 20 lowest");
+ CHECK(zizhan_thermal_cpu_cap_khz(1,sparse,9)==1500000,"cap sparse level 1 highest");
+ CHECK(zizhan_thermal_cpu_cap_khz(20,rows,1)==0,"cap one row takes no cap");
+ CHECK(zizhan_thermal_cpu_cap_khz(20,NULL,5)==0,"cap null takes no cap");
+}
+
 static void test_tuning_modes(void){
  ZizhanThermalTuning t;
  for(unsigned m=0;m<=2;++m)
@@ -447,6 +476,8 @@ int main(void){
  test_backwards_rebase_and_recover();
  test_stale_cold_no_streak();
  test_real_idle_g396();
+ test_cpu_rank();
+ test_cpu_cap_direction();
  test_tuning_default();
  test_tuning_modes();
  test_tuning_cpu();

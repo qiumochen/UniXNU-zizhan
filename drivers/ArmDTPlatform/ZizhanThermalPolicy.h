@@ -115,6 +115,34 @@ typedef struct {
  int32_t cpu_clamp_mc, cpu_release_mc, gpu_clamp_mc, gpu_release_mc;
 } ZizhanThermalTuning;
 
+/* Map a logical CPU cap level to a rank in an ascending usable-frequency
+ * list: level 0 = no cap, level 20 = the lowest row. The caller walks its
+ * LUT from the highest frequency down and takes the returned rank. */
+static inline unsigned zizhan_thermal_cpu_rank(unsigned level,unsigned usable){
+ if(!level||usable<2)return 0;
+ if(level>ZizhanThermalCpuLevels)level=(unsigned)ZizhanThermalCpuLevels;
+ return (level*(usable-1)+10u)/20u;
+}
+
+/* Select the cap frequency from the domain's LUT. The LUT is ascending;
+ * zero rows are boost/unusable and are skipped. Level 20 returns the lowest
+ * usable row, level 0 returns 0 (no cap). This is the exact scan the CPU
+ * worker uses, kept here so the host tests cover its direction. */
+static inline unsigned zizhan_thermal_cpu_cap_khz(unsigned level,const unsigned *khz,
+                                                  unsigned levels){
+ if(!level||!khz||levels<2)return 0;
+ unsigned usable=0;
+ for(unsigned i=0;i<levels;++i)if(khz[i])++usable;
+ if(usable<2)return 0;
+ const unsigned rank=zizhan_thermal_cpu_rank(level,usable);
+ unsigned seen=0;
+ for(unsigned i=levels;i-- >0;)if(khz[i]){
+  if(seen==rank)return khz[i];
+  ++seen;
+ }
+ return 0;
+}
+
 static inline int zizhan_thermal_tune(uint32_t mode,uint32_t test_cpu_c,
                                       uint32_t test_gpu_c,uint32_t load_s,
                                       ZizhanThermalTuning *out){

@@ -230,6 +230,8 @@ typedef struct {
  unsigned pulse_profile;ZizhanPulseReceipt pulse[2];
  /* profile 19 playback window (docs/plan/2026-11-18-m1-playback-amp.md) */
  unsigned play_profile,play_ms,play_ready[2],play_torn[2],play_streamed,play_polls,play_reason,play_stage,play_chip;
+ /* Read-only register snapshot at poll 5 of the play window (zizhan_play_snap_regs order). */
+ uint32_t play_snap[2][12];unsigned play_snap_reads[2];
  unsigned iv_profile,iv_reads[2][2];uint32_t iv_values[2][2][3];
  unsigned mailbox_profile,mailbox_attempted[2],mailbox_acknowledged[2],mailbox_completed[2];
  unsigned mailbox_polls[2][2],mailbox_mask_restored[2][2];

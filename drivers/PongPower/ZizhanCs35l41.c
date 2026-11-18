@@ -865,6 +865,7 @@ static int run_read(GeniI2c *bus,const ZizhanAmpClock *clock,uint32_t reg,uint32
  if(out->core_debug)for(unsigned i=0;i<15;++i)if(reg==run_debug_regs[i])allowed=1;
  if(out->native_calibration&&(reg==0x2800800||reg==0x2800268||reg==0x2800274||reg==0x2800270))allowed=1;
  if(out->mailbox_profile&&(reg==0x10914))allowed=1;
+ if(out->play_profile&&(reg==0x4c00||reg==0x4820||reg==0x6c04||reg==0x2c0c||reg==0x4800||reg==0x4808))allowed=1;
  if(out->pulse_profile&&(reg==0x6000||reg==0x2084))allowed=1;
  if(out->iv_profile&&(reg==0x4c48||reg==0x4c4c))allowed=1;
  if(!allowed)return ZizhanAmpArgument;
@@ -884,7 +885,7 @@ static int run_write(GeniI2c *bus,const ZizhanAmpClock *clock,uint32_t reg,uint3
   if(!out->global_on[chip]&&!out->global_active[chip]&&value==(out->after_state[chip][0]|1u)&&!out->asp_enables[chip]&&out->asp_checks[chip])allowed=1;
   if(out->global_active[chip]&&value==(out->after_state[chip][0]&~1u))allowed=1;
  }
- if(out->native_frame&&reg==0x2c0c&&value==((out->global_fs_before[chip]&~0x1fu)|3u)&&out->frame_writes[chip]==0)allowed=1;
+ if(out->native_frame&&reg==0x2c0c&&value==((out->global_fs_before[chip]&~0x1fu)|4u)&&out->frame_writes[chip]==0)allowed=1;
  if(out->native_frame&&reg==0x2800804&&value==32&&out->frame_writes[chip]==1)allowed=1;
  if(out->native_calibration){const unsigned n=out->prerun_writes[chip];
   if(!chip&&n==0&&reg==0x2800800&&value==1)allowed=1;
@@ -986,6 +987,7 @@ static int pulse_write(void *p,uint32_t reg,uint32_t value){
  int allowed=(reg==0x40&&(value==0x55||value==0xaa||value==0xcc||value==0x33))||
   (reg==0x2084&&(value==0x2f1aa0||value==0x2f1aa3))||
   (reg==0x2018&&(value==0x3300||value==0x3320||value==0x3321))||
+  (reg==0x4c00&&(value==0||value==0x08))||
   (reg==0x6000&&(value==original||value==((original&~0x3ff8u)|0x3f40u)));
  if(!out->pulse_profile||!allowed||out->transport.controller_uncertain)return 0;
  const uint8_t wire[]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg,
@@ -1049,8 +1051,13 @@ static void play_teardown_all(GeniI2c *bus,const ZizhanAmpClock *clock,const Ziz
 }
 typedef struct {GeniI2c *bus;const ZizhanAmpClock *clock;ZizhanAmpRun *out;ZizhanPulseOps io[2];uint64_t begin,limit;int reason;} PlayPoll;
 /* Between periods: both amps fault-free (sticky and raw), HALO still running, inside the run limit. */
+const uint32_t zizhan_play_snap_regs[12]={0x2014,0x2018,0x2c0c,0x4800,0x4808,0x4820,0x4c00,0x6000,0x6c04,0x10018,0x10098,0x1009c};
 static int play_poll(void *p){
  PlayPoll *pp=p;ZizhanAmpRun *out=pp->out;++out->play_polls;
+ if(out->play_polls==5){
+  for(unsigned chip=0;chip<2;++chip){pp->bus->address=chip?0x42:0x40;
+   for(unsigned i=0;i<12;++i){if(run_read(pp->bus,pp->clock,zizhan_play_snap_regs[i],&out->play_snap[chip][i],out)){break;}++out->play_snap_reads[chip];}}
+ }
  if(pp->clock->now_us(pp->clock->context)-pp->begin>=pp->limit){pp->reason=ZizhanAmpTimeout;return 1;}
  for(unsigned chip=0;chip<2;++chip){uint32_t halo=0;pp->bus->address=chip?0x42:0x40;out->failed_chip=chip;
   if(zizhan_pulse_hold_check(&pp->io[chip],&out->pulse[chip])){pp->reason=ZizhanAmpProtocol;return 1;}
@@ -1107,9 +1114,10 @@ static int silent_run(unsigned enabled,unsigned verified,GeniI2c *bus,const Zizh
    // Actual vendor pcm_hw_params96k maps to3 (generic upstream maps4).
    // WMFW metadata MAX_LRCLK_DELAY globalXMoffset13/nativepre_run32.
    reason=run_read(bus,clock,0x2c0c,&out->global_fs_before[chip],out);if(reason)goto fail;
-   reason=run_write(bus,clock,0x2c0c,(out->global_fs_before[chip]&~0x1fu)|3u,out);if(reason)goto fail;++out->frame_writes[chip];
+   /* GLOBAL_FS 4 = 96 kHz: the ADSP TDM backend runs 96 kHz/24-bit/3 slots (as Android agm). */
+   reason=run_write(bus,clock,0x2c0c,(out->global_fs_before[chip]&~0x1fu)|4u,out);if(reason)goto fail;++out->frame_writes[chip];
    reason=run_read(bus,clock,0x2c0c,&out->global_fs_after[chip],out);if(reason)goto fail;
-   if(out->global_fs_after[chip]!=((out->global_fs_before[chip]&~0x1fu)|3u)){reason=ZizhanAmpReadback;goto fail;}
+   if(out->global_fs_after[chip]!=((out->global_fs_before[chip]&~0x1fu)|4u)){reason=ZizhanAmpReadback;goto fail;}
    reason=run_write(bus,clock,0x2800804,32,out);if(reason)goto fail;++out->frame_writes[chip];
    reason=run_read(bus,clock,0x2800804,&out->lrclk_delay[chip],out);if(reason)goto fail;
    if(out->lrclk_delay[chip]!=32){reason=ZizhanAmpReadback;goto fail;}

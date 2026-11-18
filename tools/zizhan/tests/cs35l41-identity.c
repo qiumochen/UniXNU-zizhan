@@ -28,7 +28,7 @@ typedef struct {
     unsigned native_core_init,native_core_bad,native_core_writes[2];
     unsigned allow_ram,ram_mismatch,ram_value_writes,ram_sparse,read_index,short_fifo;
     unsigned coeff_mode,identity_bad;uint32_t coeff_unpacked[2][2];
-    unsigned pulse_test,pulse_writes,pulse_commands[32];uint32_t pulse_volume[2],pulse_patch[2];
+    unsigned pulse_test,pulse_writes,pulse_commands[48];uint32_t pulse_volume[2],pulse_patch[2],pulse_pcm[2];
     unsigned play_fault; /* profile 19 test: 0x10010 reports a protection fault (bit 15) */
     unsigned iv_bad,iv_reads;
     unsigned mailbox_test,mailbox_fault,mailbox_count[2],mailbox_commands[2][12];uint32_t mailbox_mask[2],mailbox_irq[2],mailbox_state[2];
@@ -122,6 +122,7 @@ static uint32_t rd(void *ctx, uint32_t reg) {
         if(f->run_mode){
             if(f->pulse_test&&f->reg==0x6000)return swap(f->pulse_volume[i]);
             if(f->pulse_test&&f->reg==0x2084)return swap(f->pulse_patch[i]);
+            if(f->pulse_test&&f->reg==0x4c00)return swap(f->pulse_pcm[i]);
             if(f->reg==0x4c48||f->reg==0x4c4c){++f->iv_reads;return swap((f->reg==0x4c48?0x18u:0x19u)^((f->iv_bad==(f->reg==0x4c48?1u:2u))?1u:0u));}
             if(f->reg==0x10914)return swap(f->mailbox_mask[i]^(f->mailbox_fault==4?1u:0u));
             if(f->reg==0x10014&&f->mailbox_test)return swap(f->mailbox_irq[i]);
@@ -229,11 +230,12 @@ static void wr(void *ctx, uint32_t reg, uint32_t value) {
             if(f->output_setup&&output_slot(f->reg)>=0){assert(f->output_writes<28&&!(f->state[chip][0]&1)&&!(f->state[chip][1]&0x31)&&f->state[chip][2]==0);f->output_commands[f->output_writes++]=f->commands;f->output_values[chip][output_slot(f->reg)]=swap(value);++f->fifo_writes;return;}
             if(f->run_mode){
                 uint32_t v=swap(value);int rate=rate_slot(f->reg),mpu=mpu_slot(f->reg);
-                if(f->pulse_test&&(f->reg==0x6000||f->reg==0x2084||f->reg==0x40||f->reg==0x2018)){
-                    assert(f->pulse_writes<32);f->pulse_commands[f->pulse_writes++]=f->commands;
+                if(f->pulse_test&&(f->reg==0x6000||f->reg==0x2084||f->reg==0x40||f->reg==0x2018||f->reg==0x4c00)){
+                    assert(f->pulse_writes<48);f->pulse_commands[f->pulse_writes++]=f->commands;
                     if(f->reg==0x6000){assert(v==0x267c||v==0x3f44);f->pulse_volume[chip]=v;}
                     else if(f->reg==0x2084){assert(v==0x2f1aa0||v==0x2f1aa3);f->pulse_patch[chip]=v;}
                     else if(f->reg==0x40)assert(v==0x55||v==0xaa||v==0xcc||v==0x33);
+                    else if(f->reg==0x4c00){assert(v==0||(v==8&&!(f->state[chip][1]&1)));f->pulse_pcm[chip]=v;}
                     else{assert(f->state[chip][0]==1&&f->state[chip][2]==1&&(v==0x3300||v==0x3320||v==0x3321));f->state[chip][1]=v;}
                 }else if(f->mailbox_test&&(f->reg==0x10814||f->reg==0x10014||f->reg==0x10914||f->reg==0x13020)){
                     assert(f->state[chip][2]==1&&f->state[chip][0]==1&&!(f->state[chip][1]&0x31));
@@ -256,7 +258,7 @@ static void wr(void *ctx, uint32_t reg, uint32_t value) {
                     else if(f->reg==0x2800274){assert(n==(chip?1u:2u)&&v==f->run_cal_r[chip]+1);f->run_cal_checksum[chip]=v;}
                     else{assert(n==(chip?2u:3u)&&v==1);f->run_cal_status[chip]=v;}
                     ++f->run_prerun_writes[chip];
-                }else if(f->reg==0x2c0c){assert(f->run_native_frame&&v==((f->run_global_fs[chip]&~31u)|3u)&&!f->run_asp_enabled[chip]&&!f->state[chip][0]);f->run_global_fs[chip]=v;}
+                }else if(f->reg==0x2c0c){assert(f->run_native_frame&&v==((f->run_global_fs[chip]&~31u)|4u)&&!f->run_asp_enabled[chip]&&!f->state[chip][0]);f->run_global_fs[chip]=v;}
                 else if(f->reg==0x2800804){assert(f->run_native_frame&&v==32&&!f->run_asp_enabled[chip]&&!f->state[chip][0]);f->run_lrclk_delay[chip]=v;}
                 else if(f->reg==0x4808){assert(f->run_format_profile&&v==((f->run_format_value[chip]&~0xff000755u)|0x20000000u)&&!f->run_format_written[chip]&&!f->state[chip][0]&&!(f->state[chip][1]&0x31)&&!f->run_asp_enabled[chip]);f->run_format_value[chip]=v;++f->run_format_written[chip];}
                 else if(f->reg==0x4800){assert(f->run_rx_profile&&(v==0x10000||v==0)&&!(f->state[chip][1]&0x31)&&!(f->state[chip][2]&1));assert(v==0||(!f->run_asp_enabled[chip]&&f->run_pll_writes[chip]==6));f->run_asp_enabled[chip]=v;++f->run_rx_writes;}
@@ -311,7 +313,7 @@ static void wr(void *ctx, uint32_t reg, uint32_t value) {
         }
         const uint32_t requested = swap(value);
         assert((f->output_setup&&output_slot(requested)>=0)||requested == 0 || requested == 4 || requested == 0x1001c || requested == 0x10018 ||
-               (f->run_mode&&(((requested>=0x10010&&requested<=0x1001c)||(requested>=0x10090&&requested<=0x1009c))||debug_slot(requested)>=0||requested==0x2800800||requested==0x2800268||requested==0x2800274||requested==0x2800270||requested==0x2c0c||requested==0x2800804||requested==0x4800||requested==0x4808||requested==0x2d10||requested==0x14000||rate_slot(requested)>=0||mpu_slot(requested)>=0||requested==0x2bc3140||requested==0x28007d0||requested==0x28007d4||requested==0x2800258||requested==0x13004||requested==0x10914||requested==0x6000||requested==0x2084||requested==0x40||requested==0x4c48||requested==0x4c4c||requested==0x10814||requested==0x13020||requested==0x2c04||requested==0x2c08||requested==0x2bc3104||requested==0x2bc310c||requested==0x2bc3114||requested==0x2bc7008)) ||
+               (f->run_mode&&(((requested>=0x10010&&requested<=0x1001c)||(requested>=0x10090&&requested<=0x1009c))||debug_slot(requested)>=0||requested==0x2800800||requested==0x2800268||requested==0x2800274||requested==0x2800270||requested==0x2c0c||requested==0x2800804||requested==0x4800||requested==0x4808||requested==0x2d10||requested==0x14000||rate_slot(requested)>=0||mpu_slot(requested)>=0||requested==0x2bc3140||requested==0x28007d0||requested==0x28007d4||requested==0x2800258||requested==0x13004||requested==0x10914||requested==0x6000||requested==0x2084||requested==0x40||requested==0x4c48||requested==0x4c4c||requested==0x4c00||requested==0x4820||requested==0x6c04||requested==0x10814||requested==0x13020||requested==0x2c04||requested==0x2c08||requested==0x2bc3104||requested==0x2bc310c||requested==0x2bc3114||requested==0x2bc7008)) ||
                (f->allow_ram&&ram_slot(requested)>=0) ||
                (f->allow_ram&&requested>=0x02800000&&requested<0x02800060&&!(requested&3)) ||
                (f->coeff_mode&&requested>=0x03400090&&requested<0x03400098&&!(requested&3)) ||

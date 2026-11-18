@@ -3,7 +3,7 @@
 #include <map>
 #include "ZizhanAmpPulse.h"
 struct Device{
- std::map<uint32_t,uint32_t> regs={{0x2014,0},{0x2018,0x3300},{0x2bc1000,1},{0x4800,0x10000},{0x13004,0},{0x28007d0,2},{0x4c48,0x18},{0x4c4c,0x19},{0x6000,0x267c},{0x10010,0x1400000},{0x10090,0x41406000}};
+ std::map<uint32_t,uint32_t> regs={{0x2014,0},{0x2018,0x3300},{0x2bc1000,1},{0x4800,0x10000},{0x13004,0},{0x28007d0,2},{0x4c48,0x18},{0x4c4c,0x19},{0x6000,0x267c},{0x4c00,0},{0x10010,0x1400000},{0x10090,0x41406000}};
  unsigned test=0,commands=0,fail=0;bool uncertain=false;uint64_t time=0;
  static int read(void *p,uint32_t reg,uint32_t *v){auto &d=*static_cast<Device *>(p);assert(!d.uncertain);++d.commands;if(d.fail==d.commands){d.uncertain=true;return 0;}assert(d.regs.count(reg));*v=d.regs[reg];return 1;}
  static int write(void *p,uint32_t reg,uint32_t v){auto &d=*static_cast<Device *>(p);assert(!d.uncertain);++d.commands;if(d.fail==d.commands){d.uncertain=true;return 0;}d.regs[reg]=v;return 1;}
@@ -53,7 +53,7 @@ int main(){
   d.regs[0x2014]=0;
   if(test==3){assert(zizhan_pulse_patch(&o,&r,0)==ZizhanPulseGuard&&!r.patch_off);continue;}  /* no pdn after a failed window, as in zizhan_pulse_run */
   assert(!zizhan_pulse_patch(&o,&r,0)&&r.patch_off);
-  if(test==1)assert(r.attempted==10);else{assert(r.attempted==16&&r.acknowledged==16);if(!test)window=d.commands;}
+  if(test==1)assert(r.attempted==10);else{assert(r.attempted==18&&r.acknowledged==18&&d.regs[0x4c00]==0&&!r.pcm_source);if(!test)window=d.commands;}
  }
  for(unsigned fail=1;fail<=window;++fail){Device d;d.fail=fail;auto o=d.ops();ZizhanPulseReceipt r={};int rc=zizhan_pulse_patch(&o,&r,1);
   if(!rc){d.regs[0x2014]=1;rc=zizhan_pulse_arm(&o,&r);}

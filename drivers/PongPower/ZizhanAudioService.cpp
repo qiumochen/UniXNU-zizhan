@@ -43,8 +43,12 @@ void check(void *,wait_result_t){
 }
 // Silent self-test producer (zizhan_audio_selftest=1 with PRM mode 40). It writes like the HAL's
 // DoIOOperation: from lead + 2 periods after the anchor, one period every 10 ms, watermark after the copy.
-int16_t selftest_sample(uint64_t frame){return ((frame/24u)&1u)?512:-512;}
+// zizhan_audio_selftest_amp=64..8192 (attended loudness checks only); default 512 = -36 dBFS.
+int16_t gSelftestAmp=512;
+int16_t selftest_sample(uint64_t frame){return ((frame/24u)&1u)?gSelftestAmp:int16_t(-gSelftestAmp);}
 void selftest(void *,wait_result_t){
+ {unsigned amp=0;if(PE_parse_boot_argn("zizhan_audio_selftest_amp",&amp,sizeof amp)&&amp>=64&&amp<=8192){gSelftestAmp=int16_t(amp);}}
+ IOLog("ZIZHAN_AUDIO_SELFTEST: amp=%d\n",int(gSelftestAmp));
  IOSleep(30000);auto c=control();auto ring=gRing?static_cast<int16_t *>(gRing->getBytesNoCopy()):nullptr;
  unsigned produced=0,waited=0;const int started=c&&ring&&zizhan_handoff_request_start(&gHandoff);
  IOLog("ZIZHAN_AUDIO_SELFTEST: start accepted=%d owner=%u\n",started,gHandoff.owner);

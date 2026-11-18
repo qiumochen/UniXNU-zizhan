@@ -21,7 +21,7 @@ typedef struct {
 } ZizhanPulseOps;
 typedef struct {
  unsigned attempted,acknowledged,patch_on,patch_off,enabled,disabled,data_ack,complete,reason,reads;
- unsigned armed,polls; /* playback window only (zizhan_pulse_arm/hold_check/disarm) */
+ unsigned armed,polls,pcm_source; /* playback window only (zizhan_pulse_arm/hold_check/disarm) */
  uint32_t original_volume,original_power,fault_sticky[2],fault_raw[2];uint64_t enabled_us;
 } ZizhanPulseReceipt;
 enum {ZizhanPulseIo=1,ZizhanPulseGuard,ZizhanPulseTimeout,ZizhanPulseReadback,ZizhanPulseData};
@@ -29,7 +29,7 @@ static inline int zizhan_pulse_read(const ZizhanPulseOps *o,ZizhanPulseReceipt *
  ++r->reads;return o->read(o->context,reg,v)?0:ZizhanPulseIo;
 }
 static inline int zizhan_pulse_write(const ZizhanPulseOps *o,ZizhanPulseReceipt *r,uint32_t reg,uint32_t v){
- if(r->attempted>=16){return ZizhanPulseGuard;}++r->attempted;
+ if(r->attempted>=18){return ZizhanPulseGuard;}++r->attempted;
  if(!o->write(o->context,reg,v)){return ZizhanPulseIo;}++r->acknowledged;return 0;
 }
 /* Exact original native pup/pdn patch. Parent calls on before GLOBAL_EN,
@@ -99,7 +99,7 @@ stop:
 /* Playback window (docs/plan/2026-11-18-m1-playback-amp.md): the reads, checks and writes of
  * zizhan_pulse_run, split so both amps can be enabled, held while data streams, polled for faults
  * and disabled. Same volume (-12 dB index), same enable sequence and readbacks, same cleanup order,
- * same 16-write budget. Dry: identical reads and fault checks, no volume or AMP write. */
+ * same 18-write budget (16 + DACPCM1 source on/off). Dry: identical reads and fault checks, no volume or AMP write. */
 static inline int zizhan_pulse_arm(const ZizhanPulseOps *o,ZizhanPulseReceipt *r){
  if(!o||!r||!o->read||!o->write||!o->now||!o->uncertain||!r->patch_on||r->armed||r->enabled||r->complete||o->uncertain(o->context))return ZizhanPulseGuard;
  uint32_t value=0;const uint32_t regs[]={0x2014,0x2018,0x2bc1000,0x4800,0x13004,0x28007d0,0x4c48,0x4c4c,0x6000};
@@ -113,6 +113,10 @@ static inline int zizhan_pulse_arm(const ZizhanPulseOps *o,ZizhanPulseReceipt *r
  const uint32_t volume=(r->original_volume&~0x3ff8u)|0x3f40u;
  rc=zizhan_pulse_write(o,r,0x6000,volume);if(rc){return rc;}
  rc=zizhan_pulse_read(o,r,0x6000,&value);if(rc){return rc;}if(value!=volume){return ZizhanPulseReadback;}
+ /* DACPCM1 source: reset value 0 feeds the DAC silence. 0x08 = ASPRX1, as the vendor "PCM Source:ASP". */
+ rc=zizhan_pulse_write(o,r,0x4c00,0x08);if(rc){return rc;}
+ rc=zizhan_pulse_read(o,r,0x4c00,&value);if(rc){return rc;}if(value!=0x08){return ZizhanPulseReadback;}
+ r->pcm_source=1;
  rc=zizhan_pulse_write(o,r,0x2018,0x3320);if(rc){return rc;}
  rc=zizhan_pulse_read(o,r,0x2018,&value);if(rc){return rc;}if(value!=0x3320){return ZizhanPulseReadback;}
  rc=zizhan_pulse_write(o,r,0x2018,0x3321);if(rc){return rc;}
@@ -133,7 +137,8 @@ static inline int zizhan_pulse_disarm(const ZizhanPulseOps *o,ZizhanPulseReceipt
  if(o->uncertain(o->context)){rc=ZizhanPulseIo;}
  else if(o->dry){r->disabled=1;}
  else{
-  rc=zizhan_pulse_write(o,r,0x2018,0x3320);
+  if(r->pcm_source){rc=zizhan_pulse_write(o,r,0x4c00,0);if(!rc){r->pcm_source=0;}}
+  if(!rc){rc=zizhan_pulse_write(o,r,0x2018,0x3320);}
   if(!rc){rc=zizhan_pulse_write(o,r,0x2018,0x3300);}
   if(!rc){rc=zizhan_pulse_read(o,r,0x2018,&value);}
   if(!rc&&value!=0x3300){rc=ZizhanPulseReadback;}

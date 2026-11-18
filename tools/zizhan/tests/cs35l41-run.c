@@ -177,7 +177,7 @@ int main(int argc,char **argv){
   f.run_global_fs[0]=f.run_global_fs[1]=0xa5000003;f.run_bad_frame=test;
   int rc=zizhan_cs35l41_native_frame_run(1,flags,&f.bus,&clock,&coeff,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==104&&out.acknowledged_writes==104);
-   for(unsigned c=0;c<2;++c)assert(out.frame_writes[c]==2&&out.lrclk_delay[c]==32&&out.global_fs_after[c]==0xa5000003&&out.samples[c]==100&&out.stopped[c]);
+   for(unsigned c=0;c<2;++c)assert(out.frame_writes[c]==2&&out.lrclk_delay[c]==32&&out.global_fs_after[c]==0xa5000004&&out.samples[c]==100&&out.stopped[c]);
   }else assert(rc==ZizhanAmpReadback&&!out.started[0]&&!out.global_on[0]);
  }
  for(unsigned test=0;test<2;++test){

@@ -93,11 +93,16 @@ Default-off, no hardware transition or visibility completion is inferred.
  }
  
  /* A swap's surfaces onto the panel, once the GPU is done with them. */
-@@ -1564,6 +1610,7 @@
+@@ -1564,6 +1610,12 @@
  	case kFBMethodRequestPowerChange:
++		extern "C" int zizhan_display_power_request(uint32_t,const uint64_t *,size_t) __attribute__((weak_import));
  		if (zizhan_display_power_observe)
  			zizhan_display_power_observe(args->scalarInputCount, in, args->structureInputSize);
 +		fOwner->observePowerOwner();
++		if (zizhan_display_power_request) {
++			if (zizhan_display_power_request(args->scalarInputCount, in, args->structureInputSize))
++				return kIOReturnError;
++		}
  		// Existing compatibility return retained; observation explicitly reports
  		// hardware-transition=UNIMPLEMENTED, never a device PM completion.
  		return kIOReturnSuccess;

@@ -1,0 +1,111 @@
+/* SPDX-License-Identifier: BSD-2-Clause-Patent */
+/* POWER-02 S3 kernel wrapper: default-off selector-12 executor. */
+#pragma once
+#include <IOKit/IOLib.h>
+#include <kern/clock.h>
+#include <pexpert/pexpert.h>
+#include <stdint.h>
+#include "ZizhanDisplayPowerExecutor.h"
+
+/* Implemented in PongAdrenoScanout.cpp and PongBacklight.cpp. Weak so a
+ * reduced kernel without the display/backlight components still links. */
+extern "C" int zizhan_dsi_power_sequence(const uint8_t *dcs,const uint16_t *wait_ms,
+                                         uint32_t count,int low_power)
+    __attribute__((weak));
+extern "C" int pong_backlight_level(uint32_t *level) __attribute__((weak));
+extern "C" int pong_backlight_set(uint32_t level,uint32_t timeout_ms) __attribute__((weak));
+
+namespace zizhan_display_power_service {
+static ZizhanDisplayPowerRuntime runtime;
+static uint8_t runtime_ready;
+static uint8_t mode_parsed;
+static uint8_t unsupported_logged;
+static uint32_t mode_raw;
+
+static uint64_t uptime_us(void) {
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+  return ns / 1000u;
+}
+
+static int mode(void) {
+  if (!mode_parsed) {
+    mode_raw = 0;
+    (void)PE_parse_boot_argn("zizhan_display_power", &mode_raw, sizeof mode_raw);
+    mode_parsed = 1;
+  }
+  return zizhan_display_power_mode(mode_raw);
+}
+
+static int backlight_get(uint32_t *level, void *) {
+  if (!pong_backlight_level) return -1;
+  return pong_backlight_level(level);
+}
+
+static int backlight_set(uint32_t level, uint32_t timeout_ms, void *) {
+  if (!pong_backlight_set) return -1;
+  return pong_backlight_set(level, timeout_ms);
+}
+
+static int dsi_sequence(const uint8_t *dcs, const uint16_t *wait_ms, uint32_t count,
+                        int low_power, void *) {
+  if (!zizhan_dsi_power_sequence) return -1;
+  return zizhan_dsi_power_sequence(dcs, wait_ms, count, low_power);
+}
+} // namespace zizhan_display_power_service
+
+extern "C" int zizhan_display_power_request(uint32_t count,const uint64_t *in,
+                                            size_t bytes) {
+  using namespace zizhan_display_power_service;
+  const int current = mode();
+  if (current == 0) return 0;
+  if (current < 0) {
+    if (!unsupported_logged) {
+      IOLog("ZIZHAN_DISPLAY_POWER: SKIP unsupported-mode zizhan_display_power=%u\n",
+            (unsigned)mode_raw);
+      unsupported_logged = 1;
+    }
+    return 0;
+  }
+  if (!pong_backlight_level || !pong_backlight_set || !zizhan_dsi_power_sequence) {
+    IOLog("ZIZHAN_DISPLAY_POWER: SKIP missing-executor backlight=%u/%u dsi=%u\n",
+          pong_backlight_level ? 1u : 0u, pong_backlight_set ? 1u : 0u,
+          zizhan_dsi_power_sequence ? 1u : 0u);
+    return -1;
+  }
+  if (!runtime_ready) {
+    zizhan_display_power_runtime_init(&runtime);
+    runtime_ready = 1;
+  }
+  const ZizhanDisplayPowerOps ops = {backlight_get, backlight_set, dsi_sequence};
+  ZizhanDisplayPowerReport report;
+  const int result = zizhan_display_power_execute(&runtime, &ops, nullptr, count, in,
+                                                  bytes, uptime_us(), &report);
+  if (result == ZizhanDisplayPowerOk) {
+    IOLog("ZIZHAN_DISPLAY_POWER: PASS target=%s sequence=%u saved=%u state=%u\n",
+          report.target == ZizhanDisplayTargetOff ? "off" : "on",
+          (unsigned)report.sequence, (unsigned)runtime.saved_level,
+          (unsigned)runtime.state.state);
+  } else if (result == ZizhanDisplayPowerNoOp) {
+    IOLog("ZIZHAN_DISPLAY_POWER: NOOP target=%s state=%u\n",
+          report.target == ZizhanDisplayTargetOff ? "off" : "on",
+          (unsigned)runtime.state.state);
+  } else if (result == ZizhanDisplayPowerRejected) {
+    IOLog("ZIZHAN_DISPLAY_POWER: REJECT reason=%u request=%u accepted=%u noops=%u "
+          "unknown=%u busy=%u queue-full=%u\n",
+          (unsigned)runtime.state.last_failure,
+          (unsigned)runtime.state.requests, (unsigned)runtime.state.accepted,
+          (unsigned)runtime.state.noops, (unsigned)runtime.state.rejected_unknown,
+          (unsigned)runtime.state.rejected_busy,
+          (unsigned)runtime.state.rejected_queue_full);
+  } else {
+    IOLog("ZIZHAN_DISPLAY_POWER: FAIL fault=%u target=%s sequence=%u saved=%u "
+          "restored=%u dsi_failed=%u state=%u\n",
+          report.fault,
+          report.target == ZizhanDisplayTargetOff ? "off" : "on",
+          (unsigned)report.sequence, (unsigned)runtime.saved_level,
+          (unsigned)report.restored, (unsigned)report.dsi_failed,
+          (unsigned)runtime.state.state);
+  }
+  return result == ZizhanDisplayPowerOk || result == ZizhanDisplayPowerNoOp ? 0 : -1;
+}

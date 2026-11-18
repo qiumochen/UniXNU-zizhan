@@ -913,6 +913,40 @@ static int zizhanDsiSet(const uint8_t *program,uint32_t bytes,bool lp,unsigned *
     if(retain) {strictDsiQuarantined=true;++dsiFailures;}
     return ok?0:-int(result)-1;
 }
+static bool powerDsiQuarantined;
+/* POWER-02 S3: short DCS packets under the power lease. The caller supplies
+ * the live-DT waits; every packet is checked by zizhan_dsi::transfer (status,
+ * DMA done, error pending) before the next one. A retained lease or a busy
+ * status after the transfer quarantines the engine instead of reusing it. */
+extern "C" int zizhan_dsi_power_sequence(const uint8_t *dcs,const uint16_t *wait_ms,
+                                         uint32_t count,int low_power)
+{
+    if(!dcs || !wait_ms || !count)return -1;
+    if(!dsiMap && !dsiInit())return -2;
+    if(powerDsiQuarantined || strictDsiQuarantined || dsiFailures>=3)return -3;
+    if(!pong_dsi_try_acquire(PongDsiPower))return -4;
+    ZizhanDsiIo io;
+    int rc=0;
+    for(uint32_t i=0;i<count;++i) {
+        zizhan_panel::Packet packet{0x05,0,0,0,&dcs[i],1};
+        const auto outcome=zizhan_dsi::transfer(io,packet,low_power!=0);
+        if(outcome.retain_lease) {
+            powerDsiQuarantined=true;rc=-5;break;
+        }
+        if(outcome.result!=zizhan_panel::Result::Ok) {rc=-6;break;}
+        if(wait_ms[i])IOSleep(wait_ms[i]);
+    }
+    if(!powerDsiQuarantined) {
+        if(!zizhan_dsi::may_release(false,dsiRd(DsiStatus))) {
+            powerDsiQuarantined=true;rc=rc?rc:-7;
+        } else if(!pong_dsi_release(PongDsiPower)) {
+            powerDsiQuarantined=true;rc=rc?rc:-8;
+        }
+    }
+    IOLog("ZIZHAN_DISPLAY_POWER: dsi %s commands=%u rc=%d quarantine=%u status=%x irq=%x\n",
+          rc?"FAIL":"PASS",count,rc,powerDsiQuarantined?1u:0u,dsiRd(DsiStatus),dsiRd(DsiIntCtrl));
+    return rc;
+}
 void panelHz(void)
 {
     char text[240];

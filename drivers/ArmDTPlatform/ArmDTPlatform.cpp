@@ -26,6 +26,7 @@
 #include "ZizhanTsensProbe.h"
 #include "ZizhanThermalService.h"
 #include "ZizhanPowerAudit.h"
+#include "ZizhanDisplayPowerService.h"
 
 extern "C" bool pong_cpu_start(IOService *platform);
 #if XNU_PONG_WIFI

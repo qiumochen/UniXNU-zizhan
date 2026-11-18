@@ -457,6 +457,17 @@ static void test_load_hot_boundary(void){
        "load hot stop latches");
 }
 
+static void test_load_gate(void){
+ /* waits for the desktop, a complete sample and a peak below 60 C; gives up after 120 s */
+ CHECK(zizhan_thermal_load_gate(0,1,40000,0)==ZizhanThermalLoadWait,"load gate waits for the desktop");
+ CHECK(zizhan_thermal_load_gate(1,0,40000,0)==ZizhanThermalLoadWait,"load gate waits for a complete sample");
+ CHECK(zizhan_thermal_load_gate(1,1,INT32_MIN,0)==ZizhanThermalLoadWait,"load gate waits for a reading");
+ CHECK(zizhan_thermal_load_gate(1,1,60000,0)==ZizhanThermalLoadWait,"load gate: 60 C is not cool");
+ CHECK(zizhan_thermal_load_gate(1,1,90700,119999999ull)==ZizhanThermalLoadWait,"load gate: hot keeps waiting");
+ CHECK(zizhan_thermal_load_gate(1,1,59999,5000000ull)==ZizhanThermalLoadGo,"load gate: cool sample starts");
+ CHECK(zizhan_thermal_load_gate(1,1,90700,120000000ull)==ZizhanThermalLoadGiveUp,"load gate gives up at 120 s");
+ CHECK(zizhan_thermal_load_gate(1,1,40000,120000000ull)==ZizhanThermalLoadGiveUp,"load gate deadline wins");
+}
 int main(void){
  test_mapping();
  test_normal();
@@ -488,6 +499,7 @@ int main(void){
  test_load_deadline();
  test_load_zero_and_no_reading();
  test_load_hot_boundary();
+ test_load_gate();
  printf("%s: %d failure(s)\n",failures?"FAIL":"PASS",failures);
  return failures?1:0;
 }

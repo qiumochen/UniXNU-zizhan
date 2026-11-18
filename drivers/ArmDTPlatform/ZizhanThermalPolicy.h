@@ -173,6 +173,17 @@ static inline int zizhan_thermal_tune(uint32_t mode,uint32_t test_cpu_c,
 enum { ZizhanThermalLoadRun=0, ZizhanThermalLoadDeadline=1,
        ZizhanThermalLoadHot=2 };
 #define ZIZHAN_THERMAL_LOAD_HOT_MC 75000
+/* 11-18 device rounds: the first frame arrives while boot work holds the CPU
+ * at 85-90 C, so a load started there hits the 75 C stop at once. Start it only
+ * from a complete sample whose peak is below 60 C, and give up after 120 s. */
+#define ZIZHAN_THERMAL_LOAD_START_MC 60000
+#define ZIZHAN_THERMAL_LOAD_WAIT_US 120000000ull
+enum {ZizhanThermalLoadWait=0,ZizhanThermalLoadGo=1,ZizhanThermalLoadGiveUp=2};
+static inline int zizhan_thermal_load_gate(int desktop,int complete,int32_t peak_mc,uint64_t waited_us){
+ if(waited_us>=ZIZHAN_THERMAL_LOAD_WAIT_US){return ZizhanThermalLoadGiveUp;}
+ if(!desktop||!complete||peak_mc==INT32_MIN||peak_mc>=ZIZHAN_THERMAL_LOAD_START_MC){return ZizhanThermalLoadWait;}
+ return ZizhanThermalLoadGo;
+}
 
 typedef struct {
  uint64_t start_us, deadline_us;

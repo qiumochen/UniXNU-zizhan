@@ -151,26 +151,10 @@ static void load_worker(void *arg, wait_result_t) {
   thread_block(THREAD_CONTINUE_NULL);
 }
 
-// The desktop proxy is the first presented frame, which needs both userland
-// mounted and backboardd's scanout running. Without the scanout symbol (a
-// reduced build) fall back to the root-mount settle used by the other probes.
-static bool desktop_ready(void) {
-  if (!&pong_zc_flipped_tag) return true;
-  for (unsigned i = 0; i < 600; ++i) {
-    if (__atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)) return true;
-    IOSleep(100);
-  }
-  return false;
-}
-
+// The load gate (worker loop) uses the first presented frame as the desktop proxy; a reduced build
+// without the scanout symbol falls back to 60 s of uptime.
 static void start_load(void) {
   if (!tuning.load_seconds) return;
-  if (!desktop_ready()) {
-    IOLog("ZIZHAN_THERMAL: load SKIP desktop-timeout seconds=%u\n",
-          (unsigned)tuning.load_seconds);
-    return;
-  }
-  IOSleep((&pong_zc_flipped_tag) ? 3000 : 5000);
   __atomic_store_n(&load_stop, 0, __ATOMIC_RELEASE);
   load_started = 0;
   load_done = 0;
@@ -272,7 +256,9 @@ static void worker(void *, wait_result_t) {
     return;
   }
   IOSleep(5000);
-  start_load();
+  // The load waits for the desktop and a cool complete sample (see ZIZHAN_THERMAL_LOAD_START_MC).
+  bool load_pending = tuning.load_seconds != 0;
+  uint64_t load_wait_from = 0;
   uint32_t samples = 0, stale = 0, incomplete = 0, since_summary = 0;
   for (;;) {
     const uint64_t now_us = uptime_us();
@@ -294,6 +280,18 @@ static void worker(void *, wait_result_t) {
                           cpu_all && gpu_all;
     unsigned hot_bank = 0, hot_index = 0;
     const int32_t peak = sample_peak(&hot_bank, &hot_index);
+    if (load_pending) {
+      const int desktop = (&pong_zc_flipped_tag) ? (__atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE) != 0)
+                                                 : (now_us >= 60000000ull);
+      if (desktop && !load_wait_from) load_wait_from = now_us;
+      const int gate = zizhan_thermal_load_gate(desktop, complete, peak,
+                                                load_wait_from ? now_us - load_wait_from : 0);
+      if (gate == ZizhanThermalLoadGo) { load_pending = false; start_load(); }
+      else if (gate == ZizhanThermalLoadGiveUp) {
+        load_pending = false;
+        IOLog("ZIZHAN_THERMAL: load SKIP not-cool peak=%d waited_s=120\n", (int)peak);
+      }
+    }
     service_load(now_us, peak, hot_bank, hot_index);
     if (status == ZizhanThermalStale) ++stale;
     if (!complete) ++incomplete;

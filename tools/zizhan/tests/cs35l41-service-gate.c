@@ -17,6 +17,8 @@ int main(void){
  assert(zizhan_service_gate(1,1,0,0,1,0)==ZizhanGateStart);
  assert(zizhan_service_gate(1,1,0,0,1,40)==ZizhanGateStart);
  assert(zizhan_service_gate(1,1,0,0,1,38)==ZizhanGateConflictPrm&&zizhan_service_gate(1,1,0,0,1,39)==ZizhanGateConflictPrm);
+ assert(zizhan_service_gate(1,1,0,0,1,41)==ZizhanGateStart&&zizhan_service_gate(1,1,0,0,1,42)==ZizhanGateConflictPrm);
+ assert(zizhan_service_owner_mode(40)&&zizhan_service_owner_mode(41)&&!zizhan_service_owner_mode(39)&&!zizhan_service_owner_mode(34));
  assert(zizhan_service_gate(1,1,1,1,1,34)==ZizhanGateConflictPong);
  /* Control page: valid v2 header at the real 19.2 MHz counter, idle state, no Ready. */
  static uint8_t page[ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES];memset(page,0xa5,sizeof page);

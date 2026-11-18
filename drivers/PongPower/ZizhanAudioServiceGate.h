@@ -21,6 +21,9 @@ enum {ZizhanRequestOk=0,ZizhanRequestBadArgument,ZizhanRequestUnsupported,Zizhan
  * service: it waits for StartOutput, then runs the verified mode-38 graph on
  * the service ring with the HAL (or the silent self-test) as the producer. */
 #define ZIZHAN_AUDIO_PRM_SERVICE_MODE 40u
+/* PRM mode 41: mode 40 plus the profile 19 dual-amp playback window (attended, or dry). */
+#define ZIZHAN_AUDIO_PRM_PLAY_MODE 41u
+static inline int zizhan_service_owner_mode(unsigned prm){return prm==ZIZHAN_AUDIO_PRM_SERVICE_MODE||prm==ZIZHAN_AUDIO_PRM_PLAY_MODE;}
 /* Only an explicit zizhan_audio_service=1 starts the owner. The Pong TFA9873
  * path (pong_audio) and every other PRM diagnostic mode own the same ADSP
  * graph and DMA window, so either one being set skips the service. */
@@ -29,7 +32,7 @@ static inline unsigned zizhan_service_gate(int has_service,unsigned service,int 
  if(!has_service||service==0)return ZizhanGateOff;
  if(service!=1)return ZizhanGateBadValue;
  if(has_pong&&pong_audio!=0)return ZizhanGateConflictPong;
- if(has_prm&&prm!=0&&prm!=ZIZHAN_AUDIO_PRM_SERVICE_MODE)return ZizhanGateConflictPrm;
+ if(has_prm&&prm!=0&&!zizhan_service_owner_mode(prm))return ZizhanGateConflictPrm;
  return ZizhanGateStart;
 }
 /* hz is the host counter frequency; ticks_per_frame_q32 = hz * 2^32 / 48000. */

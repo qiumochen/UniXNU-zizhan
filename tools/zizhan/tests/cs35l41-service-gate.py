@@ -24,7 +24,7 @@ for forbidden in ("sheng_adsp_send","zizhan_audio_dma_map_begin","zizhan_cs35l41
 assert source.count("zizhan_service_request(")==1 and ",owner)){" in source and "zizhan_handoff_request_start(&gHandoff)" in source
 assert "zizhan_handoff_register" not in source,"only the PRM owner registers"
 # The self-test producer exists only with PRM mode 40 and the explicit boot-arg.
-assert "prm==ZIZHAN_AUDIO_PRM_SERVICE_MODE" in probe and "zizhan_audio_selftest" in probe
+assert "zizhan_service_owner_mode(prm)" in probe and "zizhan_audio_selftest" in probe
 # Kernel thread stack: no large locals in this file.
 assert not re.search(r"\[\s*(\d{3,})\s*\]",source.replace("native_zizhan_audio_service[8]","")),"large local array"
 build=(R/"scripts/build-pong-power-native.py").read_text()

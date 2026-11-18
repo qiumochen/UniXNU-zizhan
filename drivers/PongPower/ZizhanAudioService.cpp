@@ -166,7 +166,7 @@ extern "C" void zizhan_audio_service_probe(void){
  thread_t t=nullptr;if(kernel_thread_start(check,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);
  unsigned self=0;
  if(PE_parse_boot_argn("zizhan_audio_selftest",&self,sizeof self)&&self==1){
-  if(has_prm&&prm==ZIZHAN_AUDIO_PRM_SERVICE_MODE){t=nullptr;if(kernel_thread_start(selftest,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);}
+  if(has_prm&&zizhan_service_owner_mode(prm)){t=nullptr;if(kernel_thread_start(selftest,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);}
   else IOLog("ZIZHAN_AUDIO_SELFTEST: SKIP prm=%u needs=40\n",prm);
  }
 }

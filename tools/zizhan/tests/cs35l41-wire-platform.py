@@ -95,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix='zizhan-wire-platform-') as temp:
         subprocess.run([str(binary),case],check=True,timeout=10)
     # Reproduce the exact rejected dispatch before considering this a
     # regression test: the real owner must route mode35 through native RAM.
-    dispatch='mode>=33&&mode<=39'
+    dispatch='mode>=33&&mode<=40'
     assert source.count(dispatch)==1
     cpp.write_text(harness+stubs+source.replace(dispatch,'mode==33||mode==34')+main)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I'+str(R/'drivers/PongPower'),str(cpp),*objects,'-o',str(binary)],check=True,timeout=30)

@@ -28,6 +28,8 @@ void zizhan_amp_native_debug_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt
 void zizhan_amp_native_core_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *);
 void zizhan_amp_native_data_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,const ZizhanAudioTransfer *);
 void zizhan_amp_native_pulse_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,const ZizhanAudioTransfer *);
+/* PRM 41: profile 19 dual-amp playback window; transfer->stream required. */
+void zizhan_amp_native_play_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,const ZizhanAudioTransfer *);
 void zizhan_amp_native_iv_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,const ZizhanAudioTransfer *);
 void zizhan_amp_native_mailbox_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,const ZizhanAudioTransfer *);
 void zizhan_amp_native_output_off_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,const ZizhanAudioTransfer *);

@@ -228,6 +228,8 @@ typedef struct {
  unsigned native_calibration,prerun_writes[2],prerun_readbacks[2];uint32_t calibration_r[2],calibration_checksum[2],calibration_status[2],us_bypass[2];
  unsigned transfer_attempts[2],transfer_acks[2];uint32_t transfer_halo[2][2],transfer_heartbeat[2][2];
  unsigned pulse_profile;ZizhanPulseReceipt pulse[2];
+ /* profile 19 playback window (docs/plan/2026-11-18-m1-playback-amp.md) */
+ unsigned play_profile,play_ms,play_ready[2],play_torn[2],play_streamed,play_polls,play_reason,play_stage,play_chip;
  unsigned iv_profile,iv_reads[2][2];uint32_t iv_values[2][2][3];
  unsigned mailbox_profile,mailbox_attempted[2],mailbox_acknowledged[2],mailbox_completed[2];
  unsigned mailbox_polls[2][2],mailbox_mask_restored[2][2];
@@ -282,6 +284,9 @@ int zizhan_cs35l41_native_core_transfer(unsigned,unsigned,GeniI2c *,const Zizhan
 extern void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 extern unsigned zizhan_amp_pulse_hold_us;
 extern unsigned zizhan_amp_pulse_flags;
+extern unsigned zizhan_amp_play_ms; /* 0 unless the kernel sets zizhan_audio_play_ms=<100..2000> */
+int zizhan_cs35l41_native_play_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
+ const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_pulse_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_iv_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,

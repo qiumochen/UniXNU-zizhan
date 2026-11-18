@@ -21,6 +21,7 @@ typedef struct {
 } ZizhanPulseOps;
 typedef struct {
  unsigned attempted,acknowledged,patch_on,patch_off,enabled,disabled,data_ack,complete,reason,reads;
+ unsigned armed,polls; /* playback window only (zizhan_pulse_arm/hold_check/disarm) */
  uint32_t original_volume,original_power,fault_sticky[2],fault_raw[2];uint64_t enabled_us;
 } ZizhanPulseReceipt;
 enum {ZizhanPulseIo=1,ZizhanPulseGuard,ZizhanPulseTimeout,ZizhanPulseReadback,ZizhanPulseData};
@@ -94,5 +95,54 @@ stop:
   if(!rc)rc=cleanup;
  }
  r->enabled_us=o->now(o->context)-begin;r->reason=rc;if(!rc&&r->disabled&&r->data_ack)r->complete=1;return rc;
+}
+/* Playback window (docs/plan/2026-11-18-m1-playback-amp.md): the reads, checks and writes of
+ * zizhan_pulse_run, split so both amps can be enabled, held while data streams, polled for faults
+ * and disabled. Same volume (-12 dB index), same enable sequence and readbacks, same cleanup order,
+ * same 16-write budget. Dry: identical reads and fault checks, no volume or AMP write. */
+static inline int zizhan_pulse_arm(const ZizhanPulseOps *o,ZizhanPulseReceipt *r){
+ if(!o||!r||!o->read||!o->write||!o->now||!o->uncertain||!r->patch_on||r->armed||r->enabled||r->complete||o->uncertain(o->context))return ZizhanPulseGuard;
+ uint32_t value=0;const uint32_t regs[]={0x2014,0x2018,0x2bc1000,0x4800,0x13004,0x28007d0,0x4c48,0x4c4c,0x6000};
+ const uint32_t expected[]={1,0x3300,1,0x10000,0,2,0x18,0x19,0};int rc=0;
+ for(unsigned i=0;i<9;++i){rc=zizhan_pulse_read(o,r,regs[i],&value);if(rc){return rc;}
+  if(i==8){r->original_volume=value;}else if(value!=expected[i]){return ZizhanPulseGuard;}}
+ if((r->original_volume&0x3fffu)!=0x267cu){return ZizhanPulseGuard;}
+ r->original_power=0x3300;rc=zizhan_pulse_faults(o,r,0);if(rc){return rc;}
+ r->armed=1;r->enabled_us=o->now(o->context);
+ if(o->dry){return 0;}
+ const uint32_t volume=(r->original_volume&~0x3ff8u)|0x3f40u;
+ rc=zizhan_pulse_write(o,r,0x6000,volume);if(rc){return rc;}
+ rc=zizhan_pulse_read(o,r,0x6000,&value);if(rc){return rc;}if(value!=volume){return ZizhanPulseReadback;}
+ rc=zizhan_pulse_write(o,r,0x2018,0x3320);if(rc){return rc;}
+ rc=zizhan_pulse_read(o,r,0x2018,&value);if(rc){return rc;}if(value!=0x3320){return ZizhanPulseReadback;}
+ rc=zizhan_pulse_write(o,r,0x2018,0x3321);if(rc){return rc;}
+ rc=zizhan_pulse_read(o,r,0x2018,&value);if(rc){return rc;}if(value!=0x3321){return ZizhanPulseReadback;}
+ r->enabled=1;return 0;
+}
+/* Called every poll while data streams: any sticky or raw protection fault stops the window. */
+static inline int zizhan_pulse_hold_check(const ZizhanPulseOps *o,ZizhanPulseReceipt *r){
+ if(!o||!r||!r->armed||r->disabled){return ZizhanPulseGuard;}
+ if(o->uncertain(o->context)){return ZizhanPulseIo;}
+ ++r->polls;return zizhan_pulse_faults(o,r,1);
+}
+/* Always called once per armed amp, also after a failed arm or a fault. Uncertain bus: no I2C at all,
+ * the caller's shared reset contains the output (same rule as zizhan_pulse_run). */
+static inline int zizhan_pulse_disarm(const ZizhanPulseOps *o,ZizhanPulseReceipt *r,int data_ok){
+ if(!o||!r||!r->armed||r->disabled){return ZizhanPulseGuard;}
+ int rc=0;uint32_t value=0;
+ if(o->uncertain(o->context)){rc=ZizhanPulseIo;}
+ else if(o->dry){r->disabled=1;}
+ else{
+  rc=zizhan_pulse_write(o,r,0x2018,0x3320);
+  if(!rc){rc=zizhan_pulse_write(o,r,0x2018,0x3300);}
+  if(!rc){rc=zizhan_pulse_read(o,r,0x2018,&value);}
+  if(!rc&&value!=0x3300){rc=ZizhanPulseReadback;}
+  if(!rc){r->disabled=1;rc=zizhan_pulse_write(o,r,0x6000,r->original_volume);}
+  if(!rc){rc=zizhan_pulse_read(o,r,0x6000,&value);}
+  if(!rc&&value!=r->original_volume){rc=ZizhanPulseReadback;}
+ }
+ r->enabled_us=o->now(o->context)-r->enabled_us;r->data_ack=data_ok?1u:0u;r->reason=rc;
+ if(!rc&&r->disabled&&data_ok){r->complete=1;}
+ return rc;
 }
 #endif

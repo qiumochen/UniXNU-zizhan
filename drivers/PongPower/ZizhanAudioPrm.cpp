@@ -655,7 +655,7 @@ void worker(void *,wait_result_t){
       if(!o.dma_restored){zizhan_prm_fail(&o.state,ZizhanPrmNotReady);o.state.uncertain=1;break;}
      }
     }
-    if(o.mode>=29){const ZizhanAudioTransfer transfer={&o,zero_transfer};
+    if(o.mode>=29){const ZizhanAudioTransfer transfer={&o,zero_transfer,nullptr};
      if(o.mode==34)zizhan_amp_native_pulse_run(&o.state,&o.silent,&transfer);
      else if(o.mode>=32)zizhan_amp_native_iv_run(&o.state,&o.silent,&transfer);
      else if(o.mode==31)zizhan_amp_native_mailbox_run(&o.state,&o.silent,&transfer);

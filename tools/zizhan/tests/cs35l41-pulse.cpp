@@ -32,5 +32,35 @@ int main(){
   if(!rc){d.regs[0x2014]=0;rc=zizhan_pulse_patch(&o,&r,0);}
   assert(rc&&d.uncertain&&d.commands==fail);
  }
- puts("PASS nativepulse guards/faults/latefault/datafailure/timeout/clearAMP-beforeBST/nativepup-pdn/16writebudget/alltransactionfailure retention;no hardware");
+ /* Playback window split: arm/hold/disarm, dry, fault while held, guards, every transaction failing. */
+ unsigned window=0;
+ for(unsigned test=0;test<6;++test){Device d;d.test=test==1?11u:0u;auto o=d.ops();ZizhanPulseReceipt r={};
+  assert(!zizhan_pulse_patch(&o,&r,1));d.regs[0x2014]=1;
+  if(test==4){assert(zizhan_pulse_disarm(&o,&r,1)==ZizhanPulseGuard&&zizhan_pulse_hold_check(&o,&r)==ZizhanPulseGuard);}
+  if(test==5)d.regs[0x13004]=1;
+  int rc=zizhan_pulse_arm(&o,&r);
+  if(test==5){assert(rc==ZizhanPulseGuard&&!r.armed&&!r.enabled&&d.regs[0x2018]==0x3300&&zizhan_pulse_disarm(&o,&r,1)==ZizhanPulseGuard);continue;}
+  assert(!rc&&r.armed);
+  if(test==1){assert(!r.enabled&&d.regs[0x2018]==0x3300&&d.regs[0x6000]==0x267c);}
+  else{assert(r.enabled&&d.regs[0x2018]==0x3321&&d.regs[0x6000]==0x3f44);}
+  assert(zizhan_pulse_arm(&o,&r)==ZizhanPulseGuard);
+  for(unsigned i=0;i<20;++i){if(test==2&&i==7)d.regs[0x10010]|=0x8000;rc=zizhan_pulse_hold_check(&o,&r);if(rc)break;}
+  if(test==2){assert(rc==ZizhanPulseGuard&&r.polls==8);}else{assert(!rc&&r.polls==20);}
+  rc=zizhan_pulse_disarm(&o,&r,test!=3);
+  assert(!rc&&r.disabled&&d.regs[0x2018]==0x3300&&d.regs[0x6000]==0x267c);
+  assert(r.complete==(test!=3?1u:0u)&&r.data_ack==(test!=3?1u:0u));
+  assert(zizhan_pulse_disarm(&o,&r,1)==ZizhanPulseGuard&&zizhan_pulse_hold_check(&o,&r)==ZizhanPulseGuard);
+  d.regs[0x2014]=0;
+  if(test==3){assert(zizhan_pulse_patch(&o,&r,0)==ZizhanPulseGuard&&!r.patch_off);continue;}  /* no pdn after a failed window, as in zizhan_pulse_run */
+  assert(!zizhan_pulse_patch(&o,&r,0)&&r.patch_off);
+  if(test==1)assert(r.attempted==10);else{assert(r.attempted==16&&r.acknowledged==16);if(!test)window=d.commands;}
+ }
+ for(unsigned fail=1;fail<=window;++fail){Device d;d.fail=fail;auto o=d.ops();ZizhanPulseReceipt r={};int rc=zizhan_pulse_patch(&o,&r,1);
+  if(!rc){d.regs[0x2014]=1;rc=zizhan_pulse_arm(&o,&r);}
+  for(unsigned i=0;!rc&&i<20;++i)rc=zizhan_pulse_hold_check(&o,&r);
+  if(r.armed){const int off=zizhan_pulse_disarm(&o,&r,!rc);if(!rc)rc=off;}
+  if(!rc){d.regs[0x2014]=0;rc=zizhan_pulse_patch(&o,&r,0);}
+  assert(rc&&d.uncertain&&d.commands==fail);
+ }
+ puts("PASS nativepulse+window(arm/hold/disarm,dry,held fault,guards,all-transaction failure) guards/faults/latefault/datafailure/timeout/clearAMP-beforeBST/nativepup-pdn/16writebudget/alltransactionfailure retention;no hardware");
 }

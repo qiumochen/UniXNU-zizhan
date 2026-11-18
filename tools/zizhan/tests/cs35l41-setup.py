@@ -97,7 +97,7 @@ int main(int argc,char **argv){
  if(test=="native-data-missing"||test=="native-data-proof"||test=="native-data-input"){
   mode=35;ZizhanPrmState lease={};ZizhanAudioSilentReceipt receipt={};
   lease.phase=ZizhanPrmClockReleaseReady;lease.native_wire=lease.native_framework=lease.clock_mode=1;lease.framework_ready=lease.lease_held=lease.clock_held=lease.request_ack=lease.clock_request_ack=1;lease.sent=lease.acknowledged=3;
-  const ZizhanAudioTransfer transfer={nullptr,[](void *,unsigned){assert(false);return 0;}};
+  const ZizhanAudioTransfer transfer={nullptr,[](void *,unsigned){assert(false);return 0;},nullptr};
   if(test=="native-data-proof")lease.clock_request_ack=0;
   zizhan_amp_native_data_run(&lease,&receipt,test=="native-data-missing"?nullptr:&transfer);
   assert(!threads&&!receipt.amp_pass&&!receipt.data_connected);

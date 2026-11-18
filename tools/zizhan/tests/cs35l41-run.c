@@ -19,6 +19,15 @@ static int transfer_zero(void *context,unsigned chip){TransferContext *c=context
  if(c->test==6)c->f->time+=8000000;else c->f->time+=10000;
  return 1;
 }
+/* Profile 19 window: both amps enabled (or both off when dry) for the whole stream; poll between periods. */
+typedef struct {Fake *f;unsigned calls,polls,test,dry;} PlayContext;
+static int transfer_play(void *p,unsigned ms,int (*poll)(void *),void *poll_context){PlayContext *c=p;++c->calls;assert(ms==500);
+ for(unsigned chip=0;chip<2;++chip){assert(c->f->state[chip][2]==1&&c->f->state[chip][0]==1);assert(c->f->state[chip][1]==(c->dry?0x3300u:0x3321u));}
+ for(unsigned period=0;period<50;++period){c->f->time+=10000;
+  if((c->test==2&&period==20)||(c->test==4&&period==10)){c->f->play_fault=1;}if(c->test==3&&period==30){c->f->run_halo_state=1;}
+  ++c->polls;if(poll(poll_context)){return c->test==4?1:0;}}
+ return c->test==5?0:1;
+}
 typedef struct {Fake *f;unsigned calls,test;} PulseContext;
 static int transfer_pulse(void *p,unsigned chip){PulseContext *c=p;const unsigned order[]={2,0,3,1};assert(c->calls<4&&chip==order[c->calls]);
  const unsigned real=chip%2;assert(c->f->state[real][2]==1&&c->f->state[real][0]==1);
@@ -121,7 +130,7 @@ int main(int argc,char **argv){
  unsigned global_commands=0;
  for(unsigned test=0;test<3;++test){
   unsigned before=prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;f.run_allow_global=1;
-  if(test==1){f.run_asp_enabled=1;}if(test==2)f.state[0][1]|=1;
+  if(test==1){f.run_asp_enabled[0]=1;}if(test==2)f.state[0][1]|=1;
   int rc=zizhan_cs35l41_global_pll_capture(1,flags,&f.bus,&clock,&coeff,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==18&&out.acknowledged_writes==18&&f.run_global_writes==4&&!f.run_core_writes);
    global_commands=f.commands-before;
@@ -136,7 +145,7 @@ int main(int argc,char **argv){
  for(unsigned test=0;test<6;++test){
   prepare_run(&f,&coeff,coeff_hash,fw_hash);f.run_pll[0]=f.run_pll[1]=0x10;f.run_allow_global=1;f.run_lock=1;
   if(test==1){f.run_lock=0;}if(test==2)f.run_bad_mpu=1;if(test==3)f.run_freeze=1;
-  if(test==4){f.run_asp_enabled=1;}if(test==5)f.run_halo_state=1;
+  if(test==4){f.run_asp_enabled[0]=1;}if(test==5)f.run_halo_state=1;
   int rc=zizhan_cs35l41_global_silent_run(1,flags,&f.bus,&clock,&coeff,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==100&&out.acknowledged_writes==100&&!out.observed_mpu_profile);
    for(unsigned c=0;c<2;++c)assert(out.global_on[c]==1&&out.global_off[c]==1&&!out.global_active[c]&&out.started[c]==1&&out.stopped[c]==1&&out.samples[c]==100&&out.heartbeat_changes[c]==99&&out.pll_lock_samples[c]==64&&!out.asp_enables[c]&&!f.state[c][0]&&f.state[c][1]==0x3300);
@@ -209,7 +218,7 @@ int main(int argc,char **argv){
   if(test==1){f.run_freeze=1;}if(test>=2)f.run_rx_bad=test-1;
   ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};
   int rc=zizhan_cs35l41_asp_rx_run(1,flags,&f.bus,&clock,&coeff,&cal,&out);
-  if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==147&&out.acknowledged_writes==147&&!f.run_asp_enabled);
+  if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.attempted_writes==147&&out.acknowledged_writes==147&&!f.run_asp_enabled[0]&&!f.run_asp_enabled[1]);
    for(unsigned c=0;c<2;++c)assert(out.asp_rx_on[c]==1&&out.asp_rx_off[c]==1&&!out.asp_rx_active[c]&&out.started[c]&&out.stopped[c]&&out.samples[c]==100);
   }else if(test==1)assert(rc==ZizhanAmpTimeout&&out.started[0]&&out.stopped[0]&&out.asp_rx_on[0]&&!out.asp_rx_off[0]&&out.samples[0]==100);
   else if(test==2)assert(rc==ZizhanAmpStateChanged&&!out.started[0]&&out.asp_rx_active[0]&&!out.asp_rx_on[0]);
@@ -263,7 +272,7 @@ int main(int argc,char **argv){
   f.run_mode=1;f.run_pll[0]=f.run_pll[1]=0x10;
   f.run_allow_global=f.run_lock=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=f.run_format_profile=f.run_observed=1;
   f.run_format_value[0]=f.run_format_value[1]=0x181802a2;
-  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};TransferContext context={&f,&out,0,test};ZizhanAudioTransfer transfer={&context,transfer_zero};
+  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};TransferContext context={&f,&out,0,test};ZizhanAudioTransfer transfer={&context,transfer_zero,0};
   unsigned before=f.commands;int rc=zizhan_cs35l41_native_core_transfer(1,flags,&f.bus,&clock,&coeff,&cal,test==3?0:&transfer,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&context.calls==2&&out.attempted_writes==149);
    for(unsigned c=0;c<2;++c)assert(out.transfer_attempts[c]==1&&out.transfer_acks[c]==1&&out.transfer_halo[c][0]==2&&out.transfer_halo[c][1]==2&&out.transfer_heartbeat[c][1]!=out.transfer_heartbeat[c][0]&&out.samples[c]==100&&out.stopped[c]);}
@@ -285,7 +294,7 @@ int main(int argc,char **argv){
   f.mailbox_test=1;f.mailbox_mask[0]=0xa5ffffff;f.mailbox_mask[1]=0x5a0fffff;
   if(test>=1&&test<=4){f.mailbox_fault=test;if(test==3)f.mailbox_irq[0]=0x200000;}
   if(test>=7)f.fail_command=mailbox_fail_commands[test-7];
-  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};TransferContext context={&f,&out,0,0};ZizhanAudioTransfer transfer={&context,transfer_zero};
+  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};TransferContext context={&f,&out,0,0};ZizhanAudioTransfer transfer={&context,transfer_zero,0};
   unsigned before=f.commands;if(test==5)coeff.after_state[0][2]=0x100;
   int rc=zizhan_cs35l41_native_mailbox_transfer(1,flags,&f.bus,&clock,&coeff,&cal,test==6?0:&transfer,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&context.calls==2&&out.attempted_writes==149);
@@ -308,7 +317,7 @@ int main(int argc,char **argv){
   f.run_allow_global=f.run_lock=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=f.run_format_profile=f.run_observed=1;
   f.run_format_value[0]=f.run_format_value[1]=0x181802a2;f.mailbox_test=1;f.mailbox_mask[0]=f.mailbox_mask[1]=0xffffffff;
   if(test==1||test==2){f.iv_bad=test;}if(test==3)f.state[0][1]&=~0x1000u;
-  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};TransferContext context={&f,&out,0,test==4?7u:0u};ZizhanAudioTransfer transfer={&context,transfer_zero};
+  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};TransferContext context={&f,&out,0,test==4?7u:0u};ZizhanAudioTransfer transfer={&context,transfer_zero,0};
   int rc=zizhan_cs35l41_native_iv_transfer(1,flags,&f.bus,&clock,&coeff,&cal,&transfer,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&context.calls==2&&out.attempted_writes==149&&f.iv_reads==8);
    for(unsigned c=0;c<2;++c)for(unsigned i=0;i<2;++i)assert(out.iv_reads[c][i]==3&&out.iv_values[c][i][0]==0x3300&&out.iv_values[c][i][1]==0x18&&out.iv_values[c][i][2]==0x19&&out.mailbox_completed[c]==2);
@@ -325,7 +334,7 @@ int main(int argc,char **argv){
   f.run_allow_global=f.run_lock=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=f.run_format_profile=f.run_observed=1;
   f.run_format_value[0]=f.run_format_value[1]=0x181802a2;f.mailbox_test=1;f.mailbox_mask[0]=f.mailbox_mask[1]=0xffffffff;
   f.pulse_test=1;f.pulse_volume[0]=f.pulse_volume[1]=0x267c;if(test>=4)f.fail_command=pulse_commands[test-4];
-  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};PulseContext context={&f,0,test};ZizhanAudioTransfer transfer={&context,transfer_pulse};
+  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};PulseContext context={&f,0,test};ZizhanAudioTransfer transfer={&context,transfer_pulse,0};
   int rc=zizhan_cs35l41_native_pulse_transfer(1,flags,&f.bus,&clock,&coeff,&cal,&transfer,&out);
   if(!test){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&context.calls==4&&out.attempted_writes==149&&f.pulse_writes==32);
    for(unsigned c=0;c<2;++c){assert(out.pulse[c].complete&&out.pulse[c].patch_on&&out.pulse[c].patch_off&&out.pulse[c].enabled&&out.pulse[c].disabled&&out.pulse[c].data_ack&&out.pulse[c].acknowledged==16&&out.pulse[c].attempted==16&&out.pulse[c].enabled_us<250000&&out.stopped[c]&&f.pulse_volume[c]==0x267c&&f.pulse_patch[c]==0x2f1aa3);}
@@ -334,5 +343,47 @@ int main(int argc,char **argv){
   else{assert(rc&&out.status==ZizhanAmpFail&&!out.completed&&out.stopped[0]&&f.state[0][1]==0x3300);
    if(test==1)assert(context.calls==1&&!out.pulse[0].enabled);else assert(context.calls==2&&out.pulse[0].disabled&&!out.pulse[0].complete);}
  }
- puts("PASS native protection-fw9 volatilecachedR/checksum/status/topbypass,strict input/reads/ordering/no ambient ormeasurement,HALOguards/native rateblock low5zero/highbitspreserved/all16badreadbacks/HBfailure;no hardware");return 0;
+ unsigned play_total=0;
+ for(unsigned test=0;test<7;++test){
+  ZizhanAmpSnapshot snapshot;ZizhanAmpTrim trim;ZizhanAmpRam ram;prepare(&f,&snapshot,&trim);f.native_core_init=1;
+  assert(!zizhan_cs35l41_ram_native_init(1,flags,&f.bus,&clock,&snapshot,&trim,firmware,sizeof firmware,fw_hash,&ram));
+  f.coeff_mode=1;coeff_bad_hash=0;assert(!zizhan_cs35l41_coefficients(1,flags,&f.bus,&clock,&ram,top_coeff,sizeof top_coeff,bottom_coeff,sizeof bottom_coeff,coeff_hash,&coeff));
+  f.run_mode=1;f.run_pll[0]=f.run_pll[1]=0x10;
+  f.run_allow_global=f.run_lock=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=f.run_format_profile=f.run_observed=1;
+  f.run_format_value[0]=f.run_format_value[1]=0x181802a2;f.mailbox_test=1;f.mailbox_mask[0]=f.mailbox_mask[1]=0xffffffff;
+  f.pulse_test=1;f.pulse_volume[0]=f.pulse_volume[1]=0x267c;f.play_fault=0;f.run_halo_state=0;
+  zizhan_amp_pulse_flags=test==1?1u:0u;zizhan_amp_play_ms=test==6?0u:500u;
+  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};PlayContext context={&f,0,0,test,test==1?1u:0u};ZizhanAudioTransfer transfer={&context,0,transfer_play};
+  const unsigned before=f.commands;
+  int rc=zizhan_cs35l41_native_play_transfer(1,flags,&f.bus,&clock,&coeff,&cal,&transfer,&out);
+  if(test==6){assert(!rc&&out.reason==ZizhanAmpPrerequisite&&f.commands==before&&!context.calls);continue;}
+  assert(context.calls==1&&out.play_profile&&out.play_ready[0]&&out.play_ready[1]);
+  for(unsigned c=0;c<2;++c){assert(out.pulse[c].armed&&out.pulse[c].disabled&&out.stopped[c]&&out.play_torn[c]&&f.state[c][1]==0x3300&&f.state[c][2]==out.core_before[c]&&f.pulse_volume[c]==0x267c&&!out.asp_rx_active[c]&&!out.global_active[c]);}
+  if(test<=1){assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.play_streamed&&context.polls==50&&out.play_polls==50);
+   for(unsigned c=0;c<2;++c)assert(out.pulse[c].complete&&out.pulse[c].patch_off&&out.pulse[c].enabled==(test?0u:1u)&&out.pulse[c].polls==50);
+   if(!test)play_total=f.commands-before;}
+  else{assert(rc&&out.status==ZizhanAmpFail&&out.play_streamed==(test==4?1u:0u));
+   for(unsigned c=0;c<2;++c)assert(!out.pulse[c].complete&&!out.pulse[c].patch_off&&out.pulse[c].enabled);
+   if(test==2)assert(rc==ZizhanAmpProtocol&&context.polls==21);
+   if(test==3)assert(rc==ZizhanAmpStateChanged&&context.polls==31);
+   if(test==4)assert(rc==ZizhanAmpProtocol&&context.polls==11);  /* stream ignored the abort: still a failure */
+   if(test==5)assert(rc==ZizhanAmpProtocol&&context.polls==50);}
+ }
+ zizhan_amp_pulse_flags=0;zizhan_amp_play_ms=500;
+ /* Every bus command of the window failing: the bus becomes uncertain and nothing more is sent. */
+ for(unsigned fail=play_total-260;fail<=play_total;fail+=13){
+  ZizhanAmpSnapshot snapshot;ZizhanAmpTrim trim;ZizhanAmpRam ram;prepare(&f,&snapshot,&trim);f.native_core_init=1;
+  assert(!zizhan_cs35l41_ram_native_init(1,flags,&f.bus,&clock,&snapshot,&trim,firmware,sizeof firmware,fw_hash,&ram));
+  f.coeff_mode=1;coeff_bad_hash=0;assert(!zizhan_cs35l41_coefficients(1,flags,&f.bus,&clock,&ram,top_coeff,sizeof top_coeff,bottom_coeff,sizeof bottom_coeff,coeff_hash,&coeff));
+  f.run_mode=1;f.run_pll[0]=f.run_pll[1]=0x10;
+  f.run_allow_global=f.run_lock=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=f.run_format_profile=f.run_observed=1;
+  f.run_format_value[0]=f.run_format_value[1]=0x181802a2;f.mailbox_test=1;f.mailbox_mask[0]=f.mailbox_mask[1]=0xffffffff;
+  f.pulse_test=1;f.pulse_volume[0]=f.pulse_volume[1]=0x267c;f.play_fault=0;f.run_halo_state=0;
+  const unsigned before=f.commands;f.fail_command=before+fail;
+  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};PlayContext context={&f,0,0,0,0};ZizhanAudioTransfer transfer={&context,0,transfer_play};
+  int rc=zizhan_cs35l41_native_play_transfer(1,flags,&f.bus,&clock,&coeff,&cal,&transfer,&out);
+  assert(rc&&out.status==ZizhanAmpFail&&out.transport.controller_uncertain&&f.commands==f.fail_command);
+  f.fail_command=0;
+ }
+ puts("PASS native protection-fw9+playwindow(both amps held,dry,fault/HALO abort,stream fail,refuse,late bus failures) volatilecachedR/checksum/status/topbypass,strict input/reads/ordering/no ambient ormeasurement,HALOguards/native rateblock low5zero/highbitspreserved/all16badreadbacks/HBfailure;no hardware");return 0;
 }

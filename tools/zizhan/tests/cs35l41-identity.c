@@ -29,6 +29,7 @@ typedef struct {
     unsigned allow_ram,ram_mismatch,ram_value_writes,ram_sparse,read_index,short_fifo;
     unsigned coeff_mode,identity_bad;uint32_t coeff_unpacked[2][2];
     unsigned pulse_test,pulse_writes,pulse_commands[32];uint32_t pulse_volume[2],pulse_patch[2];
+    unsigned play_fault; /* profile 19 test: 0x10010 reports a protection fault (bit 15) */
     unsigned iv_bad,iv_reads;
     unsigned mailbox_test,mailbox_fault,mailbox_count[2],mailbox_commands[2][12];uint32_t mailbox_mask[2],mailbox_irq[2],mailbox_state[2];
     unsigned run_mode,run_freeze,run_bad_mpu,run_fault,run_rate_writes,run_mpu_writes,run_core_writes;
@@ -40,7 +41,7 @@ typedef struct {
     uint32_t run_monitor[2];unsigned run_monitor_writes[2],run_bad_monitor;
     unsigned run_format_profile,run_format_bad,run_format_written[2];uint32_t run_format_value[2];
     unsigned run_rx_profile,run_rx_bad,run_rx_writes;
-    unsigned run_allow_global,run_global_writes,run_asp_enabled;
+    unsigned run_allow_global,run_global_writes,run_asp_enabled[2]; /* per amp: 0x4800 is a per-chip register (profile 19 keeps both prepared) */
     unsigned run_native_frame,run_bad_frame;uint32_t run_global_fs[2],run_lrclk_delay[2];
     unsigned run_native_rates,run_bad_native_rate,run_native_rate_written[2];
     unsigned run_calibration,run_bad_calibration,run_prerun_writes[2];uint32_t run_cal_r[2],run_cal_checksum[2],run_cal_status[2],run_us_bypass[2];
@@ -142,7 +143,7 @@ static uint32_t rd(void *ctx, uint32_t reg) {
             if(f->reg==0x2d10)return swap(f->run_monitor[i]^((f->run_bad_monitor&&f->run_monitor_writes[i])?1u:0u));
             if(f->reg==0x14000)return swap(0x1234);
             if(f->reg==0x4808)return swap(f->run_format_value[i]^((f->run_format_bad&&f->run_format_written[i])?0x10000u:0u));
-            if(f->reg==0x4800)return swap(f->run_asp_enabled^((f->run_rx_bad&&f->run_rx_writes==f->run_rx_bad)?1u:0u));
+            if(f->reg==0x4800)return swap(f->run_asp_enabled[i]^((f->run_rx_bad&&f->run_rx_writes==f->run_rx_bad)?1u:0u));
             if(f->reg==0x2c0c)return swap(f->run_global_fs[i]);
             if(f->reg==0x2800804)return swap(f->run_lrclk_delay[i]^(f->run_bad_frame?1u:0u));
             if(f->reg==0x2800800)return swap(f->run_us_bypass[i]);
@@ -150,7 +151,7 @@ static uint32_t rd(void *ctx, uint32_t reg) {
             if(f->reg==0x2800274){return swap(f->run_cal_checksum[i]);}if(f->reg==0x2800270)return swap(f->run_cal_status[i]);
             if(debug_slot(f->reg)>=0)return swap(0x40000000u+(unsigned)debug_slot(f->reg)+((f->state[i][2]&1)?0x10000u:0));
             if(f->reg>=0x10090&&f->reg<=0x1009c)return swap(f->reg==0x10098&&f->run_lock?2u:0u);
-            if(f->reg>=0x10010&&f->reg<=0x1001c)return 0;
+            if(f->reg>=0x10010&&f->reg<=0x1001c)return swap(f->play_fault&&f->reg==0x10010?0x8000u:0u);
             if(f->reg==0x2800258||f->reg==0x13004||f->reg==0x2c08)return 0;
             if(f->reg==0x2bc3104||f->reg==0x2bc310c||f->reg==0x2bc3114||f->reg==0x2bc7008)return f->run_fault?swap(1):0;
         }
@@ -243,30 +244,30 @@ static void wr(void *ctx, uint32_t reg, uint32_t value) {
                     else if(f->reg==0x10814)assert(v==0x100000);
                     else{assert((v==1||v==2)&&!(f->mailbox_mask[chip]&0x100000));if(f->mailbox_fault!=1)f->mailbox_irq[chip]|=0x200000;f->mailbox_state[chip]=f->mailbox_fault==2?7u:v==1?1u:0u;}
                 }else if(rate>=0){
-                    if(v!=1){assert(f->run_native_rates&&v==(f->run_rates[chip][rate]&~0x1fu)&&f->run_mpu_writes>=(chip+1)*23&&!(f->state[chip][2]&1)&&!(f->state[chip][1]&0x31)&&f->run_asp_enabled==(f->run_rx_profile?0x10000u:0u));f->run_native_rate_written[chip]|=1u<<rate;}
+                    if(v!=1){assert(f->run_native_rates&&v==(f->run_rates[chip][rate]&~0x1fu)&&f->run_mpu_writes>=(chip+1)*23&&!(f->state[chip][2]&1)&&!(f->state[chip][1]&0x31)&&f->run_asp_enabled[chip]==(f->run_rx_profile?0x10000u:0u));f->run_native_rate_written[chip]|=1u<<rate;}
                     f->run_rates[chip][rate]=v;++f->run_rate_writes;}
                 else if(mpu>=0){assert(v==0xffffffff);f->run_mpu[chip][mpu]=v;++f->run_mpu_writes;}
                 else if(f->reg==0x2bc3140){assert(v==0x5555||v==0xaaaa||v==0);++f->run_mpu_writes;}
                 else if(f->reg==0x2800800||f->reg==0x2800268||f->reg==0x2800274||f->reg==0x2800270){
-                    assert(f->run_calibration&&!f->state[chip][0]&&!(f->state[chip][1]&0x31)&&!f->run_asp_enabled);
+                    assert(f->run_calibration&&!f->state[chip][0]&&!(f->state[chip][1]&0x31)&&!f->run_asp_enabled[chip]);
                     unsigned n=f->run_prerun_writes[chip];
                     if(f->reg==0x2800800){assert(!chip&&n==0&&v==1);f->run_us_bypass[chip]=v;}
                     else if(f->reg==0x2800268){assert(n==(chip?0u:1u)&&v>0&&v<0xffffffu);f->run_cal_r[chip]=v;}
                     else if(f->reg==0x2800274){assert(n==(chip?1u:2u)&&v==f->run_cal_r[chip]+1);f->run_cal_checksum[chip]=v;}
                     else{assert(n==(chip?2u:3u)&&v==1);f->run_cal_status[chip]=v;}
                     ++f->run_prerun_writes[chip];
-                }else if(f->reg==0x2c0c){assert(f->run_native_frame&&v==((f->run_global_fs[chip]&~31u)|3u)&&!f->run_asp_enabled&&!f->state[chip][0]);f->run_global_fs[chip]=v;}
-                else if(f->reg==0x2800804){assert(f->run_native_frame&&v==32&&!f->run_asp_enabled&&!f->state[chip][0]);f->run_lrclk_delay[chip]=v;}
-                else if(f->reg==0x4808){assert(f->run_format_profile&&v==((f->run_format_value[chip]&~0xff000755u)|0x20000000u)&&!f->run_format_written[chip]&&!f->state[chip][0]&&!(f->state[chip][1]&0x31)&&!f->run_asp_enabled);f->run_format_value[chip]=v;++f->run_format_written[chip];}
-                else if(f->reg==0x4800){assert(f->run_rx_profile&&(v==0x10000||v==0)&&!(f->state[chip][1]&0x31)&&!(f->state[chip][2]&1));assert(v==0||(!f->run_asp_enabled&&f->run_pll_writes[chip]==6));f->run_asp_enabled=v;++f->run_rx_writes;}
-                else if(f->reg==0x2014){assert(f->run_allow_global&&(v==0||v==1)&&!(f->state[chip][1]&0x31)&&(f->run_asp_enabled==0||(f->run_rx_profile&&v==0&&f->run_asp_enabled==0x10000))&&!(f->state[chip][2]&1));f->state[chip][0]=v;++f->run_global_writes;}
+                }else if(f->reg==0x2c0c){assert(f->run_native_frame&&v==((f->run_global_fs[chip]&~31u)|3u)&&!f->run_asp_enabled[chip]&&!f->state[chip][0]);f->run_global_fs[chip]=v;}
+                else if(f->reg==0x2800804){assert(f->run_native_frame&&v==32&&!f->run_asp_enabled[chip]&&!f->state[chip][0]);f->run_lrclk_delay[chip]=v;}
+                else if(f->reg==0x4808){assert(f->run_format_profile&&v==((f->run_format_value[chip]&~0xff000755u)|0x20000000u)&&!f->run_format_written[chip]&&!f->state[chip][0]&&!(f->state[chip][1]&0x31)&&!f->run_asp_enabled[chip]);f->run_format_value[chip]=v;++f->run_format_written[chip];}
+                else if(f->reg==0x4800){assert(f->run_rx_profile&&(v==0x10000||v==0)&&!(f->state[chip][1]&0x31)&&!(f->state[chip][2]&1));assert(v==0||(!f->run_asp_enabled[chip]&&f->run_pll_writes[chip]==6));f->run_asp_enabled[chip]=v;++f->run_rx_writes;}
+                else if(f->reg==0x2014){assert(f->run_allow_global&&(v==0||v==1)&&!(f->state[chip][1]&0x31)&&(f->run_asp_enabled[chip]==0||(f->run_rx_profile&&v==0&&f->run_asp_enabled[chip]==0x10000))&&!(f->state[chip][2]&1));f->state[chip][0]=v;++f->run_global_writes;}
                 else if(f->reg==0x2d10){assert(v==0x24010&&!f->run_monitor_writes[chip]&&!f->run_pll_writes[chip]);f->run_monitor[chip]=v;++f->run_monitor_writes[chip];}
                 else if(f->reg==0x2c04){
                     const uint32_t sequence[]={0x810,0xe70,0xe60,0xe60,0x660,0x670};
                     assert(f->run_pll_writes[chip]<6&&v==sequence[f->run_pll_writes[chip]]);
                     assert(!(f->state[chip][0]&1)&&!(f->state[chip][1]&0x31)&&!(f->state[chip][2]&1));
                     f->run_pll[chip]=v;++f->run_pll_writes[chip];
-                }else{assert(f->reg==0x2bc1000&&(v==(f->native_core_init?0u:0x100u)||v==(f->native_core_init?1u:0x101u)));assert((!(f->state[chip][0]&1)||f->run_allow_global)&&!(f->state[chip][1]&0x31)&&f->run_asp_enabled==(f->run_rx_profile?0x10000u:0u));f->state[chip][2]=v;++f->run_core_writes;}
+                }else{assert(f->reg==0x2bc1000&&(v==(f->native_core_init?0u:0x100u)||v==(f->native_core_init?1u:0x101u)));assert((!(f->state[chip][0]&1)||f->run_allow_global)&&!(f->state[chip][1]&0x31)&&f->run_asp_enabled[chip]==(f->run_rx_profile?0x10000u:0u));f->state[chip][2]=v;++f->run_core_writes;}
                 ++f->fifo_writes;return;
             }
             if(f->native_core_init&&f->reg==0x2bc1000){assert(swap(value)==0&&!f->native_core_writes[chip]&&!f->state[chip][0]&&!(f->state[chip][1]&0x31)&&!(f->state[chip][2]&1));f->state[chip][2]=0;++f->native_core_writes[chip];++f->fifo_writes;return;}

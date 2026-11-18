@@ -32,7 +32,12 @@ class PowerQueryTests(unittest.TestCase):
 #include <thread>
 #include <vector>
 #include <string>
-namespace zizhan_power_audit {static volatile uint32_t request_slots;}
+namespace zizhan_power_audit {
+static volatile uint32_t request_slots;
+static void observer_process(char *name,size_t bytes) {
+    if(name && bytes) snprintf(name,bytes,"test-proc");
+}
+}
 static unsigned mode;
 static std::vector<std::string> logs;
 static bool PE_parse_boot_argn(const char *name,void *out,size_t n) {
@@ -56,6 +61,8 @@ int main(int argc,char **argv) {
         assert(logs.size()==33 && zizhan_power_audit::request_slots==33);
         for(unsigned i=0;i<32;++i)
             assert(logs[i].find("SKIP observe-only=1")!=std::string::npos &&
+                   logs[i].find("selector=12")!=std::string::npos &&
+                   logs[i].find("in0=1 scalars=3 proc=test-proc")!=std::string::npos &&
                    logs[i].find("raw=0x1/0x2/0x3 hardware-transition=UNIMPLEMENTED")!=std::string::npos);
         assert(logs[32].find("output-limit=32")!=std::string::npos);
         assert(values[0]==1 && values[1]==2 && values[2]==3);

@@ -1,0 +1,42 @@
+#include "ZizhanPowerInjectPlan.h"
+#include <stdio.h>
+
+static int failures;
+
+#define CHECK(cond,name) do{ \
+ if(cond)printf("PASS %s\n",name); \
+ else{printf("FAIL %s\n",name);++failures;} \
+}while(0)
+
+int main(void){
+ CHECK(zizhan_power_inject_mode(0,0)==ZizhanPowerInjectOff,"inject default off");
+ CHECK(zizhan_power_inject_mode(0,1)==ZizhanPowerInjectOff,"inject 0 stays off");
+ CHECK(zizhan_power_inject_mode(1,0)==ZizhanPowerInjectSkipObserve,
+       "inject needs observe");
+ CHECK(zizhan_power_inject_mode(1,2)==ZizhanPowerInjectSkipObserve,
+       "observe must be exactly 1");
+ CHECK(zizhan_power_inject_mode(1,1)==ZizhanPowerInjectRun,"inject runs with observe");
+ CHECK(zizhan_power_inject_mode(2,1)==ZizhanPowerInjectSkipMode,
+       "unsupported inject mode skips");
+
+ CHECK(ZizhanPowerInjectDelayMs==20000u,"first frame delay is 20 s");
+ CHECK(ZizhanPowerPressCount==2u,"exactly two presses");
+ CHECK(ZizhanPowerPressHoldMs<=200u,"hold is at most 200 ms");
+ CHECK(ZizhanPowerPressGapMs>=5000u,"gap is at least 5 s");
+
+ CHECK(zizhan_power_inject_down_ms(0)==0u,"press 1 down at 0 ms");
+ CHECK(zizhan_power_inject_up_ms(0)==120u,"press 1 up at 120 ms");
+ CHECK(zizhan_power_inject_down_ms(1)==8120u,"press 2 down at 8120 ms");
+ CHECK(zizhan_power_inject_up_ms(1)==8240u,"press 2 up at 8240 ms");
+ CHECK(zizhan_power_inject_up_ms(0)-zizhan_power_inject_down_ms(0)<=200u,
+       "press 1 hold <=200 ms");
+ CHECK(zizhan_power_inject_up_ms(1)-zizhan_power_inject_down_ms(1)<=200u,
+       "press 2 hold <=200 ms");
+ CHECK(zizhan_power_inject_down_ms(1)-zizhan_power_inject_up_ms(0)>=5000u,
+       "between presses >=5 s");
+ CHECK(zizhan_power_inject_up_ms(1)>zizhan_power_inject_down_ms(1),
+       "up follows down");
+
+ printf("%s: %d failure(s)\n",failures?"FAIL":"PASS",failures);
+ return failures?1:0;
+}

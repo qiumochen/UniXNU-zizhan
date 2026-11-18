@@ -10,9 +10,22 @@
 
 extern "C" struct vnode *rootvnode;
 extern "C" uint32_t psci_smp_hvc;
+extern "C" struct proc *current_proc(void);
+extern "C" int proc_pid(struct proc *);
+extern "C" void proc_name(int, char *, int);
 
 namespace zizhan_power_audit {
 static volatile uint32_t request_slots;
+static void observer_process(char *name, size_t bytes) {
+    if (!name || !bytes) return;
+    struct proc *p = current_proc();
+    if (!p) return;
+    const int pid = proc_pid(p);
+    if (pid <= 0) return;
+    name[0] = 0;
+    proc_name(pid, name, (int)bytes);
+    name[bytes - 1] = 0;
+}
 static uint64_t query(bool hvc, uint32_t fid, uint32_t argument) {
     register uint64_t x0 __asm__("x0") = fid;
     register uint64_t x1 __asm__("x1") = argument;
@@ -112,6 +125,9 @@ extern "C" void zizhan_display_power_observe(uint32_t count,const uint64_t *valu
     if (slot > 32) return;
     if (slot == 32) {IOLog("ZIZHAN_POWER_REQUEST: SKIP output-limit=32\n");return;}
     if (count && !values) {IOLog("ZIZHAN_POWER_REQUEST: FAIL malformed-scalars\n");return;}
-    IOLog("ZIZHAN_POWER_REQUEST: SKIP observe-only=1 sequence=%u scalars=%u structure=%lu raw=0x%llx/0x%llx/0x%llx hardware-transition=UNIMPLEMENTED\n",
-          slot+1,count,(unsigned long)bytes,count?values[0]:0,count>1?values[1]:0,count>2?values[2]:0);
+    char proc[32] = "unknown";
+    zizhan_power_audit::observer_process(proc, sizeof proc);
+    IOLog("ZIZHAN_POWER_REQUEST: SKIP observe-only=1 selector=12 sequence=%u in0=%llu scalars=%u proc=%s structure=%lu raw=0x%llx/0x%llx/0x%llx hardware-transition=UNIMPLEMENTED\n",
+          slot+1,(unsigned long long)(count?values[0]:0),count,proc,(unsigned long)bytes,
+          count?values[0]:0,count>1?values[1]:0,count>2?values[2]:0);
 }

@@ -4,8 +4,14 @@
 
 ## 硬件
 
-- 后置：主摄 50 MP Sony IMX766（f/1.8、OIS），另有超广角与长焦；前置 20 MP（IMX596 与 S5K3T2 两种说法，未用官方资料核实，需从本机 Android DT/驱动确认）。
+- 后置：主摄 50 MP Sony IMX766（f/1.8、OIS），另有超广角与长焦；前置 20 MP（本机 CamX 模块确认为 IMX596，见下）。
 - SoC 为 SM8475：Qualcomm Spectra ISP。数据通路 CSIPHY → CSID → IFE/IFE-lite（VFE）→ 内存；传感器经 CCI（I2C）配置，另需各自的供电、MCLK 和 reset GPIO。
+
+## 本机 Android 只读核对（01:35）
+
+- vendor CamX 模块：`zizhan_sunny_imx766_wide`（主摄）、`zizhan_ofilm_ov13b10_ultra`（超广角）、`zizhan_ofilm_imx663_tele`（长焦）、`zizhan_sunny_imx596_front`（前置）。前置确认为 **IMX596**。
+- DT：CCI0（0xac15000）下 cam-sensor0/1/2（csiphy 0/3/1），CCI1（0xac16000）下 cam-sensor3（csiphy 2）；另有 actuator、OIS、eeprom 节点。CSID0–2、CSID-lite0/1、IFE0–2、IFE-lite0/1、CSIPHY0–5 均在 DT 中。
+- 每个传感器节点有 vio/vana/vana1/vdig/vaf/custom 供电、clocks、gpio-reset 和 gpio 请求表；完整属性在仓库外 `work/camera-dt/camera-dt.txt`。I2C 从地址不在 DT，在 CamX 传感器模块 bin 中。
 
 ## iPadOS 侧的限制
 

@@ -55,7 +55,8 @@ void selftest(void *,wait_result_t){
    const uint64_t anchor=c->out_anchor_host,q32=c->ticks_per_frame_q32;
    auto sample_now=[&]{const uint64_t now=mach_absolute_time();return now>anchor&&q32?((now-anchor)<<16)/(q32>>16):0;};
    uint64_t t=sample_now()+ZIZHAN_AUDIO_LEAD_FRAMES+2*ZIZHAN_AUDIO_PERIOD_FRAMES;
-   for(unsigned i=0;i<12000&&(c->state&ZizhanAudioOutputRunning);++i){
+   // Up to 60 s while Running: PRM 41 brings both amps up (RAM load over I2C, ~13 s) before it streams.
+   for(unsigned i=0;i<60000&&(c->state&ZizhanAudioOutputRunning);++i){
     const uint64_t target=sample_now()+ZIZHAN_AUDIO_LEAD_FRAMES+2*ZIZHAN_AUDIO_PERIOD_FRAMES;
     while(t+ZIZHAN_AUDIO_PERIOD_FRAMES<=target){
      for(unsigned f=0;f<ZIZHAN_AUDIO_PERIOD_FRAMES;++f,++t){const unsigned at=unsigned(t%ZIZHAN_AUDIO_RING_FRAMES);

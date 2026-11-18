@@ -471,7 +471,12 @@ static PlayStream play_stream_context;
 int play_stream(void *context,unsigned ms,int (*poll)(void *),void *poll_context){
  auto &p=*static_cast<PlayStream *>(context);auto &r=owner.service;uint64_t w=0;
  if(!zizhan_audio_written_stable(p.ctl,&w)||!w)return 0;
- r.start_frame=zizhan_service_start_frame(w);
+ // Start 4 periods (40 ms) behind the newest frame so the DSP always has queued data while the window
+ // polls the amps (11-18: starting at the producer front left at most 2 periods ready and one dry round
+ // starved 5 times). Those frames were written after Running (the producer has been writing since),
+ // and never earlier than the first whole period after the watermark seen at Running.
+ const uint64_t newest=w-(w%ZIZHAN_AUDIO_PERIOD_FRAMES),floor=zizhan_service_start_frame(r.first_written);
+ r.start_frame=newest>=floor+4*ZIZHAN_AUDIO_PERIOD_FRAMES?newest-4*ZIZHAN_AUDIO_PERIOD_FRAMES:floor;
  return flow_round(p.ctl,p.ring,p.h,p.dma,p.tagged,ms,poll,poll_context)?1:0;
 }
 __attribute__((noinline)) bool play_round(volatile ZizhanAudioControl *ctl,int16_t *ring,ZizhanAudioHandoff *h,volatile uint8_t *dma,uint64_t tagged){

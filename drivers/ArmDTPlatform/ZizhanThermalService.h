@@ -35,6 +35,14 @@ static ZizhanThermalSample sample;
 static zizhan_tsens::Observation observation[ZizhanThermalBanks];
 static IOMemoryDescriptor *descriptor[ZizhanThermalBanks][2];
 static IOMemoryMap *map[ZizhanThermalBanks][2];
+// Load validation only: four busy kernel threads (half the cores), a local
+// deadline in each thread, and a stop flag set by the sampler on a real
+// reading at or above 75 C.
+static const unsigned LoadThreads = 4;
+static volatile uint32_t load_stop;
+static uint64_t load_deadline_abs;
+static uint32_t load_started, load_done;
+static ZizhanThermalLoad load;
 
 static uint64_t uptime_us(void) {
   uint64_t ns = 0;
@@ -106,6 +114,109 @@ static void build_sample(uint64_t time_us) {
   }
 }
 
+// Peak across every valid sensor, used only for the bounded-load stop. The
+// policy itself keeps its CPU/GPU groups separate.
+static int32_t sample_peak(unsigned *bank, unsigned *index) {
+  int32_t peak = INT32_MIN;
+  if (bank) *bank = 0;
+  if (index) *index = 0;
+  for (unsigned b = 0; b < ZizhanThermalBanks; ++b) {
+    if (!sample.bank_valid[b]) continue;
+    for (unsigned n = 0; n < ZizhanThermalSensors; ++n) {
+      if (!(sample.valid_mask[b] & (uint16_t)(1u << n))) continue;
+      if (sample.temp_mc[b][n] <= peak) continue;
+      peak = sample.temp_mc[b][n];
+      if (bank) *bank = b;
+      if (index) *index = n;
+    }
+  }
+  return peak;
+}
+
+static void load_worker(void *arg, wait_result_t) {
+  (void)arg;
+  uint64_t slice = 0;
+  nanoseconds_to_absolutetime(4000000ull, &slice);
+  for (;;) {
+    if (__atomic_load_n(&load_stop, __ATOMIC_ACQUIRE)) break;
+    const uint64_t now = mach_absolute_time();
+    if (now >= load_deadline_abs) break;
+    const uint64_t until = now + slice < load_deadline_abs ? now + slice
+                                                           : load_deadline_abs;
+    while (mach_absolute_time() < until)
+      for (volatile uint32_t i = 0; i < 4096; ++i) {}
+    IOSleep(1);
+  }
+  thread_terminate(current_thread());
+  thread_block(THREAD_CONTINUE_NULL);
+}
+
+// The desktop proxy is the first presented frame, which needs both userland
+// mounted and backboardd's scanout running. Without the scanout symbol (a
+// reduced build) fall back to the root-mount settle used by the other probes.
+static bool desktop_ready(void) {
+  if (!&pong_zc_flipped_tag) return true;
+  for (unsigned i = 0; i < 600; ++i) {
+    if (__atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)) return true;
+    IOSleep(100);
+  }
+  return false;
+}
+
+static void start_load(void) {
+  if (!tuning.load_seconds) return;
+  if (!desktop_ready()) {
+    IOLog("ZIZHAN_THERMAL: load SKIP desktop-timeout seconds=%u\n",
+          (unsigned)tuning.load_seconds);
+    return;
+  }
+  IOSleep((&pong_zc_flipped_tag) ? 3000 : 5000);
+  __atomic_store_n(&load_stop, 0, __ATOMIC_RELEASE);
+  load_started = 0;
+  load_done = 0;
+  const uint64_t now_us = uptime_us();
+  zizhan_thermal_load_begin(&load, now_us, tuning.load_seconds);
+  uint64_t ns = 0;
+  nanoseconds_to_absolutetime((uint64_t)tuning.load_seconds * 1000000000ull, &ns);
+  load_deadline_abs = mach_absolute_time() + ns;
+  for (unsigned i = 0; i < LoadThreads; ++i) {
+    thread_t thread = THREAD_NULL;
+    if (kernel_thread_start(load_worker, (void *)(uintptr_t)i, &thread) == KERN_SUCCESS) {
+      thread_deallocate(thread);
+      ++load_started;
+    }
+  }
+  if (!load_started) {
+    IOLog("ZIZHAN_THERMAL: load SKIP thread-start seconds=%u\n",
+          (unsigned)tuning.load_seconds);
+    return;
+  }
+  IOLog("ZIZHAN_THERMAL: load start seconds=%u threads=%u hot_stop_mc=%d "
+        "desktop=%s\n",
+        (unsigned)tuning.load_seconds, (unsigned)load_started,
+        (int)ZIZHAN_THERMAL_LOAD_HOT_MC,
+        (&pong_zc_flipped_tag) ? "first-flip" : "root-settle");
+}
+
+static void service_load(uint64_t now_us, int32_t peak, unsigned bank,
+                         unsigned index) {
+  if (!load_started || load_done) return;
+  const int result =
+      zizhan_thermal_load_step(&load, now_us, peak, ZIZHAN_THERMAL_LOAD_HOT_MC);
+  if (result == ZizhanThermalLoadRun) return;
+  __atomic_store_n(&load_stop, 1, __ATOMIC_RELEASE);
+  load_done = 1;
+  const uint64_t elapsed_ms = now_us > load.start_us ? (now_us - load.start_us) / 1000u : 0;
+  if (result == ZizhanThermalLoadHot)
+    IOLog("ZIZHAN_THERMAL: load stop reason=hot max=%d bank=%u sensor=%u "
+          "elapsed_ms=%llu threads=%u\n",
+          (int)peak, bank, index, (unsigned long long)elapsed_ms,
+          (unsigned)load_started);
+  else
+    IOLog("ZIZHAN_THERMAL: load stop reason=deadline elapsed_ms=%llu threads=%u\n",
+          (unsigned long long)elapsed_ms, (unsigned)load_started);
+}
+
 static const char *sample_reason(int status, uint8_t prev_cpu, uint8_t prev_gpu,
                                  bool complete) {
   if (status == ZizhanThermalStale)
@@ -161,6 +272,7 @@ static void worker(void *, wait_result_t) {
     return;
   }
   IOSleep(5000);
+  start_load();
   uint32_t samples = 0, stale = 0, incomplete = 0, since_summary = 0;
   for (;;) {
     const uint64_t now_us = uptime_us();
@@ -180,6 +292,9 @@ static void worker(void *, wait_result_t) {
                         &gpu_max, &gpu_all, &gpu_any);
     const bool complete = sample.bank_valid[0] && sample.bank_valid[1] &&
                           cpu_all && gpu_all;
+    unsigned hot_bank = 0, hot_index = 0;
+    const int32_t peak = sample_peak(&hot_bank, &hot_index);
+    service_load(now_us, peak, hot_bank, hot_index);
     if (status == ZizhanThermalStale) ++stale;
     if (!complete) ++incomplete;
     ++samples;
@@ -190,6 +305,7 @@ static void worker(void *, wait_result_t) {
     }
     IOSleep(1000);
   }
+  __atomic_store_n(&load_stop, 1, __ATOMIC_RELEASE);
   publish();
   unmap_banks();
   thread_terminate(current_thread());
@@ -197,16 +313,21 @@ static void worker(void *, wait_result_t) {
 }
 
 static void start(IOService *provider) {
-  uint32_t mode_arg = 0, test_cpu = 0, test_gpu = 0;
-  if (!PE_parse_boot_argn("zizhan_thermal", &mode_arg, sizeof mode_arg) || !mode_arg)
+  uint32_t mode_arg = 0, test_cpu = 0, test_gpu = 0, load_s = 0;
+  (void)PE_parse_boot_argn("zizhan_thermal_load", &load_s, sizeof load_s);
+  if (!PE_parse_boot_argn("zizhan_thermal", &mode_arg, sizeof mode_arg) || !mode_arg) {
+    if (load_s)
+      IOLog("ZIZHAN_THERMAL: SKIP load-without-mode load=%u\n", (unsigned)load_s);
     return;
+  }
   (void)PE_parse_boot_argn("zizhan_thermal_test_cpu", &test_cpu, sizeof test_cpu);
   (void)PE_parse_boot_argn("zizhan_thermal_test_gpu", &test_gpu, sizeof test_gpu);
-  if (zizhan_thermal_tune(mode_arg, test_cpu, test_gpu, 0, &tuning) !=
+  if (zizhan_thermal_tune(mode_arg, test_cpu, test_gpu, load_s, &tuning) !=
       ZizhanThermalTuneOk) {
     IOLog("ZIZHAN_THERMAL: SKIP invalid-boot-arg zizhan_thermal=%u test_cpu=%u "
-          "test_gpu=%u\n",
-          (unsigned)mode_arg, (unsigned)test_cpu, (unsigned)test_gpu);
+          "test_gpu=%u load=%u\n",
+          (unsigned)mode_arg, (unsigned)test_cpu, (unsigned)test_gpu,
+          (unsigned)load_s);
     return;
   }
   IORegistryEntry *chosen = provider->childFromPath("chosen", gIODTPlane);
@@ -236,10 +357,12 @@ static void start(IOService *provider) {
     return;
   }
   IOLog("ZIZHAN_THERMAL: RUNNING mode=%u period_ms=1000 cpu_clamp=%d cpu_release=%d "
-        "gpu_clamp=%d gpu_release=%d test_cpu=%u test_gpu=%u tsens-ro=1 apply=%u\n",
+        "gpu_clamp=%d gpu_release=%d test_cpu=%u test_gpu=%u load_s=%u "
+        "tsens-ro=1 apply=%u\n",
         (unsigned)tuning.mode, (int)policy.cpu_clamp_mc, (int)policy.cpu_release_mc,
         (int)policy.gpu_clamp_mc, (int)policy.gpu_release_mc,
         (unsigned)tuning.test_cpu_c, (unsigned)tuning.test_gpu_c,
+        (unsigned)tuning.load_seconds,
         tuning.mode == 2 ? 1u : 0u);
   thread_deallocate(thread);
 }

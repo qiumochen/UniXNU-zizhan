@@ -331,6 +331,25 @@ class PongBacklight : public IOService {
         static_cast<PongBacklight *>(owner)->service();
     }
 public:
+    bool readLevelForPower(uint32_t *answer) {
+        if (!answer || !published || __atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return false;
+        *answer = __atomic_load_n(&level, __ATOMIC_ACQUIRE);
+        return true;
+    }
+    bool setLevelForPower(uint32_t target, uint32_t timeout_ms) {
+        if (!published || __atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return false;
+        target = clamped(target);
+        const uint64_t deadline = nowNs() + uint64_t(timeout_ms) * 1000000ULL;
+        __atomic_add_fetch(&requests, 1u, __ATOMIC_RELAXED);
+        __atomic_store_n(&request, (1ULL << 63) | (uint64_t(target) << 16), __ATOMIC_RELEASE);
+        timer->setTimeoutUS(1);
+        while (nowNs() < deadline) {
+            if (__atomic_load_n(&level, __ATOMIC_ACQUIRE) == target) return true;
+            if (__atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return false;
+            IOSleep(1);
+        }
+        return __atomic_load_n(&level, __ATOMIC_ACQUIRE) == target;
+    }
     bool prepare() {
         IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
         OSData *data = chosen ? OSDynamicCast(OSData, chosen->getProperty("pong-dsi-backlight")) : nullptr;
@@ -456,4 +475,16 @@ extern "C" void pong_backlight_start(IOService *display) {
         service->release(); return;
     }
     backlight = service; // the service and hardware handoff persist until reboot
+}
+
+extern "C" int pong_backlight_level(uint32_t *level) {
+    PongBacklight *service = __atomic_load_n(&gPublishedBacklight, __ATOMIC_ACQUIRE);
+    if (!service || !level) return -1;
+    return service->readLevelForPower(level) ? 0 : -1;
+}
+
+extern "C" int pong_backlight_set(uint32_t level, uint32_t timeout_ms) {
+    PongBacklight *service = __atomic_load_n(&gPublishedBacklight, __ATOMIC_ACQUIRE);
+    if (!service) return -1;
+    return service->setLevelForPower(level, timeout_ms) ? 0 : -1;
 }

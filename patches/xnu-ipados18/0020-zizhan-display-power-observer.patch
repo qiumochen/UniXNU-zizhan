@@ -5,7 +5,7 @@ zizhan: observe bounded native display power requests without changing hardware 
  	}
  }
  
-+// zizhan POWER-02: default-off bounded observation; no display power executor yet.
++// zizhan POWER-02: default-off bounded observation; S3 executor is a separate weak hook.
 +extern "C" void zizhan_display_power_observe(uint32_t,const uint64_t *,size_t) __attribute__((weak_import));
 +
  IOReturn

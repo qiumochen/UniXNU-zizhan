@@ -10,12 +10,10 @@
  * the raw scalar arguments; S2/S3 later call zizhan_display_complete() with
  * the sequence returned here.
  *
- * The meaning of in[0]/in[1] is NOT decoded yet. zizhan_display_classify()
- * is the single replaceable rule: today it reads only in[0], maps 1 to on
- * and 0 to off, and leaves every other value unknown. Replace that function
- * (not the state machine) when a device trace with zizhan_power_observe=1
- * establishes the real 22H374 encoding. Unknown values are rejected, never
- * guessed.
+ * The 2026-11-18 device trace established the encoding: selector 12 carries
+ * one scalar, in[0]==1 is on, in[0]==0 is off, and no in[1] is sent.
+ * zizhan_display_classify() is the single rule that maps it; unknown values
+ * are rejected, never guessed.
  *
  * Queue: up to four pending target requests, FIFO. A request for the same
  * target as the last pending one (or the current target when the queue is
@@ -124,12 +122,9 @@ typedef struct {
  unsigned event_count,event_next;
 } ZizhanDisplayPower;
 
-/* SPECULATIVE 22H374 encoding: in[0]==1 on, in[0]==0 off, anything else
- * unknown. Disassembly of IOMobileFramebuffer's _kern_RequestPowerChange
- * (0x1b6fe4664) confirms selector 12 sends exactly one scalar (in[0]) and no
- * in[1]; the caller's 0/1 value constants are still unconfirmed. This is the
- * only function to replace when a device log or a confirmed caller proves the
- * encoding. Do not add guesses for in[1] here. */
+/* 22H374 encoding, confirmed by the 2026-11-18 device evidence: selector 12
+ * sends exactly one scalar; in[0]==1 means on, in[0]==0 means off, and no
+ * in[1] is sent. Anything else is unknown. Do not add guesses for in[1]. */
 static inline ZizhanDisplayTarget zizhan_display_classify(uint32_t count,const uint64_t *in){
  if(!in||count==0)return ZizhanDisplayTargetUnknown;
  if(in[0]==1)return ZizhanDisplayTargetOn;

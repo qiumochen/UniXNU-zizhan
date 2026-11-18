@@ -21,20 +21,23 @@ static void *client(void *argument)
 int main(void)
 {
     assert(!pong_dsi_lease_try(&state, 0));
-    assert(!pong_dsi_lease_try(&state, 3));
+    assert(!pong_dsi_lease_try(&state, 4));
     assert(pong_dsi_lease_try(&state, PongDsiTiming));
     assert(!pong_dsi_lease_try(&state, PongDsiTiming));
+    assert(!pong_dsi_lease_try(&state, PongDsiPower));
     assert(!pong_dsi_lease_release(&state, PongDsiBacklight));
     assert(state == PongDsiTiming);
     /* A still-active timed-out DMA keeps ownership; the other user waits. */
     assert(!pong_dsi_lease_try(&state, PongDsiBacklight));
     assert(pong_dsi_lease_release(&state, PongDsiTiming));
     assert(!pong_dsi_lease_release(&state, PongDsiTiming));
-    pthread_t timing, backlight;
+    pthread_t timing, backlight, power;
     assert(!pthread_create(&timing, NULL, client, (void *)(uintptr_t)PongDsiTiming));
     assert(!pthread_create(&backlight, NULL, client, (void *)(uintptr_t)PongDsiBacklight));
+    assert(!pthread_create(&power, NULL, client, (void *)(uintptr_t)PongDsiPower));
     assert(!pthread_join(timing, NULL));
     assert(!pthread_join(backlight, NULL));
-    assert(!state && !active && transfers == 20000);
-    puts("PASS: DSI lease rejects wrong owners, retains busy ownership and serializes timing/backlight clients");
+    assert(!pthread_join(power, NULL));
+    assert(!state && !active && transfers == 30000);
+    puts("PASS: DSI lease rejects wrong owners, retains busy ownership and serializes timing/backlight/power clients");
 }

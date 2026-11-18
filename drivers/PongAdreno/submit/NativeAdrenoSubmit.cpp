@@ -118,7 +118,7 @@ void gtDump(unsigned seconds)
     for(uint32_t i=0;gGtIb && i<records;++i) {
         const GtIb &r=gGtIb[i];
         if(!r.done)continue;++complete;
-        char line[2040];int at=snprintf(line,sizeof line,"GT i %u %u %u ",r.fence,r.count,r.start_us);
+        static char line[2040];int at=snprintf(line,sizeof line,"GT i %u %u %u ",r.fence,r.count,r.start_us);
         const uint32_t n=r.count<GtIbMax?r.count:GtIbMax;
         for(uint32_t k=0;k<n && at>0 && at<(int)sizeof line-96;++k) {
             const GtSig &g=r.sig[k];

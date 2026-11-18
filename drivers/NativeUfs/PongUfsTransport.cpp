@@ -116,7 +116,8 @@ static bool transportFailure(const char *why) {
   gHost.ready = false;
   // No panic, reset, retry or DMA release after a timeout. The controller
   // may still own the allocation. Preserve evidence and let BSD continue.
-  char text[2400];
+  // Static: transport failures are serialized by gHost.ready=false; keeps 2.4 KiB off the worker stack (11-18 stack audit).
+  static char text[2400];
   formatUfsRootDiagnostics(text, sizeof(text), gRootDiagnostic, why, "PONG_UFS TRANSPORT");
   IOLog("%s\nPONG_UFS: no media published; continue boot\n", text);
   PongProbeRecord(4, "ufs-transport", PongProbeFail, why, gRootDiagnostic.result);

@@ -704,7 +704,8 @@ int zizhan_cs35l41_trim(unsigned enabled,unsigned verified,GeniI2c *bus,const Zi
     if(verified!=flags||!snapshot||snapshot->status!=ZizhanAmpPass||snapshot->completed!=2||snapshot->identity.controller_uncertain||
        !patch||patch->status!=ZizhanAmpPass||patch->completed!=2||patch->transport.controller_uncertain||
        patch->attempted_writes!=20||patch->acknowledged_writes!=20){out->reason=ZizhanAmpPrerequisite;return 0;}
-    ZizhanAmpTrimUpdate updates[2][98];
+    /* Static and cleared per call: trim runs only inside the boot-exclusive prepare (11-18 stack audit). */
+    static ZizhanAmpTrimUpdate updates[2][98];memset(updates,0,sizeof updates);
     for(unsigned chip=0;chip<2;++chip){
         if(snapshot->identity.devid[chip]!=0x35a40||snapshot->identity.revid[chip]!=0xb2||snapshot->word_count[chip]!=32||
            patch->close_acknowledged[chip]!=2||patch->state_count[chip]!=3||

@@ -203,7 +203,8 @@ void nativeAdrenoMailboxPoller(void *,wait_result_t)
         const uint32_t method=gMailboxWords[3],in_size=gMailboxWords[5],out_size=gMailboxWords[6];
         IOReturn status=kIOReturnBadArgument;
         if(in_size<=0x700 && out_size<=0x700) {
-            uint8_t input[0x700],output[0x700];
+            // Static: this is the only poller thread (gPollerStarted); 2x0x700 B stay off its 16 KiB stack (11-18 stack audit).
+            static uint8_t input[0x700],output[0x700];
             memcpy(input,const_cast<uint32_t *>(gMailboxWords)+0x10,in_size);
             IOLockLock(g.lock);
             AGXDeviceUserClient *owner=gMailboxOwner;

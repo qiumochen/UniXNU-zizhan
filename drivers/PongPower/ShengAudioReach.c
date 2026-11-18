@@ -362,16 +362,18 @@ uint32_t zizhan_cap_open(uint8_t *out,uint32_t capacity,uint32_t token){
 uint32_t zizhan_cap_config(uint8_t *out,uint32_t capacity,uint32_t token){
  W w;begin(&w,out,capacity,ZizhanCapPort,AR_APM_IID,token,AR_OP_SET_CFG);
  const uint32_t cmd=cmd_payload_start(&w);
- /* Same interface as the RX sink (tertiary, internal sync, 4x32, delay 1); input: no data out,
-  * all four slots, lane 0 (data0/GPIO122). */
+ /* ACDB TX source (b0000007): tertiary, internal sync, ctrl_data_out_enable 1, all four slots,
+  * 4x32, delay 1; lane mask 1 (data0/GPIO122). */
  uint32_t at=param_begin(&w,ZizhanCapTdmIid,0x0800101bu);
- put32(&w,0);put32(&w,2);put16(&w,1);put16(&w,0);put32(&w,0xf);
+ put32(&w,0);put32(&w,2);put16(&w,1);put16(&w,1);put32(&w,0xf);
  put16(&w,4);put16(&w,32);put16(&w,0);put16(&w,0);put16(&w,1);put16(&w,0);
  zizhan_tdm_param_end(&w,at);
  at=param_begin(&w,ZizhanCapTdmIid,PARAM_HW_EP_MF);put32(&w,96000);put16(&w,24);put16(&w,4);put32(&w,1);zizhan_tdm_param_end(&w,at);
  at=param_begin(&w,ZizhanCapTdmIid,PARAM_FRAME_SIZE_FACTOR);put32(&w,1);zizhan_tdm_param_end(&w,at);
  at=param_begin(&w,ZizhanCapTdmIid,0x0800106au);put16(&w,1);put16(&w,0);zizhan_tdm_param_end(&w,at);
  at=param_begin(&w,ZizhanCapTdmIid,0x0800113cu);put32(&w,0);put32(&w,0);put32(&w,4);put32(&w,0);zizhan_tdm_param_end(&w,at);
+ /* ACDB TX source b0000007/0x40a5 also carries 0x0800108a {2,0x30,0x31}; the DSP rejected it
+  * (status 17) next to a 4-channel media format, so it is not sent. */
  {const uint32_t cv=param_begin(&w,ZizhanCapCnvIid,PARAM_PCM_OUTPUT);
   put32(&w,1);put32(&w,MEDIA_PCM);put32(&w,16u+4u);
   put16(&w,24);put16(&w,1);put16(&w,32);put16(&w,27);put16(&w,1);put16(&w,DEINTERLEAVED_UNPACKED);put16(&w,0);put16(&w,4);

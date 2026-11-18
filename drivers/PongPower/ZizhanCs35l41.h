@@ -288,7 +288,11 @@ int zizhan_cs35l41_native_core_transfer(unsigned,unsigned,GeniI2c *,const Zizhan
 extern void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 extern unsigned zizhan_amp_pulse_hold_us;
 extern unsigned zizhan_amp_pulse_flags;
-extern unsigned zizhan_amp_echo; /* 1: dry play window echoes ASPRX1 on the top chip's ASPTX1 */
+extern unsigned zizhan_amp_echo;
+/* zizhan_audio_ampdump=1 (dry): read every Android-readable config register of both amps after
+ * the stream, before disarm; values land in zizhan_amp_dump_values (see ZizhanAmpDumpRegs.h). */
+extern unsigned zizhan_amp_dump_on,zizhan_amp_dump_reads[2];
+extern uint32_t zizhan_amp_dump_values[2][228]; /* 1: dry play window echoes ASPRX1 on the top chip's ASPTX1 */
 extern unsigned zizhan_amp_play_ms; /* 0 unless the kernel sets zizhan_audio_play_ms=<100..2000> */
 int zizhan_cs35l41_native_play_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);

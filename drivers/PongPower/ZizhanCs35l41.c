@@ -852,6 +852,8 @@ static const uint32_t run_pll[6][2]={{0x800,0x800},{0x7e0,0x660},{0x10,0},{7,0},
 static const uint32_t run_debug_regs[15]={0x2b80010,0x2b80040,0x2b80048,0x2b80050,0x2b80500,
  0x2b805c0,0x2b805c8,0x2b805d0,0x2b805d8,0x2bc1008,0x2bc2000,0x2bc20c0,0x2bc2180,0x25e2040,0x25e2044};
 uint32_t zizhan_cs35l41_debug_register(unsigned index){return index<15?run_debug_regs[index]:0;}
+#include "ZizhanAmpDumpRegs.h"
+static unsigned zizhan_amp_dump_active;
 static int run_read(GeniI2c *bus,const ZizhanAmpClock *clock,uint32_t reg,uint32_t *value,ZizhanAmpRun *out){
  int allowed=reg==0x2014||reg==0x2018||reg==0x2bc1000||reg==0x2c04||reg==0x2c08||reg==0x13004||
   reg==0x28007d0||reg==0x28007d4||reg==0x2800258||reg==0x2bc3104||reg==0x2bc310c||reg==0x2bc3114||reg==0x2bc7008;
@@ -865,6 +867,7 @@ static int run_read(GeniI2c *bus,const ZizhanAmpClock *clock,uint32_t reg,uint32
  if(out->core_debug)for(unsigned i=0;i<15;++i)if(reg==run_debug_regs[i])allowed=1;
  if(out->native_calibration&&(reg==0x2800800||reg==0x2800268||reg==0x2800274||reg==0x2800270))allowed=1;
  if(out->mailbox_profile&&(reg==0x10914))allowed=1;
+ if(zizhan_amp_dump_active&&reg<0x20000u)allowed=1;
  if(out->play_profile&&(reg==0x4c00||reg==0x4820||reg==0x6c04||reg==0x2c0c||reg==0x4800||reg==0x4808||reg==0x201c||reg==0x2020||reg==0x2024||reg==0x4804||reg==0x4c20||reg==0x4810))allowed=1;
  if(out->pulse_profile&&(reg==0x6000||reg==0x2084))allowed=1;
  if(out->iv_profile&&(reg==0x4c48||reg==0x4c4c))allowed=1;
@@ -1006,6 +1009,8 @@ void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 #define AMP_CHECKPOINT(chip,stage) do{if(out->pulse_profile&&zizhan_amp_checkpoint){zizhan_amp_checkpoint((chip),(stage));}}while(0)
 unsigned zizhan_amp_pulse_hold_us; /* 0 unless the kernel sets zizhan_pulse_hold=<ms> (attended only). */
 unsigned zizhan_amp_echo;
+unsigned zizhan_amp_dump_on,zizhan_amp_dump_reads[2];
+uint32_t zizhan_amp_dump_values[2][228];
 unsigned zizhan_amp_pulse_flags; /* bit0 dry (no AMP enable/volume), bit1 skip the native pup/pdn patch. */
 unsigned zizhan_amp_play_ms; /* profile 19 window length; 0 refuses the profile. */
 static void pulse_pause(void *p,unsigned us){NativePulse *c=p;c->clock->pause_us(c->clock->context,us);}
@@ -1085,6 +1090,11 @@ static int play_window(GeniI2c *bus,const ZizhanAmpClock *clock,const ZizhanAmpC
   out->play_streamed=transfer->stream(transfer->context,out->play_ms,play_poll,&poll)==1?1u:0u;
   // A fault seen by the poll fails the window even if the stream reports success.
   if(!out->play_streamed||poll.reason){reason=poll.reason?poll.reason:ZizhanAmpProtocol;}}
+ if(zizhan_amp_dump_on&&(zizhan_amp_pulse_flags&1u)&&!out->transport.controller_uncertain){
+  zizhan_amp_dump_active=1;
+  for(unsigned chip=0;chip<2;++chip){bus->address=chip?0x42:0x40;zizhan_amp_dump_reads[chip]=0;
+   for(unsigned i=0;i<ZizhanAmpDumpCount;++i){if(run_read(bus,clock,zizhan_amp_dump_regs[i],&zizhan_amp_dump_values[chip][i],out)){break;}++zizhan_amp_dump_reads[chip];}}
+  zizhan_amp_dump_active=0;}
  if(out->echo_on&&!out->transport.controller_uncertain){bus->address=0x40;
   if(pulse_write(&context[0],0x4800,0x10000)&&pulse_write(&context[0],0x4c20,out->echo_src[0])&&
      !run_read(bus,clock,0x4c20,&out->echo_src[2],out)&&!run_read(bus,clock,0x4800,&out->echo_en[2],out)){

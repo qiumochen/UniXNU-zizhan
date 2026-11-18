@@ -87,7 +87,9 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
         unsigned play=0;if(mode==40){if(!PE_parse_boot_argn("zizhan_audio_play_ms",&play,sizeof play)||play<100||play>2000){IOLog("ZIZHAN_AUDIO_PLAY: SKIP play_ms=%u needs=100..2000\n",play);return;}
             zizhan_amp_play_ms=play;IOLog("ZIZHAN_AUDIO_PLAY: armed play_ms=%u dry=%u\n",play,zizhan_amp_pulse_flags&1u);
             unsigned echo=0;zizhan_amp_echo=(dry==1&&PE_parse_boot_argn("zizhan_audio_echo",&echo,sizeof echo)&&echo==1)?1u:0u;
-            if(zizhan_amp_echo)IOLog("ZIZHAN_AUDIO_ECHO: armed dry=1 top_asptx1=asprx1 din=gpio122\n");}}
+            if(zizhan_amp_echo)IOLog("ZIZHAN_AUDIO_ECHO: armed dry=1 top_asptx1=asprx1 din=gpio122\n");
+            unsigned dump=0;zizhan_amp_dump_on=(dry==1&&PE_parse_boot_argn("zizhan_audio_ampdump",&dump,sizeof dump)&&dump==1)?1u:0u;
+            if(zizhan_amp_dump_on)IOLog("ZIZHAN_AMP_DUMP: armed dry=1 registers=228\n");}}
     ZizhanAmpSpeakerCalibration speaker_cal={1,sizeof(ZizhanAmpSpeakerCalibration),{0,0}};
     if(mode>=29){
         const bool top_present=PE_parse_boot_argn("zizhan_cal_t",&speaker_cal.resistance[0],sizeof(uint32_t));
@@ -299,6 +301,10 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                     executed.play_reason?executed.play_reason:executed.reason,executed.play_stage,executed.play_chip,executed.play_torn[0],executed.play_torn[1],zizhan_amp_pulse_flags&1u);
                 if(mode==40&&(executed.echo_on||zizhan_amp_echo))IOLog("ZIZHAN_AUDIO_ECHO: amp on=%u restored=%u src=%x/%x/%x en=%x/%x/%x slots=%x din_restored=%u\n",
                     executed.echo_on,executed.echo_restored,executed.echo_src[0],executed.echo_src[1],executed.echo_src[2],executed.echo_en[0],executed.echo_en[1],executed.echo_en[2],executed.echo_slots,din_state.claimed?(din_state.restored?1u:0u):2u);
+                if(mode==40&&zizhan_amp_dump_on){for(unsigned c=0;c<2;++c){IOLog("ZIZHAN_AMP_DUMP: chip=%u reads=%u\n",c,zizhan_amp_dump_reads[c]);
+                    for(unsigned i=0;i+8<=228u;i+=8){const uint32_t *v=&zizhan_amp_dump_values[c][i];
+                        IOLog("ZIZHAN_AMP_DUMP: c=%u i=%u %x %x %x %x %x %x %x %x\n",c,i,v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7]);}
+                    {const uint32_t *v=&zizhan_amp_dump_values[c][224];IOLog("ZIZHAN_AMP_DUMP: c=%u i=224 %x %x %x %x\n",c,v[0],v[1],v[2],v[3]);}}}
                 if(mode==40){for(unsigned c=0;c<2;++c){const uint32_t *v=executed.play_snap[c];IOLog("ZIZHAN_AUDIO_PLAY_SNAP: chip=%u reads=%u 2014=%x 2018=%x 2c0c=%x 4800=%x 4808=%x 4820=%x 4c00=%x 6000=%x 6c04=%x 10018=%x 10098=%x 1009c=%x 201c=%x 2020=%x 2024=%x 4804=%x\n",c,executed.play_snap_reads[c],v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);}}
                 if(mode==39||mode==40){combined->pulse_verified=executed.status==ZizhanAmpPass;
                     for(unsigned c=0;c<2;++c){const auto &p=executed.pulse[c];if(!p.complete||!p.patch_off||!p.disabled||!p.data_ack)combined->pulse_verified=0;

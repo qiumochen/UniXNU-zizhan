@@ -305,9 +305,9 @@ static void worker(void *,wait_result_t)
                 thermalLevelNow,state[0],state[1],state[2],selected[0],selected[1],selected[2]);
         }
         if(l3Mode==1 && l3Thermal && !thermalNow)voteL3(l3.levels-1);
-        if((l3Mode==2 || thermalNow || l3Thermal) && l3.live) {
+        if((l3Mode==2 || (l3Mode==1 && thermalNow)) && l3.live) {
             uint64_t want=l3.cap_khz;
-            if(!boosted) {
+            if(!boosted || thermalNow) {
                 unsigned share=0;   /* per mille of its cap, fastest domain */
                 for(auto &d:domains)if(d.live) {
                     const unsigned current=d.regs[0x320/4];

@@ -520,10 +520,16 @@ void worker(void *context,wait_result_t){prepare(static_cast<unsigned>(reinterpr
 } // namespace
 static void owned_clock_run(const ZizhanPrmState *lease,ZizhanAudioSilentReceipt *receipt,unsigned mode,const ZizhanAudioTransfer *transfer=nullptr){
     if(!receipt){return;}memset(receipt,0,sizeof *receipt);receipt->release_safe=1;
+    auto dry_arg=[]{unsigned d=0;return PE_parse_boot_argn("zizhan_pulse_dry",&d,sizeof d)&&d==1;};
+    /* zizhan_audio_noclk=1 (dry diagnostics only): no clock vote of our own, so accept the lease
+     * without it; the amp's own 64-sample PLL lock check still refuses to run without a BCLK. */
+    const bool own=lease&&!lease->skip_clock&&lease->clock_held&&lease->clock_request_ack&&lease->sent==3&&lease->acknowledged==3;
+    const bool endpoint=lease&&lease->skip_clock&&!lease->clock_held&&!lease->clock_request_ack&&lease->sent==2&&lease->acknowledged==2&&
+                        mode==40&&dry_arg();
     if(!lease||lease->phase!=ZizhanPrmClockReleaseReady||!lease->native_framework||!lease->native_wire||!lease->clock_mode||
-       !lease->framework_ready||!lease->lease_held||!lease->clock_held||!lease->request_ack||!lease->clock_request_ack||
-       lease->sent!=3||lease->acknowledged!=3||lease->reason||lease->uncertain){
+       !lease->framework_ready||!lease->lease_held||!lease->request_ack||!(own||endpoint)||lease->reason||lease->uncertain){
         IOLog("ZIZHAN_AUDIO_SILENT: SKIP no-actual-owned-clock writes=0\n");return;}
+    if(endpoint){IOLog("ZIZHAN_AUDIO_SILENT: noclk lease accepted dry=1 pll_lock_required=1\n");}
     static uint32_t started;if(__atomic_exchange_n(&started,1,__ATOMIC_ACQ_REL)){receipt->release_safe=0;return;}
     receipt->invoked=1;prepare(mode,receipt,transfer);
 }

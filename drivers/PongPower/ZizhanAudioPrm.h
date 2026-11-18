@@ -22,6 +22,7 @@ typedef struct {
  uint32_t token,expected_opcode,expected_source;
  unsigned native_wire,native_framework,expected_port,framework_ready,native_parameter_reply;
  unsigned clock_mode,clock_held,clock_request_ack,clock_release_ack,expected_parameter,expected_request;
+ unsigned skip_clock;
 } ZizhanPrmState;
 static inline uint32_t zizhan_prm_le32(const uint8_t *p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
 static inline void zizhan_prm_fail(ZizhanPrmState *s,unsigned reason){
@@ -52,6 +53,10 @@ static inline unsigned zizhan_prm_next(ZizhanPrmState *s,uint64_t now,uint8_t ou
   s->phase=request?ZizhanPrmRequestWait:ZizhanPrmReleaseWait;
   s->expected_opcode=request?AR_OP_PRM_REQUEST_DONE:AR_OP_PRM_RELEASE_DONE;s->expected_source=AR_PRM_IID;
   s->expected_request=request?AR_OP_PRM_REQUEST:AR_OP_PRM_RELEASE;s->expected_parameter=0x08001032u;
+ }else if(s->clock_mode&&s->skip_clock&&(s->phase==ZizhanPrmClockRequestReady||s->phase==ZizhanPrmClockReleaseReady)){
+  /* zizhan_audio_noclk=1 (diagnostic): no TERT_TDM_IBIT vote of our own; the TDM endpoint auto
+   * clock config (0x0800113c) is the only clock source. Phases advance without a command. */
+  s->phase=s->phase==ZizhanPrmClockRequestReady?ZizhanPrmClockReleaseReady:ZizhanPrmReleaseReady;return 0;
  }else if(s->clock_mode&&(s->phase==ZizhanPrmClockRequestReady||s->phase==ZizhanPrmClockReleaseReady)){
   const int request=s->phase==ZizhanPrmClockRequestReady;
   /* Exact actual machine/module contract:96k*4slots*32=12.288M,

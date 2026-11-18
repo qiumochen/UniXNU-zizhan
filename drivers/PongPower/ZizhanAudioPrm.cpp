@@ -781,6 +781,7 @@ void worker(void *,wait_result_t){
    if(o.mode>=4)o.state.native_framework=1;
    if(o.mode>=5)o.state.native_parameter_reply=1;
    if(o.mode>=6)o.state.clock_mode=1;
+   {unsigned noclk=0;if(o.mode==41&&PE_parse_boot_argn("zizhan_audio_noclk",&noclk,sizeof noclk)&&noclk==1){o.state.skip_clock=1;IOLog("ZIZHAN_AUDIO_PRM: noclk=1 own TDM clock vote skipped\n");}}
    IOLog("ZIZHAN_AUDIO_PRM: linked channel=adsp_apps port=%x no-codec-access=%u\n",o.mode>=4?3u:o.mode==3?7u:0x2101u,o.mode>=7?0u:1u);
    IOLog("ZIZHAN_AUDIO_PRM: mode=%u framework_query=%u framework_verified=0\n",o.mode,(o.mode==1||o.mode>=4)?1u:0u);
    if(o.mode>=4)IOLog("ZIZHAN_AUDIO_PRM: settle_us=1000000 native_apm_port=3 token=0 pdr_verified=0\n");}

@@ -197,12 +197,16 @@ static void worker(void *, wait_result_t) {
 }
 
 static void start(IOService *provider) {
-  uint32_t mode_arg = 0;
+  uint32_t mode_arg = 0, test_cpu = 0, test_gpu = 0;
   if (!PE_parse_boot_argn("zizhan_thermal", &mode_arg, sizeof mode_arg) || !mode_arg)
     return;
-  if (zizhan_thermal_tune(mode_arg, 0, 0, 0, &tuning) != ZizhanThermalTuneOk) {
-    IOLog("ZIZHAN_THERMAL: SKIP invalid-boot-arg zizhan_thermal=%u\n",
-          (unsigned)mode_arg);
+  (void)PE_parse_boot_argn("zizhan_thermal_test_cpu", &test_cpu, sizeof test_cpu);
+  (void)PE_parse_boot_argn("zizhan_thermal_test_gpu", &test_gpu, sizeof test_gpu);
+  if (zizhan_thermal_tune(mode_arg, test_cpu, test_gpu, 0, &tuning) !=
+      ZizhanThermalTuneOk) {
+    IOLog("ZIZHAN_THERMAL: SKIP invalid-boot-arg zizhan_thermal=%u test_cpu=%u "
+          "test_gpu=%u\n",
+          (unsigned)mode_arg, (unsigned)test_cpu, (unsigned)test_gpu);
     return;
   }
   IORegistryEntry *chosen = provider->childFromPath("chosen", gIODTPlane);
@@ -232,9 +236,10 @@ static void start(IOService *provider) {
     return;
   }
   IOLog("ZIZHAN_THERMAL: RUNNING mode=%u period_ms=1000 cpu_clamp=%d cpu_release=%d "
-        "gpu_clamp=%d gpu_release=%d tsens-ro=1 apply=%u\n",
+        "gpu_clamp=%d gpu_release=%d test_cpu=%u test_gpu=%u tsens-ro=1 apply=%u\n",
         (unsigned)tuning.mode, (int)policy.cpu_clamp_mc, (int)policy.cpu_release_mc,
         (int)policy.gpu_clamp_mc, (int)policy.gpu_release_mc,
+        (unsigned)tuning.test_cpu_c, (unsigned)tuning.test_gpu_c,
         tuning.mode == 2 ? 1u : 0u);
   thread_deallocate(thread);
 }

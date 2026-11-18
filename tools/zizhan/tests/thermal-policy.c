@@ -46,6 +46,19 @@ static int step(ZizhanThermalState *st,uint64_t t,ZizhanThermalSample *s){
  return zizhan_thermal_step(&c,st,s);
 }
 
+static ZizhanThermalConfig tuned(const ZizhanThermalTuning *t){
+ ZizhanThermalConfig c=zizhan_thermal_default_config();
+ c.cpu_clamp_mc=t->cpu_clamp_mc;c.cpu_release_mc=t->cpu_release_mc;
+ c.gpu_clamp_mc=t->gpu_clamp_mc;c.gpu_release_mc=t->gpu_release_mc;
+ return c;
+}
+
+static int step_cfg(const ZizhanThermalConfig *c,ZizhanThermalState *st,uint64_t t,
+                    ZizhanThermalSample *s){
+ s->time_us=t;
+ return zizhan_thermal_step(c,st,s);
+}
+
 static void test_mapping(void){
  unsigned b=0,i=0;
  CHECK(zizhan_thermal_cpu_sensor(0,&b,&i)&&b==0&&i==5,"mapping cpu0");
@@ -283,6 +296,138 @@ static void test_real_idle_g396(void){
  CHECK(hot.gpu_level==0,"g396 one cpu-1 hot leaves gpu");
 }
 
+static void test_tuning_default(void){
+ ZizhanThermalTuning t;
+ memset(&t,0,sizeof t);
+ CHECK(zizhan_thermal_tune(1,0,0,0,&t)==ZizhanThermalTuneOk,"tune default ok");
+ CHECK(t.mode==1&&t.test_cpu_c==0&&t.test_gpu_c==0&&t.load_seconds==0,
+       "tune default fields");
+ CHECK(t.cpu_clamp_mc==110000&&t.cpu_release_mc==105000,"tune default cpu");
+ CHECK(t.gpu_clamp_mc==95000&&t.gpu_release_mc==90000,"tune default gpu");
+}
+
+static void test_tuning_modes(void){
+ ZizhanThermalTuning t;
+ for(unsigned m=0;m<=2;++m)
+  CHECK(zizhan_thermal_tune(m,0,0,0,&t)==ZizhanThermalTuneOk,"tune mode ok");
+ CHECK(zizhan_thermal_tune(3,0,0,0,&t)==ZizhanThermalTuneBadMode,"tune mode 3 rejected");
+ CHECK(zizhan_thermal_tune(UINT32_MAX,0,0,0,&t)==ZizhanThermalTuneBadMode,
+       "tune mode max rejected");
+ CHECK(zizhan_thermal_tune(1,0,0,0,NULL)==ZizhanThermalTuneBadOutput,
+       "tune null output rejected");
+}
+
+static void test_tuning_cpu(void){
+ ZizhanThermalTuning t;
+ CHECK(zizhan_thermal_tune(2,39,0,0,&t)==ZizhanThermalTuneBadCpu,"tune cpu 39 rejected");
+ CHECK(zizhan_thermal_tune(2,40,0,0,&t)==ZizhanThermalTuneOk,"tune cpu 40 accepted");
+ CHECK(t.cpu_clamp_mc==40000&&t.cpu_release_mc==35000,"tune cpu 40 release 35");
+ CHECK(zizhan_thermal_tune(2,100,0,0,&t)==ZizhanThermalTuneOk,"tune cpu 100 accepted");
+ CHECK(t.cpu_clamp_mc==100000&&t.cpu_release_mc==95000,"tune cpu 100 release 95");
+ CHECK(zizhan_thermal_tune(2,101,0,0,&t)==ZizhanThermalTuneBadCpu,"tune cpu 101 rejected");
+ CHECK(zizhan_thermal_tune(2,110,0,0,&t)==ZizhanThermalTuneBadCpu,"tune cpu 110 rejected");
+}
+
+static void test_tuning_gpu(void){
+ ZizhanThermalTuning t;
+ CHECK(zizhan_thermal_tune(2,0,39,0,&t)==ZizhanThermalTuneBadGpu,"tune gpu 39 rejected");
+ CHECK(zizhan_thermal_tune(2,0,40,0,&t)==ZizhanThermalTuneOk,"tune gpu 40 accepted");
+ CHECK(t.gpu_clamp_mc==40000&&t.gpu_release_mc==35000,"tune gpu 40 release 35");
+ CHECK(zizhan_thermal_tune(2,0,94,0,&t)==ZizhanThermalTuneOk,"tune gpu 94 accepted");
+ CHECK(t.gpu_clamp_mc==94000&&t.gpu_release_mc==89000,"tune gpu 94 release 89");
+ CHECK(zizhan_thermal_tune(2,0,95,0,&t)==ZizhanThermalTuneBadGpu,
+       "tune gpu 95 not below default");
+ CHECK(zizhan_thermal_tune(2,0,100,0,&t)==ZizhanThermalTuneBadGpu,
+       "tune gpu 100 rejected");
+}
+
+static void test_tuning_load(void){
+ ZizhanThermalTuning t;
+ CHECK(zizhan_thermal_tune(1,0,0,120,&t)==ZizhanThermalTuneOk,"tune load 120 accepted");
+ CHECK(t.load_seconds==120,"tune load field");
+ CHECK(zizhan_thermal_tune(1,0,0,121,&t)==ZizhanThermalTuneBadLoad,"tune load 121 rejected");
+ CHECK(zizhan_thermal_tune(0,0,0,1,&t)==ZizhanThermalTuneBadLoad,
+       "tune load without mode rejected");
+}
+
+static void test_tuning_leaves_output(void){
+ ZizhanThermalTuning t;
+ memset(&t,0xa5,sizeof t);
+ const ZizhanThermalTuning before=t;
+ CHECK(zizhan_thermal_tune(2,39,0,0,&t)==ZizhanThermalTuneBadCpu,"tune reject cpu");
+ CHECK(memcmp(&t,&before,sizeof t)==0,"tune reject leaves output");
+ CHECK(zizhan_thermal_tune(2,0,95,0,&t)==ZizhanThermalTuneBadGpu,"tune reject gpu");
+ CHECK(memcmp(&t,&before,sizeof t)==0,"tune gpu reject leaves output");
+ CHECK(zizhan_thermal_tune(2,0,0,121,&t)==ZizhanThermalTuneBadLoad,"tune reject load");
+ CHECK(memcmp(&t,&before,sizeof t)==0,"tune load reject leaves output");
+}
+
+static void test_tuned_stale_invalid_hold(void){
+ ZizhanThermalTuning t;
+ CHECK(zizhan_thermal_tune(2,50,60,0,&t)==ZizhanThermalTuneOk,"tuned 50/60 ok");
+ const ZizhanThermalConfig c=tuned(&t);
+ ZizhanThermalState st;zizhan_thermal_init(&st);
+ ZizhanThermalSample s=base(1000000);cpu(&s,4,50000);gpu(&s,0,60000);
+ CHECK(step_cfg(&c,&st,1000000,&s)==ZizhanThermalFresh,"tuned hot fresh");
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels&&st.gpu_level==ZizhanThermalGpuLevels,
+       "tuned hot clamps");
+
+ /* One stale cold sample and one invalid cold sample: neither may release. */
+ s=base(4000000);cpu(&s,4,40000);gpu(&s,0,50000);
+ CHECK(step_cfg(&c,&st,4000000,&s)==ZizhanThermalStale,"tuned stale cold stale");
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels&&st.gpu_level==ZizhanThermalGpuLevels,
+       "tuned stale cold holds");
+ s=base(5000000);cpu(&s,4,40000);gpu(&s,0,50000);drop_cpu(&s,0);drop_gpu(&s,1);
+ CHECK(step_cfg(&c,&st,5000000,&s)==ZizhanThermalFresh,"tuned invalid cold fresh");
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels&&st.gpu_level==ZizhanThermalGpuLevels,
+       "tuned invalid cold holds");
+
+ /* The tuned release thresholds are 45/55 C, not the defaults. */
+ for(unsigned n=1;n<=3;++n){
+  s=base(5000000ull+1000000ull*n);cpu(&s,4,44000);gpu(&s,0,54000);
+  step_cfg(&c,&st,s.time_us,&s);
+ }
+ CHECK(st.cpu_level==ZizhanThermalCpuLevels-1&&st.gpu_level==ZizhanThermalGpuLevels-1,
+       "tuned three fresh below test release");
+}
+
+static void test_load_deadline(void){
+ ZizhanThermalLoad l;
+ zizhan_thermal_load_begin(&l,2000000,60);
+ CHECK(l.deadline_us==62000000ull,"load deadline 60 s");
+ CHECK(zizhan_thermal_load_step(&l,61000000,40000,ZIZHAN_THERMAL_LOAD_HOT_MC)==
+       ZizhanThermalLoadRun,"load before deadline runs");
+ CHECK(zizhan_thermal_load_step(&l,62000000,40000,ZIZHAN_THERMAL_LOAD_HOT_MC)==
+       ZizhanThermalLoadDeadline,"load deadline stops");
+ CHECK(l.stopped&&l.reason==ZizhanThermalLoadDeadline,"load deadline recorded");
+ CHECK(zizhan_thermal_load_step(&l,UINT64_MAX,40000,ZIZHAN_THERMAL_LOAD_HOT_MC)==
+       ZizhanThermalLoadDeadline,"load stays stopped");
+}
+
+static void test_load_zero_and_no_reading(void){
+ ZizhanThermalLoad l;
+ zizhan_thermal_load_begin(&l,5000000,0);
+ CHECK(zizhan_thermal_load_step(&l,5000000,40000,ZIZHAN_THERMAL_LOAD_HOT_MC)==
+       ZizhanThermalLoadDeadline,"load zero seconds stops at once");
+ zizhan_thermal_load_begin(&l,5000000,120);
+ CHECK(zizhan_thermal_load_step(&l,5000000,INT32_MIN,ZIZHAN_THERMAL_LOAD_HOT_MC)==
+       ZizhanThermalLoadRun,"load missing reading does not stop");
+ CHECK(zizhan_thermal_load_step(&l,125000000,INT32_MIN,ZIZHAN_THERMAL_LOAD_HOT_MC)==
+       ZizhanThermalLoadDeadline,"load missing reading stops at deadline");
+}
+
+static void test_load_hot_boundary(void){
+ ZizhanThermalLoad l;
+ zizhan_thermal_load_begin(&l,0,60);
+ CHECK(zizhan_thermal_load_step(&l,1000000,74999,75000)==ZizhanThermalLoadRun,
+       "load 74.999 C runs");
+ CHECK(zizhan_thermal_load_step(&l,2000000,75000,75000)==ZizhanThermalLoadHot,
+       "load 75 C stops");
+ CHECK(l.stopped&&l.reason==ZizhanThermalLoadHot,"load hot recorded");
+ CHECK(zizhan_thermal_load_step(&l,3000000,40000,75000)==ZizhanThermalLoadHot,
+       "load hot stop latches");
+}
+
 int main(void){
  test_mapping();
  test_normal();
@@ -302,6 +447,16 @@ int main(void){
  test_backwards_rebase_and_recover();
  test_stale_cold_no_streak();
  test_real_idle_g396();
+ test_tuning_default();
+ test_tuning_modes();
+ test_tuning_cpu();
+ test_tuning_gpu();
+ test_tuning_load();
+ test_tuning_leaves_output();
+ test_tuned_stale_invalid_hold();
+ test_load_deadline();
+ test_load_zero_and_no_reading();
+ test_load_hot_boundary();
  printf("%s: %d failure(s)\n",failures?"FAIL":"PASS",failures);
  return failures?1:0;
 }

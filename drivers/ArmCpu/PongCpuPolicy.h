@@ -212,6 +212,7 @@ static void worker(void *,wait_result_t)
     uint64_t boostTicks=0,boostUntil=0,boosts=0,boostedTicks=0,reportAt=0,stateSum[3]{},stateN=0,l3Sum=0,l3N=0;nanoseconds_to_absolutetime(uint64_t(boostMs)*1000000ull,&boostTicks);
     uint32_t touches=&pong_touch_activity?pong_touch_activity:0;
     bool l3Thermal=false;
+    unsigned lastThermal=0;
     for(unsigned tick=0;;++tick) {
         // 8 ms: a touch is seen within a frame or so; the load policy below still runs every 32 ms
         IOSleep(8);
@@ -288,6 +289,18 @@ static void worker(void *,wait_result_t)
             // Request only real, non-boost LUT indices through perf-lock.
             *d.pdmem=selected;d.regs[0x320/4]=selected;
             __asm__ volatile("dsb oshst":::"memory");
+        }
+        if(thermalLevelNow!=lastThermal) {
+            lastThermal=thermalLevelNow;
+            unsigned state[3]{},selected[3]{};
+            for(unsigned i=0;i<3;++i)if(domains[i].live) {
+                const Domain &d=domains[i];
+                state[i]=stateKhz(d)/1000;
+                const unsigned row=d.regs[0x320/4];
+                selected[i]=row<d.levels?d.khz[row]/1000:0;
+            }
+            IOLog("Pong CPU: thermal level %u state %u/%u/%u MHz selected %u/%u/%u MHz\n",
+                thermalLevelNow,state[0],state[1],state[2],selected[0],selected[1],selected[2]);
         }
         if((l3Mode==2 || thermalNow || l3Thermal) && l3.live) {
             uint64_t want=l3.cap_khz;

@@ -51,12 +51,18 @@ void selftest(void *,wait_result_t){
  if(started){
   for(;waited<1500&&!(c->state&ZizhanAudioOutputRunning)&&gHandoff.phase<ZizhanHandoffDone;++waited)IOSleep(10);
   if(c->state&ZizhanAudioOutputRunning){
-   const uint64_t anchor=c->out_anchor_host,now=mach_absolute_time(),q32=c->ticks_per_frame_q32;
-   uint64_t t=now>anchor&&q32?((now-anchor)<<16)/(q32>>16):0;t+=ZIZHAN_AUDIO_LEAD_FRAMES+2*ZIZHAN_AUDIO_PERIOD_FRAMES;
-   for(unsigned i=0;i<300&&(c->state&ZizhanAudioOutputRunning);++i){
-    for(unsigned f=0;f<ZIZHAN_AUDIO_PERIOD_FRAMES;++f,++t){const unsigned at=unsigned(t%ZIZHAN_AUDIO_RING_FRAMES);
-     ring[2*at]=selftest_sample(t);ring[2*at+1]=int16_t(-selftest_sample(t));}
-    zizhan_audio_publish_written(c,t);++produced;IOSleep(10);
+   // Paced by the clock, not by sleeps: keep the watermark lead + 2 periods ahead of "now" in sample time.
+   const uint64_t anchor=c->out_anchor_host,q32=c->ticks_per_frame_q32;
+   auto sample_now=[&]{const uint64_t now=mach_absolute_time();return now>anchor&&q32?((now-anchor)<<16)/(q32>>16):0;};
+   uint64_t t=sample_now()+ZIZHAN_AUDIO_LEAD_FRAMES+2*ZIZHAN_AUDIO_PERIOD_FRAMES;
+   for(unsigned i=0;i<12000&&(c->state&ZizhanAudioOutputRunning);++i){
+    const uint64_t target=sample_now()+ZIZHAN_AUDIO_LEAD_FRAMES+2*ZIZHAN_AUDIO_PERIOD_FRAMES;
+    while(t+ZIZHAN_AUDIO_PERIOD_FRAMES<=target){
+     for(unsigned f=0;f<ZIZHAN_AUDIO_PERIOD_FRAMES;++f,++t){const unsigned at=unsigned(t%ZIZHAN_AUDIO_RING_FRAMES);
+      ring[2*at]=selftest_sample(t);ring[2*at+1]=int16_t(-selftest_sample(t));}
+     zizhan_audio_publish_written(c,t);++produced;
+    }
+    IOSleep(1);
    }
   }
   zizhan_handoff_request_stop(&gHandoff);

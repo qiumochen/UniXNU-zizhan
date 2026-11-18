@@ -13,6 +13,7 @@
 #include "ZizhanAudioPrm.h"
 #include "ZizhanAudioService.h"
 #include "ZizhanAudioServiceGate.h"
+#include "ZizhanAudioFlow.h"
 #include "ZizhanAudioSilent.h"
 #include "ZizhanAudioGraph.h"
 #include "ZizhanTdm.h"
@@ -43,6 +44,9 @@ struct Runtime {
 struct ServiceRun {
  unsigned waited_ms,ready_after,underrun_waits,pack_verified,packets,acks,drained,ready_cleared,stopped_by_request;
  uint64_t first_written,start_frame,frames;
+ // zizhan_audio_stream_ms: continuous flow instead of four finite periods.
+ unsigned flow_ms,flow_inflight,flow_ok,flow_waits,flow_starved,flow_verified,flow_reason,flow_peak_inflight;
+ uint64_t flow_submitted,flow_completed,flow_peak_us;
 };
 struct Owner {
  IOLock *lock;ShengAdspChannel *channel;Packet queue[16];
@@ -305,6 +309,8 @@ __attribute__((noinline)) bool runtime_round(){
  return ok&&r.ready_before==0&&r.ready_after==1&&r.watermark_gate==1&&r.underrun_gate==1&&
         r.pack_verified==4&&r.packets==4&&r.acks==4&&r.drained==1&&r.ready_cleared==1&&r.frames==1920;
 }
+unsigned stream_ms_arg();
+bool flow_round(volatile ZizhanAudioControl *,int16_t *,ZizhanAudioHandoff *,volatile uint8_t *,uint64_t,unsigned);
 /* Mode 40 (I4): the same verified graph and four finite periods as mode 38,
  * but the ring, control page and producer belong to the ZizhanAudio service:
  * the HAL (or the silent self-test) writes the ring and publishes out_written.
@@ -331,6 +337,12 @@ __attribute__((noinline)) bool service_round(){
  for(r.waited_ms=0;r.waited_ms<2000&&!zizhan_handoff_stopping(h);r.waited_ms+=10){
   if(zizhan_audio_written_stable(ctl,&written)&&written){ok=true;break;}IOSleep(10);}
  r.first_written=written;r.start_frame=zizhan_service_start_frame(written);
+ if(const unsigned ms=stream_ms_arg()){
+  ok=ok&&flow_round(ctl,ring,h,dma,tagged,ms);
+  __atomic_and_fetch(&ctl->state,~(uint32_t)(ZizhanAudioOutputReady|ZizhanAudioOutputRunning),__ATOMIC_RELEASE);
+  r.ready_cleared=!(ctl->state&(ZizhanAudioOutputReady|ZizhanAudioOutputRunning))?1u:0u;
+  map->release();ok=ok&&r.ready_cleared;zizhan_handoff_finish(h,ok);return ok;
+ }
  // Static: the PRM worker's 16 KiB stack already carries the graph and IOLog frames (11-18 overflow).
  static ZizhanAudioService svc;static uint8_t expect[ZizhanRingPcmBytes];memset(&svc,0,sizeof svc);
  ok=ok&&zizhan_service_init(&svc,ctl,tagged,o.memory.handle,4,r.start_frame,now_us())&&
@@ -375,6 +387,69 @@ __attribute__((noinline)) bool service_round(){
  ok=ok&&r.ready_after&&r.pack_verified==4&&r.packets==4&&r.acks==4&&r.frames==1920&&r.drained&&r.ready_cleared;
  zizhan_handoff_finish(h,ok);
  return ok;
+}
+/* zizhan_audio_stream_ms=<100..10000> (silent diagnostics, mode 40 only): after Ready,
+ * stream continuously through ZizhanAudioFlow for that long or until Stop, with
+ * zizhan_audio_inflight=<1..3> (default 2) WRITEs outstanding. A period is staged
+ * only once the stable producer watermark covers it; `starved` counts the times
+ * the DSP was left with nothing outstanding. Absent: the finite 4-period path. */
+unsigned stream_ms_arg(){unsigned v=0;return PE_parse_boot_argn("zizhan_audio_stream_ms",&v,sizeof v)&&v>=100&&v<=10000?v:0u;}
+unsigned inflight_arg(){unsigned v=2;(void)PE_parse_boot_argn("zizhan_audio_inflight",&v,sizeof v);return v>=1&&v<=3?v:2u;}
+__attribute__((noinline)) bool flow_round(volatile ZizhanAudioControl *ctl,int16_t *ring,ZizhanAudioHandoff *h,
+                                          volatile uint8_t *dma,uint64_t tagged,unsigned ms){
+ auto &o=owner;auto &r=o.service;r.flow_ms=ms;r.flow_inflight=inflight_arg();
+ static ZizhanAudioFlow flow;static uint8_t staged[ZizhanRingPcmBytes];memset(&flow,0,sizeof flow);
+ if(!zizhan_flow_init(&flow,tagged,o.memory.handle,r.flow_inflight,ZizhanRingPcmBytes,ZizhanRingPcmFrames,r.start_frame,ms*1000ull,now_us()))return false;
+ uint64_t w=0;unsigned i=0;
+ for(;i<50&&!(zizhan_audio_written_stable(ctl,&w)&&w>=r.start_frame+ZIZHAN_AUDIO_PERIOD_FRAMES);++i){++r.underrun_waits;IOSleep(10);}
+ if(i>=50)return false;
+ __atomic_or_fetch(&ctl->state,(uint32_t)ZizhanAudioOutputReady,__ATOMIC_RELEASE);r.ready_after=1;
+ bool ok=true,idle=false;
+ for(unsigned iteration=0;iteration<200000;++iteration){
+  for(;;){Packet p={};unsigned closed,overflow;IOLockLock(o.lock);closed=o.closed;overflow=o.overflow;
+   if(o.count){p=o.queue[o.head];o.head=(o.head+1)%16;--o.count;}IOLockUnlock(o.lock);
+   if(closed||overflow){zizhan_flow_send_failed(&flow);ok=false;break;}
+   if(!p.bytes)break;
+   if(zizhan_flow_receive(&flow,p.data,p.bytes,now_us())<0){ok=false;break;}}
+  if(!ok)break;
+  zizhan_flow_tick(&flow,now_us());
+  if(zizhan_handoff_stopping(h)&&flow.phase==ZizhanFlowRunning){r.stopped_by_request=1;zizhan_flow_stop(&flow);}
+  if(flow.phase==ZizhanFlowDone||flow.phase==ZizhanFlowFailed)break;
+  uint64_t frame=0;int slot;
+  while((slot=zizhan_flow_claim(&flow,&frame))>=0){
+   if(!(zizhan_audio_written_stable(ctl,&w)&&w>=frame+ZIZHAN_AUDIO_PERIOD_FRAMES)){++r.flow_waits;break;}
+   ZizhanRingReceipt receipt={};
+   if(!zizhan_ring_pack(ring,ZIZHAN_AUDIO_RING_FRAMES,frame,staged,&receipt)||receipt.packed!=sizeof staged){ok=false;break;}
+   auto dst=const_cast<uint8_t *>(dma)+unsigned(slot)*ZizhanFlowStride;memcpy(dst,staged,sizeof staged);
+#if defined(__aarch64__) && defined(KERNEL)
+   __asm__ volatile("dsb sy":::"memory");
+#endif
+   if(memcmp(dst,staged,sizeof staged)){ok=false;break;}
+   ++r.flow_verified;
+   uint8_t tx[512];const unsigned n=zizhan_flow_submit(&flow,unsigned(slot),now_us(),tx);
+   if(!n||sheng_adsp_send(o.channel,tx,n)){zizhan_flow_send_failed(&flow);ok=false;break;}
+  }
+  if(!ok)break;
+  // The DSP has nothing outstanding while the stream runs: count each transition.
+  const bool empty=flow.submitted&&!flow.inflight&&flow.phase==ZizhanFlowRunning;
+  if(empty&&!idle){++r.flow_starved;}idle=empty;
+  IOSleep(1);
+ }
+ if(flow.phase==ZizhanFlowRunning)zizhan_flow_stop(&flow);
+ // Drain whatever is still outstanding (each WRITE has its own 100 ms budget).
+ for(unsigned d=0;d<30&&flow.inflight&&flow.phase==ZizhanFlowDraining;++d){
+  Packet p={};IOLockLock(o.lock);if(o.count){p=o.queue[o.head];o.head=(o.head+1)%16;--o.count;}IOLockUnlock(o.lock);
+  if(p.bytes){if(zizhan_flow_receive(&flow,p.data,p.bytes,now_us())<0)break;}else IOSleep(10);
+  zizhan_flow_tick(&flow,now_us());
+ }
+ r.flow_submitted=flow.submitted;r.flow_completed=flow.completed;r.flow_peak_us=flow.peak_us;r.flow_peak_inflight=flow.peak_inflight;
+ r.flow_reason=flow.reason;r.frames=flow.confirmed_frames;r.drained=zizhan_flow_returned(&flow)?1u:0u;
+ r.flow_ok=ok&&r.drained&&flow.completed&&r.flow_verified==flow.submitted?1u:0u;
+ IOLog("ZIZHAN_AUDIO_FLOW: %s ms=%u inflight=%u start_frame=%llu submitted=%llu completed=%llu frames=%llu peak_inflight=%u peak_us=%llu waits=%u starved=%u verified=%u stopped_by_request=%u reason=%u uncertain=%u audio_output=0\n",
+  r.flow_ok?"PASS":"FAIL",ms,r.flow_inflight,(unsigned long long)r.start_frame,(unsigned long long)flow.submitted,(unsigned long long)flow.completed,
+  (unsigned long long)flow.confirmed_frames,flow.peak_inflight,(unsigned long long)flow.peak_us,r.flow_waits,r.flow_starved,r.flow_verified,
+  r.stopped_by_request,flow.reason,flow.uncertain);
+ return r.flow_ok!=0;
 }
 /* Mode 40: wait (bounded, before any PRM lease) for the service's one Start. */
 bool service_wait(){
@@ -670,7 +745,7 @@ void worker(void *,wait_result_t){
    o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==40){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_SERVICE_RUN: %s acks=%u waited_ms=%u first_written=%llu start_frame=%llu ready_after=%u underrun_waits=%u pack=%u packets=%u done_acks=%u frames=%llu drained=%u ready_cleared=%u stopped_by_request=%u mapped=%u restored=%u memory_phase=%u handle=%x data=service audio_output=0 finished=1\n",
-   o.graph_acks==12&&o.service.ready_after&&o.service.pack_verified==4&&o.service.packets==4&&o.service.acks==4&&o.service.frames==1920&&
+   o.graph_acks==12&&o.service.ready_after&&(o.service.flow_ms?o.service.flow_ok==1:(o.service.pack_verified==4&&o.service.packets==4&&o.service.acks==4&&o.service.frames==1920))&&
    o.service.drained&&o.service.ready_cleared&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.service.waited_ms,(unsigned long long)o.service.first_written,(unsigned long long)o.service.start_frame,o.service.ready_after,
    o.service.underrun_waits,o.service.pack_verified,o.service.packets,o.service.acks,(unsigned long long)o.service.frames,o.service.drained,

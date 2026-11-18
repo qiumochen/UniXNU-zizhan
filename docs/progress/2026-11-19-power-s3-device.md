@@ -28,3 +28,7 @@
 | pwr-s4 | S3 参数 + `zizhan_power_inject=10 pong_touch_synth=3` | 10 次 off/on 全部 PASS；10 次 `paused`/`resumed`，每个熄屏期丢弃合成滑动 66 个事件（一次 23）；无 FAIL |
 
 S2（停止呈现/VSync）仍未实现；熄屏期间 GPU/合成照常运行，影响的是功耗而不是可用性。
+
+## 组合稳定性（02:55）
+
+daily-1..4（`zizhan_thermal=1` + S3 10 轮 + S4 + `pong_touch_synth=3` + Wi-Fi，内核 build-play19）：每轮 10/10 off/on、10/10 pause/resume，无 FAIL、无 panic，每轮 DHCP 完成；温控 mode1 采样 160，CPU 最高 67.4 °C、GPU 65.1 °C，未封顶。今晚 S3 累计 80 次 off/on 全部 PASS。

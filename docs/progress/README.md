@@ -1,6 +1,6 @@
 # Development notes
 
-[当前台账](STATUS.md) · [接手梳理与重新规划](../plan/2026-11-17-takeover-replan.md) · [双系统引导调研](../research/2026-11-17-dual-boot-loaders.md) · [11-17 前台账原文](2026-11-17-status-archive.md) · [11-14 回到主线与系统应用目标](2026-11-14-system-app-resume.md) · [本批无人值守交付与历史](2026-11-14-app-unattended.md) · [主线应用修复调研](../research/2026-11-14-main-app-repair-directions.md) · [Weather/Safari晚间接续调查](../research/2026-11-14-weather-safari-followup.md)
+[当前台账](STATUS.md) · [今晚分支收口](2026-11-17-codex-prep-summary.md) · [M2 方案](../plan/2026-11-17-m2-thermal-and-screen-off.md) · [M3 评估](../research/2026-11-17-m3-bootmenu-port.md) · [电池健康输入](../research/2026-11-17-battery-health-inputs.md) · [接手梳理与重新规划](../plan/2026-11-17-takeover-replan.md) · [双系统引导调研](../research/2026-11-17-dual-boot-loaders.md) · [11-17 前台账原文](2026-11-17-status-archive.md) · [11-14 回到主线与系统应用目标](2026-11-14-system-app-resume.md) · [本批无人值守交付与历史](2026-11-14-app-unattended.md) · [主线应用修复调研](../research/2026-11-14-main-app-repair-directions.md) · [Weather/Safari晚间接续调查](../research/2026-11-14-weather-safari-followup.md)
 
 一小时人工验证： [传感器、GNSS、音频与折叠检查点](2026-11-14-sensors-gps-audio-fold.md)
 

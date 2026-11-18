@@ -9,6 +9,7 @@
 #include <kern/thread.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
+#include "../ArmDTPlatform/ZizhanThermalPolicy.h"
 extern "C" uint64_t pong_cpu_idle_mach(unsigned int);
 /* zizhan touch boost (docs/progress/2026-11-01-120hz-and-cadence.md section 8): bsd/dev/pong_fts.c counts every touch report, real
  * or pong_touch_synth. A gesture's first frames were computed at the idle clock while the load windows ramped (at most doubling
@@ -16,6 +17,9 @@ extern "C" uint64_t pong_cpu_idle_mach(unsigned int);
  * input, every domain is held at its cap from the first report until pong_cpu_boost_ms (default 400, 0 = off) after the last;
  * the caps are the policy's own and no boost row is used. */
 extern "C" volatile uint32_t pong_touch_activity __attribute__((weak));
+/* zizhan THERM-01 (ZizhanThermalService.h): 0 = unrestricted, 20 = the
+ * lowest usable EPSS row. Weak so a reduced kernel without the service links. */
+extern "C" volatile uint32_t pong_cpu_thermal_level __attribute__((weak));
 /* zizhan L3 (docs/progress/2026-11-01-120hz-and-cadence.md section 12): nothing voted the EPSS L3, the CPUs' shared cache clock.
  * Mainline osm-l3.c "qcom,epss-l3" (sm8450.dtsi interconnect@17d90000), as UniXNU-sheng package/CpuFreqProbe.cpp votes it on
  * SM8550: LUT at 0x100 in the domains' row format, vote at 0x90; no other offset is touched. The boot loader leaves level 13
@@ -38,6 +42,16 @@ struct Domain {
 static Domain domains[]={{0,4,1804800},{4,3,2496000},{7,1,2995200}};
 static Domain l3{0,0,0};
 static IOMemoryMap *pdmem_map;
+static unsigned thermalLevel()
+{
+    if(!&pong_cpu_thermal_level)return 0;
+    const unsigned level=__atomic_load_n(&pong_cpu_thermal_level,__ATOMIC_ACQUIRE);
+    return level>20u?20u:level;
+}
+static unsigned thermalCapKhz(const Domain &d,unsigned level)
+{
+    return zizhan_thermal_cpu_cap_khz(level,d.khz,d.levels);
+}
 static unsigned stateKhz(const Domain &d){return (d.regs[0x20/4]&255)*19200u;}
 static bool prepareL3()
 {
@@ -69,7 +83,9 @@ static void voteL3(unsigned level)
 static void setTop(Domain &d)
 {
     unsigned top=40;
-    for(unsigned i=0;i<d.levels;++i)if(d.khz[i] && d.khz[i]<=d.cap_khz)top=i;
+    const unsigned thermal=thermalCapKhz(d,thermalLevel());
+    for(unsigned i=0;i<d.levels;++i)if(d.khz[i] && d.khz[i]<=d.cap_khz &&
+        (!thermal || d.khz[i]<=thermal))top=i;
     if(top!=40 && d.regs[0x320/4]!=top){*d.pdmem=top;d.regs[0x320/4]=top;}
     d.down=0;
 }
@@ -186,6 +202,8 @@ static void worker(void *,wait_result_t)
     unsigned boostMs=400;PE_parse_boot_argn("pong_cpu_boost_ms",&boostMs,sizeof boostMs);
     uint64_t boostTicks=0,boostUntil=0,boosts=0,boostedTicks=0,reportAt=0,stateSum[3]{},stateN=0,l3Sum=0,l3N=0;nanoseconds_to_absolutetime(uint64_t(boostMs)*1000000ull,&boostTicks);
     uint32_t touches=&pong_touch_activity?pong_touch_activity:0;
+    bool l3Thermal=false;
+    unsigned lastThermal=0;
     for(unsigned tick=0;;++tick) {
         // 8 ms: a touch is seen within a frame or so; the load policy below still runs every 32 ms
         IOSleep(8);
@@ -195,7 +213,7 @@ static void worker(void *,wait_result_t)
             if(at>=boostUntil) {
                 ++boosts;
                 for(auto &d:domains)if(d.live)setTop(d);
-                if(l3Mode==2)voteL3(l3.levels-1);
+                if(l3Mode==2 && !thermalLevel())voteL3(l3.levels-1);
                 __asm__ volatile("dsb oshst":::"memory");
             }
             boostUntil=at+boostTicks;
@@ -204,6 +222,8 @@ static void worker(void *,wait_result_t)
         const uint64_t now=mach_absolute_time(),elapsed=now-stamp;stamp=now;
         if(!elapsed)continue;
         const bool boosted=now<boostUntil;
+        const unsigned thermalLevelNow=thermalLevel();
+        const bool thermalNow=thermalLevelNow!=0;
         if(boosted) {
             boostedTicks+=elapsed;++stateN;
             for(unsigned i=0;i<3;++i)if(domains[i].live)stateSum[i]+=stateKhz(domains[i])/1000;
@@ -245,22 +265,40 @@ static void worker(void *,wait_result_t)
                 const unsigned hardware=(d.regs[0x20/4]&255)*19200u;
                 if(hardware && hardware<cap)cap=hardware;
             }
+            const unsigned thermal=thermalCapKhz(d,thermalLevelNow);
+            if(thermal && thermal<cap)cap=thermal;
+            if(requested>cap)requested=cap;
             unsigned selected=40,last=40;
             for(unsigned i=0;i<d.levels;++i)if(d.khz[i] && d.khz[i]<=cap) {
                 last=i;if(d.khz[i]>=requested){selected=i;break;}
             }
             if(selected==40)selected=last;
             if(selected==40 || selected==current){d.down=0;continue;}
-            if(d.khz[selected]<freq && ++d.down<4)continue;
+            /* A thermal cap is a ceiling, not a load estimate: apply it in
+             * this tick instead of waiting out the load-policy hysteresis. */
+            if(d.khz[selected]<freq && !thermal && ++d.down<4)continue;
             d.down=0;
             // Voltage and thermal ceilings remain firmware-controlled.
             // Request only real, non-boost LUT indices through perf-lock.
             *d.pdmem=selected;d.regs[0x320/4]=selected;
             __asm__ volatile("dsb oshst":::"memory");
         }
-        if(l3Mode==2 && l3.live) {
+        if(thermalLevelNow!=lastThermal) {
+            lastThermal=thermalLevelNow;
+            unsigned state[3]{},selected[3]{};
+            for(unsigned i=0;i<3;++i)if(domains[i].live) {
+                const Domain &d=domains[i];
+                state[i]=stateKhz(d)/1000;
+                const unsigned row=d.regs[0x320/4];
+                selected[i]=row<d.levels?d.khz[row]/1000:0;
+            }
+            IOLog("Pong CPU: thermal level %u state %u/%u/%u MHz selected %u/%u/%u MHz\n",
+                thermalLevelNow,state[0],state[1],state[2],selected[0],selected[1],selected[2]);
+        }
+        if(l3Mode==1 && l3Thermal && !thermalNow)voteL3(l3.levels-1);
+        if((l3Mode==2 || (l3Mode==1 && thermalNow)) && l3.live) {
             uint64_t want=l3.cap_khz;
-            if(!boosted) {
+            if(!boosted || thermalNow) {
                 unsigned share=0;   /* per mille of its cap, fastest domain */
                 for(auto &d:domains)if(d.live) {
                     const unsigned current=d.regs[0x320/4];
@@ -273,6 +311,7 @@ static void worker(void *,wait_result_t)
             for(unsigned i=0;i<l3.levels;++i)if(l3.khz[i]>=want){level=i;break;}
             voteL3(level);
         }
+        l3Thermal=thermalNow;
     }
 }
 static void start()

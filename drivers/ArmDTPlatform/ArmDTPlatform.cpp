@@ -23,6 +23,7 @@
 #include "PongCpuPark.h"
 #include "ZizhanHallProbe.h"
 #include "ZizhanTsensProbe.h"
+#include "ZizhanThermalService.h"
 #include "ZizhanPowerAudit.h"
 
 extern "C" bool pong_cpu_start(IOService *platform);
@@ -45,6 +46,8 @@ volatile uint32_t armdt_platform_bus_count = 0;
 volatile uint32_t armdt_platform_defaults_count = 0;
 volatile uint32_t armdt_platform_nvram_proxy = 0;
 volatile uint32_t armdt_platform_device_count = 0;
+volatile uint32_t pong_cpu_thermal_level = 0;
+volatile uint32_t pong_gpu_thermal_level = 0;
 }
 
 class ArmDTPlatform : public IODTPlatformExpert {
@@ -233,6 +236,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   }
   armdt_platform_configured = 1;
   zizhan_tsens::start(provider);
+  zizhan_thermal::start(provider);
   zizhan_hall::start(provider);
   zizhan_power_audit::start(provider);
 #if XNU_PONG_WIFI || XNU_PONG_POWER

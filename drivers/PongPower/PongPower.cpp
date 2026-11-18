@@ -13,6 +13,7 @@ void zizhan_se15_probe(void);
 void zizhan_se15_prepare_probe(void);
 void zizhan_cmd_db_probe(void);
 void zizhan_audio_prm_probe(void);
+void zizhan_audio_service_probe(void);
 void PongBatteryStaticInit(void);
 volatile int32_t native_battery_stats[16];
 void pong_power_start_optional(void) {
@@ -30,5 +31,6 @@ void pong_power_start_optional(void) {
  if(h){PongBatteryStaticInit();if(!OSMetaClass::postModLoad(h))sheng_battery_start();}
  sheng_audio_probe();
  zizhan_audio_prm_probe();
+ zizhan_audio_service_probe();   // default off; zizhan_audio_service=1 (I1: service/memory only, no graph)
 }
 }

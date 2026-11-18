@@ -93,9 +93,8 @@ Default-off, no hardware transition or visibility completion is inferred.
  }
  
  /* A swap's surfaces onto the panel, once the GPU is done with them. */
-@@ -1564,6 +1610,12 @@
+@@ -1564,6 +1610,11 @@
  	case kFBMethodRequestPowerChange:
-+		extern "C" int zizhan_display_power_request(uint32_t,const uint64_t *,size_t) __attribute__((weak_import));
  		if (zizhan_display_power_observe)
  			zizhan_display_power_observe(args->scalarInputCount, in, args->structureInputSize);
 +		fOwner->observePowerOwner();

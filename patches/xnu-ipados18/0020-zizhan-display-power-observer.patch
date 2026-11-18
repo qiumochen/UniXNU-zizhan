@@ -1,17 +1,18 @@
 zizhan: observe bounded native display power requests without changing hardware or legacy ABI.
 --- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 +++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
-@@ -1444,6 +1444,9 @@
+@@ -1444,6 +1444,10 @@
  	}
  }
  
 +// zizhan POWER-02: default-off bounded observation; S3 executor is a separate weak hook.
 +extern "C" void zizhan_display_power_observe(uint32_t,const uint64_t *,size_t) __attribute__((weak_import));
++extern "C" int zizhan_display_power_request(uint32_t,const uint64_t *,size_t) __attribute__((weak_import));
 +
  IOReturn
  IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
      IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
-@@ -1556,8 +1559,13 @@
+@@ -1556,8 +1560,13 @@
  	case kFBMethodSwapSignal:
  	case kFBMethodSwapCancel:
  	case kFBMethodSwapCancelAll:

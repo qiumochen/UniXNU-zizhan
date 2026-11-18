@@ -12,7 +12,7 @@
 | `drivers/ArmDTPlatform/ZizhanThermalPolicy.h` | 新增 boot-arg 解析规则（`zizhan_thermal_tune`）和负载停止状态（deadline / 75°C） |
 | `drivers/ArmDTPlatform/ZizhanTsensProbe.h` | `zizhan_thermal` 非 0 时跳过旧的 one-shot `zizhan_tsens`，避免两个线程同时读 TSENS |
 | `drivers/ArmDTPlatform/ArmDTPlatform.cpp` | 启动服务；定义 `pong_cpu_thermal_level` / `pong_gpu_thermal_level` |
-| `drivers/ArmCpu/PongCpuPolicy.h` | 按档位收窄三个 EPSS 域的 LTU 上限；触摸 boost 的 `setTop` 也受温控限制；温控下压不等负载滞后，32 ms 内生效；温控期间 L3 跟随最快域；档位变化时打印真实 state/selected |
+| `drivers/ArmCpu/PongCpuPolicy.h` | 按档位收窄三个 EPSS 域的 LTU 上限；触摸 boost 的 `setTop` 也受温控限制；温控下压不等负载滞后，32 ms 内生效；温控期间 L3 跟随最快域、boost 也不能抬高；档位变化时打印真实 state/selected |
 | `drivers/PongAdreno/PongAdrenoPlatform.cpp` | DCVS 每轮把 `top` 收窄到 `13 - gpu_level`，`floor` 再取 `min(boot_floor, top)` |
 | `tools/zizhan/tests/thermal-policy.c` | 新增 boot-arg、测试阈值、stale/invalid 保持、负载 deadline/75°C 停止的用例 |
 
@@ -84,7 +84,8 @@ T3 的 `test_cpu` 必须在 40..100 且低于 110；若 T1 待机 +8 超过 100�
 
 - 本分支提交：`3a09da1`（服务/封顶接线）、`dbc1265`（测试阈值）、`13fa32f`
   （有界负载）、`8633de8`（主机测试）、`1c704d3`（EPSS 读回日志）、
-  `2458668`（温控下压跳过负载滞后）、`817e42f`（温控结束后 L3 回到 boot top）。
+  `2458668`（温控下压跳过负载滞后）、`817e42f`（温控结束后 L3 回到 boot top）、
+  `1cbd489`（L3 复位不被共享域投票覆盖，boost 不越过温控）。
 - `python3 tools/zizhan/tests/thermal-policy.py`：Mac `cc`（Apple clang 21）
   0 failure。
 - `zizhan-ci:gcc14-clang` 内 `gcc-14` 与 `clang` 19 均以

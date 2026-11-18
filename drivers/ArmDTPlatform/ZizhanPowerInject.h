@@ -21,6 +21,7 @@ extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint
 enum : uint32_t { PongButtonDown = 4u, PongButtonUp = 5u, PongButtonPower = 0u };
 
 namespace zizhan_power_inject {
+static uint32_t inject_value = 1;
 
 static uint64_t uptime_ms(void) {
   uint64_t ns = 0;
@@ -64,7 +65,9 @@ static void worker(void *, wait_result_t) {
     return;
   }
   IOSleep(ZizhanPowerInjectDelayMs);
-  for (unsigned press = 0; press < ZizhanPowerPressCount; ++press) {
+  const unsigned presses = zizhan_power_inject_presses(inject_value);
+  const uint32_t gap_ms = zizhan_power_inject_gap_ms(inject_value);
+  for (unsigned press = 0; press < presses; ++press) {
     const uint64_t down = uptime_ms();
     IOLog("ZIZHAN_POWER_INJECT: press=%u phase=down t_ms=%llu\n",
           press + 1, (unsigned long long)down);
@@ -74,9 +77,9 @@ static void worker(void *, wait_result_t) {
     pong_touch_post(PongButtonUp, PongButtonPower, 0, 0);
     IOLog("ZIZHAN_POWER_INJECT: press=%u phase=up t_ms=%llu\n",
           press + 1, (unsigned long long)up);
-    if (press + 1 < ZizhanPowerPressCount) IOSleep(ZizhanPowerPressGapMs);
+    if (press + 1 < presses) IOSleep(gap_ms);
   }
-  IOLog("ZIZHAN_POWER_INJECT: DONE presses=%u\n", (unsigned)ZizhanPowerPressCount);
+  IOLog("ZIZHAN_POWER_INJECT: DONE presses=%u\n", presses);
   finish();
 }
 
@@ -97,14 +100,15 @@ static void start(void) {
     return;
   }
   if (mode != ZizhanPowerInjectRun) return;
+  inject_value = inject;
   thread_t thread = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &thread) != KERN_SUCCESS) {
     IOLog("ZIZHAN_POWER_INJECT: FAIL worker-start\n");
     return;
   }
   IOLog("ZIZHAN_POWER_INJECT: RUNNING presses=%u hold_ms=%u gap_ms=%u delay_ms=%u\n",
-        (unsigned)ZizhanPowerPressCount, (unsigned)ZizhanPowerPressHoldMs,
-        (unsigned)ZizhanPowerPressGapMs, (unsigned)ZizhanPowerInjectDelayMs);
+        zizhan_power_inject_presses(inject), (unsigned)ZizhanPowerPressHoldMs,
+        (unsigned)zizhan_power_inject_gap_ms(inject), (unsigned)ZizhanPowerInjectDelayMs);
   thread_deallocate(thread);
 }
 

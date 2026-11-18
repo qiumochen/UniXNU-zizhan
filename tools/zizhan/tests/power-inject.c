@@ -16,8 +16,12 @@ int main(void){
  CHECK(zizhan_power_inject_mode(1,2)==ZizhanPowerInjectSkipObserve,
        "observe must be exactly 1");
  CHECK(zizhan_power_inject_mode(1,1)==ZizhanPowerInjectRun,"inject runs with observe");
- CHECK(zizhan_power_inject_mode(2,1)==ZizhanPowerInjectSkipMode,
-       "unsupported inject mode skips");
+ CHECK(zizhan_power_inject_mode(2,1)==ZizhanPowerInjectRun,"inject 2 runs two cycles");
+ CHECK(zizhan_power_inject_mode(10,1)==ZizhanPowerInjectRun,"inject 10 runs ten cycles");
+ CHECK(zizhan_power_inject_mode(11,1)==ZizhanPowerInjectSkipMode,"more than ten cycles skips");
+ CHECK(zizhan_power_inject_presses(1)==2u&&zizhan_power_inject_gap_ms(1)==8000u,"inject 1 keeps the S1 schedule");
+ CHECK(zizhan_power_inject_presses(10)==20u&&zizhan_power_inject_gap_ms(10)==5000u,"ten cycles: 20 presses 5 s apart");
+ CHECK(20000u+zizhan_power_inject_presses(10)*(ZizhanPowerPressHoldMs+zizhan_power_inject_gap_ms(10))<150000u,"ten cycles fit well inside the autoreset window");
 
  CHECK(ZizhanPowerInjectDelayMs==20000u,"first frame delay is 20 s");
  CHECK(ZizhanPowerPressCount==2u,"exactly two presses");

@@ -15,6 +15,12 @@ enum {
  ZizhanPowerPressCount=2u
 };
 
+/* zizhan_power_inject=N (2..10): N off/on cycles (2N presses) 5 s apart, so ten cycles finish
+ * well inside the 210 s autoreset window. N=1 keeps the S1 schedule above. */
+enum {ZizhanPowerCyclesMax=10u,ZizhanPowerCycleGapMs=5000u};
+static inline unsigned zizhan_power_inject_presses(uint32_t inject){return inject>=2u&&inject<=ZizhanPowerCyclesMax?2u*inject:ZizhanPowerPressCount;}
+static inline uint32_t zizhan_power_inject_gap_ms(uint32_t inject){return inject>=2u?ZizhanPowerCycleGapMs:ZizhanPowerPressGapMs;}
+
 enum {
  ZizhanPowerInjectOff=0,
  ZizhanPowerInjectRun=1,
@@ -24,7 +30,7 @@ enum {
 
 static inline int zizhan_power_inject_mode(uint32_t inject,uint32_t observe){
  if(!inject)return ZizhanPowerInjectOff;
- if(inject!=1u)return ZizhanPowerInjectSkipMode;
+ if(inject>ZizhanPowerCyclesMax)return ZizhanPowerInjectSkipMode;
  if(observe!=1u)return ZizhanPowerInjectSkipObserve;
  return ZizhanPowerInjectRun;
 }

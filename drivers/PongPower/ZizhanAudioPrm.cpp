@@ -12,6 +12,7 @@
 #include "ShengAdsp.h"
 #include "ZizhanAudioPrm.h"
 #include "ZizhanAudioService.h"
+#include "ZizhanAudioServiceGate.h"
 #include "ZizhanAudioSilent.h"
 #include "ZizhanAudioGraph.h"
 #include "ZizhanTdm.h"
@@ -29,11 +30,19 @@ extern "C" void pong_smmu_lease_unlock(void);
 extern "C" boolean_t pmap_valid_page(ppnum_t);
 extern "C" int pong_klog_flush(int reason) __attribute__((weak));
 extern "C" {extern volatile int32_t native_adsp_stats[16];extern char native_adsp_text[96];}
+// ZizhanAudioService.cpp: the service page/ring this PRM mode-40 owner streams from, and the Start handoff.
+extern "C" volatile ZizhanAudioControl *zizhan_audio_service_control(void);
+extern "C" int16_t *zizhan_audio_service_ring(void);
+extern "C" ZizhanAudioHandoff *zizhan_audio_service_handoff(void);
 namespace {
 struct Packet {unsigned bytes;uint8_t data[512];};
 struct Runtime {
  unsigned ready_before,ready_after,watermark_gate,underrun_gate,pack_verified;
  unsigned packets,acks,drained,ready_cleared;uint64_t frames;
+};
+struct ServiceRun {
+ unsigned waited_ms,ready_after,underrun_waits,pack_verified,packets,acks,drained,ready_cleared,stopped_by_request;
+ uint64_t first_written,start_frame,frames;
 };
 struct Owner {
  IOLock *lock;ShengAdspChannel *channel;Packet queue[16];
@@ -45,7 +54,7 @@ struct Owner {
  unsigned tone_prepared,tone_cleared;
  unsigned transfer_calls,transfer_acks,write_sent,write_ack;
  unsigned graph_acks,batch_acks,tone48_prepared,tone48_cleared;ZizhanAudioBatch batch;
- Runtime runtime;
+ Runtime runtime;ServiceRun service;
 };
 Owner owner={};
 uint64_t now_us(){uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;}
@@ -296,6 +305,87 @@ __attribute__((noinline)) bool runtime_round(){
  return ok&&r.ready_before==0&&r.ready_after==1&&r.watermark_gate==1&&r.underrun_gate==1&&
         r.pack_verified==4&&r.packets==4&&r.acks==4&&r.drained==1&&r.ready_cleared==1&&r.frames==1920;
 }
+/* Mode 40 (I4): the same verified graph and four finite periods as mode 38,
+ * but the ring, control page and producer belong to the ZizhanAudio service:
+ * the HAL (or the silent self-test) writes the ring and publishes out_written.
+ * Running and a fresh anchor are published once the graph is started; Ready
+ * only once the producer covers the first whole period. An uncovered period
+ * waits (bounded) instead of being filled; Stop is honoured between periods.
+ * No data pads, amplifier or output: the same scope as mode 38. */
+__attribute__((noinline)) bool service_round(){
+ auto &o=owner;auto &r=o.service;
+ volatile ZizhanAudioControl *ctl=zizhan_audio_service_control();int16_t *ring=zizhan_audio_service_ring();
+ ZizhanAudioHandoff *h=zizhan_audio_service_handoff();
+ const uint64_t tagged=zizhan_audio_dma_map_address(),base=uint32_t(tagged);
+ if(!ctl||!ring||!zizhan_audio_control_valid(ctl)||(tagged>>32)!=1||!base||(base&4095)||base>0xffff0000ull||!o.dma_mapped||!o.memory.handle)return false;
+ for(unsigned i=0;i<16;++i)if(pmap_valid_page((ppnum_t)((base>>12)+i)))return false;
+ auto memory=IODeviceMemory::withRange(base,65536);
+ auto map=memory?memory->map(kIOMapAnywhere|kIOMapWriteCombineCache):nullptr;if(memory)memory->release();
+ if(!map)return false;
+ auto dma=reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress());
+ ctl->out_seq=ctl->out_seq+1;__atomic_thread_fence(__ATOMIC_RELEASE);ctl->out_anchor_host=mach_absolute_time();
+ __atomic_thread_fence(__ATOMIC_RELEASE);ctl->out_seq=ctl->out_seq+1;
+ __atomic_or_fetch(&ctl->state,(uint32_t)ZizhanAudioOutputRunning,__ATOMIC_RELEASE);
+ IOLog("ZIZHAN_AUDIO_SERVICE_RUN: running anchor=%llu lead=%u\n",(unsigned long long)ctl->out_anchor_host,ctl->lead_frames);
+ uint64_t written=0;bool ok=false;
+ for(r.waited_ms=0;r.waited_ms<2000&&!zizhan_handoff_stopping(h);r.waited_ms+=10){
+  if(zizhan_audio_written_stable(ctl,&written)&&written){ok=true;break;}IOSleep(10);}
+ r.first_written=written;r.start_frame=zizhan_service_start_frame(written);
+ // Static: the PRM worker's 16 KiB stack already carries the graph and IOLog frames (11-18 overflow).
+ static ZizhanAudioService svc;static uint8_t expect[ZizhanRingPcmBytes];memset(&svc,0,sizeof svc);
+ ok=ok&&zizhan_service_init(&svc,ctl,tagged,o.memory.handle,4,r.start_frame,now_us())&&
+    zizhan_service_map(&svc,1)&&zizhan_service_graph_started(&svc);
+ for(unsigned i=0;ok&&i<50&&!zizhan_service_publish_ready(&svc);++i){++r.underrun_waits;IOSleep(10);}
+ r.ready_after=ok&&(ctl->state&ZizhanAudioOutputReady)?1u:0u;ok=ok&&r.ready_after;
+ unsigned slot=0;
+ while(ok&&slot<4){
+  if(zizhan_handoff_stopping(h)){r.stopped_by_request=1;break;}
+  auto dst=const_cast<uint8_t *>(dma)+slot*0x3000u;const uint64_t frame=svc.stream.next_frame;
+  // Wait for a stable watermark covering this period before staging: an odd
+  // written_seq read inside the gate is a failure, not an underrun.
+  unsigned tries=0;uint64_t w=0;
+  while(!(zizhan_audio_written_stable(ctl,&w)&&w>=frame+ZIZHAN_AUDIO_PERIOD_FRAMES)&&tries<20){++tries;++r.underrun_waits;IOSleep(10);}
+  if(tries>=20||!zizhan_service_stage(&svc,ring,slot,dst)){ok=false;break;}
+#if defined(__aarch64__) && defined(KERNEL)
+  __asm__ volatile("dsb sy":::"memory");
+#endif
+  ZizhanRingReceipt receipt={};
+  if(!zizhan_ring_pack(ring,ZIZHAN_AUDIO_RING_FRAMES,frame,expect,&receipt)||receipt.packed!=sizeof expect||memcmp(dst,expect,sizeof expect)){ok=false;break;}
+  ++r.pack_verified;
+  uint8_t tx[512];const unsigned n=zizhan_service_commit(&svc,slot,now_us(),tx);
+  if(!n||sheng_adsp_send(o.channel,tx,n)){ok=false;break;}
+  ++r.packets;bool done=false;
+  for(unsigned iteration=0;iteration<40&&ok&&!done;++iteration){
+   Packet p={};unsigned closed,overflow;
+   IOLockLock(o.lock);closed=o.closed;overflow=o.overflow;
+   if(o.count){p=o.queue[o.head];o.head=(o.head+1)%16;--o.count;}
+   IOLockUnlock(o.lock);
+   if(closed||overflow){ok=false;break;}
+   if(p.bytes){const int accepted=zizhan_service_receive(&svc,p.data,p.bytes,now_us());if(accepted<0){ok=false;break;}if(accepted==1)done=true;}
+   if(!done&&svc.phase==ZizhanServiceFailed){ok=false;break;}
+   if(!done)IOSleep(10);
+  }
+  if(!done){ok=false;break;}
+  ++r.acks;++slot;
+ }
+ if(svc.magic){zizhan_service_stop(&svc);r.frames=svc.stream.batch.confirmed_frames;r.drained=zizhan_service_done(&svc)?1u:0u;}
+ __atomic_and_fetch(&ctl->state,~(uint32_t)(ZizhanAudioOutputReady|ZizhanAudioOutputRunning),__ATOMIC_RELEASE);
+ r.ready_cleared=!(ctl->state&(ZizhanAudioOutputReady|ZizhanAudioOutputRunning))?1u:0u;
+ map->release();
+ ok=ok&&r.ready_after&&r.pack_verified==4&&r.packets==4&&r.acks==4&&r.frames==1920&&r.drained&&r.ready_cleared;
+ zizhan_handoff_finish(h,ok);
+ return ok;
+}
+/* Mode 40: wait (bounded, before any PRM lease) for the service's one Start. */
+bool service_wait(){
+ ZizhanAudioHandoff *h=zizhan_audio_service_handoff();
+ for(unsigned ms=0;ms<170000;ms+=10){
+  if(zizhan_handoff_take(h)){IOLog("ZIZHAN_AUDIO_SERVICE_RUN: start taken waited_ms=%u\n",ms);return true;}
+  IOSleep(10);
+ }
+ zizhan_handoff_finish(h,0);
+ IOLog("ZIZHAN_AUDIO_SERVICE_RUN: SKIP no-start waited_ms=170000 lease=0 graph=0 finished=1\n");return false;
+}
 __attribute__((noinline)) bool graph_round(){
  auto &o=owner;uint8_t b[512];unsigned n;
  n=zizhan_mfc_device_open(b,sizeof b,0x7a300001u);
@@ -321,6 +411,7 @@ __attribute__((noinline)) bool graph_round(){
   ZizhanMfcSg,ZizhanPcmSg,ZizhanMfcIid,ZizhanTdmIid);
  if(o.mode==36||o.mode==37){if(!batch_round(o.mode==36))return false;}
  else if(o.mode==38){if(!runtime_round())return false;}
+ else if(o.mode==40){if(!service_round())return false;}
  else IOSleep(1000);
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a300009u,AR_OP_GRAPH_STOP,ZizhanPcmSg);
  if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a300009u,ZizhanPcmPort)){return false;}++o.graph_acks;
@@ -422,6 +513,7 @@ __attribute__((noinline)) bool dma_observe(){
 }
 void worker(void *,wait_result_t){
  thread_set_thread_name(current_thread(),"zizhan_audio_prm");auto &o=owner;
+ if(o.mode==40&&!service_wait())return;
  const uint64_t start=now_us();bool linked=false;const uint64_t worker_limit=o.mode>=7?90000000u:40000000u;
  /* Retained static client context never freed while callbacks may arrive.
   * Whole worker cap40s,iteration4000 prevents frozen-clock hangs. */
@@ -463,7 +555,7 @@ void worker(void *,wait_result_t){
     if(o.mode==25&&!dma_observe()){zizhan_prm_fail(&o.state,ZizhanPrmNotReady);o.state.uncertain=1;break;}
     o.silent_called=1;const uint64_t hold_begin=now_us();
     IOLog("ZIZHAN_AUDIO_SILENT: RUNNING same-thread=1 core_held=1 clock_held=1 hold_limit_us=60000000 audio_output=0\n");
-    if(o.mode==35||o.mode==36||o.mode==37||o.mode==38){
+    if(o.mode==35||o.mode==36||o.mode==37||o.mode==38||o.mode==40){
      if(!graph_round()){zizhan_prm_fail(&o.state,ZizhanPrmNotReady);o.state.uncertain=1;break;}
      o.silent.release_safe=1;
     } else {
@@ -576,7 +668,14 @@ void worker(void *,wait_result_t){
    o.graph_acks,o.runtime.ready_before,o.runtime.ready_after,o.runtime.watermark_gate,o.runtime.underrun_gate,o.runtime.pack_verified,
    o.runtime.packets,o.runtime.acks,(unsigned long long)o.runtime.frames,o.runtime.drained,o.runtime.ready_cleared,
    o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
- if(o.mode>=29&&o.mode!=38){if(!o.dma_restored)zizhan_audio_dma_map_retain();
+ if(o.mode==40){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
+  IOLog("ZIZHAN_AUDIO_SERVICE_RUN: %s acks=%u waited_ms=%u first_written=%llu start_frame=%llu ready_after=%u underrun_waits=%u pack=%u packets=%u done_acks=%u frames=%llu drained=%u ready_cleared=%u stopped_by_request=%u mapped=%u restored=%u memory_phase=%u handle=%x data=service audio_output=0 finished=1\n",
+   o.graph_acks==12&&o.service.ready_after&&o.service.pack_verified==4&&o.service.packets==4&&o.service.acks==4&&o.service.frames==1920&&
+   o.service.drained&&o.service.ready_cleared&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
+   o.graph_acks,o.service.waited_ms,(unsigned long long)o.service.first_written,(unsigned long long)o.service.start_frame,o.service.ready_after,
+   o.service.underrun_waits,o.service.pack_verified,o.service.packets,o.service.acks,(unsigned long long)o.service.frames,o.service.drained,
+   o.service.ready_cleared,o.service.stopped_by_request,o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
+ if(o.mode>=29&&o.mode!=38&&o.mode!=40){if(!o.dma_restored)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_WIRE: %s callbacks=%u completed=%u write_sent=%u write_ack=%u zero_verified=%u connected=%u restored=%u memory_phase=%u retired=%u data_bytes_each=%u outputs_off=%u finished=1\n",
    o.state.phase==ZizhanPrmDone&&o.dma_restored&&o.write_ack==(o.mode==34?4u:2u)&&o.silent.amp_pass?"PASS":"FAIL",o.transfer_calls,o.transfer_acks,o.write_sent,o.write_ack,o.zero_verified,o.silent.data_connected,o.silent.data_restored,o.memory.phase,o.dma_restored,ZizhanWriteBytes,o.mode==34?0u:1u);}
  if(o.mode==33)IOLog("ZIZHAN_AUDIO_TONE: %s prepared=%u cleared=%u callbacks=%u write_ack=%u output_enables=0 finite_frames=960 finished=1\n",o.state.phase==ZizhanPrmDone&&o.tone_prepared&&o.tone_cleared&&o.write_ack==2?"PASS":"FAIL",o.tone_prepared,o.tone_cleared,o.transfer_calls,o.write_ack);
@@ -592,17 +691,17 @@ void worker(void *,wait_result_t){
    o.silent.diagnostic_capture&&o.silent.release_safe&&o.state.phase==ZizhanPrmDone?"PASS":"FAIL",
    o.silent.diagnostic_capture,o.silent.reset_asserted,o.silent.pin_restored,
    o.state.phase==ZizhanPrmDone?1u:0u,o.state.lease_held,o.state.clock_held,o.state.uncertain);
- if(o.mode>=9&&o.mode!=35&&o.mode!=36&&o.mode!=37&&o.mode!=38)IOLog("ZIZHAN_AUDIO_TDM: %s phase=%u sent=%u acknowledged=%u opened=%u running=%u uncertain=%u reason=%u remote=%u data_pads=0 audio_output=0 finished=1\n",
+ if(o.mode>=9&&o.mode!=35&&o.mode!=36&&o.mode!=37&&o.mode!=38&&o.mode!=40)IOLog("ZIZHAN_AUDIO_TDM: %s phase=%u sent=%u acknowledged=%u opened=%u running=%u uncertain=%u reason=%u remote=%u data_pads=0 audio_output=0 finished=1\n",
    o.tdm.phase==ZizhanTdmDone&&o.silent.release_safe&&o.state.phase==ZizhanPrmDone?"PASS":"FAIL",
    o.tdm.phase,o.tdm.sent,o.tdm.ack,o.tdm.opened,o.tdm.running,o.tdm.uncertain,o.tdm.reason,o.tdm.status);
- if(o.mode>=23&&o.mode!=35&&o.mode!=36&&o.mode!=37&&o.mode!=38)IOLog("ZIZHAN_AUDIO_PCM: %s phase=%u sent=%u acknowledged=%u opened=%u running=%u uncertain=%u reason=%u remote=%u joint=%u dma=%u data=%u audio_output=0 finished=1\n",
+ if(o.mode>=23&&o.mode!=35&&o.mode!=36&&o.mode!=37&&o.mode!=38&&o.mode!=40)IOLog("ZIZHAN_AUDIO_PCM: %s phase=%u sent=%u acknowledged=%u opened=%u running=%u uncertain=%u reason=%u remote=%u joint=%u dma=%u data=%u audio_output=0 finished=1\n",
    o.pcm.phase==ZizhanPcmDone&&o.silent.release_safe&&o.state.phase==ZizhanPrmDone?"PASS":"FAIL",
    o.pcm.phase,o.pcm.sent,o.pcm.ack,o.pcm.opened,o.pcm.running,o.pcm.uncertain,o.pcm.reason,o.pcm.status,o.pcm.joint,o.dma_mapped,o.write.sent);
  if(o.mode==16)IOLog("ZIZHAN_AUDIO_COREDEBUG: %s captured=%u amp_pass=%u reset_asserted=%u pin_restored=%u lease_done=%u core_held=%u clock_held=%u uncertain=%u audio_output=0 finished=1\n",
    o.silent.diagnostic_capture&&o.silent.release_safe&&o.state.phase==ZizhanPrmDone?"PASS":"FAIL",
    o.silent.diagnostic_capture,o.silent.amp_pass,o.silent.reset_asserted,o.silent.pin_restored,
    o.state.phase==ZizhanPrmDone?1u:0u,o.state.lease_held,o.state.clock_held,o.state.uncertain);
- if(o.mode==7||o.mode==12||o.mode==14||o.mode==15||o.mode==17||o.mode==18||o.mode==19||o.mode==20||o.mode==22||(o.mode>=23&&o.mode!=35&&o.mode!=36&&o.mode!=37&&o.mode!=38))IOLog("ZIZHAN_AUDIO_SILENT: %s invoked=%u amp_pass=%u reset_asserted=%u pin_restored=%u lease_done=%u core_held=%u clock_held=%u uncertain=%u audio_output=0 finished=1\n",
+ if(o.mode==7||o.mode==12||o.mode==14||o.mode==15||o.mode==17||o.mode==18||o.mode==19||o.mode==20||o.mode==22||(o.mode>=23&&o.mode!=35&&o.mode!=36&&o.mode!=37&&o.mode!=38&&o.mode!=40))IOLog("ZIZHAN_AUDIO_SILENT: %s invoked=%u amp_pass=%u reset_asserted=%u pin_restored=%u lease_done=%u core_held=%u clock_held=%u uncertain=%u audio_output=0 finished=1\n",
    o.silent.amp_pass&&o.silent.release_safe&&o.state.phase==ZizhanPrmDone?"PASS":"FAIL",
    o.silent.invoked,o.silent.amp_pass,o.silent.reset_asserted,o.silent.pin_restored,
    o.state.phase==ZizhanPrmDone?1u:0u,o.state.lease_held,o.state.clock_held,o.state.uncertain);
@@ -610,7 +709,9 @@ void worker(void *,wait_result_t){
 }
 extern "C" void zizhan_audio_prm_probe(void){
  unsigned mode=0,audio=0,prepare=0,adsp=0,observe=0;
- if(!PE_parse_boot_argn("zizhan_audio_prm",&mode,sizeof mode)||mode<1||mode>38)return;
+ if(!PE_parse_boot_argn("zizhan_audio_prm",&mode,sizeof mode)||mode<1||(mode>38&&mode!=ZIZHAN_AUDIO_PRM_SERVICE_MODE))return;
+ if(mode==ZIZHAN_AUDIO_PRM_SERVICE_MODE){unsigned service=0;
+  if(!PE_parse_boot_argn("zizhan_audio_service",&service,sizeof service)||service!=1){IOLog("ZIZHAN_AUDIO_PRM: SKIP mode40-needs-service writes=0 finished=1\n");return;}}
  if(mode==34){unsigned attended=0,dry=0;PE_parse_boot_argn("zizhan_pulse_dry",&dry,sizeof dry);if((!PE_parse_boot_argn("zizhan_audio_attended",&attended,sizeof attended)||attended!=1)&&dry!=1){IOLog("ZIZHAN_AUDIO_PULSE: SKIP attended=0 no_owner=1\n");return;}}
  PE_parse_boot_argn("pong_audio",&audio,sizeof audio);PE_parse_boot_argn("zizhan_se15_prepare",&prepare,sizeof prepare);PE_parse_boot_argn("pong_adsp",&adsp,sizeof adsp);
  if(mode>=7)PE_parse_boot_argn("zizhan_se15_observe",&observe,sizeof observe);
@@ -621,6 +722,8 @@ extern "C" void zizhan_audio_prm_probe(void){
  owner.mode=mode;owner.lock=IOLockAlloc();if(!owner.lock){IOLog("ZIZHAN_AUDIO_PRM: FAIL lock finished=1\n");return;}
  const ShengAdspClient client={channel_state,receive};owner.channel=sheng_adsp_channel("adsp_apps",512,16,1,&client,&owner);
  thread_t thread=nullptr;
+ // Mode 40 registers as the service's graph owner before its worker can wait for Start.
+ if(owner.channel&&mode==ZIZHAN_AUDIO_PRM_SERVICE_MODE)(void)zizhan_handoff_register(zizhan_audio_service_handoff());
  if(!owner.channel||kernel_thread_start(worker,nullptr,&thread)!=KERN_SUCCESS){IOLog("ZIZHAN_AUDIO_PRM: FAIL channel-or-thread finished=1\n");return;}
  thread_deallocate(thread);IOLog("ZIZHAN_AUDIO_PRM: RUNNING bounded%us no-codec-output=1\n",mode>=7?90u:40u);
 }

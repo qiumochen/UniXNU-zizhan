@@ -20,7 +20,11 @@ for later in ("inTaskWithOptions","preModLoad","OSTypeAlloc","kernel_thread_star
 # No graph, output or amp path is reachable from the I1 service.
 for forbidden in ("sheng_adsp_send","zizhan_audio_dma_map_begin","zizhan_cs35l41","ZizhanAudioOutputReady","GLOBAL_EN","PongAudio","sheng_audio_memory","sheng_audio_request"):
     assert forbidden not in source,forbidden
-assert source.count("zizhan_service_request(")==1 and ",0)){" in source,"Start must stay refused (graph_available=0)"
+# Start is granted only through the one-shot handoff, and only when PRM mode 40 registered as owner.
+assert source.count("zizhan_service_request(")==1 and ",owner)){" in source and "zizhan_handoff_request_start(&gHandoff)" in source
+assert "zizhan_handoff_register" not in source,"only the PRM owner registers"
+# The self-test producer exists only with PRM mode 40 and the explicit boot-arg.
+assert "prm==ZIZHAN_AUDIO_PRM_SERVICE_MODE" in probe and "zizhan_audio_selftest" in probe
 # Kernel thread stack: no large locals in this file.
 assert not re.search(r"\[\s*(\d{3,})\s*\]",source.replace("native_zizhan_audio_service[8]","")),"large local array"
 build=(R/"scripts/build-pong-power-native.py").read_text()

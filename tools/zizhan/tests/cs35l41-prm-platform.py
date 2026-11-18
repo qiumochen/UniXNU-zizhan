@@ -19,6 +19,7 @@ harness=r'''
 #include "ShengAdsp.h"
 #include "ZizhanAudioPrm.h"
 #include "ZizhanAudioService.h"
+#include "ZizhanAudioServiceGate.h"
 #include "ZizhanAudioSilent.h"
 #include "ZizhanTdm.h"
 #include "ZizhanPcm.h"
@@ -84,9 +85,13 @@ struct IORegistryEntry{
  OSData *getProperty(const char *p){assert(!strcmp(p,"compatible")||!strcmp(p,"pong-audio-dma"));static OSData d;return chosen_path&&dma_missing?nullptr:&d;}void release(){}
 };
 #define OSDynamicCast(type,value) static_cast<type *>(value)
+static unsigned service_arg;static ZizhanAudioHandoff handoff;
+extern "C" volatile ZizhanAudioControl *zizhan_audio_service_control(void){abort();}
+extern "C" int16_t *zizhan_audio_service_ring(void){abort();}
+extern "C" ZizhanAudioHandoff *zizhan_audio_service_handoff(void){return &handoff;}
 static bool PE_parse_boot_argn(const char *key,void *out,size_t size){assert(size==4);unsigned value;
  if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat")||!strcmp(key,"zizhan_pulse_dry")||!strcmp(key,"zizhan_write_ms")||!strcmp(key,"zizhan_write_flush")||!strcmp(key,"zizhan_write_probe"))return false;
- if(!strcmp(key,"zizhan_audio_attended"))value=attended;else if(!strcmp(key,"zizhan_audio_prm"))value=mode;else if(!strcmp(key,"pong_audio"))value=audio;
+ if(!strcmp(key,"zizhan_audio_service"))value=service_arg;else if(!strcmp(key,"zizhan_audio_attended"))value=attended;else if(!strcmp(key,"zizhan_audio_prm"))value=mode;else if(!strcmp(key,"pong_audio"))value=audio;
  else if(!strcmp(key,"zizhan_se15_prepare"))value=prepare_mode;else if(!strcmp(key,"zizhan_se15_observe"))value=observe_mode;else{assert(!strcmp(key,"pong_adsp"));value=adsp;}
  memcpy(out,&value,4);return value!=0;
 }
@@ -203,7 +208,7 @@ extern "C" void zizhan_amp_native_iv_run(const ZizhanPrmState *lease,ZizhanAudio
 extern "C" void zizhan_amp_native_core_run(const ZizhanPrmState *lease,ZizhanAudioSilentReceipt *r){zizhan_amp_silent_clock_run(lease,r);}
 /* SOURCE */
 int main(int argc,char **argv){assert(argc==2);std::string test=argv[1];
- if(test=="off")mode=0;else if(test=="unsupported")mode=39;else if(test=="direct")mode=2;else if(test=="native")mode=3;
+ if(test=="off")mode=0;else if(test=="unsupported")mode=39;else if(test=="unsupported41")mode=41;else if(test=="service-off")mode=40;else if(test=="service-nostart")mode=40,service_arg=1;else if(test=="direct")mode=2;else if(test=="native")mode=3;
  else if(test=="pulse"||test=="pulse-preroll"||test=="pulse-timeout"||test=="pulse-tone-timeout")mode=34,attended=1,write_fault=test=="pulse-preroll"?1u:test=="pulse-timeout"?2u:test=="pulse-tone-timeout"?4u:0u;else if(test=="unattended-pulse")mode=34;else if(test=="tone"||test=="tone-prepare"||test=="tone-clear")mode=33,tone_prepare_fail=test=="tone-prepare",tone_clear_fail=test=="tone-clear";else if(test=="iv")mode=32;else if(test=="mailbox")mode=31;else if(test=="outputoff")mode=30;else if(test=="outputoff-config")mode=30,output_cfg_fail=true;
  else if(test=="wire")mode=29;else if(test=="wire-claim")mode=29,wire_claim_fail=true;else if(test=="wire-data")mode=29,write_fault=1;else if(test=="wire-second")mode=29,write_fault=3;else if(test=="wire-reset")mode=29,wire_reset_fail=true;else if(test=="wire-unmap")mode=29,memory_fault=2;else if(test=="wire-end")mode=29,dma_end_fail=true;else if(test=="wire-timeout")mode=29,write_fault=2;
  else if(test=="write")mode=28;else if(test=="write-zero")mode=28,zero_fail=true;else if(test=="write-bad")mode=28,write_fault=1;else if(test=="write-timeout")mode=28,write_fault=2;else if(test=="write-unmap")mode=28,memory_fault=2;else if(test=="write-end")mode=28,dma_end_fail=true;
@@ -250,7 +255,13 @@ int main(int argc,char **argv){assert(argc==2);std::string test=argv[1];
  dma_regs[0x20/4]=(1u<<30)|(15u<<9)|120;dma_regs[0x24/4]=78;dma_regs[0x28/4]=(1u<<12)|0x22;
  zizhan_audio_prm_probe();
  if(test=="unattended-pulse"){assert(!allocations&&!registrations&&!threads&&logs.size()==1);return 0;}
- if(test=="off"||test=="unsupported")assert(!allocations&&!registrations&&!threads&&logs.empty());
+ if(test=="off"||test=="unsupported"||test=="unsupported41")assert(!allocations&&!registrations&&!threads&&logs.empty());
+ else if(test=="service-off"){assert(!allocations&&!registrations&&!threads&&logs.size()==1&&logs[0].find("SKIP mode40-needs-service")!=std::string::npos&&!handoff.owner);return 0;}
+ else if(test=="service-nostart"){
+  // Registered as owner, waited the bounded 170 s, took no PRM lease and sent nothing; later Starts are refused.
+  assert(handoff.owner==1&&handoff.phase==ZizhanHandoffFailed&&threads==1&&!sends&&!owner.state.lease_held&&time_us==170000000u);
+  bool skipped=false;for(const auto &l:logs)skipped|=l.find("SKIP no-start")!=std::string::npos;
+  assert(skipped&&!zizhan_handoff_request_start(&handoff));return 0;}
  else if(audio||prepare_mode||observe_mode||adsp!=2||!board)assert(!allocations&&!registrations&&!threads&&logs.back().find("SKIP")!=std::string::npos);
  else if(test=="lock")assert(!registrations&&!threads);
  else if(test=="channel")assert(registrations==1&&!threads);
@@ -314,6 +325,6 @@ with tempfile.TemporaryDirectory(prefix="zizhan-prm-platform-") as temp:
         objects.append(str(obj))
     binary=temp/"platform"
     subprocess.run([os.environ.get("CXX","c++"),"-std=c++17","-Wall","-Wextra","-Werror","-fsanitize=address,undefined","-I"+str(ROOT/"drivers/PongPower"),str(cpp),*objects,"-o",str(binary)],check=True,timeout=30)
-    for case in ("off","unsupported","audio","prepare","adsp","board","lock","channel","thread","down","drop","frozen","send","reject-request","reject-release","pass","direct","native","native-ready","native-not-ready","settle-frozen","settle-drop","parameter","parameter-reject","clock","clock-pins","clock-map","clock-reject","clock-release-reject","silent","silent-ampfail","silent-cleanup","silent-timeout","silent-close","silent-observe","silent-notready","silent-rejectclock","pll-capture","tdm","tdm-open","tdm-config","tdm-start","tdm-stop","tdm-close","fsmon","global","global-run","powered-mpu","powered-run","native-frame","core-debug","native-protection","native-rates","asp-rx","asp-format","native-core","native-core-run","pcm","pcm-open","pcm-media","pcm-start","pcm-stop","pcm-close","joint","joint-stop","joint-close","dma","dma-missing","dma-lock","dma-map","dmamap","dmamap-begin","dmamap-map","dmamap-unmap","dmamap-end","dmacontrol","dmacontrol-begin","dmacontrol-end","write","write-zero","write-bad","write-timeout","write-unmap","write-end","wire","wire-claim","wire-data","wire-second","wire-reset","wire-unmap","wire-end","wire-timeout","outputoff","outputoff-config","mailbox","iv","unattended-pulse","pulse","pulse-preroll","pulse-timeout","pulse-tone-timeout","tone","tone-prepare","tone-clear"):
+    for case in ("off","unsupported","unsupported41","service-off","service-nostart","audio","prepare","adsp","board","lock","channel","thread","down","drop","frozen","send","reject-request","reject-release","pass","direct","native","native-ready","native-not-ready","settle-frozen","settle-drop","parameter","parameter-reject","clock","clock-pins","clock-map","clock-reject","clock-release-reject","silent","silent-ampfail","silent-cleanup","silent-timeout","silent-close","silent-observe","silent-notready","silent-rejectclock","pll-capture","tdm","tdm-open","tdm-config","tdm-start","tdm-stop","tdm-close","fsmon","global","global-run","powered-mpu","powered-run","native-frame","core-debug","native-protection","native-rates","asp-rx","asp-format","native-core","native-core-run","pcm","pcm-open","pcm-media","pcm-start","pcm-stop","pcm-close","joint","joint-stop","joint-close","dma","dma-missing","dma-lock","dma-map","dmamap","dmamap-begin","dmamap-map","dmamap-unmap","dmamap-end","dmacontrol","dmacontrol-begin","dmacontrol-end","write","write-zero","write-bad","write-timeout","write-unmap","write-end","wire","wire-claim","wire-data","wire-second","wire-reset","wire-unmap","wire-end","wire-timeout","outputoff","outputoff-config","mailbox","iv","unattended-pulse","pulse","pulse-preroll","pulse-timeout","pulse-tone-timeout","tone","tone-prepare","tone-clear"):
         subprocess.run([str(binary),case],check=True,timeout=10)
 print("PASS actual PRM platform:94 controls,defaultoff/conflicts,owned nativeframe/coredebug/TDM/HALO,graphstop/close before release,strict retention;no hardware")

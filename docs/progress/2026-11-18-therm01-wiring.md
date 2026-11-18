@@ -12,7 +12,7 @@
 | `drivers/ArmDTPlatform/ZizhanThermalPolicy.h` | 新增 boot-arg 解析规则（`zizhan_thermal_tune`）和负载停止状态（deadline / 75°C） |
 | `drivers/ArmDTPlatform/ZizhanTsensProbe.h` | `zizhan_thermal` 非 0 时跳过旧的 one-shot `zizhan_tsens`，避免两个线程同时读 TSENS |
 | `drivers/ArmDTPlatform/ArmDTPlatform.cpp` | 启动服务；定义 `pong_cpu_thermal_level` / `pong_gpu_thermal_level` |
-| `drivers/ArmCpu/PongCpuPolicy.h` | 按档位收窄三个 EPSS 域的 LTU 上限；触摸 boost 的 `setTop` 也受温控限制；温控下压不等负载滞后，32 ms 内生效；温控期间 L3 跟随最快域、boost 也不能抬高；档位变化时打印真实 state/selected |
+| `drivers/ArmCpu/PongCpuPolicy.h` | 按档位收窄三个 EPSS 域的 LTU 上限（LUT 是升序，档位从最高行往下取）；触摸 boost 的 `setTop` 也受温控限制；温控下压不等负载滞后，32 ms 内生效；温控期间 L3 跟随最快域、boost 也不能抬高；档位变化时打印真实 state/selected |
 | `drivers/PongAdreno/PongAdrenoPlatform.cpp` | DCVS 每轮把 `top` 收窄到 `13 - gpu_level`，`floor` 再取 `min(boot_floor, top)` |
 | `tools/zizhan/tests/thermal-policy.c` | 新增 boot-arg、测试阈值、stale/invalid 保持、负载 deadline/75°C 停止的用例 |
 
@@ -85,14 +85,33 @@ T3 的 `test_cpu` 必须在 40..100 且低于 110；若 T1 待机 +8 超过 100�
 - 本分支提交：`3a09da1`（服务/封顶接线）、`dbc1265`（测试阈值）、`13fa32f`
   （有界负载）、`8633de8`（主机测试）、`1c704d3`（EPSS 读回日志）、
   `2458668`（温控下压跳过负载滞后）、`817e42f`（温控结束后 L3 回到 boot top）、
-  `1cbd489`（L3 复位不被共享域投票覆盖，boost 不越过温控）。
+  `1cbd489`（L3 复位不被共享域投票覆盖，boost 不越过温控）、`5cb1e09`
+  （修正升序 EPSS LUT 的档位方向，并加 level 20/0/单调的主机回归）、
+  `58c4086`（SPDX 改为仓库统一的 BSD-2-Clause-Patent）、`15bdeab`
+  （daily-use 主机检查加入 thermal-policy / display-power）。
 - `python3 tools/zizhan/tests/thermal-policy.py`：Mac `cc`（Apple clang 21）
   0 failure。
 - `zizhan-ci:gcc14-clang` 内 `gcc-14` 与 `clang` 19 均以
   `-std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined` 编译并运行，
   0 failure。
+- `python3 tools/zizhan/mac/check-daily-use-host.py`（已含 `thermal-policy.py`
+  和 `display-power.py`）：exit 0，约 81 s。
 - **未做**：内核构建（按本轮边界由主线统一构建）、`fastboot boot`、任何设备
   轮、频率读回的真机确认。主机测试只覆盖纯策略头，内核侧改动仅做过源码审查；
   实际 EPSS LUT 行数、DCVS 档位与 4 线程的升温幅度都要等 T1–T3 的真实日志。
 - **推测**：4 个 4 ms 忙/1 ms 睡的线程足以在 60 s 内形成可见温升；若 T2 的
   `max_cpu` 几乎不动，先保留日志，再讨论增加线程数或改为全核忙循环。
+
+**未完成与后续想法（本轮不扩展）**
+
+- 内核构建与 T1/T2/T3 仍由主线执行；本页所有“判据”都还没有设备证据。
+- 实际 EPSS LUT 行数、CPU rank 落到多少 MHz、DCVS 档位与 GPU 温升，需要
+  T1–T3 的真实 `state/selected` 和 `PONG GPU DCVS` 日志才能确认。
+- 负载目前固定 4 线程、4 ms 忙 + 1 ms 睡；若 T2 温升不足，再评估线程数/占空比，
+  本轮不改。
+- “桌面”代理是首个呈现帧 + 3 s；若走 CPU 合成、没有 `pong_zc_flipped_tag`，
+  负载会 SKIP。是否改用更直接的 WindowServer/服务信号留待设备观察。
+- boot-arg 的格式错误可能被 `PE_parse_boot_argn` 当成 0/缺省，当前无法区分
+  “未给”和“解析失败”；越界数值会被拒绝，但拼写错误会回落到默认阈值。
+- 32 路逐秒全量日志、GPU 单独测试阈值轮、NTC/PMIC 传感器、thermalmonitord/HID
+  发布、vendor thermal conf 解密和 suspend 都不在本版范围。

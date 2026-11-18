@@ -283,7 +283,9 @@ static void worker(void *,wait_result_t)
             }
             if(selected==40)selected=last;
             if(selected==40 || selected==current){d.down=0;continue;}
-            if(d.khz[selected]<freq && ++d.down<4)continue;
+            /* A thermal cap is a ceiling, not a load estimate: apply it in
+             * this tick instead of waiting out the load-policy hysteresis. */
+            if(d.khz[selected]<freq && !thermal && ++d.down<4)continue;
             d.down=0;
             // Voltage and thermal ceilings remain firmware-controlled.
             // Request only real, non-boost LUT indices through perf-lock.

@@ -5,6 +5,7 @@
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <kern/thread.h>
+#include <pexpert/pexpert.h>
 #include "ZizhanTsensCore.h"
 
 extern "C" struct vnode *rootvnode;
@@ -86,6 +87,11 @@ static void worker(void *, wait_result_t) {
 }
 
 static void start(IOService *provider) {
+  uint32_t thermal = 0;
+  if (PE_parse_boot_argn("zizhan_thermal", &thermal, sizeof thermal) && thermal) {
+    IOLog("ZIZHAN_TSENS: SKIP superseded-by-zizhan_thermal mode=%u\n", thermal);
+    return;
+  }
   uint32_t enabled = 0;
   if (!PE_parse_boot_argn("zizhan_tsens", &enabled, sizeof(enabled)) || !enabled) return;
   if (enabled != 1) {

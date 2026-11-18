@@ -97,6 +97,83 @@ static inline int zizhan_thermal_config_ok(const ZizhanThermalConfig *c){
  return 1;
 }
 
+/* Boot-arg tuning, kept free of kernel APIs so host tests exercise the same
+ * acceptance rules as the service: mode 0 off, 1 observe, 2 enforce;
+ * test_cpu_c/test_gpu_c 0 = default clamp, otherwise 40..100 C and strictly
+ * below the default clamp; load_s 0 = off, 1..120 s only with mode >= 1.
+ * A rejected tuning leaves *out untouched so a partially applied threshold
+ * can never reach the policy. */
+enum {
+ ZizhanThermalTuneOk=0, ZizhanThermalTuneBadMode=-1,
+ ZizhanThermalTuneBadCpu=-2, ZizhanThermalTuneBadGpu=-3,
+ ZizhanThermalTuneBadLoad=-4, ZizhanThermalTuneBadOutput=-5
+};
+
+typedef struct {
+ uint8_t mode;
+ uint32_t test_cpu_c, test_gpu_c, load_seconds;
+ int32_t cpu_clamp_mc, cpu_release_mc, gpu_clamp_mc, gpu_release_mc;
+} ZizhanThermalTuning;
+
+static inline int zizhan_thermal_tune(uint32_t mode,uint32_t test_cpu_c,
+                                      uint32_t test_gpu_c,uint32_t load_s,
+                                      ZizhanThermalTuning *out){
+ ZizhanThermalTuning t;
+ const ZizhanThermalConfig d=zizhan_thermal_default_config();
+ if(!out)return ZizhanThermalTuneBadOutput;
+ if(mode>2u)return ZizhanThermalTuneBadMode;
+ if(test_cpu_c&&(test_cpu_c<40u||test_cpu_c>100u||
+                 (int32_t)test_cpu_c*1000>=d.cpu_clamp_mc))
+  return ZizhanThermalTuneBadCpu;
+ if(test_gpu_c&&(test_gpu_c<40u||test_gpu_c>100u||
+                 (int32_t)test_gpu_c*1000>=d.gpu_clamp_mc))
+  return ZizhanThermalTuneBadGpu;
+ if(load_s>120u||(load_s&&mode==0u))return ZizhanThermalTuneBadLoad;
+ t.mode=(uint8_t)mode;
+ t.test_cpu_c=test_cpu_c;t.test_gpu_c=test_gpu_c;t.load_seconds=load_s;
+ t.cpu_clamp_mc=test_cpu_c?(int32_t)test_cpu_c*1000:d.cpu_clamp_mc;
+ t.cpu_release_mc=test_cpu_c?t.cpu_clamp_mc-5000:d.cpu_release_mc;
+ t.gpu_clamp_mc=test_gpu_c?(int32_t)test_gpu_c*1000:d.gpu_clamp_mc;
+ t.gpu_release_mc=test_gpu_c?t.gpu_clamp_mc-5000:d.gpu_release_mc;
+ *out=t;
+ return ZizhanThermalTuneOk;
+}
+
+/* Bounded load bookkeeping. The service stops the busy threads on the
+ * deadline or on a real reading at/above the hot threshold; both decisions
+ * are pure here so the host tests can reproduce them. */
+enum { ZizhanThermalLoadRun=0, ZizhanThermalLoadDeadline=1,
+       ZizhanThermalLoadHot=2 };
+#define ZIZHAN_THERMAL_LOAD_HOT_MC 75000
+
+typedef struct {
+ uint64_t start_us, deadline_us;
+ uint8_t stopped, reason;
+} ZizhanThermalLoad;
+
+static inline void zizhan_thermal_load_begin(ZizhanThermalLoad *l,uint64_t now_us,
+                                             uint32_t seconds){
+ if(!l)return;
+ l->start_us=now_us;
+ l->deadline_us=now_us+(uint64_t)seconds*1000000ull;
+ l->stopped=0;l->reason=(uint8_t)ZizhanThermalLoadRun;
+}
+
+static inline int zizhan_thermal_load_step(ZizhanThermalLoad *l,uint64_t now_us,
+                                          int32_t max_mc,int32_t hot_mc){
+ if(!l)return ZizhanThermalLoadDeadline;
+ if(l->stopped)return (int)l->reason;
+ if(now_us>=l->deadline_us){
+  l->stopped=1;l->reason=(uint8_t)ZizhanThermalLoadDeadline;
+  return ZizhanThermalLoadDeadline;
+ }
+ if(max_mc>=hot_mc){
+  l->stopped=1;l->reason=(uint8_t)ZizhanThermalLoadHot;
+  return ZizhanThermalLoadHot;
+ }
+ return ZizhanThermalLoadRun;
+}
+
 /* Classify the sample clock. Fresh: in order and at most two periods after
  * the last accepted one. Stale: in order but more than two periods later.
  * Backwards: before the last accepted time (out-of-order or 64-bit wrap).

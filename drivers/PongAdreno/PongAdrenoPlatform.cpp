@@ -408,6 +408,9 @@ static void run(void *,wait_result_t)
  * idles until backboardd renders; a dead counter would read as idle) the start level stays. Every 10 s: busy share and time per
  * level, changes, failed votes and boosts, to the console and the diagnostic record. */
 extern "C" volatile uint32_t pong_touch_activity __attribute__((weak));
+/* zizhan THERM-01 (ZizhanThermalService.h): 0 = no cap, 12 = the lowest GPU
+ * level. Weak so a reduced kernel without the service links. */
+extern "C" volatile uint32_t pong_gpu_thermal_level __attribute__((weak));
 /* submit/NativeAdrenoUserClient.cpp and NativeAdrenoMemory.cpp: per-method {calls, failures, last status, total us} and the slowest call
  * (reset at each report), and the BO pool's {MiB, BOs from it, fell back, MiB in use, peak MiB, scattered BOs, their spans, import spans}:
  * the 10 s report also prints "PONG GPU BO" when BOs were made, to see what a home-screen or app transition paid for its memory. */
@@ -421,13 +424,14 @@ extern "C" void pong_fence_report_if_changed(void) __attribute__((weak));
 static unsigned dcvsMHz(unsigned level) {return PongAdrenoPowerLevels[13-level].hz/1000000;}
 static void dcvs(void *,wait_result_t)
 {
-    unsigned top=13,floor=3,boostMs=1000;
-    (void)PE_parse_boot_argn("pong_gpu_max_level",&top,sizeof(top));
-    (void)PE_parse_boot_argn("pong_gpu_dcvs_min",&floor,sizeof(floor));
+    unsigned bootTop=13,bootFloor=3,boostMs=1000;
+    (void)PE_parse_boot_argn("pong_gpu_max_level",&bootTop,sizeof(bootTop));
+    (void)PE_parse_boot_argn("pong_gpu_dcvs_min",&bootFloor,sizeof(bootFloor));
     (void)PE_parse_boot_argn("pong_gpu_dcvs_boost_ms",&boostMs,sizeof(boostMs));
-    if(top<1 || top>13)top=13;
-    if(floor<1)floor=1;
-    if(floor>top)floor=top;
+    if(bootTop<1 || bootTop>13)bootTop=13;
+    if(bootFloor<1)bootFloor=1;
+    if(bootFloor>bootTop)bootFloor=bootTop;
+    unsigned top=bootTop,floor=bootFloor;
     auto levelFor=[&](uint64_t mhz){unsigned l=1;while(l<top && dcvsMHz(l)<mhz)++l;return l;};
     auto done=[]{thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);};
     if(PongAdrenoGmuEnableBusyCounter(&gmu)) {record("SKIP DCVS busy counter",1);done();return;}
@@ -445,6 +449,11 @@ static void dcvs(void *,wait_result_t)
     record("DCVS started (sheng governor)",0,(uint64_t(floor)<<32)|top,cur);
     for(;;) {
         IOSleep(16);
+        const unsigned thermal=(&pong_gpu_thermal_level)?
+            __atomic_load_n(&pong_gpu_thermal_level,__ATOMIC_ACQUIRE):0;
+        const unsigned thermalTop=thermal>12u?1u:13u-thermal;
+        top=bootTop<thermalTop?bootTop:thermalTop;
+        floor=bootFloor<top?bootFloor:top;
         uint64_t busy=0,ns=0;
         if(PongAdrenoGmuBusyTicks(&gmu,&busy)) {record("STOP DCVS busy read",1);break;}
         const uint64_t t=mach_absolute_time();

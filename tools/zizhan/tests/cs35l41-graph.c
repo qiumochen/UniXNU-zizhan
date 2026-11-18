@@ -91,6 +91,18 @@ int main(void){
   for(unsigned k=0;k<2;++k){uint32_t size=0;const uint8_t *b=param(&p,k?ZizhanPcmCnvIid:ZizhanPcmDecIid,0x08001008u,&size);
    assert(b&&size==30&&le32(b)==1&&le32(b+4)==0x09001000u&&le32(b+8)==18);
    assert(le16(b+12)==24&&le16(b+14)==1&&le16(b+16)==32&&le16(b+18)==27&&le16(b+20)==1&&le16(b+22)==3&&le16(b+24)==0&&le16(b+26)==2&&b[28]==1&&b[29]==2);}}
+  /* Loopback diagnostic: 5 or 4 stream modules ending in RD_SHMEM, ENC 16-bit interleaved, RD 1 frame/buffer, READ V2 body. */
+ for(unsigned dec=0;dec<2;++dec){GprPacket p;n=zizhan_pcm_open_loopback(a,sizeof a,0x7a20000du,dec);assert(n);
+  assert(!gpr_decode(a,n,&p)&&p.size==n&&p.opcode==AR_OP_GRAPH_OPEN&&module_count(&p,ZizhanPcmSg,ZizhanPcmContainer)==(dec?5u:4u));
+  assert(link_count(&p,ZizhanPcmEncIid,ZizhanPcmRdIid)==(dec?4u:3u));link_count(&p,dec?ZizhanPcmDecIid:ZizhanPcmShmem,ZizhanPcmCnvIid);
+  n=zizhan_pcm_loopback_config(a,sizeof a,0x7a20000eu,dec);assert(n&&!gpr_decode(a,n,&p)&&p.opcode==AR_OP_SET_CFG);
+  uint32_t size=0;const uint8_t *b=param(&p,ZizhanPcmEncIid,0x08001008u,&size);
+  assert(b&&size==30&&le16(b+12)==16&&le16(b+16)==16&&le16(b+18)==15&&le16(b+22)==1&&le16(b+26)==2);
+  b=param(&p,ZizhanPcmRdIid,0x08001007u,&size);assert(b&&size==8&&le32(b)==1&&le32(b+4)==0);
+  assert((param(&p,ZizhanPcmDecIid,0x08001008u,&size)!=NULL)==(dec!=0));}
+ {GprPacket p;n=zizhan_pcm_read(a,sizeof a,0x7a2d0001u,0x1f9e3c000ull,0xb0d50e28u,0x3000u);assert(n);
+  assert(!gpr_decode(a,n,&p)&&p.size==n&&p.opcode==AR_OP_READ&&p.dst_port==ZizhanPcmRdIid&&p.src_port==ZizhanPcmPort&&p.payload_bytes==32);
+  assert(le32(p.payload)==0xf9e3c000u&&le32(p.payload+4)==1&&le32(p.payload+8)==0xb0d50e28u&&le32(p.payload+12)==0x3000u&&!le32(p.payload+16));}
  n=zizhan_graph_command(a,sizeof a,ZizhanMfcPort,0x7a200005u,AR_OP_GRAPH_PREPARE,ZizhanMfcSg);assert(n);
  check_commands(a,n,ZizhanMfcPort,ZizhanMfcSg,AR_OP_GRAPH_PREPARE);
  n=zizhan_graph_command(a,sizeof a,ZizhanPcmPort,0x7a200006u,AR_OP_GRAPH_START,ZizhanPcmSg);assert(n);

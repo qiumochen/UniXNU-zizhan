@@ -11,7 +11,8 @@ extern "C" {
  * The MFC performs the original 48k/2ch/24-bit-packed to 96k/3ch/24-bit
  * conversion; the stream graph does not create a third channel. */
 enum {ZizhanMfcPort=0x2105,ZizhanMfcSg=0x4106,ZizhanMfcContainer=0x5106,
-      ZizhanMfcIid=0x6182,ZizhanSalIid=0x6183,ZizhanPcmDecIid=0x6184,ZizhanPcmCnvIid=0x6185};
+      ZizhanMfcIid=0x6182,ZizhanSalIid=0x6183,ZizhanPcmDecIid=0x6184,ZizhanPcmCnvIid=0x6185,
+      ZizhanPcmEncIid=0x6186,ZizhanPcmRdIid=0x6187,ZizhanLoopMfcIid=0x6188,ZizhanLoopSalIid=0x6189};
 uint32_t zizhan_mfc_device_open(uint8_t *,uint32_t,uint32_t);
 uint32_t zizhan_mfc_device_config(uint8_t *,uint32_t,uint32_t);
 uint32_t zizhan_pcm_open_to_mfc(uint8_t *,uint32_t,uint32_t);
@@ -20,6 +21,16 @@ uint32_t zizhan_pcm_media_packed48(uint8_t *,uint32_t,uint32_t);
  * Android AGM speaker graph (tags c000000e/c0000010); both outputs deinterleaved-unpacked 24-in-32 Q27. */
 uint32_t zizhan_pcm_open_dec_to_mfc(uint8_t *,uint32_t,uint32_t);
 uint32_t zizhan_pcm_dec_cnv_config(uint8_t *,uint32_t,uint32_t);
+/* zizhan_audio_loopback=3 keeps the real stream graph (WR_SHMEM->DEC->CNV->MFC) and the device
+ * MFC->SAL, but the device graph ends in PCM_ENC (16-bit 3ch) -> RD_SHMEM instead of the TDM sink.
+ * zizhan_audio_loopback=1|2 (silent diagnostic, no device link): stream WR_SHMEM -> [PCM_DEC] -> PCM_CNV
+ * -> PCM_ENC -> RD_SHMEM; 1 includes the decoder, 2 omits it (control). ENC output is 16-bit
+ * interleaved FL/FR so the read-back can be compared with the int16 selftest pattern. */
+uint32_t zizhan_pcm_open_loopback(uint8_t *,uint32_t,uint32_t,unsigned dec);
+uint32_t zizhan_pcm_loopback_config(uint8_t *,uint32_t,uint32_t,unsigned dec);
+uint32_t zizhan_pcm_read(uint8_t *,uint32_t,uint32_t,uint64_t,uint32_t,uint32_t);
+uint32_t zizhan_mfc_loop_device_open(uint8_t *,uint32_t,uint32_t);
+uint32_t zizhan_mfc_loop_device_config(uint8_t *,uint32_t,uint32_t);
 uint32_t zizhan_graph_command(uint8_t *,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
 #ifdef __cplusplus
 }

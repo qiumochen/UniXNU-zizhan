@@ -865,7 +865,7 @@ static int run_read(GeniI2c *bus,const ZizhanAmpClock *clock,uint32_t reg,uint32
  if(out->core_debug)for(unsigned i=0;i<15;++i)if(reg==run_debug_regs[i])allowed=1;
  if(out->native_calibration&&(reg==0x2800800||reg==0x2800268||reg==0x2800274||reg==0x2800270))allowed=1;
  if(out->mailbox_profile&&(reg==0x10914))allowed=1;
- if(out->play_profile&&(reg==0x4c00||reg==0x4820||reg==0x6c04||reg==0x2c0c||reg==0x4800||reg==0x4808))allowed=1;
+ if(out->play_profile&&(reg==0x4c00||reg==0x4820||reg==0x6c04||reg==0x2c0c||reg==0x4800||reg==0x4808||reg==0x201c||reg==0x2020||reg==0x2024||reg==0x4804))allowed=1;
  if(out->pulse_profile&&(reg==0x6000||reg==0x2084))allowed=1;
  if(out->iv_profile&&(reg==0x4c48||reg==0x4c4c))allowed=1;
  if(!allowed)return ZizhanAmpArgument;
@@ -1051,12 +1051,12 @@ static void play_teardown_all(GeniI2c *bus,const ZizhanAmpClock *clock,const Ziz
 }
 typedef struct {GeniI2c *bus;const ZizhanAmpClock *clock;ZizhanAmpRun *out;ZizhanPulseOps io[2];uint64_t begin,limit;int reason;} PlayPoll;
 /* Between periods: both amps fault-free (sticky and raw), HALO still running, inside the run limit. */
-const uint32_t zizhan_play_snap_regs[12]={0x2014,0x2018,0x2c0c,0x4800,0x4808,0x4820,0x4c00,0x6000,0x6c04,0x10018,0x10098,0x1009c};
+const uint32_t zizhan_play_snap_regs[16]={0x2014,0x2018,0x2c0c,0x4800,0x4808,0x4820,0x4c00,0x6000,0x6c04,0x10018,0x10098,0x1009c,0x201c,0x2020,0x2024,0x4804};
 static int play_poll(void *p){
  PlayPoll *pp=p;ZizhanAmpRun *out=pp->out;++out->play_polls;
  if(out->play_polls==5){
   for(unsigned chip=0;chip<2;++chip){pp->bus->address=chip?0x42:0x40;
-   for(unsigned i=0;i<12;++i){if(run_read(pp->bus,pp->clock,zizhan_play_snap_regs[i],&out->play_snap[chip][i],out)){break;}++out->play_snap_reads[chip];}}
+   for(unsigned i=0;i<16;++i){if(run_read(pp->bus,pp->clock,zizhan_play_snap_regs[i],&out->play_snap[chip][i],out)){break;}++out->play_snap_reads[chip];}}
  }
  if(pp->clock->now_us(pp->clock->context)-pp->begin>=pp->limit){pp->reason=ZizhanAmpTimeout;return 1;}
  for(unsigned chip=0;chip<2;++chip){uint32_t halo=0;pp->bus->address=chip?0x42:0x40;out->failed_chip=chip;

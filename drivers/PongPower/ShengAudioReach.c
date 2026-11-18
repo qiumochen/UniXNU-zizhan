@@ -306,6 +306,58 @@ uint32_t zizhan_pcm_dec_cnv_config(uint8_t *out,uint32_t capacity,uint32_t token
  zizhan_pcm_out24(&w,ZizhanPcmDecIid);zizhan_pcm_out24(&w,ZizhanPcmCnvIid);
  cmd_payload_end(&w,cmd);return finish(&w);
 }
+uint32_t zizhan_pcm_open_loopback(uint8_t *out,uint32_t capacity,uint32_t token,unsigned dec){
+ const Sg sg={ZizhanPcmSg,PERF_LOW_LATENCY,DIR_RX,SCENARIO_PLAYBACK};
+ const Container c={ZizhanPcmContainer,POS_STREAM};
+ const Module m[]={{AR_MOD_WR_SHMEM,ZizhanPcmShmem,0,1},{AR_MOD_PCM_CNV,ZizhanPcmCnvIid,1,1},
+                   {AR_MOD_PCM_ENC,ZizhanPcmEncIid,1,1},{AR_MOD_RD_SHMEM,ZizhanPcmRdIid,1,0},{AR_MOD_PCM_DEC,ZizhanPcmDecIid,1,1}};
+ const Link with[]={{ZizhanPcmShmem,ZizhanPcmDecIid},{ZizhanPcmDecIid,ZizhanPcmCnvIid},{ZizhanPcmCnvIid,ZizhanPcmEncIid},{ZizhanPcmEncIid,ZizhanPcmRdIid}};
+ const Link without[]={{ZizhanPcmShmem,ZizhanPcmCnvIid},{ZizhanPcmCnvIid,ZizhanPcmEncIid},{ZizhanPcmEncIid,ZizhanPcmRdIid}};
+ return dec?graph_open(out,capacity,ZizhanPcmPort,token,&sg,&c,m,5,with,4):graph_open(out,capacity,ZizhanPcmPort,token,&sg,&c,m,4,without,3);
+}
+static void zizhan_pcm_out16i(W *w,uint32_t iid,unsigned channels){
+ const uint32_t at=param_begin(w,iid,PARAM_PCM_OUTPUT);
+ put32(w,1);put32(w,MEDIA_PCM);put32(w,16u+channels);
+ put16(w,16);put16(w,1);put16(w,16);put16(w,15);put16(w,1);put16(w,INTERLEAVED);put16(w,0);put16(w,(uint16_t)channels);
+ for(unsigned i=0;i<channels;++i){put8(w,(uint8_t)(i+1));}
+ zizhan_tdm_param_end(w,at);
+}
+static void zizhan_pcm_out24(W *w,uint32_t iid);
+uint32_t zizhan_pcm_loopback_config(uint8_t *out,uint32_t capacity,uint32_t token,unsigned dec){
+ W w;begin(&w,out,capacity,ZizhanPcmPort,AR_APM_IID,token,AR_OP_SET_CFG);
+ const uint32_t cmd=cmd_payload_start(&w);
+ if(dec){zizhan_pcm_out24(&w,ZizhanPcmDecIid);}
+ zizhan_pcm_out24(&w,ZizhanPcmCnvIid);zizhan_pcm_out16i(&w,ZizhanPcmEncIid,2u);
+ const uint32_t at=param_begin(&w,ZizhanPcmRdIid,0x08001007u);put32(&w,1);put32(&w,0);zizhan_tdm_param_end(&w,at);
+ cmd_payload_end(&w,cmd);return finish(&w);
+}
+static void zizhan_mfc_param_end(W *w,uint32_t at);
+uint32_t zizhan_mfc_loop_device_open(uint8_t *out,uint32_t capacity,uint32_t token){
+ const Sg sg={ZizhanMfcSg,PERF_LOW_LATENCY,DIR_RX,SCENARIO_PLAYBACK};
+ const Container c={ZizhanMfcContainer,POS_GLOBAL_DEV};
+ const Module m[]={{0x07001015u,ZizhanMfcIid,1,1},{0x07001010u,ZizhanSalIid,1,1},
+                   {AR_MOD_PCM_ENC,ZizhanPcmEncIid,1,1},{AR_MOD_RD_SHMEM,ZizhanPcmRdIid,1,0}};
+ const Link l[]={{ZizhanMfcIid,ZizhanSalIid},{ZizhanSalIid,ZizhanPcmEncIid},{ZizhanPcmEncIid,ZizhanPcmRdIid}};
+ return graph_open(out,capacity,ZizhanMfcPort,token,&sg,&c,m,4,l,3);
+}
+uint32_t zizhan_mfc_loop_device_config(uint8_t *out,uint32_t capacity,uint32_t token){
+ W w;begin(&w,out,capacity,ZizhanMfcPort,AR_APM_IID,token,AR_OP_SET_CFG);
+ const uint32_t cmd=cmd_payload_start(&w);
+ uint32_t at=param_begin(&w,ZizhanMfcIid,0x08001024u);
+ put32(&w,96000);put16(&w,24);put16(&w,3);put16(&w,1);put16(&w,2);put16(&w,3);
+ zizhan_mfc_param_end(&w,at);
+ at=param_begin(&w,ZizhanSalIid,0x08001016u);put32(&w,24);zizhan_tdm_param_end(&w,at);
+ at=param_begin(&w,ZizhanSalIid,0x0800101eu);put32(&w,1);zizhan_tdm_param_end(&w,at);
+ zizhan_pcm_out16i(&w,ZizhanPcmEncIid,3u);
+ at=param_begin(&w,ZizhanPcmRdIid,0x08001007u);put32(&w,1);put32(&w,0);zizhan_tdm_param_end(&w,at);
+ cmd_payload_end(&w,cmd);return finish(&w);
+}
+uint32_t zizhan_pcm_read(uint8_t *out,uint32_t capacity,uint32_t token,uint64_t address,uint32_t handle,uint32_t bytes){
+ W w;begin(&w,out,capacity,ZizhanPcmPort,ZizhanPcmRdIid,token,AR_OP_READ);
+ put32(&w,(uint32_t)address);put32(&w,(uint32_t)(address>>32));put32(&w,handle);put32(&w,bytes);
+ put32(&w,0);put32(&w,0);put32(&w,0);put32(&w,0);
+ return finish(&w);
+}
 uint32_t zizhan_pcm_media_packed48(uint8_t *out,uint32_t capacity,uint32_t token){
  W w;begin(&w,out,capacity,ZizhanPcmPort,ZizhanPcmShmem,token,AR_OP_SET_CFG);
  const uint32_t cmd=cmd_payload_start(&w),at=param_begin(&w,ZizhanPcmShmem,PARAM_MEDIA_FORMAT);

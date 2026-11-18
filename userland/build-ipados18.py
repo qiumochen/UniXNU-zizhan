@@ -1007,6 +1007,38 @@ def compile_audio(out, developer):
     return bundle
 
 
+
+def compile_zizhan_audio(out, developer):
+    """Build the zizhan output-only AudioServerPlugIn (userland/ZizhanAudioPlugIn.c, kernel class
+    ZizhanAudio, control page v2). Not part of any default image: a trial adds it to the HAL view
+    explicitly. Same SDK header handling as compile_audio; separate bundle id, factory and user client."""
+    env=dict(os.environ,DEVELOPER_DIR=str(developer))
+    sdk=Path(subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip())
+    mac=Path(subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],env=env,text=True).strip())
+    includes=out/'audio-sdk-headers/CoreAudio';includes.mkdir(parents=True,exist_ok=True)
+    for name in ('AudioServerPlugIn.h','AudioHardwareBase.h'):
+        shutil.copyfile(mac/'System/Library/Frameworks/CoreAudio.framework/Headers'/name,includes/name)
+    bundle=out/'ZizhanAudio.driver';bundle.mkdir(exist_ok=True)
+    target=bundle/'ZizhanAudio'
+    cmd=['xcrun','clang','-target','arm64-apple-ios18.0','-isysroot',str(sdk),
+        '-Os','-fblocks','-bundle','-fvisibility=hidden','-Wall','-Wextra','-Werror',
+        '-Wl,-no_fixup_chains',
+        '-I'+str(includes.parent),'-I'+str(PROJECT/'drivers/PongPower'),
+        '-framework','CoreFoundation','-framework','IOKit',
+        str(PROJECT/'userland/ZizhanAudioPlugIn.c'),'-o',str(target)]
+    run(cmd,env=env)
+    factory='2E77A7C3-3DFC-4A84-B197-F97C6A82ECE1'
+    put_plist(bundle/'Info.plist',dict(CFBundleDevelopmentRegion='en',CFBundleExecutable='ZizhanAudio',
+        CFBundleIdentifier='org.unixnu.zizhan.audio',CFBundleInfoDictionaryVersion='6.0',
+        CFBundleName='ZizhanAudio',CFBundlePackageType='BNDL',CFBundleShortVersionString='1.0',
+        CFBundleVersion='1',CFBundleSupportedPlatforms=['iPhoneOS'],MinimumOSVersion='18.0',
+        CFPlugInFactories={factory:'ZizhanAudio_Create'},
+        CFPlugInTypes={'443ABAB8-E7B3-491A-B985-BEB9187030DB':[factory]},
+        AudioServerPlugIn_IOKitUserClients=['ZizhanAudioUserClient']))
+    run(['codesign','--force','--sign','-','--pagesize','4096',bundle])
+    dump(out/'zizhan-audio-compile-command.json',cmd)
+    return bundle
+
 def compile_sleep(out, developer):
     """22H374 local Sleep configuration service; uses shipped XPC interfaces."""
     env = dict(os.environ, DEVELOPER_DIR=str(developer))

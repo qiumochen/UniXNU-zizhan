@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BSD-2-Clause-Patent
 // zizhan THERM-01: default-off periodic TSENS sampling and thermal caps.
 // Mode 1 samples and logs only. Mode 2 also publishes the logical CPU/GPU cap
 // levels consumed by PongCpuPolicy.h and PongAdrenoPlatform.cpp. No TSENS

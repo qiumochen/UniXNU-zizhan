@@ -284,6 +284,28 @@ uint32_t zizhan_pcm_open_to_mfc(uint8_t *out,uint32_t capacity,uint32_t token){
  const Link l={ZizhanPcmShmem,ZizhanMfcIid};
  return graph_open(out,capacity,ZizhanPcmPort,token,&sg,&c,&m,1,&l,1);
 }
+uint32_t zizhan_pcm_open_dec_to_mfc(uint8_t *out,uint32_t capacity,uint32_t token){
+ const Sg sg={ZizhanPcmSg,PERF_LOW_LATENCY,DIR_RX,SCENARIO_PLAYBACK};
+ const Container c={ZizhanPcmContainer,POS_STREAM};
+ const Module m[]={{AR_MOD_WR_SHMEM,ZizhanPcmShmem,0,1},{AR_MOD_PCM_DEC,ZizhanPcmDecIid,1,1},{AR_MOD_PCM_CNV,ZizhanPcmCnvIid,1,1}};
+ const Link l[]={{ZizhanPcmShmem,ZizhanPcmDecIid},{ZizhanPcmDecIid,ZizhanPcmCnvIid},{ZizhanPcmCnvIid,ZizhanMfcIid}};
+ return graph_open(out,capacity,ZizhanPcmPort,token,&sg,&c,m,3,l,3);
+}
+/* AGM configure_output_media_format for RX: FIXED_POINT/PCM, bit_width 24 -> 32 bits per sample,
+ * Q27, LSB aligned, little endian, deinterleaved unpacked, 2 channels FL/FR. payload_size 16+2. */
+static void zizhan_pcm_out24(W *w,uint32_t iid){
+ const uint32_t at=param_begin(w,iid,PARAM_PCM_OUTPUT);
+ put32(w,1);put32(w,MEDIA_PCM);put32(w,16u+2u);
+ put16(w,24);put16(w,1);put16(w,32);put16(w,27);put16(w,1);put16(w,DEINTERLEAVED_UNPACKED);put16(w,0);put16(w,2);
+ put8(w,1);put8(w,2);
+ zizhan_tdm_param_end(w,at);
+}
+uint32_t zizhan_pcm_dec_cnv_config(uint8_t *out,uint32_t capacity,uint32_t token){
+ W w;begin(&w,out,capacity,ZizhanPcmPort,AR_APM_IID,token,AR_OP_SET_CFG);
+ const uint32_t cmd=cmd_payload_start(&w);
+ zizhan_pcm_out24(&w,ZizhanPcmDecIid);zizhan_pcm_out24(&w,ZizhanPcmCnvIid);
+ cmd_payload_end(&w,cmd);return finish(&w);
+}
 uint32_t zizhan_pcm_media_packed48(uint8_t *out,uint32_t capacity,uint32_t token){
  W w;begin(&w,out,capacity,ZizhanPcmPort,ZizhanPcmShmem,token,AR_OP_SET_CFG);
  const uint32_t cmd=cmd_payload_start(&w),at=param_begin(&w,ZizhanPcmShmem,PARAM_MEDIA_FORMAT);

@@ -58,7 +58,7 @@ struct Owner {
  ZizhanWriteState write;unsigned zero_verified;
  unsigned tone_prepared,tone_cleared;
  unsigned transfer_calls,transfer_acks,write_sent,write_ack;
- unsigned graph_acks,batch_acks,tone48_prepared,tone48_cleared;ZizhanAudioBatch batch;
+ unsigned graph_acks,graph_dec,batch_acks,tone48_prepared,tone48_cleared;ZizhanAudioBatch batch;
  Runtime runtime;ServiceRun service;
 };
 Owner owner={};
@@ -503,10 +503,15 @@ __attribute__((noinline)) bool graph_round(){
  if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300001u,ZizhanMfcPort)){return false;}++o.graph_acks;
  n=zizhan_mfc_device_config(b,sizeof b,0x7a300002u);
  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300002u,ZizhanMfcPort)){return false;}++o.graph_acks;
- n=zizhan_pcm_open_to_mfc(b,sizeof b,0x7a300003u);
+ unsigned dec=0;if(!PE_parse_boot_argn("zizhan_audio_dec",&dec,sizeof dec)||dec!=1){dec=0;}
+ o.graph_dec=dec;
+ n=dec?zizhan_pcm_open_dec_to_mfc(b,sizeof b,0x7a300003u):zizhan_pcm_open_to_mfc(b,sizeof b,0x7a300003u);
  if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300003u,ZizhanPcmPort)){return false;}++o.graph_acks;
  n=zizhan_pcm_media_packed48(b,sizeof b,0x7a300004u);
  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300004u,ZizhanPcmPort)){return false;}++o.graph_acks;
+ if(dec){n=zizhan_pcm_dec_cnv_config(b,sizeof b,0x7a30000du);
+  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a30000du,ZizhanPcmPort)){return false;}++o.graph_acks;}
+ IOLog("ZIZHAN_AUDIO_GRAPH: stream decoder=%u dec=%x cnv=%x\n",dec,dec?ZizhanPcmDecIid:0u,dec?ZizhanPcmCnvIid:0u);
  o.dma_mapped=zizhan_audio_dma_map_begin()?1u:0u;
  if(!o.dma_mapped||!memory_commands(false))return false;
  if(o.mode==37){o.tone48_prepared=zizhan_audio_tone48_prepare()?1u:0u;if(!o.tone48_prepared)return false;}
@@ -762,19 +767,19 @@ void worker(void *,wait_result_t){
    o.write.phase==ZizhanWriteDone&&o.memory.phase==ZizhanMemoryDone&&o.dma_restored&&o.state.phase==ZizhanPrmDone?"PASS":"FAIL",o.write.phase,o.write.sent,o.write.ack,o.write.uncertain,o.write.reason,o.zero_verified,o.memory.handle,o.memory.phase,o.memory.sent,o.memory.ack,o.dma_mapped,o.dma_restored,ZizhanWriteBytes);}
  if(o.mode==35){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_GRAPH: %s acks=%u mapped=%u restored=%u memory_phase=%u handle=%x data=0 audio_output=0 finished=1\n",
-   o.graph_acks==12&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
+   o.graph_acks==12u+o.graph_dec&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==36){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_GRAPH_DATA: %s acks=%u batch_acks=%u frames=%llu bytes_each=2880 zero_verified=%u mapped=%u restored=%u memory_phase=%u handle=%x data=zero audio_output=0 finished=1\n",
-   o.graph_acks==12&&o.batch_acks==4&&o.batch.confirmed_frames==1920&&o.zero_verified&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
+   o.graph_acks==12u+o.graph_dec&&o.batch_acks==4&&o.batch.confirmed_frames==1920&&o.zero_verified&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.batch_acks,(unsigned long long)o.batch.confirmed_frames,o.zero_verified,o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==37){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_GRAPH_DATA: %s acks=%u batch_acks=%u frames=%llu bytes_each=2880 tone_prepared=%u tone_cleared=%u mapped=%u restored=%u memory_phase=%u handle=%x data=known48 audio_output=0 finished=1\n",
-   o.graph_acks==12&&o.batch_acks==4&&o.batch.confirmed_frames==1920&&o.tone48_prepared&&o.tone48_cleared&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
+   o.graph_acks==12u+o.graph_dec&&o.batch_acks==4&&o.batch.confirmed_frames==1920&&o.tone48_prepared&&o.tone48_cleared&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.batch_acks,(unsigned long long)o.batch.confirmed_frames,o.tone48_prepared,o.tone48_cleared,o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==38){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_RUNTIME: %s acks=%u ready_before=%u ready_after=%u watermark_gate=%u underrun_gate=%u pack=%u packets=%u done_acks=%u frames=%llu drained=%u ready_cleared=%u mapped=%u restored=%u memory_phase=%u handle=%x data=known48 audio_output=0 finished=1\n",
-   o.graph_acks==12&&o.runtime.ready_before==0&&o.runtime.ready_after==1&&o.runtime.watermark_gate==1&&o.runtime.underrun_gate==1&&
+   o.graph_acks==12u+o.graph_dec&&o.runtime.ready_before==0&&o.runtime.ready_after==1&&o.runtime.watermark_gate==1&&o.runtime.underrun_gate==1&&
    o.runtime.pack_verified==4&&o.runtime.packets==4&&o.runtime.acks==4&&o.runtime.frames==1920&&o.runtime.drained==1&&o.runtime.ready_cleared==1&&
    o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.runtime.ready_before,o.runtime.ready_after,o.runtime.watermark_gate,o.runtime.underrun_gate,o.runtime.pack_verified,
@@ -782,7 +787,7 @@ void worker(void *,wait_result_t){
    o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==40||o.mode==41){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_SERVICE_RUN: %s acks=%u waited_ms=%u first_written=%llu start_frame=%llu ready_after=%u underrun_waits=%u pack=%u packets=%u done_acks=%u frames=%llu drained=%u ready_cleared=%u stopped_by_request=%u mapped=%u restored=%u memory_phase=%u handle=%x data=service audio_output=0 finished=1\n",
-   o.graph_acks==12&&o.service.ready_after&&(o.mode==41?(o.service.flow_ok==1&&o.silent.amp_pass&&o.silent.pulse_verified):o.service.flow_ms?o.service.flow_ok==1:(o.service.pack_verified==4&&o.service.packets==4&&o.service.acks==4&&o.service.frames==1920))&&
+   o.graph_acks==12u+o.graph_dec&&o.service.ready_after&&(o.mode==41?(o.service.flow_ok==1&&o.silent.amp_pass&&o.silent.pulse_verified):o.service.flow_ms?o.service.flow_ok==1:(o.service.pack_verified==4&&o.service.packets==4&&o.service.acks==4&&o.service.frames==1920))&&
    o.service.drained&&o.service.ready_cleared&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.service.waited_ms,(unsigned long long)o.service.first_written,(unsigned long long)o.service.start_frame,o.service.ready_after,
    o.service.underrun_waits,o.service.pack_verified,o.service.packets,o.service.acks,(unsigned long long)o.service.frames,o.service.drained,

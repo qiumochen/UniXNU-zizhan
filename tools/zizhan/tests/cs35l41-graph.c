@@ -81,6 +81,16 @@ int main(void){
  n=zizhan_mfc_device_config(a,sizeof a,0x7a200002u);assert(n);check_device_config(a,n);
  n=zizhan_pcm_open_to_mfc(a,sizeof a,0x7a200003u);assert(n);check_stream_open(a,n);
  n=zizhan_pcm_media_packed48(a,sizeof a,0x7a200004u);assert(n);check_media48(a,n);
+ /* Decoder variant: three stream modules, SHMEM->DEC->CNV->MFC, and the AGM RX output format on both. */
+ {n=zizhan_pcm_open_dec_to_mfc(a,sizeof a,0x7a20000bu);assert(n);
+  GprPacket p;assert(!gpr_decode(a,n,&p)&&p.size==n&&p.src_port==ZizhanPcmPort&&p.opcode==AR_OP_GRAPH_OPEN);
+  assert(module_count(&p,ZizhanPcmSg,ZizhanPcmContainer)==3);
+  assert(link_count(&p,ZizhanPcmShmem,ZizhanPcmDecIid)==3);link_count(&p,ZizhanPcmDecIid,ZizhanPcmCnvIid);link_count(&p,ZizhanPcmCnvIid,ZizhanMfcIid);
+  n=zizhan_pcm_dec_cnv_config(a,sizeof a,0x7a20000cu);assert(n);
+  assert(!gpr_decode(a,n,&p)&&p.size==n&&p.src_port==ZizhanPcmPort&&p.dst_port==AR_APM_IID&&p.opcode==AR_OP_SET_CFG);
+  for(unsigned k=0;k<2;++k){uint32_t size=0;const uint8_t *b=param(&p,k?ZizhanPcmCnvIid:ZizhanPcmDecIid,0x08001008u,&size);
+   assert(b&&size==30&&le32(b)==1&&le32(b+4)==0x09001000u&&le32(b+8)==18);
+   assert(le16(b+12)==24&&le16(b+14)==1&&le16(b+16)==32&&le16(b+18)==27&&le16(b+20)==1&&le16(b+22)==3&&le16(b+24)==0&&le16(b+26)==2&&b[28]==1&&b[29]==2);}}
  n=zizhan_graph_command(a,sizeof a,ZizhanMfcPort,0x7a200005u,AR_OP_GRAPH_PREPARE,ZizhanMfcSg);assert(n);
  check_commands(a,n,ZizhanMfcPort,ZizhanMfcSg,AR_OP_GRAPH_PREPARE);
  n=zizhan_graph_command(a,sizeof a,ZizhanPcmPort,0x7a200006u,AR_OP_GRAPH_START,ZizhanPcmSg);assert(n);

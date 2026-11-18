@@ -39,3 +39,18 @@
 | flow-h-1 | 1 | PASS（协议）但 **starved=177**：单个在途时 DSP 每个周期之间都会空 |
 
 结论：连续播放至少要 2 个 WRITE 在途；默认 2 正确。HAL 接入后用同一路径。功放仍关闭，可闻连续播放需要“两颗功放同时开、随流保持”的新时序（ZizhanCs35l41.c 现为逐颗 1 s 核心运行 + 单次脉冲），未实现。
+
+## 补充：双功放播放窗（PRM 41 / SE15 prepare mode 40 / CS35L41 profile 19），静音 dry 设备验证
+
+设计见 [双功放播放时序](../plan/2026-11-18-m1-playback-amp.md)。实现：`c404fac`（`ZizhanAmpPulse.h` 拆出 arm/hold_check/disarm；`silent_run` profile 19：两颗都准备到 HALO 运行 → 一起 arm → `ZizhanAudioTransfer.stream` + 每 50 ms 安全轮询（sticky/raw 故障、HALO 状态、运行时限）→ 逆序 disarm → 两颗收尾；任何失败收尾所有仍在准备态的芯片，总线不确定时不再访问）、PRM 41 提交（服务 Start → 连接图 → 播放窗内连续流），之后三处修正：自测生产者写满 60 s（功放准备约 33 s）、轮询发现故障时即使流报告成功也判失败（主机测试发现）、流从生产者最前沿后退 4 个周期（40 ms）开始。主机：`cs35l41-pulse.py`、`cs35l41-run.py`（新增双颗保持、dry、流中故障/HALO 停止、忽略中止的流、流失败、拒绝、晚期总线失败）、`cs35l41-prm-platform.py`、`cs35l41-service-gate.py`，clang 与 gcc:14 全过。
+
+`zizhan_audio_service=1 zizhan_audio_prm=41 zizhan_audio_selftest=1 zizhan_pulse_dry=1 zizhan_audio_play_ms=1000`（dry：不写任何 AMP/音量寄存器）：
+
+| 轮 | 内核 | 在途 | 结果 |
+| --- | --- | --- | --- |
+| play-v1-d-1/2 | f56299e2 | 2 | 功放侧全过（ready 1/1、arm/disarm、torn 1/1、数据脚恢复、reset 已断言）；流未开始：自测生产者 12 s 后停写，而功放准备用了约 13+ s → 修生产者 |
+| play-d-1/2、play2-d-1..4 | 85f…（修生产者后） | 2 | 6/6 PASS：两颗同时保持约 1.0 s，99 周期/流、19 次轮询无故障、pdn、收尾、PRM PASS；其中 play2-d-2 starved=5 |
+| play3-d-1/2 | 同上 | 3 | 2/2 PASS，starved=0，但 peak_inflight 仍 2（流从生产者最前沿开始，就绪数据只有 1–2 周期） |
+| play4-d-1..3 | 5176e5e3（后退 40 ms 起流） | 3 | **3/3 PASS：peak_inflight=3、waits=0、starved=0、103 周期、20 次轮询无故障** |
+
+观察：从图启动到播放窗打开约 33 s（功放固件 RAM 经 I2C 加载），系统声音场景必须改成“服务启动时预先准备、待命不使能”。在场包 `out/play-a4`（同一臂，去掉 dry，`zizhan_audio_attended=1`），启动器 `work/m1-firstsound/run-play.sh`，仅在用户在场且单次脉冲已听到后运行。

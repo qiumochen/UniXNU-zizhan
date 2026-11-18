@@ -49,7 +49,7 @@
 | 轮 | 内核 | 在途 | 结果 |
 | --- | --- | --- | --- |
 | play-v1-d-1/2 | f56299e2 | 2 | 功放侧全过（ready 1/1、arm/disarm、torn 1/1、数据脚恢复、reset 已断言）；流未开始：自测生产者 12 s 后停写，而功放准备用了约 13+ s → 修生产者 |
-| play-d-1/2、play2-d-1..4 | 85f…（修生产者后） | 2 | 6/6 PASS：两颗同时保持约 1.0 s，99 周期/流、19 次轮询无故障、pdn、收尾、PRM PASS；其中 play2-d-2 starved=5 |
+| play-d-1/2、play2-d-1..4 | c60d6e11（修生产者后） | 2 | 6/6 PASS：两颗同时保持约 1.0 s，99 周期/流、19 次轮询无故障、pdn、收尾、PRM PASS；其中 play2-d-2 starved=5 |
 | play3-d-1/2 | 同上 | 3 | 2/2 PASS，starved=0，但 peak_inflight 仍 2（流从生产者最前沿开始，就绪数据只有 1–2 周期） |
 | play4-d-1..3 | 5176e5e3（后退 40 ms 起流） | 3 | **3/3 PASS：peak_inflight=3、waits=0、starved=0、103 周期、20 次轮询无故障** |
 

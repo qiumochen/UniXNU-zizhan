@@ -85,7 +85,9 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
             zizhan_amp_checkpoint=amp_checkpoint;IOLog("ZIZHAN_AUDIO_CHECKPOINT: armed klog=%u\n",pong_klog_flush?1u:0u);}
         unsigned hold=0;if(mode==39&&PE_parse_boot_argn("zizhan_pulse_hold",&hold,sizeof hold)&&hold>=1&&hold<=300){zizhan_amp_pulse_hold_us=hold*1000u;IOLog("ZIZHAN_AUDIO_PULSE: hold_ms=%u\n",hold);}
         unsigned play=0;if(mode==40){if(!PE_parse_boot_argn("zizhan_audio_play_ms",&play,sizeof play)||play<100||play>2000){IOLog("ZIZHAN_AUDIO_PLAY: SKIP play_ms=%u needs=100..2000\n",play);return;}
-            zizhan_amp_play_ms=play;IOLog("ZIZHAN_AUDIO_PLAY: armed play_ms=%u dry=%u\n",play,zizhan_amp_pulse_flags&1u);}}
+            zizhan_amp_play_ms=play;IOLog("ZIZHAN_AUDIO_PLAY: armed play_ms=%u dry=%u\n",play,zizhan_amp_pulse_flags&1u);
+            unsigned echo=0;zizhan_amp_echo=(dry==1&&PE_parse_boot_argn("zizhan_audio_echo",&echo,sizeof echo)&&echo==1)?1u:0u;
+            if(zizhan_amp_echo)IOLog("ZIZHAN_AUDIO_ECHO: armed dry=1 top_asptx1=asprx1 din=gpio122\n");}}
     ZizhanAmpSpeakerCalibration speaker_cal={1,sizeof(ZizhanAmpSpeakerCalibration),{0,0}};
     if(mode>=29){
         const bool top_present=PE_parse_boot_argn("zizhan_cal_t",&speaker_cal.resistance[0],sizeof(uint32_t));
@@ -99,9 +101,9 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
     if(coefficients&&(!top.open("zizhan-cs35l41-prot-t",5060)||!bottom.open("zizhan-cs35l41-prot-b",5148))){
         IOLog("ZIZHAN_AMP_COEFF: SKIP missing-private-input writes=0 finished=1\n");return;
     }
-    Page votes, gates, core, sda, scl, reset,sck,ws,data_pin;
+    Page votes, gates, core, sda, scl, reset,sck,ws,data_pin,din_pin;
     zizhan_audio_sck::State sck_state,ws_state;
-    zizhan_audio_data_pin::State data_state;
+    zizhan_audio_data_pin::State data_state,din_state;
     if (!votes.open(0x162000, 0x1000, true) || !gates.open(0x12e000, 0x1000) ||
         !core.open(0x133000, 0x1000) || !sda.open(0xf138000, 0x1000, true) ||
         !scl.open(0xf139000, 0x1000, true) || !reset.open(0xf101000, 0x1000, identity)) {
@@ -233,6 +235,9 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                                             if(both_off&&data_pin.open(0xf17c000,0x1000,true)&&zizhan_audio_data_pin::connect(data_pin,data_state)){
                                                 combined->data_connected=1;
                                                 IOLog("ZIZHAN_AUDIO_DATA_PIN: connected=1 pin=124 config=%x io=%x original=%x/%x native_ALT1_8mA=1 latch_writes=0 outputs_off=1\n",data_pin.read(0),data_pin.read(4),data_state.config,data_state.io);
+                                                if(mode==40&&zizhan_amp_echo){const bool din=din_pin.open(0xf17a000,0x1000,true)&&zizhan_audio_data_pin::connect(din_pin,din_state);
+                                                    IOLog("ZIZHAN_AUDIO_ECHO: din pin=122 connected=%u config=%x original=%x\n",din?1u:0u,din?din_pin.read(0):0u,din_state.config);
+                                                    if(!din){zizhan_amp_echo=0;}}
                                                 if((mode==39||mode==40)&&zizhan_amp_checkpoint)zizhan_amp_checkpoint(0,0);
                                                 if(mode==40)zizhan_cs35l41_native_play_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==39)zizhan_cs35l41_native_pulse_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
@@ -279,7 +284,7 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                 combined->reset_asserted=reset_state.claimed&&held_reset;
                 /* Never intentionally remove SCK while shared reset could
                  * still be released. Unknown cleanup retains clock lease. */
-                combined->pin_restored=held_reset&&zizhan_audio_data_pin::restore(data_pin,data_state,held_reset)&&zizhan_audio_sck::restore(ws,ws_state)&&zizhan_audio_sck::restore(sck,sck_state);
+                combined->pin_restored=held_reset&&zizhan_audio_data_pin::restore(din_pin,din_state,held_reset)&&zizhan_audio_data_pin::restore(data_pin,data_state,held_reset)&&zizhan_audio_sck::restore(ws,ws_state)&&zizhan_audio_sck::restore(sck,sck_state);
                 if(mode>=35&&mode<=40){combined->data_restored=held_reset&&data_state.restored;
                     IOLog("ZIZHAN_AUDIO_DATA_PIN: restored=%u reset_asserted=%u claimed=%u config=%x latch_writes=0 outputs_off=1\n",combined->data_restored,held_reset?1u:0u,data_state.claimed?1u:0u,data_state.claimed?data_pin.read(0):0u);
                     for(unsigned c=0;c<2;++c){combined->transfer_attempts[c]=executed.transfer_attempts[c];combined->transfer_acks[c]=executed.transfer_acks[c];
@@ -292,6 +297,8 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                 if(mode==40)IOLog("ZIZHAN_AUDIO_PLAY: %s play_ms=%u ready=%u/%u streamed=%u polls=%u reason=%u stage=%u chip=%u torn=%u/%u dry=%u\n",
                     executed.status==ZizhanAmpPass?"PASS":"FAIL",executed.play_ms,executed.play_ready[0],executed.play_ready[1],executed.play_streamed,executed.play_polls,
                     executed.play_reason?executed.play_reason:executed.reason,executed.play_stage,executed.play_chip,executed.play_torn[0],executed.play_torn[1],zizhan_amp_pulse_flags&1u);
+                if(mode==40&&(executed.echo_on||zizhan_amp_echo))IOLog("ZIZHAN_AUDIO_ECHO: amp on=%u restored=%u src=%x/%x/%x en=%x/%x/%x slots=%x din_restored=%u\n",
+                    executed.echo_on,executed.echo_restored,executed.echo_src[0],executed.echo_src[1],executed.echo_src[2],executed.echo_en[0],executed.echo_en[1],executed.echo_en[2],executed.echo_slots,din_state.claimed?(din_state.restored?1u:0u):2u);
                 if(mode==40){for(unsigned c=0;c<2;++c){const uint32_t *v=executed.play_snap[c];IOLog("ZIZHAN_AUDIO_PLAY_SNAP: chip=%u reads=%u 2014=%x 2018=%x 2c0c=%x 4800=%x 4808=%x 4820=%x 4c00=%x 6000=%x 6c04=%x 10018=%x 10098=%x 1009c=%x 201c=%x 2020=%x 2024=%x 4804=%x\n",c,executed.play_snap_reads[c],v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);}}
                 if(mode==39||mode==40){combined->pulse_verified=executed.status==ZizhanAmpPass;
                     for(unsigned c=0;c<2;++c){const auto &p=executed.pulse[c];if(!p.complete||!p.patch_off||!p.disabled||!p.data_ack)combined->pulse_verified=0;

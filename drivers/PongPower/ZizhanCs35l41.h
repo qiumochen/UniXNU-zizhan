@@ -232,6 +232,8 @@ typedef struct {
  unsigned play_profile,play_ms,play_ready[2],play_torn[2],play_streamed,play_polls,play_reason,play_stage,play_chip;
  /* Read-only register snapshot at poll 5 of the play window (zizhan_play_snap_regs order). */
  uint32_t play_snap[2][16];unsigned play_snap_reads[2];
+ /* zizhan_audio_echo: top chip ASP TX1 source/enables before, after setup, after restore; 4810. */
+ uint32_t echo_src[3],echo_en[3],echo_slots;unsigned echo_on,echo_restored;
  unsigned iv_profile,iv_reads[2][2];uint32_t iv_values[2][2][3];
  unsigned mailbox_profile,mailbox_attempted[2],mailbox_acknowledged[2],mailbox_completed[2];
  unsigned mailbox_polls[2][2],mailbox_mask_restored[2][2];
@@ -286,6 +288,7 @@ int zizhan_cs35l41_native_core_transfer(unsigned,unsigned,GeniI2c *,const Zizhan
 extern void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 extern unsigned zizhan_amp_pulse_hold_us;
 extern unsigned zizhan_amp_pulse_flags;
+extern unsigned zizhan_amp_echo; /* 1: dry play window echoes ASPRX1 on the top chip's ASPTX1 */
 extern unsigned zizhan_amp_play_ms; /* 0 unless the kernel sets zizhan_audio_play_ms=<100..2000> */
 int zizhan_cs35l41_native_play_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);

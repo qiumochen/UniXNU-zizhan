@@ -352,6 +352,40 @@ uint32_t zizhan_mfc_loop_device_config(uint8_t *out,uint32_t capacity,uint32_t t
  at=param_begin(&w,ZizhanPcmRdIid,0x08001007u);put32(&w,1);put32(&w,0);zizhan_tdm_param_end(&w,at);
  cmd_payload_end(&w,cmd);return finish(&w);
 }
+uint32_t zizhan_cap_open(uint8_t *out,uint32_t capacity,uint32_t token){
+ const Sg sg={ZizhanCapSg,PERF_LOW_LATENCY,DIR_TX,SCENARIO_RECORD};
+ const Container c={ZizhanCapContainer,POS_GLOBAL_DEV};
+ const Module m[]={{0x0700100fu,ZizhanCapTdmIid,0,1},{AR_MOD_PCM_CNV,ZizhanCapCnvIid,1,1},{AR_MOD_PCM_ENC,ZizhanCapEncIid,1,1},{AR_MOD_RD_SHMEM,ZizhanCapRdIid,1,0}};
+ const Link l[]={{ZizhanCapTdmIid,ZizhanCapCnvIid},{ZizhanCapCnvIid,ZizhanCapEncIid},{ZizhanCapEncIid,ZizhanCapRdIid}};
+ return graph_open(out,capacity,ZizhanCapPort,token,&sg,&c,m,4,l,3);
+}
+uint32_t zizhan_cap_config(uint8_t *out,uint32_t capacity,uint32_t token){
+ W w;begin(&w,out,capacity,ZizhanCapPort,AR_APM_IID,token,AR_OP_SET_CFG);
+ const uint32_t cmd=cmd_payload_start(&w);
+ /* Same interface as the RX sink (tertiary, internal sync, 4x32, delay 1); input: no data out,
+  * all four slots, lane 0 (data0/GPIO122). */
+ uint32_t at=param_begin(&w,ZizhanCapTdmIid,0x0800101bu);
+ put32(&w,0);put32(&w,2);put16(&w,1);put16(&w,0);put32(&w,0xf);
+ put16(&w,4);put16(&w,32);put16(&w,0);put16(&w,0);put16(&w,1);put16(&w,0);
+ zizhan_tdm_param_end(&w,at);
+ at=param_begin(&w,ZizhanCapTdmIid,PARAM_HW_EP_MF);put32(&w,96000);put16(&w,24);put16(&w,4);put32(&w,1);zizhan_tdm_param_end(&w,at);
+ at=param_begin(&w,ZizhanCapTdmIid,PARAM_FRAME_SIZE_FACTOR);put32(&w,1);zizhan_tdm_param_end(&w,at);
+ at=param_begin(&w,ZizhanCapTdmIid,0x0800106au);put16(&w,1);put16(&w,0);zizhan_tdm_param_end(&w,at);
+ at=param_begin(&w,ZizhanCapTdmIid,0x0800113cu);put32(&w,0);put32(&w,0);put32(&w,4);put32(&w,0);zizhan_tdm_param_end(&w,at);
+ {const uint32_t cv=param_begin(&w,ZizhanCapCnvIid,PARAM_PCM_OUTPUT);
+  put32(&w,1);put32(&w,MEDIA_PCM);put32(&w,16u+4u);
+  put16(&w,24);put16(&w,1);put16(&w,32);put16(&w,27);put16(&w,1);put16(&w,DEINTERLEAVED_UNPACKED);put16(&w,0);put16(&w,4);
+  put8(&w,1);put8(&w,2);put8(&w,3);put8(&w,4);zizhan_tdm_param_end(&w,cv);}
+ zizhan_pcm_out16i(&w,ZizhanCapEncIid,4u);
+ at=param_begin(&w,ZizhanCapRdIid,0x08001007u);put32(&w,1);put32(&w,0);zizhan_tdm_param_end(&w,at);
+ cmd_payload_end(&w,cmd);return finish(&w);
+}
+uint32_t zizhan_cap_read(uint8_t *out,uint32_t capacity,uint32_t token,uint64_t address,uint32_t handle,uint32_t bytes){
+ W w;begin(&w,out,capacity,ZizhanCapPort,ZizhanCapRdIid,token,AR_OP_READ);
+ put32(&w,(uint32_t)address);put32(&w,(uint32_t)(address>>32));put32(&w,handle);put32(&w,bytes);
+ put32(&w,0);put32(&w,0);put32(&w,0);put32(&w,0);
+ return finish(&w);
+}
 uint32_t zizhan_pcm_read(uint8_t *out,uint32_t capacity,uint32_t token,uint64_t address,uint32_t handle,uint32_t bytes){
  W w;begin(&w,out,capacity,ZizhanPcmPort,ZizhanPcmRdIid,token,AR_OP_READ);
  put32(&w,(uint32_t)address);put32(&w,(uint32_t)(address>>32));put32(&w,handle);put32(&w,bytes);

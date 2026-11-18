@@ -865,7 +865,7 @@ static int run_read(GeniI2c *bus,const ZizhanAmpClock *clock,uint32_t reg,uint32
  if(out->core_debug)for(unsigned i=0;i<15;++i)if(reg==run_debug_regs[i])allowed=1;
  if(out->native_calibration&&(reg==0x2800800||reg==0x2800268||reg==0x2800274||reg==0x2800270))allowed=1;
  if(out->mailbox_profile&&(reg==0x10914))allowed=1;
- if(out->play_profile&&(reg==0x4c00||reg==0x4820||reg==0x6c04||reg==0x2c0c||reg==0x4800||reg==0x4808||reg==0x201c||reg==0x2020||reg==0x2024||reg==0x4804))allowed=1;
+ if(out->play_profile&&(reg==0x4c00||reg==0x4820||reg==0x6c04||reg==0x2c0c||reg==0x4800||reg==0x4808||reg==0x201c||reg==0x2020||reg==0x2024||reg==0x4804||reg==0x4c20||reg==0x4810))allowed=1;
  if(out->pulse_profile&&(reg==0x6000||reg==0x2084))allowed=1;
  if(out->iv_profile&&(reg==0x4c48||reg==0x4c4c))allowed=1;
  if(!allowed)return ZizhanAmpArgument;
@@ -988,6 +988,7 @@ static int pulse_write(void *p,uint32_t reg,uint32_t value){
   (reg==0x2084&&(value==0x2f1aa0||value==0x2f1aa3))||
   (reg==0x2018&&(value==0x3300||value==0x3320||value==0x3321))||
   (reg==0x4c00&&(value==0||value==0x08))||
+  (zizhan_amp_echo&&(zizhan_amp_pulse_flags&1u)&&c->chip==0&&((reg==0x4c20&&(value==0x08||value==out->echo_src[0]))||(reg==0x4800&&(value==0x10000||value==0x10001))))||
   (reg==0x6000&&(value==original||value==((original&~0x3ff8u)|0x3f40u)));
  if(!out->pulse_profile||!allowed||out->transport.controller_uncertain)return 0;
  const uint8_t wire[]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg,
@@ -1004,6 +1005,7 @@ static int pulse_data(void *p){NativePulse *c=p;return c->transfer->once(c->tran
 void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 #define AMP_CHECKPOINT(chip,stage) do{if(out->pulse_profile&&zizhan_amp_checkpoint){zizhan_amp_checkpoint((chip),(stage));}}while(0)
 unsigned zizhan_amp_pulse_hold_us; /* 0 unless the kernel sets zizhan_pulse_hold=<ms> (attended only). */
+unsigned zizhan_amp_echo;
 unsigned zizhan_amp_pulse_flags; /* bit0 dry (no AMP enable/volume), bit1 skip the native pup/pdn patch. */
 unsigned zizhan_amp_play_ms; /* profile 19 window length; 0 refuses the profile. */
 static void pulse_pause(void *p,unsigned us){NativePulse *c=p;c->clock->pause_us(c->clock->context,us);}
@@ -1073,10 +1075,21 @@ static int play_window(GeniI2c *bus,const ZizhanAmpClock *clock,const ZizhanAmpC
  int reason=0;
  for(unsigned chip=0;chip<2&&!reason;++chip){bus->address=chip?0x42:0x40;out->failed_chip=chip;out->failed_stage=10;
   if(zizhan_pulse_arm(&poll.io[chip],&out->pulse[chip])){reason=ZizhanAmpProtocol;}}
+ // Echo (dry only): the top chip sends what it receives on ASPRX1 back on ASPTX1 (SDOUT, GPIO122).
+ if(!reason&&zizhan_amp_echo&&(zizhan_amp_pulse_flags&1u)){bus->address=0x40;out->failed_chip=0;out->failed_stage=13;
+  if(run_read(bus,clock,0x4c20,&out->echo_src[0],out)||run_read(bus,clock,0x4800,&out->echo_en[0],out)||run_read(bus,clock,0x4810,&out->echo_slots,out)||out->echo_en[0]!=0x10000u){reason=ZizhanAmpProtocol;}
+  else if(!pulse_write(&context[0],0x4c20,0x08)||!pulse_write(&context[0],0x4800,0x10001)||
+          run_read(bus,clock,0x4c20,&out->echo_src[1],out)||run_read(bus,clock,0x4800,&out->echo_en[1],out)){reason=ZizhanAmpProtocol;}
+  else{out->echo_on=out->echo_src[1]==0x08&&out->echo_en[1]==0x10001u?1u:0u;if(!out->echo_on){reason=ZizhanAmpReadback;}}}
  if(!reason){out->failed_stage=11;
   out->play_streamed=transfer->stream(transfer->context,out->play_ms,play_poll,&poll)==1?1u:0u;
   // A fault seen by the poll fails the window even if the stream reports success.
   if(!out->play_streamed||poll.reason){reason=poll.reason?poll.reason:ZizhanAmpProtocol;}}
+ if(out->echo_on&&!out->transport.controller_uncertain){bus->address=0x40;
+  if(pulse_write(&context[0],0x4800,0x10000)&&pulse_write(&context[0],0x4c20,out->echo_src[0])&&
+     !run_read(bus,clock,0x4c20,&out->echo_src[2],out)&&!run_read(bus,clock,0x4800,&out->echo_en[2],out)){
+   out->echo_restored=out->echo_src[2]==out->echo_src[0]&&out->echo_en[2]==0x10000u?1u:0u;}
+  if(!out->echo_restored&&!reason){reason=ZizhanAmpReadback;}}
  // Both amps off (reverse order) whatever happened; then the chips' own teardown.
  for(unsigned chip=2;chip-->0;){if(!out->pulse[chip].armed){continue;}bus->address=chip?0x42:0x40;out->failed_chip=chip;out->failed_stage=12;
   if(zizhan_pulse_disarm(&poll.io[chip],&out->pulse[chip],!reason)&&!reason){reason=ZizhanAmpProtocol;}}

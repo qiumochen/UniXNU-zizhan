@@ -58,7 +58,7 @@ struct Owner {
  ZizhanWriteState write;unsigned zero_verified;
  unsigned tone_prepared,tone_cleared;
  unsigned transfer_calls,transfer_acks,write_sent,write_ack;
- unsigned graph_acks,graph_dec,loopback,loopback_pass,batch_acks,tone48_prepared,tone48_cleared;ZizhanAudioBatch batch;
+ unsigned graph_acks,graph_dec,graph_echo,loopback,loopback_pass,batch_acks,tone48_prepared,tone48_cleared;ZizhanAudioBatch batch;
  Runtime runtime;ServiceRun service;
 };
 Owner owner={};
@@ -403,6 +403,35 @@ __attribute__((noinline)) bool service_round(){
  * the DSP was left with nothing outstanding. Absent: the finite 4-period path. */
 unsigned stream_ms_arg(){unsigned v=0;return PE_parse_boot_argn("zizhan_audio_stream_ms",&v,sizeof v)&&v>=100&&v<=10000?v:0u;}
 unsigned inflight_arg(){unsigned v=2;(void)PE_parse_boot_argn("zizhan_audio_inflight",&v,sizeof v);return v>=1&&v<=3?v:2u;}
+/* zizhan_audio_echo: READ buffers for the TDM TX capture graph; 4 slots x 16-bit per frame. */
+struct Echo {unsigned reads,read_dones,status,bytes,frames,loud[4],maxabs[4],nonzero[4],toggles;int16_t last0;int16_t sample[8];};
+Echo echo_stats;
+static uint32_t echo_token[2];static unsigned echo_seq;
+static bool echo_queue(volatile uint8_t *dma,uint64_t tagged,unsigned k){
+ auto &o=owner;uint8_t tx[512];echo_token[k]=0x7a2e0000u|(++echo_seq&0xffffu);
+ for(unsigned i=0;i<0x2000u;++i){dma[0xC000u+k*0x2000u+i]=0;}
+ const unsigned n=zizhan_cap_read(tx,sizeof tx,echo_token[k],tagged+0xC000u+k*0x2000u,o.memory.handle,0x2000u);
+ if(!n||sheng_adsp_send(o.channel,tx,n)){return false;}++echo_stats.reads;return true;
+}
+/* 1: an echo READ_DONE was consumed (and re-queued), 0: not an echo packet. */
+static int echo_receive(volatile uint8_t *dma,uint64_t tagged,const uint8_t *data,unsigned bytes,bool requeue){
+ GprPacket raw;if(gpr_decode(data,bytes,&raw)!=GprOk||raw.opcode!=AR_OP_READ_DONE){return 0;}
+ unsigned k=2;for(unsigned i=0;i<2;++i){if(raw.token==echo_token[i]){k=i;}}
+ if(k==2){return 0;}
+ auto &e=echo_stats;++e.read_dones;
+ if(raw.payload_bytes>=24){
+  const uint32_t status=zizhan_tdm_le32(raw.payload),size=zizhan_tdm_le32(raw.payload+16),offset=zizhan_tdm_le32(raw.payload+20);
+  if(status){++e.status;}
+  if(size<=0x2000u&&offset<=0x2000u&&offset+size<=0x2000u){e.bytes+=size;const volatile uint8_t *d=dma+0xC000u+k*0x2000u+offset;
+   for(unsigned f=0;f+8<=size;f+=8,++e.frames){
+    for(unsigned c=0;c<4;++c){const int16_t v=int16_t(d[f+2*c]|(d[f+2*c+1]<<8));const unsigned a=unsigned(v<0?-v:v);
+     if(a>e.maxabs[c]){e.maxabs[c]=a;}if(v){++e.nonzero[c];}if(a>=128){++e.loud[c];}
+     if(c==0){if((v>0&&e.last0<0)||(v<0&&e.last0>0)){++e.toggles;}if(v){e.last0=v;}}
+     if(v&&e.nonzero[0]+e.nonzero[1]+e.nonzero[2]+e.nonzero[3]<=2&&c<4){e.sample[2*(e.nonzero[0]+e.nonzero[1]+e.nonzero[2]+e.nonzero[3]-1)]=int16_t(c);e.sample[2*(e.nonzero[0]+e.nonzero[1]+e.nonzero[2]+e.nonzero[3]-1)+1]=v;}}}}
+ }
+ if(requeue&&e.read_dones<2000){(void)echo_queue(dma,tagged,k);}
+ return 1;
+}
 __attribute__((noinline)) bool flow_round(volatile ZizhanAudioControl *ctl,int16_t *ring,ZizhanAudioHandoff *h,
                                           volatile uint8_t *dma,uint64_t tagged,unsigned ms,int (*poll)(void *),void *poll_context){
  auto &o=owner;auto &r=o.service;r.flow_ms=ms;r.flow_inflight=inflight_arg();
@@ -412,6 +441,7 @@ __attribute__((noinline)) bool flow_round(volatile ZizhanAudioControl *ctl,int16
  for(;i<50&&!(zizhan_audio_written_stable(ctl,&w)&&w>=r.start_frame+ZIZHAN_AUDIO_PERIOD_FRAMES);++i){++r.underrun_waits;IOSleep(10);}
  if(i>=50)return false;
  __atomic_or_fetch(&ctl->state,(uint32_t)ZizhanAudioOutputReady,__ATOMIC_RELEASE);r.ready_after=1;
+ if(o.graph_echo){memset(&echo_stats,0,sizeof echo_stats);if(!echo_queue(dma,tagged,0)||!echo_queue(dma,tagged,1)){return false;}}
  bool ok=true,idle=false;uint64_t polled=now_us();
  for(unsigned iteration=0;iteration<200000;++iteration){
   // Mode 41: the amp window's safety poll (faults, HALO, run limit) every 50 ms; any nonzero stops the stream.
@@ -420,6 +450,7 @@ __attribute__((noinline)) bool flow_round(volatile ZizhanAudioControl *ctl,int16
    if(o.count){p=o.queue[o.head];o.head=(o.head+1)%16;--o.count;}IOLockUnlock(o.lock);
    if(closed||overflow){zizhan_flow_send_failed(&flow);ok=false;break;}
    if(!p.bytes)break;
+   if(o.graph_echo&&echo_receive(dma,tagged,p.data,p.bytes,flow.phase==ZizhanFlowRunning)){continue;}
    if(zizhan_flow_receive(&flow,p.data,p.bytes,now_us())<0){ok=false;break;}}
   if(!ok)break;
   zizhan_flow_tick(&flow,now_us());
@@ -450,9 +481,13 @@ __attribute__((noinline)) bool flow_round(volatile ZizhanAudioControl *ctl,int16
  // Drain whatever is still outstanding (each WRITE has its own 100 ms budget).
  for(unsigned d=0;d<30&&flow.inflight&&flow.phase==ZizhanFlowDraining;++d){
   Packet p={};IOLockLock(o.lock);if(o.count){p=o.queue[o.head];o.head=(o.head+1)%16;--o.count;}IOLockUnlock(o.lock);
-  if(p.bytes){if(zizhan_flow_receive(&flow,p.data,p.bytes,now_us())<0)break;}else IOSleep(10);
+  if(p.bytes){if(o.graph_echo&&echo_receive(dma,tagged,p.data,p.bytes,false)){continue;}if(zizhan_flow_receive(&flow,p.data,p.bytes,now_us())<0)break;}else IOSleep(10);
   zizhan_flow_tick(&flow,now_us());
  }
+ if(o.graph_echo){const auto &e=echo_stats;
+  IOLog("ZIZHAN_AUDIO_ECHO: capture reads=%u read_dones=%u status=%u bytes=%u frames=%u loud=%u/%u/%u/%u maxabs=%u/%u/%u/%u nonzero=%u/%u/%u/%u toggles0=%u first=%d:%d,%d:%d audio_output=0\n",
+   e.reads,e.read_dones,e.status,e.bytes,e.frames,e.loud[0],e.loud[1],e.loud[2],e.loud[3],e.maxabs[0],e.maxabs[1],e.maxabs[2],e.maxabs[3],
+   e.nonzero[0],e.nonzero[1],e.nonzero[2],e.nonzero[3],e.toggles,e.sample[0],e.sample[1],e.sample[2],e.sample[3]);}
  r.flow_submitted=flow.submitted;r.flow_completed=flow.completed;r.flow_peak_us=flow.peak_us;r.flow_peak_inflight=flow.peak_inflight;
  r.flow_reason=flow.reason;r.frames=flow.confirmed_frames;r.drained=zizhan_flow_returned(&flow)?1u:0u;
  r.flow_ok=ok&&!r.flow_poll_stop&&r.drained&&flow.completed&&r.flow_verified==flow.submitted?1u:0u;
@@ -596,6 +631,13 @@ __attribute__((noinline)) bool graph_round(){
  if(dec){n=loop==3?zizhan_pcm_dec_cnv_config(b,sizeof b,0x7a30000du):loop?zizhan_pcm_loopback_config(b,sizeof b,0x7a30000du,loop==1?1u:0u):zizhan_pcm_dec_cnv_config(b,sizeof b,0x7a30000du);
   if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a30000du,ZizhanPcmPort)){return false;}++o.graph_acks;}
  IOLog("ZIZHAN_AUDIO_GRAPH: stream decoder=%u dec=%x cnv=%x\n",dec,dec?ZizhanPcmDecIid:0u,dec?ZizhanPcmCnvIid:0u);
+ unsigned echo=0;if(o.mode!=41||!PE_parse_boot_argn("zizhan_audio_echo",&echo,sizeof echo)||echo!=1){echo=0;}
+ {unsigned dry=0;if(!PE_parse_boot_argn("zizhan_pulse_dry",&dry,sizeof dry)||dry!=1){echo=0;}}
+ o.graph_echo=0;
+ if(echo){n=zizhan_cap_open(b,sizeof b,0x7a300011u);
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300011u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  n=zizhan_cap_config(b,sizeof b,0x7a300012u);
+  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300012u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;}
  o.dma_mapped=zizhan_audio_dma_map_begin()?1u:0u;
  if(!o.dma_mapped||!memory_commands(false))return false;
  if(o.mode==37){o.tone48_prepared=zizhan_audio_tone48_prepare()?1u:0u;if(!o.tone48_prepared)return false;}
@@ -607,6 +649,11 @@ __attribute__((noinline)) bool graph_round(){
  if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300007u,ZizhanPcmPort)){return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a300008u,AR_OP_GRAPH_START,ZizhanPcmSg);
  if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300008u,ZizhanPcmPort)){return false;}++o.graph_acks;
+ if(o.graph_echo){
+  n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300013u,AR_OP_GRAPH_PREPARE,ZizhanCapSg);
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300013u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300014u,AR_OP_GRAPH_START,ZizhanCapSg);
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300014u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;}
  IOLog("ZIZHAN_AUDIO_GRAPH: RUNNING device_sg=%x stream_sg=%x mfc=%x tdm=%x data=0 audio_output=0\n",
   ZizhanMfcSg,ZizhanPcmSg,ZizhanMfcIid,ZizhanTdmIid);
  if(o.mode==36||o.mode==37){if(!batch_round(o.mode==36))return false;}
@@ -614,6 +661,11 @@ __attribute__((noinline)) bool graph_round(){
  else if(o.mode==38){if(!runtime_round())return false;}
  else if(o.mode==40||o.mode==41){if(!service_round())return false;}
  else IOSleep(1000);
+ if(o.graph_echo){
+  n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300015u,AR_OP_GRAPH_STOP,ZizhanCapSg);
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a300015u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300016u,AR_OP_GRAPH_CLOSE,ZizhanCapSg);
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a300016u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;}
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a300009u,AR_OP_GRAPH_STOP,ZizhanPcmSg);
  if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a300009u,ZizhanPcmPort)){return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a30000au,AR_OP_GRAPH_CLOSE,ZizhanPcmSg);
@@ -852,19 +904,19 @@ void worker(void *,wait_result_t){
    o.write.phase==ZizhanWriteDone&&o.memory.phase==ZizhanMemoryDone&&o.dma_restored&&o.state.phase==ZizhanPrmDone?"PASS":"FAIL",o.write.phase,o.write.sent,o.write.ack,o.write.uncertain,o.write.reason,o.zero_verified,o.memory.handle,o.memory.phase,o.memory.sent,o.memory.ack,o.dma_mapped,o.dma_restored,ZizhanWriteBytes);}
  if(o.mode==35){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_GRAPH: %s acks=%u mapped=%u restored=%u memory_phase=%u handle=%x data=0 audio_output=0 finished=1\n",
-   o.graph_acks==12u+o.graph_dec&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
+   o.graph_acks==12u+o.graph_dec+o.graph_echo&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==36){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_GRAPH_DATA: %s acks=%u batch_acks=%u frames=%llu bytes_each=2880 zero_verified=%u mapped=%u restored=%u memory_phase=%u handle=%x data=zero audio_output=0 finished=1\n",
-   o.graph_acks==12u+o.graph_dec&&o.batch_acks==4&&o.batch.confirmed_frames==1920&&o.zero_verified&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
+   o.graph_acks==12u+o.graph_dec+o.graph_echo&&o.batch_acks==4&&o.batch.confirmed_frames==1920&&o.zero_verified&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.batch_acks,(unsigned long long)o.batch.confirmed_frames,o.zero_verified,o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==37){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_GRAPH_DATA: %s acks=%u batch_acks=%u frames=%llu bytes_each=2880 tone_prepared=%u tone_cleared=%u mapped=%u restored=%u memory_phase=%u handle=%x data=known48 audio_output=0 finished=1\n",
-   o.graph_acks==12u+o.graph_dec&&o.batch_acks==4&&o.batch.confirmed_frames==1920&&o.tone48_prepared&&o.tone48_cleared&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
+   o.graph_acks==12u+o.graph_dec+o.graph_echo&&o.batch_acks==4&&o.batch.confirmed_frames==1920&&o.tone48_prepared&&o.tone48_cleared&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.batch_acks,(unsigned long long)o.batch.confirmed_frames,o.tone48_prepared,o.tone48_cleared,o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==38){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_RUNTIME: %s acks=%u ready_before=%u ready_after=%u watermark_gate=%u underrun_gate=%u pack=%u packets=%u done_acks=%u frames=%llu drained=%u ready_cleared=%u mapped=%u restored=%u memory_phase=%u handle=%x data=known48 audio_output=0 finished=1\n",
-   o.graph_acks==12u+o.graph_dec&&o.runtime.ready_before==0&&o.runtime.ready_after==1&&o.runtime.watermark_gate==1&&o.runtime.underrun_gate==1&&
+   o.graph_acks==12u+o.graph_dec+o.graph_echo&&o.runtime.ready_before==0&&o.runtime.ready_after==1&&o.runtime.watermark_gate==1&&o.runtime.underrun_gate==1&&
    o.runtime.pack_verified==4&&o.runtime.packets==4&&o.runtime.acks==4&&o.runtime.frames==1920&&o.runtime.drained==1&&o.runtime.ready_cleared==1&&
    o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.runtime.ready_before,o.runtime.ready_after,o.runtime.watermark_gate,o.runtime.underrun_gate,o.runtime.pack_verified,
@@ -872,7 +924,7 @@ void worker(void *,wait_result_t){
    o.dma_mapped,o.dma_restored,o.memory.phase,o.memory.handle);}
  if(o.mode==40||o.mode==41){if(!o.dma_restored&&o.dma_mapped)zizhan_audio_dma_map_retain();
   IOLog("ZIZHAN_AUDIO_SERVICE_RUN: %s acks=%u waited_ms=%u first_written=%llu start_frame=%llu ready_after=%u underrun_waits=%u pack=%u packets=%u done_acks=%u frames=%llu drained=%u ready_cleared=%u stopped_by_request=%u mapped=%u restored=%u memory_phase=%u handle=%x data=service audio_output=0 finished=1\n",
-   o.graph_acks==12u+o.graph_dec&&o.service.ready_after&&(o.mode==41?(o.service.flow_ok==1&&o.silent.amp_pass&&o.silent.pulse_verified):o.service.flow_ms?o.service.flow_ok==1:(o.service.pack_verified==4&&o.service.packets==4&&o.service.acks==4&&o.service.frames==1920))&&
+   o.graph_acks==12u+o.graph_dec+o.graph_echo&&o.service.ready_after&&(o.mode==41?(o.service.flow_ok==1&&o.silent.amp_pass&&o.silent.pulse_verified):o.service.flow_ms?o.service.flow_ok==1:(o.service.pack_verified==4&&o.service.packets==4&&o.service.acks==4&&o.service.frames==1920))&&
    o.service.drained&&o.service.ready_cleared&&o.dma_restored&&o.state.phase==ZizhanPrmDone&&o.memory.phase==ZizhanMemoryDone?"PASS":"FAIL",
    o.graph_acks,o.service.waited_ms,(unsigned long long)o.service.first_written,(unsigned long long)o.service.start_frame,o.service.ready_after,
    o.service.underrun_waits,o.service.pack_verified,o.service.packets,o.service.acks,(unsigned long long)o.service.frames,o.service.drained,

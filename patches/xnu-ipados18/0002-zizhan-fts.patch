@@ -21,7 +21,7 @@
  
 --- /dev/null
 +++ b/bsd/dev/pong_fts.c
-@@ -0,0 +1,1099 @@
+@@ -0,0 +1,1123 @@
 +/* ST FingerTip FST2 (chip 0x3652) inner touch of the Xiaomi MIX Fold 2 (zizhan, SM8475).
 + * The board plumbing -- QUP0 SE4 GENI SPI on GPIO16-19, IRQ GPIO21, reset GPIO20, RPMh supplies, GCC votes --
 + * is Pong's pong_goodix.c (itself from HackiOS redwood_goodix.c, APSL 2.0), because zizhan wires its inner touch
@@ -54,9 +54,23 @@
 +static uint32_t touch_lat;
 +extern void pong_gesture_sample(void);
 +
++/* POWER-02 S4: while the display is off the FIFO is still drained, but touches are not posted.
++ * pong_touch_set_paused() only records the request; the touch thread performs the transition. */
++static volatile uint32_t touch_pause_request, touch_paused, touch_suppressed;
++void pong_touch_set_paused(int paused);
++void
++pong_touch_set_paused(int paused)
++{
++	__atomic_store_n(&touch_pause_request, paused ? 1u : 0u, __ATOMIC_RELEASE);
++}
++
 +static void
 +touch_post(uint32_t type, uint32_t id, uint32_t x, uint32_t y)
 +{
++	if (touch_paused) {
++		touch_suppressed++;
++		return;
++	}
 +	static uint32_t moved;
 +	uint64_t ns;
 +
@@ -1013,6 +1027,16 @@
 +	    se_phys, PIN_RESET, PIN_INT, max_x, max_y, flip);
 +	unsigned idle = 0, minute = 0;
 +	for (;;) {
++		const uint32_t want = __atomic_load_n(&touch_pause_request, __ATOMIC_ACQUIRE);
++		if (want && !touch_paused) {
++			fts_release_all();
++			touch_suppressed = 0;
++			touch_paused = 1;
++			printf("ZIZHAN_TOUCH_PAUSE: paused touches=%u\n", seen.touches);
++		} else if (!want && touch_paused) {
++			touch_paused = 0;
++			printf("ZIZHAN_TOUCH_PAUSE: resumed suppressed=%u touches=%u\n", touch_suppressed, seen.touches);
++		}
 +		if (!gpio_get(PIN_INT) || ++idle >= 10) { idle = 0; fts_poll(); }
 +		sleep_ms(8);
 +		if (++minute >= 7500) {

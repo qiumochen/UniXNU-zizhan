@@ -14,6 +14,7 @@ extern "C" int zizhan_dsi_power_sequence(const uint8_t *dcs,const uint16_t *wait
     __attribute__((weak));
 extern "C" int pong_backlight_level(uint32_t *level) __attribute__((weak));
 extern "C" int pong_backlight_set(uint32_t level,uint32_t timeout_ms) __attribute__((weak));
+extern "C" void pong_touch_set_paused(int paused) __attribute__((weak));
 
 namespace zizhan_display_power_service {
 static ZizhanDisplayPowerRuntime runtime;
@@ -82,6 +83,7 @@ extern "C" int zizhan_display_power_request(uint32_t count,const uint64_t *in,
   const int result = zizhan_display_power_execute(&runtime, &ops, nullptr, count, in,
                                                   bytes, uptime_us(), &report);
   if (result == ZizhanDisplayPowerOk) {
+    if (pong_touch_set_paused) pong_touch_set_paused(report.target == ZizhanDisplayTargetOff ? 1 : 0);
     IOLog("ZIZHAN_DISPLAY_POWER: PASS target=%s sequence=%u saved=%u state=%u\n",
           report.target == ZizhanDisplayTargetOff ? "off" : "on",
           (unsigned)report.sequence, (unsigned)runtime.saved_level,
@@ -99,6 +101,7 @@ extern "C" int zizhan_display_power_request(uint32_t count,const uint64_t *in,
           (unsigned)runtime.state.rejected_busy,
           (unsigned)runtime.state.rejected_queue_full);
   } else {
+    if (pong_touch_set_paused && runtime.state.state == 1) pong_touch_set_paused(0);
     IOLog("ZIZHAN_DISPLAY_POWER: FAIL fault=%u target=%s sequence=%u saved=%u "
           "restored=%u dsi_failed=%u state=%u\n",
           report.fault,

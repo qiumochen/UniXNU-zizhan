@@ -10,6 +10,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
+#include "ZizhanDailyProfile.h"
 #include <kern/clock.h>
 #include "../PongPower/GeniI2c.h"
 
@@ -281,19 +282,36 @@ static void outer_spi() {
     const bool evok = xfer(tx, ev, 3 + 1 + 8);
     IOLog("ZIZHAN_OUTER_SPI: event_xfer=%u event=%02x %02x %02x %02x %02x %02x %02x %02x (0x03 = controller ready)\n", evok ? 1u : 0u,
           ev[4], ev[5], ev[6], ev[7], ev[8], ev[9], ev[10], ev[11]);
-    /* FTM5-style event FIFO (chip 0x36xx sec panel): command 0x86 READ_ONE_EVENT, one dummy byte, 8-byte event. Read until the
-     * IRQ (GPIO119) releases: the line going high proves the event protocol without a finger. */
+    /* FTM5 SALIXP (chip id 0x3640) over SPI, per the ST fts_spi driver in Xiaomi's sm8475 kernel source: the FIFO read
+     * command is 0x87 on SPI (0x86 is the I2C opcode), then one dummy byte, then an 8-byte event. Drain while IRQ GPIO119 is low:
+     * 0x03 = controller ready, 0x43 = status update, 0xf3 = error. Then start active scanning (A0 00 01, the driver's resume
+     * setting) and drain again. The IRQ line going high after the reads is the closed-loop check; no finger is needed. */
     {
       Rw irqp;
       const bool irq_ok = irqp.open(0xf100000ull + 119ull * 0x1000, 0x1000, kIOMapInhibitCache);
-      for (unsigned n = 0; n < 8; ++n) {
-        uint8_t t2[10] = {0x86}, r2[10] = {};
-        const bool ok86 = xfer(t2, r2, 1 + 1 + 8);
-        const unsigned level = irq_ok ? (irqp.r(4) & 1u) : 2u;
-        IOLog("ZIZHAN_OUTER_SPI: ftm5 event %u xfer=%u data=%02x %02x %02x %02x %02x %02x %02x %02x irq_after=%u\n", n, ok86 ? 1u : 0u,
-              r2[2], r2[3], r2[4], r2[5], r2[6], r2[7], r2[8], r2[9], level);
-        if (level == 1) break;
-      }
+      auto irq_level = [&]() -> unsigned { return irq_ok ? (irqp.r(4) & 1u) : 2u; };
+      auto drain = [&](const char *phase) {
+        unsigned n = 0;
+        for (; n < 16; ++n) {
+          uint8_t t2[10] = {0x87}, r2[10] = {};
+          const bool ok = xfer(t2, r2, 1 + 1 + 8);
+          const unsigned level = irq_level();
+          IOLog("ZIZHAN_OUTER_SPI: ftm5 %s event %u xfer=%u data=%02x %02x %02x %02x %02x %02x %02x %02x irq_after=%u\n", phase, n,
+                ok ? 1u : 0u, r2[2], r2[3], r2[4], r2[5], r2[6], r2[7], r2[8], r2[9], level);
+          if (!ok || level == 1 || r2[2] == 0x00) { ++n; break; }
+        }
+        return n;
+      };
+      const unsigned before = irq_level();
+      const unsigned n1 = drain("boot");
+      const unsigned mid = irq_level();
+      const uint8_t scan[3] = {0xa0, 0x00, 0x01};
+      const bool scan_ok = xfer(scan, nullptr, 3);
+      IODelay(50000);
+      const unsigned after_scan = irq_level();
+      const unsigned n2 = drain("scan");
+      IOLog("ZIZHAN_OUTER_SPI: ftm5 summary irq_before=%u boot_reads=%u irq_after_boot=%u scan_cmd=%u irq_after_scan=%u scan_reads=%u irq_end=%u\n",
+            before, n1, mid, scan_ok ? 1u : 0u, after_scan, n2, irq_level());
     }
   }
 pads_back:
@@ -375,7 +393,7 @@ static void draw(bool closed) {
 }  // namespace fold
 extern "C" void zizhan_outer_fold_show(int closed) {
   uint32_t on = 0;
-  if (!PE_parse_boot_argn("zizhan_outer_fold", &on, sizeof on) || on != 1) return;
+  if (!zizhan_daily::arg("zizhan_outer_fold", &on, zizhan_daily::kOuterFold) || on != 1) return;
   fold::draw(closed != 0);
 }
 

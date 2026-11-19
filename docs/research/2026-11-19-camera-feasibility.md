@@ -63,3 +63,14 @@
 5. 反序下电，记录全部读回。
 
 补充：PM8008J 所在 I2C 是 **QUP wrap0 S5（0x994000）**，DT 时钟 GCC 96/134/135。GCC：投票寄存器 0x162008 bit 6/7（M/S AHB）、8/9（core/core2x）、15（S5）；S5 分支 0x127610，RCG 0x127618。同一总线上还有 eUSB2 中继（0x4f）和 FSA4480（0x42），操作时只碰 0x0c/0x0d，总线异常即停止。现有 `GeniI2c` 只支持 1 字节寄存器地址，PM8008 需要 16 位地址（先写 2 字节地址、不发 STOP，再读），接入内核时要补这一种传输。
+
+## 2026-11-19 13:20：第一次和摄像头传感器通信成功（cam-1，静音，用户授权自行闭环）
+
+`zizhan_cam_probe=2`（build-play35）：
+
+- 只读盘点（self-1）：wrap0 S5 已由启动程序开好时钟（投票含 bit 15、DFS 开），GPIO206/207 已是 qup5 且 eGPIO 归 APPS，PM8008J 使能 GPIO11 为高；GCC camera AHB/XO 开；CAM_CC titan GDSC 收起，MCLK3/CCI1 时钟关。
+- 上电：PM8008J（I2C 0x0d）L1 读回 1200 mV（默认）→ 设 1056 mV；L5 1.8 V → GPIO53 → L1，均读回一致；CAM_CC GDSC → MCLK3 19.2 MHz（XO）→ GPIO103 MCLK；复位 GPIO128 释放；CCI 时钟（XO）、CCI1 pads GPIO114/115（cci_i2c）。
+- **CCI1 master 0、7 位地址 0x1a、寄存器 0x0016 → 0x0663**：这是 **Sony IMX663（长焦）**，不是 IMX596。更正：CCI1 / cam-sensor3 这一路是长焦（前文按编号推断为前置有误）。
+- 结束：CCI 分支 → MCLK3 → GDSC 收起，LDO 反序关闭，GPIO 全部恢复；无 panic，返回 Android。
+
+下一步：分别对 CCI0 上的三路（cam-sensor0/1/2）做同样的只读 ID 读取，确认主摄 IMX766（0x0766）、超广角 OV13B10、前置 IMX596 各在哪一路；之后才是 CSIPHY/CSID/IFE 取 RAW 帧。

@@ -79,3 +79,7 @@ FTM5 风格的 0x86（读单个事件、1 个 dummy 字节）连读 8 次仍全 
 - 打开：按键亮内屏（TE 44 次/100 ms），外屏清黑，签名 0xad495edf。
 
 只差真实霍尔：合上手机应看到内屏熄灭、外屏出时钟。外屏触控事件协议仍未打通。
+
+### 外屏触控驱动线索
+
+Android 侧外屏触控模块是 `fts_touch_spi_sec.ko`（内屏 `fts_touch_spi_pri.ko`，共用 `xiaomi_touch.ko`），字符串显示是 ST **FTM5** 系列驱动（fts_lib：fts_system_reset、controller-ready 事件处理、production test）。模块已只读拷到本机 `work/touch-ko/`（不入仓库）。下一步按 FTM5 公开驱动（Pixel 内核 stm/fts_lib）的 system reset（0x20000024）、中断使能和 FIFO 读法对照，或反汇编该模块确认命令字节。

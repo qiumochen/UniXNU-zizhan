@@ -4,9 +4,11 @@
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
 #include "ZizhanCamProbe.h"
+#include "ZizhanModemProbe.h"
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" {
 void pong_rpmh_init(void);
+void zizhan_mpss_start(void);
 void sheng_adsp_probe(void);
 void sheng_audio_probe(void);
 void sheng_battery_start(void);
@@ -22,6 +24,8 @@ void pong_power_start_optional(void) {
  zizhan_se15_probe();
  zizhan_se15_prepare_probe();
  zizhan_cmd_db_probe();
+ zizhan_modem_probe::start();  // default off; 1 = read-only firmware/EFS reachability (MODEM-01 stage 1a)
+ zizhan_mpss_start();          // default off; zizhan_modem=2 with pong_adsp=0: boot the modem once, watch it, stop it (stage 1b)
  zizhan_cam_probe::start();   // default off; 1 read-only inventory, 2 attended front-camera chip id
  unsigned enabled=0;PE_parse_boot_argn("pong_adsp",&enabled,sizeof(enabled));
  if(!enabled)return;

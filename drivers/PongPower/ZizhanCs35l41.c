@@ -992,7 +992,8 @@ static int pulse_write(void *p,uint32_t reg,uint32_t value){
   (reg==0x2018&&(value==0x3300||value==0x3320||value==0x3321))||
   (reg==0x4c00&&(value==0||value==0x08))||
   (zizhan_amp_echo&&(zizhan_amp_pulse_flags&1u)&&c->chip==0&&((reg==0x4c20&&(value==0x08||value==out->echo_src[0]))||(reg==0x4800&&(value==0x10000||value==0x10001))))||
-  (reg==0x6000&&(value==original||value==((original&~0x3ff8u)|0x3f40u)));
+  (reg==0x6000&&(value==original||value==((original&~0x3ff8u)|0x3f40u)||((zizhan_amp_pulse_flags&4u)&&value==(original&~0x3ff8u))))||
+  ((zizhan_amp_pulse_flags&4u)&&reg==0x6c04&&(value==0x253||value==out->pulse[c->chip].original_gain));
  if(!out->pulse_profile||!allowed||out->transport.controller_uncertain)return 0;
  const uint8_t wire[]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg,
   (uint8_t)(value>>24),(uint8_t)(value>>16),(uint8_t)(value>>8),(uint8_t)value};
@@ -1015,7 +1016,7 @@ uint32_t zizhan_amp_dump_values[2][228];
 unsigned zizhan_amp_pulse_flags; /* bit0 dry (no AMP enable/volume), bit1 skip the native pup/pdn patch. */
 unsigned zizhan_amp_play_ms; /* profile 19 window length; 0 refuses the profile. */
 static void pulse_pause(void *p,unsigned us){NativePulse *c=p;c->clock->pause_us(c->clock->context,us);}
-static ZizhanPulseOps pulse_ops(NativePulse *p){ZizhanPulseOps o={p,pulse_read,pulse_write,pulse_now,pulse_uncertain,pulse_data,pulse_pause,zizhan_amp_pulse_hold_us,zizhan_amp_pulse_flags&1u};return o;}
+static ZizhanPulseOps pulse_ops(NativePulse *p){ZizhanPulseOps o={p,pulse_read,pulse_write,pulse_now,pulse_uncertain,pulse_data,pulse_pause,zizhan_amp_pulse_hold_us,zizhan_amp_pulse_flags&1u,(zizhan_amp_pulse_flags>>2)&1u};return o;}
 static int run_debug_snapshot(GeniI2c *bus,const ZizhanAmpClock *clock,ZizhanAmpRun *out,unsigned slot,uint64_t begin){
  if(!out->core_debug){return 0;}if(slot>=6)return ZizhanAmpArgument;const unsigned chip=out->failed_chip;
  for(unsigned i=0;i<15;++i){if(clock->now_us(clock->context)-begin>=8000000)return ZizhanAmpTimeout;

@@ -18,18 +18,22 @@ typedef struct {
  unsigned hold_us;
  /* Silent diagnostics: never write AMP/BST enable or volume; only the data transfer and fault reads. */
  unsigned dry;
+ /* Playback window only (zizhan_amp_lvl=1, attended): Android's level, digital volume 0 dB (0x6000 field 0)
+  * and AMP_GAIN_PCM 18 (0x6c04 = 0x253, 18.5 dB), both restored on disarm. */
+ unsigned android_level;
 } ZizhanPulseOps;
 typedef struct {
  unsigned attempted,acknowledged,patch_on,patch_off,enabled,disabled,data_ack,complete,reason,reads;
  unsigned armed,polls,pcm_source; /* playback window only (zizhan_pulse_arm/hold_check/disarm) */
  uint32_t original_volume,original_power,fault_sticky[2],fault_raw[2];uint64_t enabled_us;
+ uint32_t original_gain;unsigned gain_set;
 } ZizhanPulseReceipt;
 enum {ZizhanPulseIo=1,ZizhanPulseGuard,ZizhanPulseTimeout,ZizhanPulseReadback,ZizhanPulseData};
 static inline int zizhan_pulse_read(const ZizhanPulseOps *o,ZizhanPulseReceipt *r,uint32_t reg,uint32_t *v){
  ++r->reads;return o->read(o->context,reg,v)?0:ZizhanPulseIo;
 }
 static inline int zizhan_pulse_write(const ZizhanPulseOps *o,ZizhanPulseReceipt *r,uint32_t reg,uint32_t v){
- if(r->attempted>=18){return ZizhanPulseGuard;}++r->attempted;
+ if(r->attempted>=20){return ZizhanPulseGuard;}++r->attempted;
  if(!o->write(o->context,reg,v)){return ZizhanPulseIo;}++r->acknowledged;return 0;
 }
 /* Exact original native pup/pdn patch. Parent calls on before GLOBAL_EN,
@@ -108,11 +112,20 @@ static inline int zizhan_pulse_arm(const ZizhanPulseOps *o,ZizhanPulseReceipt *r
   if(i==8){r->original_volume=value;}else if(value!=expected[i]){return ZizhanPulseGuard;}}
  if((r->original_volume&0x3fffu)!=0x267cu){return ZizhanPulseGuard;}
  r->original_power=0x3300;rc=zizhan_pulse_faults(o,r,0);if(rc){return rc;}
+ /* Android level: the original gain is checked read-only first, dry included. */
+ if(o->android_level){
+  rc=zizhan_pulse_read(o,r,0x6c04,&r->original_gain);if(rc){return rc;}
+  if((r->original_gain&~0x3e0u)!=0x13u){return ZizhanPulseGuard;}
+ }
  r->armed=1;r->enabled_us=o->now(o->context);
  if(o->dry){return 0;}
- const uint32_t volume=(r->original_volume&~0x3ff8u)|0x3f40u;
+ const uint32_t volume=(r->original_volume&~0x3ff8u)|(o->android_level?0u:0x3f40u);
  rc=zizhan_pulse_write(o,r,0x6000,volume);if(rc){return rc;}
  rc=zizhan_pulse_read(o,r,0x6000,&value);if(rc){return rc;}if(value!=volume){return ZizhanPulseReadback;}
+ if(o->android_level){
+  rc=zizhan_pulse_write(o,r,0x6c04,0x253);if(rc){return rc;}r->gain_set=1;
+  rc=zizhan_pulse_read(o,r,0x6c04,&value);if(rc){return rc;}if(value!=0x253){return ZizhanPulseReadback;}
+ }
  /* DACPCM1 source: reset value 0 feeds the DAC silence. 0x08 = ASPRX1, as the vendor "PCM Source:ASP". */
  rc=zizhan_pulse_write(o,r,0x4c00,0x08);if(rc){return rc;}
  rc=zizhan_pulse_read(o,r,0x4c00,&value);if(rc){return rc;}if(value!=0x08){return ZizhanPulseReadback;}
@@ -138,6 +151,7 @@ static inline int zizhan_pulse_disarm(const ZizhanPulseOps *o,ZizhanPulseReceipt
  else if(o->dry){r->disabled=1;}
  else{
   if(r->pcm_source){rc=zizhan_pulse_write(o,r,0x4c00,0);if(!rc){r->pcm_source=0;}}
+  if(!rc&&r->gain_set){rc=zizhan_pulse_write(o,r,0x6c04,r->original_gain);if(!rc){r->gain_set=0;}}
   if(!rc){rc=zizhan_pulse_write(o,r,0x2018,0x3320);}
   if(!rc){rc=zizhan_pulse_write(o,r,0x2018,0x3300);}
   if(!rc){rc=zizhan_pulse_read(o,r,0x2018,&value);}

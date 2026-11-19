@@ -44,11 +44,13 @@ void check(void *,wait_result_t){
 // Silent self-test producer (zizhan_audio_selftest=1 with PRM mode 40). It writes like the HAL's
 // DoIOOperation: from lead + 2 periods after the anchor, one period every 10 ms, watermark after the copy.
 // zizhan_tone_amp=64..8192 (attended loudness checks only); default 512 = -36 dBFS.
-int16_t gSelftestAmp=512;
+int16_t gSelftestAmp=512;bool gSelftestInPhase=false;
 int16_t selftest_sample(uint64_t frame){return ((frame/24u)&1u)?gSelftestAmp:int16_t(-gSelftestAmp);}
 void selftest(void *,wait_result_t){
  {unsigned amp=0;if(PE_parse_boot_argn("zizhan_tone_amp",&amp,sizeof amp)&&amp>=64&&amp<=8192){gSelftestAmp=int16_t(amp);}}
- IOLog("ZIZHAN_AUDIO_SELFTEST: amp=%d\n",int(gSelftestAmp));
+ /* zizhan_amp_lvl=1 also plays both channels in phase (R=-L made the two speakers push against each other). */
+ {unsigned lvl=0;gSelftestInPhase=PE_parse_boot_argn("zizhan_amp_lvl",&lvl,sizeof lvl)&&lvl==1;}
+ IOLog("ZIZHAN_AUDIO_SELFTEST: amp=%d in_phase=%d\n",int(gSelftestAmp),gSelftestInPhase?1:0);
  IOSleep(30000);auto c=control();auto ring=gRing?static_cast<int16_t *>(gRing->getBytesNoCopy()):nullptr;
  unsigned produced=0,waited=0;const int started=c&&ring&&zizhan_handoff_request_start(&gHandoff);
  IOLog("ZIZHAN_AUDIO_SELFTEST: start accepted=%d owner=%u\n",started,gHandoff.owner);
@@ -64,7 +66,7 @@ void selftest(void *,wait_result_t){
     const uint64_t target=sample_now()+ZIZHAN_AUDIO_LEAD_FRAMES+2*ZIZHAN_AUDIO_PERIOD_FRAMES;
     while(t+ZIZHAN_AUDIO_PERIOD_FRAMES<=target){
      for(unsigned f=0;f<ZIZHAN_AUDIO_PERIOD_FRAMES;++f,++t){const unsigned at=unsigned(t%ZIZHAN_AUDIO_RING_FRAMES);
-      ring[2*at]=selftest_sample(t);ring[2*at+1]=int16_t(-selftest_sample(t));}
+      ring[2*at]=selftest_sample(t);ring[2*at+1]=gSelftestInPhase?selftest_sample(t):int16_t(-selftest_sample(t));}
      zizhan_audio_publish_written(c,t);++produced;
     }
     IOSleep(1);

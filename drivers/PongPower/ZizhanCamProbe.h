@@ -88,25 +88,45 @@ static void se_write(void *c, uint32_t reg, uint32_t v) { static_cast<Win *>(c)-
 
 static void gpio_out(Win &p, int high) { p.w(0, (p.r(0) & ~0x3ffu) | (1u << 9)); p.w(4, high ? 2u : 0u); }
 
-static void attended() {
-  Win vote, wrap, se, camcc, cci, pin[6];
-  uint32_t saved[6] = {};
+/* One camera module, from the zizhan live DT (regulator names W/F/U/T = wide/front/ultra/tele). vdig_ldo 0 means the
+ * digital rail is a GPIO regulator (vdig_gpio). All share vio = PM8008J L5 1.8 V. */
+struct Sensor {
+  const char *name;
+  unsigned vana_gpio, vdig_ldo, vdig_mv, vdig_gpio;
+  uint32_t mclk_rcg, mclk_cbcr; unsigned mclk_pin, reset_pin;
+  uint64_t cci_base; uint32_t cci_rcg, cci_cbcr; unsigned master, pad0, pad1;
+  uint8_t addrs[3]; uint16_t id_reg; unsigned id_len;
+};
+static const Sensor kSensors[] = {
+  // mode 2: CCI1 / cam-sensor3 = IMX663 tele (cam-1: 0x1a -> 0x0663)
+  {"tele", 53, 1, 1056, 0, 0x15054, 0x1506c, 103, 128, 0xac16000, 0x13148, 0x13160, 0, 114, 115, {0x1a, 0x10, 0}, 0x0016, 2},
+  // mode 3: CCI0 master 1 / cam-sensor1 = front IMX596: vdig PM8008J L2 1.152 V, vana GPIO97 2.9 V, MCLK5 GPIO105, reset GPIO127
+  {"front", 97, 2, 1152, 0, 0x1508c, 0x150a4, 105, 127, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x1a, 0x10, 0x37}, 0x0016, 2},
+  // mode 4: CCI0 master 1 / cam-sensor2 = ultra OV13B10: vdig GPIO92 1.2 V, vana GPIO6 2.8 V, MCLK1 GPIO101, reset GPIO24
+  {"ultra", 6, 0, 0, 92, 0x1501c, 0x15034, 101, 24, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x36, 0x10, 0}, 0x300a, 3},
+};
+
+static void attended(const Sensor &sn) {
+  Win vote, wrap, se, camcc, cci, pm_en, vana, vdig, mclk, rst, pad[2], i2c[2];
   if (!vote.open(0x162000, 0x1000, true) || !wrap.open(0x127000, 0x1000, true) || !se.open(0x994000, 0x4000, true) ||
-      !camcc.open(0xade0000, 0x20000, true) || !cci.open(0xac16000, 0x1000, true)) { IOLog("ZIZHAN_CAM_PROBE: FAIL map\n"); return; }
+      !camcc.open(0xade0000, 0x20000, true) || !cci.open(sn.cci_base, 0x1000, true)) { IOLog("ZIZHAN_CAM_PROBE: FAIL map\n"); return; }
   {
     Win cam_ahb;
     if (!cam_ahb.open(0x136000, 0x1000, true)) { IOLog("ZIZHAN_CAM_PROBE: FAIL map\n"); return; }
     if (cam_ahb.r(0x004) & 0x80000000u) { cam_ahb.w(0x004, cam_ahb.r(0x004) | 1u); IODelay(100); }
     if (cam_ahb.r(0x004) & 0x80000000u) { IOLog("ZIZHAN_CAM_PROBE: FAIL camera-ahb-off\n"); return; }
   }
-  for (unsigned i = 0; i < 6; ++i) {
-    if (!pin[i].open(0xf100000ull + uint64_t(kPins[i]) * 0x1000, 0x1000, true)) { IOLog("ZIZHAN_CAM_PROBE: FAIL pin-map\n"); return; }
-    saved[i] = pin[i].r(0);
-  }
-  // I2C pins 206/207: eGPIO must be enabled for APPS (bit 12) when present (bit 11), as the SE15 rule.
-  for (unsigned i = 4; i < 6; ++i)
-    if ((saved[i] & (1u << 11)) && !(saved[i] & (1u << 12))) { IOLog("ZIZHAN_CAM_PROBE: SKIP i2c-pin-not-apps pin=%u cfg=%x\n", kPins[i], saved[i]); return; }
-  // wrap0 clocks (add-only votes), S5 RCG at XO when DFS is off.
+  auto pin_open = [](Win &w, unsigned n) { return w.open(0xf100000ull + uint64_t(n) * 0x1000, 0x1000, true); };
+  if (!pin_open(pm_en, 11) || !pin_open(vana, sn.vana_gpio) || (sn.vdig_gpio && !pin_open(vdig, sn.vdig_gpio)) ||
+      !pin_open(mclk, sn.mclk_pin) || !pin_open(rst, sn.reset_pin) || !pin_open(pad[0], sn.pad0) || !pin_open(pad[1], sn.pad1) ||
+      !pin_open(i2c[0], 206) || !pin_open(i2c[1], 207)) { IOLog("ZIZHAN_CAM_PROBE: FAIL pin-map\n"); return; }
+  const uint32_t s_pm = pm_en.r(0), s_vana = vana.r(0), s_vdig = sn.vdig_gpio ? vdig.r(0) : 0, s_mclk = mclk.r(0), s_rst = rst.r(0),
+                 s_pad0 = pad[0].r(0), s_pad1 = pad[1].r(0), s_i2c0 = i2c[0].r(0), s_i2c1 = i2c[1].r(0);
+  IOLog("ZIZHAN_CAM_PROBE: %s start vana%u=%x vdig%u=%x mclk%u=%x reset%u=%x pads%u/%u=%x/%x\n", sn.name, sn.vana_gpio, s_vana,
+        sn.vdig_gpio, s_vdig, sn.mclk_pin, s_mclk, sn.reset_pin, s_rst, sn.pad0, sn.pad1, s_pad0, s_pad1);
+  const uint32_t i2c_cfg[2] = {s_i2c0, s_i2c1};
+  for (uint32_t v : i2c_cfg)
+    if ((v & (1u << 11)) && !(v & (1u << 12))) { IOLog("ZIZHAN_CAM_PROBE: SKIP i2c-pin-not-apps cfg=%x\n", v); return; }
   vote.w(0x8, vote.r(0x8) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | (1u << 15));
   if (!(wrap.r(0x62c) & 1u)) { wrap.w(0x61c, (wrap.r(0x61c) & ~0x1037ffu) | 1u); wrap.w(0x618, wrap.r(0x618) | 1u); }
   bool on = false;
@@ -116,79 +136,71 @@ static void attended() {
     if (!on) IODelay(100);
   }
   if (!on) { IOLog("ZIZHAN_CAM_PROBE: FAIL wrap0-s5-clock\n"); return; }
-  for (unsigned i = 4; i < 6; ++i) pin[i].w(0, (saved[i] & ~0x3ffu) | (1u << 2) | 3u);   // qup5, pull-up
-  // 100 kHz from 19.2 MHz (Linux geni i2c: div 7, t_high 10, t_low 11, t_cycle 26) if the boot loader left it unset.
+  for (unsigned i = 0; i < 2; ++i) i2c[i].w(0, (i2c[i].r(0) & ~0x3ffu) | (1u << 2) | 3u);
   if (!(se.r(0x48) & 1u) || !se.r(0x278)) { se.w(0x48, (7u << 4) | 1u); se.w(0x278, (10u << 20) | (11u << 10) | 26u); }
   I2cCtx x{}; x.se = &se;
   const GeniIo io = {se_read, se_write, &se};
   uint32_t config = 0;
-  if (geni_i2c_prepare_poll(&x.g, &io, 0x0d, &config)) { IOLog("ZIZHAN_CAM_PROBE: FAIL i2c-prepare config=%x\n", config); goto pins; }
-  {
-    gpio_out(pin[0], 1);   // PM8008J enable (active state output-high)
-    gpio_out(pin[3], 0);   // sensor reset low
+  if (geni_i2c_prepare_poll(&x.g, &io, 0x0d, &config)) {
+    IOLog("ZIZHAN_CAM_PROBE: FAIL i2c-prepare config=%x\n", config);
+  } else {
+    gpio_out(pm_en, 1);
+    gpio_out(rst, 0);
     IOSleep(5);
     const ZizhanPm8008Ops pm = {&x, pm_read, pm_write};
-    unsigned mv = 0; int en = 0;
-    int rc = zizhan_pm8008_read_ldo(&pm, 1, &mv, &en);
-    IOLog("ZIZHAN_CAM_PROBE: pm8008j l1 rc=%d mv=%u en=%d\n", rc, mv, en);
-    if (rc) goto pmoff;
-    {
-      unsigned done = 0;
-      rc = zizhan_pm8008_rails_on(&pm, &zizhan_pm8008_front_rails[0], 1, &done);   // vio L5 1.8 V
-      if (!rc) { gpio_out(pin[1], 1); IOSleep(1); }                                  // vana (GPIO53 regulator)
-      if (!rc) rc = zizhan_pm8008_rails_on(&pm, &zizhan_pm8008_front_rails[1], 1, &done);   // vdig L1 1.056 V
-      IOLog("ZIZHAN_CAM_PROBE: rails rc=%d\n", rc);
-      ZizhanCamCcOps cc = {&camcc, win_read, win_write, pause_us, 1000};
-      unsigned stage = 0;
-      int crc = rc ? -1 : zizhan_camcc_mclk3_on(&cc, &stage);
-      if (!crc) { pin[2].w(0, (saved[2] & ~0x3ffu) | (1u << 2)); IOSleep(1); gpio_out(pin[3], 1); IOSleep(10); }
-      int ccirc = -1;
-      if (!crc) ccirc = zizhan_cci_clocks_on(&cc);
-      // CCI1 master 0 pads: GPIO114/115, function cci_i2c (1), pull-up, 2 mA (DT cci2_active).
-      Win cpin[2]; uint32_t csaved[2] = {0, 0}; bool cpins = false;
-      if (!crc && !ccirc && cpin[0].open(0xf100000ull + 114ull * 0x1000, 0x1000, true) && cpin[1].open(0xf100000ull + 115ull * 0x1000, 0x1000, true)) {
-        for (unsigned i = 0; i < 2; ++i) { csaved[i] = cpin[i].r(0); cpin[i].w(0, (csaved[i] & ~0x3ffu) | (1u << 2) | 3u); }
-        cpins = true;
-      }
-      if (!crc && !ccirc && !cpins) ccirc = -2;
-      if (!crc && !ccirc) {
-        ZizhanCciOps co = {&cci, win_read, win_write, pause_us, 2000};
-        ccirc = zizhan_cci_reset_init(&co);
-        static const uint8_t addrs[] = {0x1a, 0x10};
-        for (uint8_t a : addrs) {
-          uint8_t id[2] = {0, 0};
-          const int r = ccirc ? ccirc : zizhan_cci_read16(&co, a, 0x0016, id, 2);
-          IOLog("ZIZHAN_CAM_PROBE: cci addr=%x rc=%d chip_id=%02x%02x\n", a, r, id[0], id[1]);
-          if (!r) break;
-        }
-      }
-      if (cpins) for (unsigned i = 0; i < 2; ++i) cpin[i].w(0, csaved[i]);
-      IOLog("ZIZHAN_CAM_PROBE: mclk rc=%d stage=%u cci_clocks=%d cci_pins=%u\n", crc, stage, ccirc, cpins ? 1u : 0u);
-      gpio_out(pin[3], 0);
-      pin[2].w(0, saved[2]);
-      if (!crc) {   // CCI branches off before the GDSC collapses (as Linux), then MCLK3 and the GDSC
-        static const uint32_t cci_branches[] = {0x13160u, 0x131acu, 0x13164u};
-        for (uint32_t br : cci_branches) (void)zizhan_camcc_branch(&cc, br, 0);
-        camcc.w(0x131f0u, camcc.r(0x131f0u) & ~1u);
-        (void)zizhan_camcc_mclk3_off(&cc);
-      }
-      (void)zizhan_pm8008_rails_off(&pm, zizhan_pm8008_front_rails, 2);
-      gpio_out(pin[1], 0);
+    const ZizhanPm8008Rail vio = {5, 1800}, dig = {sn.vdig_ldo, sn.vdig_mv};
+    unsigned mv = 0; int en = 0, rc = 0, crc = -1, ccirc = -1;
+    if (sn.vdig_ldo) {
+      rc = zizhan_pm8008_read_ldo(&pm, sn.vdig_ldo, &mv, &en);
+      IOLog("ZIZHAN_CAM_PROBE: %s pm8008j l%u rc=%d mv=%u en=%d\n", sn.name, sn.vdig_ldo, rc, mv, en);
     }
-  pmoff:
-    pin[0].w(0, saved[0]);
-    pin[1].w(0, saved[1]);
-    pin[3].w(0, saved[3]);
+    unsigned done = 0, stage = 0;
+    if (!rc) rc = zizhan_pm8008_rails_on(&pm, &vio, 1, &done);                 // vio
+    if (!rc) { gpio_out(vana, 1); IOSleep(1); }                               // vana
+    if (!rc) {                                                                 // vdig
+      if (sn.vdig_ldo) rc = zizhan_pm8008_rails_on(&pm, &dig, 1, &done);
+      else { gpio_out(vdig, 1); IOSleep(1); }
+    }
+    IOLog("ZIZHAN_CAM_PROBE: %s rails rc=%d\n", sn.name, rc);
+    ZizhanCamCcOps cc = {&camcc, win_read, win_write, pause_us, 1000};
+    if (!rc) crc = zizhan_camcc_mclk_on(&cc, sn.mclk_rcg, sn.mclk_cbcr, &stage);
+    if (!crc) { mclk.w(0, (s_mclk & ~0x3ffu) | (1u << 2)); IOSleep(1); gpio_out(rst, 1); IOSleep(10); }
+    if (!crc) ccirc = zizhan_cci_clocks_on_for(&cc, sn.cci_rcg, sn.cci_cbcr);
+    if (!crc && !ccirc) {
+      for (unsigned i = 0; i < 2; ++i) pad[i].w(0, ((i ? s_pad1 : s_pad0) & ~0x3ffu) | (1u << 2) | 3u);
+      ZizhanCciOps co = {&cci, win_read, win_write, pause_us, 2000};
+      ccirc = zizhan_cci_reset_init_m(&co, sn.master);
+      for (uint8_t a : sn.addrs) {
+        if (!a) continue;
+        uint8_t id[3] = {0, 0, 0};
+        const int r = ccirc ? ccirc : zizhan_cci_read16_m(&co, sn.master, a, sn.id_reg, id, sn.id_len);
+        IOLog("ZIZHAN_CAM_PROBE: %s cci m%u addr=%x reg=%x rc=%d id=%02x%02x%02x\n", sn.name, sn.master, a, sn.id_reg, r, id[0], id[1], id[2]);
+        if (!r) break;
+      }
+      pad[0].w(0, s_pad0); pad[1].w(0, s_pad1);
+    }
+    IOLog("ZIZHAN_CAM_PROBE: %s mclk rc=%d stage=%u cci_clocks=%d\n", sn.name, crc, stage, ccirc);
+    gpio_out(rst, 0);
+    mclk.w(0, s_mclk);
+    if (!crc) {
+      const uint32_t cci_branches[] = {sn.cci_cbcr, 0x131acu, 0x13164u};
+      for (uint32_t br : cci_branches) (void)zizhan_camcc_branch(&cc, br, 0);
+      camcc.w(0x131f0u, camcc.r(0x131f0u) & ~1u);
+      (void)zizhan_camcc_mclk_off(&cc, sn.mclk_cbcr);
+    }
+    if (sn.vdig_ldo) (void)zizhan_pm8008_enable(&pm, sn.vdig_ldo, 0); else gpio_out(vdig, 0);
+    gpio_out(vana, 0);
+    (void)zizhan_pm8008_enable(&pm, 5, 0);
   }
-pins:
-  for (unsigned i = 4; i < 6; ++i) pin[i].w(0, saved[i]);
-  IOLog("ZIZHAN_CAM_PROBE: DONE attended rails_off=1 pins_restored=1\n");
+  pm_en.w(0, s_pm); vana.w(0, s_vana); if (sn.vdig_gpio) vdig.w(0, s_vdig); mclk.w(0, s_mclk); rst.w(0, s_rst);
+  i2c[0].w(0, s_i2c0); i2c[1].w(0, s_i2c1);
+  IOLog("ZIZHAN_CAM_PROBE: DONE %s rails_off=1 pins_restored=1\n", sn.name);
 }
 
 static void worker(void *arg, wait_result_t) {
   const uint32_t mode = uint32_t(uintptr_t(arg));
   IOSleep(40000);   // after the desktop and Wi-Fi
-  if (mode == 1) inventory(); else attended();
+  if (mode == 1) inventory(); else attended(kSensors[mode - 2]);
   thread_terminate(current_thread());
   thread_block(THREAD_CONTINUE_NULL);
 }
@@ -197,11 +209,11 @@ static void start() {
   uint32_t mode = 0;
   if (!PE_parse_boot_argn("zizhan_cam_probe", &mode, sizeof mode) || !mode) return;
   uint32_t present = 0;
-  if (mode == 2 && (!PE_parse_boot_argn("zizhan_user_present", &present, sizeof present) || present != 1)) {
+  if (mode >= 2 && (!PE_parse_boot_argn("zizhan_user_present", &present, sizeof present) || present != 1)) {
     IOLog("ZIZHAN_CAM_PROBE: SKIP mode=2 needs zizhan_user_present=1\n");
     return;
   }
-  if (mode > 2) { IOLog("ZIZHAN_CAM_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
+  if (mode > 4) { IOLog("ZIZHAN_CAM_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, reinterpret_cast<void *>(uintptr_t(mode)), &t) == KERN_SUCCESS) thread_deallocate(t);
   IOLog("ZIZHAN_CAM_PROBE: RUNNING mode=%u\n", mode);

@@ -57,6 +57,25 @@ static inline int zizhan_camcc_branch(const ZizhanCamCcOps *o, uint32_t cbcr, in
   return ZizhanCamCcTimeout;
 }
 
+/* Any sensor MCLK at 19.2 MHz (camcc-sm8450: mclk1 0x1501c/0x15034, mclk2 0x15038/0x15050, mclk3 0x15054/0x1506c,
+ * mclk5 0x1508c/0x150a4); on any failure the steps already taken are undone in reverse. */
+static inline int zizhan_camcc_mclk_on(const ZizhanCamCcOps *o, uint32_t rcg, uint32_t cbcr, unsigned *stage) {
+  int rc = zizhan_camcc_gdsc(o, ZizhanCamCcTitanGdscr, 1);
+  if (stage) *stage = 1;
+  if (rc) { (void)zizhan_camcc_gdsc(o, ZizhanCamCcTitanGdscr, 0); return rc; }
+  rc = zizhan_camcc_rcg_xo(o, rcg);
+  if (stage) *stage = 2;
+  if (rc) { (void)zizhan_camcc_gdsc(o, ZizhanCamCcTitanGdscr, 0); return rc; }
+  rc = zizhan_camcc_branch(o, cbcr, 1);
+  if (stage) *stage = 3;
+  if (rc) { (void)zizhan_camcc_branch(o, cbcr, 0); (void)zizhan_camcc_gdsc(o, ZizhanCamCcTitanGdscr, 0); return rc; }
+  return ZizhanCamCcOk;
+}
+static inline int zizhan_camcc_mclk_off(const ZizhanCamCcOps *o, uint32_t cbcr) {
+  const int a = zizhan_camcc_branch(o, cbcr, 0);
+  const int b = zizhan_camcc_gdsc(o, ZizhanCamCcTitanGdscr, 0);
+  return a ? a : b;
+}
 /* Bring MCLK3 to 19.2 MHz; on any failure the steps already taken are undone in reverse. */
 static inline int zizhan_camcc_mclk3_on(const ZizhanCamCcOps *o, unsigned *stage) {
   int rc = zizhan_camcc_gdsc(o, ZizhanCamCcTitanGdscr, 1);

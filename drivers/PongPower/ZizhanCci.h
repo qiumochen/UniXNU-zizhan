@@ -14,16 +14,18 @@
 enum { ZizhanCciOk = 0, ZizhanCciArgument, ZizhanCciTimeout, ZizhanCciNack, ZizhanCciError, ZizhanCciLength, ZizhanCciClock };
 enum { ZizhanCciBase1 = 0x0ac16000u };
 
-/* CAM_CC part: GDSC, then the XO roots, then the branches (core AHB is halt-delay: enable only, no poll). */
-static inline int zizhan_cci_clocks_on(const ZizhanCamCcOps *c) {
-  static const uint32_t rcgs[] = {0x10034u, 0x13194u, 0x13148u};
-  static const uint32_t branches[] = {0x13164u, 0x131acu, 0x13160u};
+/* CAM_CC part: GDSC, then the XO roots, then the branches (core AHB is halt-delay: enable only, no poll).
+ * cci_rcg/cci_cbcr: CCI0 0x1312c/0x13144, CCI1 0x13148/0x13160. */
+static inline int zizhan_cci_clocks_on_for(const ZizhanCamCcOps *c, uint32_t cci_rcg, uint32_t cci_cbcr) {
+  const uint32_t rcgs[] = {0x10034u, 0x13194u, cci_rcg};
+  const uint32_t branches[] = {0x13164u, 0x131acu, cci_cbcr};
   if (zizhan_camcc_gdsc(c, ZizhanCamCcTitanGdscr, 1)) return ZizhanCciClock;
   for (unsigned i = 0; i < 3; ++i) if (zizhan_camcc_rcg_xo(c, rcgs[i])) return ZizhanCciClock;
   c->write(c->context, 0x131f0u, c->read(c->context, 0x131f0u) | 1u);
   for (unsigned i = 0; i < 3; ++i) if (zizhan_camcc_branch(c, branches[i], 1)) return ZizhanCciClock;
   return ZizhanCciOk;
 }
+static inline int zizhan_cci_clocks_on(const ZizhanCamCcOps *c) { return zizhan_cci_clocks_on_for(c, 0x13148u, 0x13160u); }
 
 typedef ZizhanCamCcOps ZizhanCciOps;   /* same read/write/pause/poll shape, offsets relative to the CCI base */
 
@@ -39,53 +41,61 @@ static inline int zizhan_cci_wait(const ZizhanCciOps *o, uint32_t done_mask, uin
   return ZizhanCciTimeout;
 }
 
-/* Reset, then master 0 standard mode (100 kHz) timings for a 19.2 MHz CCI clock. */
-static inline int zizhan_cci_reset_init(const ZizhanCciOps *o) {
-  if (!o || !o->read || !o->write || !o->pause_us || !o->polls) return ZizhanCciArgument;
-  o->write(o->context, 0xc04, 0x7fffffffu & (0x00000111u | 0x01000000u | 0x02000000u | 0x18000ee6u));   /* IRQ_MASK_0, master 0 */
+/* Reset the controller, then master m standard mode (100 kHz) timings for a 19.2 MHz CCI clock. */
+static inline int zizhan_cci_reset_init_m(const ZizhanCciOps *o, unsigned m) {
+  if (!o || !o->read || !o->write || !o->pause_us || !o->polls || m > 1) return ZizhanCciArgument;
+  o->write(o->context, 0xc04, 0x7fffffffu & (0x00111111u | 0x07000000u | 0x18000ee6u | 0x60ee6000u));   /* IRQ_MASK_0, both masters */
   o->write(o->context, 0x004, 0x0f73f3f7u);                  /* RESET_CMD */
   const int rc = zizhan_cci_wait(o, 1u << 24, 0, 0);
   if (rc) return rc;
-  o->write(o->context, 0x100, 78u << 16 | 114u);             /* SCL_CTL thigh/tlow */
-  o->write(o->context, 0x104, 28u << 16 | 28u);              /* SDA_CTL_0 tsu_sto/tsu_sta */
-  o->write(o->context, 0x108, 10u << 16 | 77u);              /* SDA_CTL_1 thd_dat/thd_sta */
-  o->write(o->context, 0x10c, 118u);                         /* SDA_CTL_2 tbuf */
-  o->write(o->context, 0x110, 1u << 8 | 6u << 4 | 1u);       /* MISC_CTL stretch, trdhld, tsp */
+  const uint32_t b = 0x100u * m;
+  o->write(o->context, b + 0x100, 78u << 16 | 114u);         /* SCL_CTL thigh/tlow */
+  o->write(o->context, b + 0x104, 28u << 16 | 28u);          /* SDA_CTL_0 tsu_sto/tsu_sta */
+  o->write(o->context, b + 0x108, 10u << 16 | 77u);          /* SDA_CTL_1 thd_dat/thd_sta */
+  o->write(o->context, b + 0x10c, 118u);                     /* SDA_CTL_2 tbuf */
+  o->write(o->context, b + 0x110, 1u << 8 | 6u << 4 | 1u);   /* MISC_CTL stretch, trdhld, tsp */
   return ZizhanCciOk;
 }
+static inline int zizhan_cci_reset_init(const ZizhanCciOps *o) { return zizhan_cci_reset_init_m(o, 0); }
 
-static inline int zizhan_cci_run(const ZizhanCciOps *o, unsigned queue, uint32_t done_mask) {
-  const uint32_t cur = o->read(o->context, 0x304 + 0x100 * queue);   /* Q CUR_WORD_CNT, master 0 */
-  o->write(o->context, 0x300 + 0x100 * queue, cur);                  /* Q EXEC_WORD_CNT */
-  o->write(o->context, 0x008, 1u << queue);                          /* QUEUE_START, master 0 */
-  return zizhan_cci_wait(o, done_mask, queue ? (1u << 28) : (1u << 27), 0x00000ee6u);
+/* IRQ_STATUS_0 bits per master (i2c-qcom-cci.c): RD_DONE 0/12, Q0 report 4/16, Q1 report 8/20, NACK Q0 27/29, Q1 28/30,
+ * other errors 0xee6 / 0xee6000. */
+static inline int zizhan_cci_run_m(const ZizhanCciOps *o, unsigned m, unsigned queue, uint32_t done_mask) {
+  const uint32_t q = 0x200u * m + 0x100u * queue;
+  const uint32_t cur = o->read(o->context, 0x304 + q);       /* CUR_WORD_CNT */
+  o->write(o->context, 0x300 + q, cur);                      /* EXEC_WORD_CNT */
+  o->write(o->context, 0x008, 1u << (m * 2 + queue));        /* QUEUE_START */
+  const uint32_t nack = m ? (queue ? (1u << 30) : (1u << 29)) : (queue ? (1u << 28) : (1u << 27));
+  return zizhan_cci_wait(o, done_mask, nack, m ? 0x00ee6000u : 0x00000ee6u);
 }
 
-/* Read len (1..11) bytes at a 16-bit register of a 7-bit slave on master 0. */
-static inline int zizhan_cci_read16(const ZizhanCciOps *o, uint8_t addr7, uint16_t reg, uint8_t *buf, unsigned len) {
-  if (!o || !o->read || !o->write || !o->pause_us || !o->polls || !buf || addr7 > 0x7f) return ZizhanCciArgument;
+/* Read len (1..11) bytes at a 16-bit register of a 7-bit slave on master m. */
+static inline int zizhan_cci_read16_m(const ZizhanCciOps *o, unsigned m, uint8_t addr7, uint16_t reg, uint8_t *buf, unsigned len) {
+  if (!o || !o->read || !o->write || !o->pause_us || !o->polls || !buf || addr7 > 0x7f || m > 1) return ZizhanCciArgument;
   if (len < 1 || len > 11) return ZizhanCciLength;
-  /* queue 0: address write {SET_PARAM|addr}, {WRITE len 2, reg hi, reg lo}, REPORT with IRQ */
-  o->write(o->context, 0x310, 1u | (uint32_t)addr7 << 4);
-  o->write(o->context, 0x310, 9u | 2u << 4 | (uint32_t)(reg >> 8) << 8 | (uint32_t)(reg & 0xff) << 16);
-  o->write(o->context, 0x310, 8u | 1u << 8);
-  int rc = zizhan_cci_run(o, 0, 1u << 4);
+  const uint32_t q0 = 0x310u + 0x200u * m, q1 = q0 + 0x100u;
+  o->write(o->context, q0, 1u | (uint32_t)addr7 << 4);
+  o->write(o->context, q0, 9u | 2u << 4 | (uint32_t)(reg >> 8) << 8 | (uint32_t)(reg & 0xff) << 16);
+  o->write(o->context, q0, 8u | 1u << 8);
+  int rc = zizhan_cci_run_m(o, m, 0, m ? (1u << 16) : (1u << 4));
   if (rc) return rc;
-  /* queue 1: {SET_PARAM|addr}, {READ len} */
-  o->write(o->context, 0x410, 1u | (uint32_t)addr7 << 4);
-  o->write(o->context, 0x410, 10u | (uint32_t)len << 4);
-  rc = zizhan_cci_run(o, 1, 1u << 0);
+  o->write(o->context, q1, 1u | (uint32_t)addr7 << 4);
+  o->write(o->context, q1, 10u | (uint32_t)len << 4);
+  rc = zizhan_cci_run_m(o, m, 1, m ? (1u << 12) : (1u << 0));
   if (rc) return rc;
-  const uint32_t words = o->read(o->context, 0x11c);                 /* READ_BUF_LEVEL */
+  const uint32_t words = o->read(o->context, 0x11c + 0x100u * m);   /* READ_BUF_LEVEL */
   if (words != len / 4 + 1) return ZizhanCciLength;
   unsigned index = 0; int first = 1;
   for (uint32_t w = 0; w < words; ++w) {
-    const uint32_t v = o->read(o->context, 0x118);                   /* READ_DATA: first byte is the slave id echo */
+    const uint32_t v = o->read(o->context, 0x118 + 0x100u * m);     /* READ_DATA: first byte is the slave id echo */
     for (unsigned b = 0; b < 4 && index < len; ++b) {
       if (first) { first = 0; continue; }
       buf[index++] = (uint8_t)(v >> (8 * b));
     }
   }
   return ZizhanCciOk;
+}
+static inline int zizhan_cci_read16(const ZizhanCciOps *o, uint8_t addr7, uint16_t reg, uint8_t *buf, unsigned len) {
+  return zizhan_cci_read16_m(o, 0, addr7, reg, buf, len);
 }
 #endif

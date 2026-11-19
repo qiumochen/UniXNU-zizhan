@@ -284,8 +284,15 @@ def main():
         mac=bytes(int(x,16) for x in args.bt_node.split(':'))
         if len(mac)!=6 or not (mac[0]&2):parser.error('--bt-node needs a locally administered 6-byte MAC')
         # bluetoothd: IODeviceTree "bluetooth" + local-mac-address, then /dev/cu.bluetooth (H4).
-        bt_nodes=[node('bluetooth',[('compatible',b'bluetooth,qca6490\0'),('local-mac-address',mac),
-                                    ('transport-encoding',struct.pack('<I',1)),('manufacturer',struct.pack('<I',29))])]
+        # Shaped like the restore's own J171 node (DeviceTree.j171ap: compatible bluetooth,n88, device_type bluetooth,
+        # transport-encoding 3, vendor 0x5ac / product 0x12a0, profiles 0x2ffb, coex 2): BlueTool/marconi-bt only match that.
+        # transport-speed is the speed the kernel UART really runs (115200), not J171's 3 Mbit/s; no function-* GPIOs
+        # (the kernel powers the controller) and no calibration blobs.
+        bt_nodes=[node('bluetooth',[('compatible',b'bluetooth,n88\0'),('device_type',b'bluetooth\0'),
+                                    ('local-mac-address',mac),('transport-encoding',struct.pack('<I',3)),
+                                    ('transport-speed',struct.pack('<I',115200)),('vendor-id',struct.pack('<I',0x5ac)),
+                                    ('product-id',struct.pack('<I',0x12a0)),('supported-profiles',struct.pack('<I',0x2ffb)),
+                                    ('coex',struct.pack('<I',2))])]
     chosen.append(('psci-method', b'smc\0'))
     cpus = [node(f'cpu{i}', [
         ('state', b'running\0' if i == 0 else b'stopped\0'),

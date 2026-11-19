@@ -130,3 +130,28 @@
 - modem-16（play69，正常内核参数，观察 480 s）：基带一直 ready，GLINK/rmtfs 稳定，最后 stop-ack 0.5 s，CPU 最高 55 °C，无 panic。日志环形缓冲在长时间运行中覆盖了开头，DMS/UIM 应答见 modem-13。
 - 新增 `zizhan_modem_watch_s`（30–1800 s）；监督脚本要求 `pong_autoreset < 900`。
 
+### 首帧 UX-01：GPU 时间线对齐后的分段
+
+- ux-d：跟踪窗口按 SpringBoard+40 s 开，但合成触摸要到开机约 221 s 才开始，没有重叠。ux-e 改为 `pong_gtrace_delay=185`，窗口 225.7–263.8 s 覆盖 8 次手势（跟踪本身有开销，总时延 88.6 ms 只看比例，不作性能比较）。
+- 逐次拆分（Began → backboardd 第一次 GPU 提交 / GPU 执行 / 交换请求）：
+
+| Began→提交 | GPU 执行 | Began→交换请求 |
+| --- | --- | --- |
+| 19.8 | 2.2 | 20.2 |
+| 43.1 | 10.0 | 44.0 |
+| 19.5 | 8.6 | 20.2 |
+| 43.7 | 9.9 | 44.6 |
+| 20.4 | 5.9 | 20.9 |
+| 35.6 | 12.2 | 35.7 |
+| 20.2 | 8.5 | 20.3 |
+| 42.8 | 9.9 | 43.0 |
+
+- 结论：慢在 CPU 侧（SpringBoard 处理手势 + CoreAnimation 提交 + backboardd 准备），GPU 执行只有 2–12 ms；交换请求紧跟首个提交。CPU 段**交替**为约 20 ms 与约 43 ms，合成手势是左右交替翻页，说明翻向某一页时工作量翻倍，与内核开关无关。
+- 下一步：确认慢的是哪一页（翻向小组件页还是图标页），再看那一页在 SpringBoard 里做了什么（图片解码、布局）。本轮不改代码。
+
+### 蓝牙：系统调用跟踪证明卡点在传输层之上
+
+- 诊断补丁 0026（仅 `zizhan_bt_probe>=4`、仅 BlueTool/bluetoothd、每进程最多 200 行）记录 socket/connect，以及 /dev 与 bluetooth/uart 相关路径的 open。
+- bt-11：BlueTool 被拉起 15 次，bluetoothd 读了蓝牙配置文件，但**两者都没有调用过 socket，也没有打开任何 /dev 节点**。内核控制、tty、btreset 节点都还没轮到被用到。
+- 因此问题在更上层的平台/初始化路径选择。bt-10 里 BlueTool 与 bluetoothd 都读 MobileGestalt 缓存文件，平台判断可能来自缓存而不是我们按进程给出的 product-id。下一步：反推 BlueTool `-R` 启动时的平台判断，核对 MobileGestalt 缓存内容。
+

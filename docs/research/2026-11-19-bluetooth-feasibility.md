@@ -79,3 +79,8 @@
 - bluetoothd 的 SIGSEGV 根因：`IODeviceTree:/product` 无 `product-id`，MobileGestalt 产品类型未知，控制器平台对象为空。补丁 0025 只对 bluetoothd/BlueTool 给出 J171 的 product-id 后，bluetoothd 常驻。
 - BlueTool 需要 IOKit 服务 `AppleBluetoothModule`（`marconi-bt: Unable to match bluetooth service in device tree`）；真机由同名驱动匹配 `bluetooth,n88` 节点发布。下一步是反推它的用户客户端方法并实现兼容服务。
 
+## 2026-11-20：iOS 18 的串口蓝牙走内核控制；两守护进程未触及传输层
+
+- BlueTool `device -D` 打开的是 PF_SYSTEM 内核控制 `com.apple.uart.bluetooth`（read/write 收发 H4，TIOCGETA/TIOCSETA 作为 socket 选项）；已在补丁 0023 中实现该控制，并在 UART 桥里对博通厂商命令（OGF 0x3f）直接应答。
+- 系统调用跟踪（补丁 0026）显示 BlueTool 与 bluetoothd 从未调用 socket 或打开 /dev 节点：卡在平台/初始化路径选择，详见晚间记录。
+

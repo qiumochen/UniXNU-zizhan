@@ -1,0 +1,86 @@
+--- a/bsd/kern/uipc_syscalls.c	2026-11-20 02:09:06
++++ b/bsd/kern/uipc_syscalls.c	2026-11-20 02:09:06
+@@ -248,13 +248,47 @@
+  *	socreate:ENOMEM
+  *	socreate:???			[other protocol families, IPSEC]
+  */
++
++/*
++ * zizhan BT-01 diagnostic: with zizhan_bt_probe>=4, log socket/connect/open of BlueTool and bluetoothd (80 lines each),
++ * to see which transport the iOS 18 Bluetooth stack actually tries on this board. Nothing else changes.
++ */
++#include <pexpert/pexpert.h>
++__private_extern__ int zizhan_bt_trace_proc(proc_t p);
++__private_extern__ int zizhan_bt_trace(proc_t p);
++/* 0 = BlueTool, 1 = bluetoothd, -1 = not traced (no budget used). */
++__private_extern__ int
++zizhan_bt_trace_proc(proc_t p)
++{
++	static int mode = -1;
++	if (mode < 0) {
++		int v = 0;
++		mode = (PE_parse_boot_argn("zizhan_bt_probe", &v, sizeof(v)) && v >= 4) ? 1 : 0;
++	}
++	if (mode != 1 || p == NULL) {
++		return -1;
++	}
++	return strcmp(p->p_comm, "BlueTool") == 0 ? 0 : strcmp(p->p_comm, "bluetoothd") == 0 ? 1 : -1;
++}
++__private_extern__ int
++zizhan_bt_trace(proc_t p)
++{
++	static uint32_t lines[2];
++	const int which = zizhan_bt_trace_proc(p);
++	return which >= 0 && __atomic_fetch_add(&lines[which], 1, __ATOMIC_RELAXED) < 200;
++}
+ int
+ socket(proc_ref_t p,
+     struct socket_args *uap,
+     int32_ref_t retval)
+ {
+-	return socket_common(p, uap->domain, uap->type, uap->protocol,
++	int zz_err = socket_common(p, uap->domain, uap->type, uap->protocol,
+ 	           proc_selfpid(), retval, 0);
++	if (zizhan_bt_trace(p)) {
++		printf("ZIZHAN_BT_TRACE: %s socket(%d,%d,%d) -> fd=%d err=%d\n", p->p_comm, uap->domain, uap->type, uap->protocol,
++		    zz_err ? -1 : *retval, zz_err);
++	}
++	return zz_err;
+ }
+ 
+ int
+@@ -796,6 +830,11 @@
+ 			sa = SA(&ss);
+ 		}
+ 	}
++	if (error == 0 && sa != NULL && zizhan_bt_trace(p)) {
++		const uint32_t *w = (const uint32_t *)(const void *)sa;
++		printf("ZIZHAN_BT_TRACE: %s connect fd=%d family=%u len=%u words=%x %x %x\n", p->p_comm, fd, sa->sa_family, sa->sa_len,
++		    sa->sa_len >= 8 ? w[1] : 0, sa->sa_len >= 12 ? w[2] : 0, sa->sa_len >= 16 ? w[3] : 0);
++	}
+ 	if (error != 0) {
+ 		goto out;
+ 	}
+--- a/bsd/vfs/vfs_syscalls.c	2026-11-20 02:09:06
++++ b/bsd/vfs/vfs_syscalls.c	2026-11-20 02:09:06
+@@ -5207,6 +5207,20 @@
+ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+     int fd, enum uio_seg segflg, int *retval)
+ {
++	{
++		extern int zizhan_bt_trace(proc_t p);
++		extern int zizhan_bt_trace_proc(proc_t p);
++		proc_t zz_p = vfs_context_proc(ctx);
++		char zz_path[96] = "";
++		size_t zz_len = 0;
++		/* only /dev nodes and bluetooth/uart paths: system plist reads would use up the budget */
++		if (segflg == UIO_USERSPACE && zizhan_bt_trace_proc(zz_p) >= 0 &&
++		    copyinstr(path, zz_path, sizeof(zz_path), &zz_len) == 0 &&
++		    (!strncmp(zz_path, "/dev/", 5) || strnstr(zz_path, "luetoo", sizeof(zz_path)) || strnstr(zz_path, "uart", sizeof(zz_path)) || strnstr(zz_path, "BlueTool", sizeof(zz_path))) &&
++		    zizhan_bt_trace(zz_p)) {
++			printf("ZIZHAN_BT_TRACE: %s open '%s' flags=%x\n", zz_p->p_comm, zz_path, flags);
++		}
++	}
+ 	struct filedesc *fdp = &vfs_context_proc(ctx)->p_fd;
+ 	struct {
+ 		struct vnode_attr va;

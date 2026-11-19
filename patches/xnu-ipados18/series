@@ -22,3 +22,4 @@
 0023-zizhan-bt-uart.patch
 0024-zizhan-crash-capture-bt.patch
 0025-zizhan-bt-identity.patch
+0026-zizhan-bt-syscall-trace.patch

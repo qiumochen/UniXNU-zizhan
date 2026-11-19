@@ -51,7 +51,7 @@ typedef struct {
  int32_t cpu_clamp_mc, cpu_release_mc;
  int32_t gpu_clamp_mc, gpu_release_mc;
  /* Stepped clamp: each hot sample adds clamp_step levels (0 = jump straight to the lowest level, the v1 behaviour);
-  * a reading at clamp + critical_margin_mc or above always jumps to the lowest level. */
+  * a reading at clamp + critical_margin_mc (10 C) or above always jumps to the lowest level. */
  uint8_t clamp_step;
  int32_t critical_margin_mc;
 } ZizhanThermalConfig;
@@ -71,7 +71,7 @@ static inline ZizhanThermalConfig zizhan_thermal_default_config(void){
  c.release_samples=(uint8_t)ZizhanThermalReleaseSamples;
  c.cpu_clamp_mc=110000; c.cpu_release_mc=105000;
  c.gpu_clamp_mc=95000; c.gpu_release_mc=90000;
- c.clamp_step=0; c.critical_margin_mc=5000;
+ c.clamp_step=0; c.critical_margin_mc=10000;
  return c;
 }
 

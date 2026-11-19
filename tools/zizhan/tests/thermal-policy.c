@@ -95,7 +95,7 @@ static void test_stepped_clamp(void){
  CHECK(step_cfg(&c,&st,2000000,&s)==ZizhanThermalFresh&&st.cpu_level==8,"stepped clamp second hot +4");
  s=base(3000000);cpu(&s,4,107000);
  CHECK(step_cfg(&c,&st,3000000,&s)==ZizhanThermalFresh&&st.cpu_level==8,"stepped clamp holds in hysteresis band");
- s=base(4000000);cpu(&s,4,115000);
+ s=base(4000000);cpu(&s,4,120000);
  CHECK(step_cfg(&c,&st,4000000,&s)==ZizhanThermalFresh&&st.cpu_level==ZizhanThermalCpuLevels,"critical jumps to lowest");
  ZizhanThermalState g;zizhan_thermal_init(&g);
  for(unsigned i=0;i<10;++i){s=base(1000000ull*(i+1));gpu(&s,1,96000);step_cfg(&c,&g,1000000ull*(i+1),&s);}

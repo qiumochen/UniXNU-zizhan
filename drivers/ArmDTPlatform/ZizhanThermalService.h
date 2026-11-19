@@ -352,12 +352,12 @@ static void start(IOService *provider) {
   policy.gpu_clamp_mc = tuning.gpu_clamp_mc;
   policy.gpu_release_mc = tuning.gpu_release_mc;
   // UX: a hot reading adds 4 levels instead of jumping to the lowest one (ux-b: the UI crawled for ~60 s after one spike);
-  // clamp + 5 C still jumps to the lowest level. zizhan_thermal_step=0 restores the v1 jump.
+  // clamp + 10 C still jumps to the lowest level. zizhan_thermal_step=0 restores the v1 jump.
   {
     uint32_t stepArg = 4;
     (void)PE_parse_boot_argn("zizhan_thermal_step", &stepArg, sizeof stepArg);
     policy.clamp_step = uint8_t(stepArg > 20 ? 20 : stepArg);
-    policy.critical_margin_mc = 5000;
+    policy.critical_margin_mc = 10000;   // therm-s1: one 1 s sample can rise 12 C under load; 5 C skipped every step
   }
   zizhan_thermal_init(&state);
   if (!zizhan_thermal_config_ok(&policy)) {

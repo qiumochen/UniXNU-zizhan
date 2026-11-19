@@ -40,6 +40,26 @@ struct Page {
     }
     ~Page() { if (map) map->release(); }
 };
+
+/* zizhan_audio_pinsample=1 (dry diagnostics): read the GPIO_IN bit of the TDM pads (121 sck, 123 ws, 124 dout) in a tight
+ * loop while the stream runs. Counts ones and level changes per pad: a stuck dout with a toggling sck means the SoC drives no data. */
+namespace zizhan_pin_sample {
+static Page *pads[3];
+static uint32_t ones[3],edges[3],samples,first[3][2];
+static uint64_t elapsed_ns;
+static void run(){
+    if(!pads[0]||!pads[1]||!pads[2])return;
+    uint32_t last[3]={2,2,2};
+    const uint64_t t0=mach_absolute_time();
+    for(uint32_t n=0;n<20000u;++n){
+        for(unsigned p=0;p<3;++p){
+            const uint32_t bit=pads[p]->read(4)&1u;
+            if(n<64u&&bit)first[p][n>>5]|=1u<<(n&31u);
+            ones[p]+=bit;if(last[p]!=2u&&bit!=last[p])++edges[p];last[p]=bit;}
+        ++samples;}
+    absolutetime_to_nanoseconds(mach_absolute_time()-t0,&elapsed_ns);
+}
+}
 uint64_t nowUs() { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000; }
 int ampHash(const uint8_t *bytes,unsigned length,uint8_t digest[32]) {
     zizhan_amp_sha256(bytes,length,digest);return 0;
@@ -89,7 +109,8 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
             unsigned echo=0;zizhan_amp_echo=(dry==1&&PE_parse_boot_argn("zizhan_audio_echo",&echo,sizeof echo)&&echo==1)?1u:0u;
             if(zizhan_amp_echo)IOLog("ZIZHAN_AUDIO_ECHO: armed dry=1 top_asptx1=asprx1 din=gpio122\n");
             unsigned dump=0;zizhan_amp_dump_on=(dry==1&&PE_parse_boot_argn("zizhan_audio_ampdump",&dump,sizeof dump)&&dump==1)?1u:0u;
-            if(zizhan_amp_dump_on)IOLog("ZIZHAN_AMP_DUMP: armed dry=1 registers=228\n");}}
+            if(zizhan_amp_dump_on)IOLog("ZIZHAN_AMP_DUMP: armed dry=1 registers=228\n");
+            unsigned ps=0;if(dry==1&&PE_parse_boot_argn("zizhan_audio_pinsample",&ps,sizeof ps)&&ps==1){zizhan_play_pin_sample=zizhan_pin_sample::run;IOLog("ZIZHAN_PIN_SAMPLE: armed dry=1 pads=121,123,124\n");}}}
     ZizhanAmpSpeakerCalibration speaker_cal={1,sizeof(ZizhanAmpSpeakerCalibration),{0,0}};
     if(mode>=29){
         const bool top_present=PE_parse_boot_argn("zizhan_cal_t",&speaker_cal.resistance[0],sizeof(uint32_t));
@@ -241,7 +262,12 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                                                     IOLog("ZIZHAN_AUDIO_ECHO: din pin=122 connected=%u config=%x original=%x\n",din?1u:0u,din?din_pin.read(0):0u,din_state.config);
                                                     if(!din){zizhan_amp_echo=0;}}
                                                 if((mode==39||mode==40)&&zizhan_amp_checkpoint)zizhan_amp_checkpoint(0,0);
+                                                if(mode==40){zizhan_pin_sample::pads[0]=&sck;zizhan_pin_sample::pads[1]=&ws;zizhan_pin_sample::pads[2]=&data_pin;}
                                                 if(mode==40)zizhan_cs35l41_native_play_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
+                                                if(mode==40&&zizhan_play_pin_sample){using namespace zizhan_pin_sample;
+                                                    IOLog("ZIZHAN_PIN_SAMPLE: n=%u ns=%llu sck ones=%u edges=%u ws ones=%u edges=%u dout ones=%u edges=%u first64 sck=%08x%08x ws=%08x%08x dout=%08x%08x\n",
+                                                          samples,elapsed_ns,ones[0],edges[0],ones[1],edges[1],ones[2],edges[2],first[0][1],first[0][0],first[1][1],first[1][0],first[2][1],first[2][0]);
+                                                    zizhan_play_pin_sample=nullptr;pads[0]=pads[1]=pads[2]=nullptr;}
                                                 else if(mode==39)zizhan_cs35l41_native_pulse_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==38)zizhan_cs35l41_native_iv_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==37)zizhan_cs35l41_native_mailbox_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);

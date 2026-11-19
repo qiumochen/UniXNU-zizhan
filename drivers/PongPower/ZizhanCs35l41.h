@@ -289,6 +289,8 @@ extern void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 extern unsigned zizhan_amp_pulse_hold_us;
 extern unsigned zizhan_amp_pulse_flags;
 extern unsigned zizhan_amp_echo;
+/* zizhan_audio_pinsample=1 (dry): called once at poll 5 of the play window to sample the TDM pad levels. */
+extern void (*zizhan_play_pin_sample)(void);
 /* zizhan_audio_ampdump=1 (dry): read every Android-readable config register of both amps after
  * the stream, before disarm; values land in zizhan_amp_dump_values (see ZizhanAmpDumpRegs.h). */
 extern unsigned zizhan_amp_dump_on,zizhan_amp_dump_reads[2];

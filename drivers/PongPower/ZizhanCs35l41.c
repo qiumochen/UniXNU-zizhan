@@ -1009,6 +1009,7 @@ void (*zizhan_amp_checkpoint)(unsigned chip,unsigned stage);
 #define AMP_CHECKPOINT(chip,stage) do{if(out->pulse_profile&&zizhan_amp_checkpoint){zizhan_amp_checkpoint((chip),(stage));}}while(0)
 unsigned zizhan_amp_pulse_hold_us; /* 0 unless the kernel sets zizhan_pulse_hold=<ms> (attended only). */
 unsigned zizhan_amp_echo;
+void (*zizhan_play_pin_sample)(void);
 unsigned zizhan_amp_dump_on,zizhan_amp_dump_reads[2];
 uint32_t zizhan_amp_dump_values[2][228];
 unsigned zizhan_amp_pulse_flags; /* bit0 dry (no AMP enable/volume), bit1 skip the native pup/pdn patch. */
@@ -1061,6 +1062,7 @@ typedef struct {GeniI2c *bus;const ZizhanAmpClock *clock;ZizhanAmpRun *out;Zizha
 const uint32_t zizhan_play_snap_regs[16]={0x2014,0x2018,0x2c0c,0x4800,0x4808,0x4820,0x4c00,0x6000,0x6c04,0x10018,0x10098,0x1009c,0x201c,0x2020,0x2024,0x4804};
 static int play_poll(void *p){
  PlayPoll *pp=p;ZizhanAmpRun *out=pp->out;++out->play_polls;
+ if(out->play_polls==5&&zizhan_play_pin_sample){zizhan_play_pin_sample();}
  if(out->play_polls==5){
   for(unsigned chip=0;chip<2;++chip){pp->bus->address=chip?0x42:0x40;
    for(unsigned i=0;i<16;++i){if(run_read(pp->bus,pp->clock,zizhan_play_snap_regs[i],&out->play_snap[chip][i],out)){break;}++out->play_snap_reads[chip];}}

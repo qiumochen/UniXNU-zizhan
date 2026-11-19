@@ -109,3 +109,12 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 - **蜂窝**：固件和 EFS 只读可达（modem-1）；**基带在 iPadOS 下第一次启动到 ready+handover**（modem-6，元数据须在 4 GiB 以下）；随后显示路径 panic，待补 `rproc_ddr` 带宽票。未发 QMI、未上线、无发射。
 - 详情：[晚间记录 · 深夜](2026-11-19-evening-daily-default.md)。
 
+## 2026-11-20 凌晨（无人值守计划执行；全部静音，未写分区）
+
+- **蜂窝**：基带在 iPadOS 下**完整初始化**。GLINK + QRTR + 最小 pd-mapper + 内存影子 rmtfs 后，公布 45 个 QMI 服务，60 s 无看门狗，可正常停止。只读 DMS 读出固件 `MPSS.DE.2.0.c1-00108-WAIPIO_GEN_PACK…`，工作模式 OFFLINE（无射频）。阶段 2 需插 SIM 并经你同意。
+- **温控**：逐级压频（每次 4 档，超阈值 10 °C 才一步到底），设备上持续负载下停在 10 档、65–67 °C，不再一下压死。
+- **蓝牙**：已加 `/dev/btreset|btwake|btpoweroff`，nub 已注册；BlueTool 仍不打开设备，按规则挂起（下一步：拿 BlueTool 的 os_log、反推 bluetoothd↔BlueTool 的 mach 命令）。
+- **首帧**：本轮没做细分测量（需给 CoreAnimation 加测量点），留待下一轮。
+- **稳定性**：daily-13（play67，日用默认）熄屏/亮屏 20/20，无 panic。
+- 详情：[晚间记录 · 凌晨](2026-11-19-evening-daily-default.md)。
+

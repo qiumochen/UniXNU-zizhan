@@ -62,3 +62,7 @@ ST FTS（`st,spi-sec`），SPI 在 **QUP wrap2 S4 / SE19（0x890000）**，IRQ G
 - WL2866D（V1.6 手册：DVDD = 0.6 V + 6 mV×码，AVDD = 1.2 V + 12.5 mV×码）：DVDD1 0xc8 = 1.8 V、AVDD1 0x90 = 3.0 V 已开（外屏面板）；**DVDD2/AVDD2（外屏触控）关闭**，复位 GPIO52 低，SE19 时钟关。
 - `zizhan_outer_probe=4`：DVDD2 设 1.8 V、AVDD2 设 3.0 V（与内屏同型号触控芯片的电压相同），只加 0x0e 的 bit1/bit3（面板的 bit0/bit2 不动），读回一致；释放复位后 **7 ms IRQ（GPIO119）被拉低并保持**——FTS 已启动并报告就绪事件。测试后复位拉低、三个寄存器恢复原值。
 - 下一步：SE19 GENI SPI（wrap2 S4，pads GPIO72-75 qup19）读芯片 ID 和事件，或把内屏 `pong_fts` 驱动参数化成第二个实例。
+
+### outer-5：外屏触控芯片 ID（SPI）
+
+SE19 GENI 固件为 SPI（FW 0x102、FIFO 16 字），时钟 XO 19.2 MHz、1 MHz SPI；按内屏驱动的 configure_spi4 三次写入后，硬件读 0xfb 0x20000000 得到 **0x3640**（内屏 FST2 为 0x3652）——外屏是另一款 ST FingerTip。用内屏的事件读法（0xb1 0x0060）读到全 0，事件协议不同，下一轮试 FTM5 的 0x86 读单个事件并观察 IRQ 是否释放。

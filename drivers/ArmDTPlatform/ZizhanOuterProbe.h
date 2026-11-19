@@ -280,6 +280,20 @@ static void outer_spi() {
     const bool evok = xfer(tx, ev, 3 + 1 + 8);
     IOLog("ZIZHAN_OUTER_SPI: event_xfer=%u event=%02x %02x %02x %02x %02x %02x %02x %02x (0x03 = controller ready)\n", evok ? 1u : 0u,
           ev[4], ev[5], ev[6], ev[7], ev[8], ev[9], ev[10], ev[11]);
+    /* FTM5-style event FIFO (chip 0x36xx sec panel): command 0x86 READ_ONE_EVENT, one dummy byte, 8-byte event. Read until the
+     * IRQ (GPIO119) releases: the line going high proves the event protocol without a finger. */
+    {
+      Rw irqp;
+      const bool irq_ok = irqp.open(0xf100000ull + 119ull * 0x1000, 0x1000, kIOMapInhibitCache);
+      for (unsigned n = 0; n < 8; ++n) {
+        uint8_t t2[10] = {0x86}, r2[10] = {};
+        const bool ok86 = xfer(t2, r2, 1 + 1 + 8);
+        const unsigned level = irq_ok ? (irqp.r(4) & 1u) : 2u;
+        IOLog("ZIZHAN_OUTER_SPI: ftm5 event %u xfer=%u data=%02x %02x %02x %02x %02x %02x %02x %02x irq_after=%u\n", n, ok86 ? 1u : 0u,
+              r2[2], r2[3], r2[4], r2[5], r2[6], r2[7], r2[8], r2[9], level);
+        if (level == 1) break;
+      }
+    }
   }
 pads_back:
   for (unsigned i = 0; i < 4; ++i) pads[i].w(0, saved[i]);

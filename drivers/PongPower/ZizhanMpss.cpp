@@ -129,7 +129,12 @@ void qrtrSendHello() {
 /* Stage 1c-b: a minimal pd-mapper. The modem asks the APPS SERVREG locator (QMI service 0x40, QRTR instance 0x101) which
  * protection domains provide a service; Linux answers from the firmware's *.jsn. modemr.jsn: domain msm/modem/root_pd,
  * instance 180, services tms/servreg and gps/gps_service. Anything else gets an empty list. */
-constexpr uint32_t kPdmPort = 0x4000, kModemNode = 0;
+constexpr uint32_t kPdmPort = 0x4000, kModemNode = 0, kDmsClientPort = 0x4002;
+/* Stage 1d: two read-only QMI DMS requests (service 2): Get Revision (0x23) and Get Operating Mode (0x2d). Nothing that
+ * changes state (no Set Operating Mode, no NAS/WDS), and no identifiers (no IMEI/serial request). */
+uint32_t gDmsPort;
+bool gDmsAsked;
+
 unsigned gPdmRequests;
 void qrtrSend(uint32_t type, uint32_t dstNode, uint32_t dstPort, uint32_t srcPort, const uint8_t *payload, uint32_t len) {
   static uint8_t pkt[32 + 512];
@@ -207,6 +212,25 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
   const uint32_t type = h[1];
   if (type == 1) {   // DATA (QMI)
     if (h[7] == kPdmPort && h[5] <= n - 32) { pdmHandle(h[2], h[3], d + 32, h[5]); return; }
+    if (h[7] == kDmsClientPort && h[5] >= 7 && h[5] <= n - 32) {
+      const uint8_t *q = d + 32;
+      const uint16_t msg = uint16_t(q[3] | (q[4] << 8)), len = uint16_t(q[5] | (q[6] << 8));
+      char text[96] = "";
+      uint16_t result = 0xffff, error = 0xffff;
+      uint8_t mode = 0xff;
+      for (uint32_t at = 7; at + 3 <= 7u + len && at + 3 <= h[5];) {
+        const uint8_t t = q[at];
+        const uint16_t l = uint16_t(q[at + 1] | (q[at + 2] << 8));
+        if (at + 3 + l > h[5]) break;
+        if (t == 0x02 && l >= 4) { memcpy(&result, q + at + 3, 2); memcpy(&error, q + at + 5, 2); }
+        if (t == 0x01 && msg == 0x23) { const uint32_t k = l < sizeof text - 1 ? l : sizeof text - 1; memcpy(text, q + at + 3, k); text[k] = 0; }
+        if (t == 0x01 && msg == 0x2d && l >= 1) mode = q[at + 3];
+        at += 3 + l;
+      }
+      for (char *c = text; *c; ++c) if (*c < 32 || *c > 126) *c = '.';
+      IOLog("ZIZHAN_MPSS: dms resp msg=0x%x result=%u error=%u revision='%s' operating_mode=%u\n", msg, result, error, text, mode);
+      return;
+    }
     if (h[7] == zizhan_rmtfs::kPort && h[5] <= n - 32) {
       static uint8_t reply[128];
       const uint32_t len = zizhan_rmtfs::handle(d + 32, h[5], reply);
@@ -218,6 +242,7 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
   }
   uint32_t c[5] = {};
   memcpy(c, d + 32, n - 32 < sizeof c ? n - 32 : sizeof c);
+  if (type == 4 && c[0] == 4 && c[1] == 2 && c[3] == kModemNode) gDmsPort = c[4];
   if (gCtlLogged++ < 60)
     IOLog("ZIZHAN_MPSS: qrtr ctrl type=%u from %u:%x cmd=%u service=%u instance=%x node=%u port=%x\n", type, h[2], h[3], c[0], c[1],
           c[2], c[3], c[4]);
@@ -446,6 +471,13 @@ void worker(void *, wait_result_t) {
   t0 = nowMs();
   nextReport = t0 + 10000;
   for (uint64_t now = t0; now - t0 < 60000; now = nowMs()) {   // up to 10 s for ready, then watch to 60 s
+    if (gDmsPort && !gDmsAsked && gIpcrtr && gIpcrtr->up && now - t0 > 20000) {
+      gDmsAsked = true;
+      static const uint8_t rev[7] = {0, 1, 0, 0x23, 0, 0, 0}, opmode[7] = {0, 2, 0, 0x2d, 0, 0, 0};
+      qrtrSend(1, kModemNode, gDmsPort, kDmsClientPort, rev, sizeof rev);
+      qrtrSend(1, kModemNode, gDmsPort, kDmsClientPort, opmode, sizeof opmode);
+      IOLog("ZIZHAN_MPSS: dms requests sent to 0:%x (get revision, get operating mode)\n", gDmsPort);
+    }
     if (now >= nextReport) {
       nextReport += 10000;
       IOLog("ZIZHAN_MPSS: glink version=%u rx=%u tx=%u unknown_opens=%u '%s' ipcrtr_up=%u ctrl=%u data=%u pdm=%u rmtfs req=%u rd=%u/%llu wr=%u/%llu fail=%u\n", gGlink.version_agreed,

@@ -81,3 +81,37 @@
   - 随后内核 panic：`preemption disable timeout`，回溯在 `IOMobileFramebuffer::show → PE_initialize_console → gc_enable`。modem-1…5 同样 `pong_adsp=0` 却没有出现，推测是基带启动后 DDR 带宽不足（我们没投 Linux 那张 `rproc_ddr` 票）拖慢了显示路径。panic 后自动回到 Android。
   - **下一步**：补 `rproc_ddr` 带宽投票；诊断轮放宽抢占阈值；然后 rmtfs（EFS 只读、写回只留内存）和 GLINK 上的 QRTR。全程未发 QMI、未上线，无射频发射。
 
+## 凌晨（11-20 00:00 起，用户授权的无人值守计划；全部静音，未写分区）
+
+### 蜂窝 MODEM-01：基带完整初始化，读出固件版本（离线模式）
+
+| 轮 | 改动 | 结果 |
+| --- | --- | --- |
+| modem-7 | 诊断轮 `sched_preemption_disable_debug_mode=1`，观察 60 s | 不再 panic；基带运行 40 s 后自身看门狗报 `DOG detects stalled initialization` |
+| modem-8 | GLINK（SMEM 478/479/480，IPCC 客户端 2 信号 0）+ IPCRTR 通道 + QRTR v1（APPS 节点 1） | HELLO 交换；基带公布 SSCTL（43）与 servreg 通知（66） |
+| modem-9 | 最小 pd-mapper（服务 0x40，实例 0x101），按 `modemr.jsn` 回答 `tms/servreg` → `msm/modem/root_pd`（实例 180） | 基带两次查询（tms/servreg、tms/pddump_disabled）；40 s 仍看门狗 |
+| modem-10/11 | rmtfs（服务 14）：2.5 MB 共享缓冲放 CVP 保留区，`MP_ASSIGN` 给 HLOS+MSS_MSA 读写（成功）；QRTR 实例须为 0x1（version 1 instance 0） | 基带打开 modem_fs1/fs2、申请缓冲；首个读请求因 iovec 地址理解错被拒 → 基带报 `rmts_read_iovec failed` |
+| modem-12 | iovec 的 `phys_offset` 是绝对物理地址 | **初始化完成**：rmtfs 读 2.5 MB，基带公布 45 个 QMI 服务（WDS 1、DMS 2、NAS 3、WMS 5、VOICE 9、UIM 11、LOC 16、WDA 26、PDC 36、DPM 47 等），打开 DS/DATA1–4 等通道；60 s 无看门狗；停止请求 0.5 s 应答 |
+| modem-13 | 只读 QMI DMS：Get Revision、Get Operating Mode | 固件 `MPSS.DE.2.0.c1-00108-WAIPIO_GEN_PACK-1.16412.27.18599.21`（2023-02-24），工作模式 3 = OFFLINE |
+
+- EFS 分区（LUN 5）整块读进内存影子，基带写回只改内存；没有写任何存储。
+- 全程未发会改变状态的 QMI（没有 Set Operating Mode、NAS、WDS），基带离线，无射频发射。
+- 下一步（阶段 2，需插 SIM 并经用户同意）：UIM 读卡状态、NAS 注册、然后接 CommCenter 桥（QcomBaseband）与 IPA 数据面。
+
+### 蓝牙 BT-01：卡在 BlueTool 的内置初始化流程
+
+- J171 的 AppleBluetooth 驱动类是 `BTReset`，提供 `/dev/btreset|btwake|btpoweroff`（打开时拉 GPIO，关闭时放开）；`AppleBluetoothModule` 只用于 PCIe 蓝牙，与本机无关（更正前一节）。
+- 已加上三个控制节点（只记录），名为 `bluetooth` 的 nub 已发布并注册；BlueTool 仍只打印 `Device not open yet`，从未打开节点或串口。
+- 本 IPSW 没有 `/etc/bluetool` 脚本和 `.hcd`，BlueTool 用二进制内置脚本按芯片选择流程；需要它的 os_log（选平台/芯片）才能继续，下一步先把 BlueTool 的 os_log 导到控制台。
+
+### 温控分级（THERM-01 体验改进）
+
+- 策略：每个过热读数多压 4 档（`zizhan_thermal_step`，0 = 旧的一步到底），超过阈值 +10 °C 才直接压到最低档；释放仍是每 3 个读数放一档。
+- therm-s1（危急余量 5 °C，测试阈值 CPU 70 °C、90 s 负载）：负载一开 1 s 内 63→75.7 °C，直接越过危急线压到最低档 → 余量太窄。
+- therm-s2（余量 10 °C）：76.1 °C → 4 档、73.8 °C → 8 档、70.2 °C → 12 档，之后放到 10 档并在持续负载下稳定在 65–67 °C，**没有再一下压到最低档**。主机测试覆盖逐级、滞回保持、危急一步到底、GPU 饱和和 step 0。
+
+### 本轮未做
+
+- 首帧细分（SpringBoard 提交 → backboardd 首次 GPU 提交）需要给 CoreAnimation 加测量点，留到下一轮；内屏触控轮询改短需要真实手指才能测出效果，也留待在场。
+- 蓝牙按“连续多轮无进展就换方向”的规则挂起，下一步见上文。
+

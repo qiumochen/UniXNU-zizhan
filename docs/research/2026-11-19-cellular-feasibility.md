@@ -43,4 +43,5 @@
 
 - 阶段 1a 已完成：固件与 EFS 在 iPadOS 下只读可达（见[晚间记录](../progress/2026-11-19-evening-daily-default.md)）。
 - 阶段 1b：基带已启动到 ready + handover（modem-6）。关键点是 PAS 元数据必须在 4 GiB 以下（Android 用 `linux,cma`）；随后的显示路径 panic 待补 `rproc_ddr` 带宽投票后复测。
+- 2026-11-20 凌晨：阶段 1 完成。GLINK + QRTR + pd-mapper + 内存影子 rmtfs 后基带完整初始化，公布 45 个 QMI 服务；只读 DMS 读出固件版本，工作模式 OFFLINE。详见晚间记录“凌晨”一节。
 

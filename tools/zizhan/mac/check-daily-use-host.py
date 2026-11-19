@@ -14,7 +14,7 @@ def main():
                  "power-transaction.py",
                  "power-query.py", "power-inventory.py", "adsp-event-wait.py",
                  "panel-program.py", "panel-pool.py", "display-owner.py", "dsi-command.py", "dsi-domain.py", "userland-policy-audit.py",
-                 "service-policy.py"):
+                 "service-policy.py", "fat.py"):
         subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests" / name)],
                        check=True, timeout=60)
 

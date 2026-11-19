@@ -185,7 +185,8 @@ static IOReturn hostScsiDir (uint8_t lun, const uint8_t *cdb, unsigned cdbLength
   bool allowed = (cdb[0] == 0x00 && !direction && cdbLength == 6 && lun == 0) ||
                  (cdb[0] == 0x1b && !direction && cdbLength == 6 && lun == 0xd0 && cdb[4] == 0x10) ||
                  (cdb[0] == 0x25 && direction == 2 && cdbLength == 10 && dataBytes == 8 && lun == 0) ||
-                 (cdb[0] == 0x28 && direction == 2 && cdbLength == 10 && lun == 0) ||
+                 // MODEM-01: LUN 4 (modem_a/b) and LUN 5 (EFS) are read-only, READ(10) only.
+                 (cdb[0] == 0x28 && direction == 2 && cdbLength == 10 && (lun == 0 || lun == 4 || lun == 5)) ||
                  // APFS commits issue doSynchronize/barrier after their writes.
                  // Accept the exact whole-LUN, non-IMMED CDB produced below;
                  // rejecting 0x35 here makes tx_flush return ENOTSUP (45),

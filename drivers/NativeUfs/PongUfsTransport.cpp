@@ -818,4 +818,28 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
   return rootPublished;
 }
 
+/* MODEM-01: byte-addressed read-only access to the firmware LUNs (4 = modem_a/b, 5 = modemst/fsg), for
+ * PongPower/ZizhanModemProbe.h. Same lock and DMA payload as the root queue; there is no write path for these LUNs
+ * (RootCommands.h allows only READ(10) there). A LUN's first command after reset may report a unit attention, so each
+ * chunk is tried up to three times. */
+extern "C" int pong_ufs_read_lun(uint8_t lun, uint64_t byte, void *dst, uint32_t length) {
+  if ((lun != 4 && lun != 5) || !dst || !gHost.lock) return -1;
+  uint8_t *out = static_cast<uint8_t *>(dst);
+  int rc = 0;
+  IOLockLock(gHost.lock);
+  while (length && !rc) {
+    const uint64_t lba = byte / 4096;
+    const uint32_t within = uint32_t(byte % 4096), maxBlocks = kDataMax / 4096;
+    uint32_t blocks = uint32_t((uint64_t(within) + length + 4095) / 4096);
+    if (blocks > maxBlocks) blocks = maxBlocks;
+    IOReturn status = kIOReturnError;
+    for (unsigned attempt = 0; attempt < 3 && status != kIOReturnSuccess; ++attempt) status = hostRead4kLocked(lun, lba, blocks);
+    if (status != kIOReturnSuccess) { rc = -2; break; }
+    const uint32_t avail = blocks * 4096 - within, n = length < avail ? length : avail;
+    memcpy(out, gHost.virt + kDataOffset + within, n);
+    out += n; byte += n; length -= n;
+  }
+  IOLockUnlock(gHost.lock);
+  return rc;
+}
 extern "C" bool pong_ufs_ready(void) { return __atomic_load_n(&gWifiUfsReady,__ATOMIC_ACQUIRE)!=0; }

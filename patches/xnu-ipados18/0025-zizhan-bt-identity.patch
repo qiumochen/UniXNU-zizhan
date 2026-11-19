@@ -1,0 +1,60 @@
+--- a/iokit/Kernel/IOUserClient.cpp	2026-11-19 21:18:37
++++ b/iokit/Kernel/IOUserClient.cpp	2026-11-19 21:18:37
+@@ -29,6 +29,7 @@
+ #include <libkern/c++/OSKext.h>
+ #include <libkern/c++/OSSharedPtr.h>
+ #include <IOKit/IOKitServer.h>
++#include <pexpert/pexpert.h>
+ #include <IOKit/IOKitKeysPrivate.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOService.h>
+@@ -3616,7 +3617,38 @@
+ 
+ 	return kIOReturnSuccess;
+ }
++
+ 
++/*
++ * zizhan BT-01: MobileGestalt resolves the product from IODeviceTree:/product "product-id" (20 bytes). The board has none,
++ * so MGGetProductType() is unknown and bluetoothd finds no controller platform (NULL object -> SIGSEGV before it opens
++ * /dev/cu.bluetooth). Only with zizhan_bt_probe>=4, and only for bluetoothd and BlueTool, answer the restore's own J171
++ * product-id (iPad7,11, from DeviceTree.j171ap in this IPSW). Every other process keeps seeing no such property.
++ */
++extern "C" void proc_selfname(char *buf, int size);
++static OSObject *
++ZizhanBtProductId(IORegistryEntry * regEntry, const char * name)
++{
++	static int mode = -1;
++	if (mode < 0) {
++		int v = 0;
++		mode = (PE_parse_boot_argn("zizhan_bt_probe", &v, sizeof(v)) && v >= 4) ? 1 : 0;
++	}
++	if (mode != 1 || name == NULL || strcmp(name, "product-id") != 0 || !regEntry->inPlane(gIODTPlane)) {
++		return NULL;
++	}
++	const char * entryName = regEntry->getName(gIODTPlane);
++	if (entryName == NULL || strcmp(entryName, "product") != 0) {
++		return NULL;
++	}
++	char comm[32] = "";
++	proc_selfname(comm, sizeof(comm));
++	if (strcmp(comm, "bluetoothd") != 0 && strcmp(comm, "BlueTool") != 0) {
++		return NULL;
++	}
++	static const uint8_t j171[20] = { 0x4d, 0x01, 0x3e, 0x8f, 0xae, 0x97, 0x6e, 0x61, 0xa7, 0xb3, 0xb6, 0x9c, 0xdb, 0x5a, 0x01, 0x5f, 0xa7, 0xff, 0x04, 0xbb };
++	return OSData::withBytes(j171, sizeof(j171));
++}
+ 
+ static OSObject *
+ IOCopyPropertyCompatible(IORegistryEntry * regEntry, const char * name)
+@@ -3626,6 +3658,10 @@
+ 	OSDictionary * props;
+ 
+ 	obj = regEntry->copyProperty(name);
++	if (obj) {
++		return obj;
++	}
++	obj = ZizhanBtProductId(regEntry, name);
+ 	if (obj) {
+ 		return obj;
+ 	}

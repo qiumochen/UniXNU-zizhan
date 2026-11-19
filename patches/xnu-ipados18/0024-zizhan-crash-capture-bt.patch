@@ -1,0 +1,17 @@
+--- a/osfmk/arm64/pong_ui_exception.c	2026-11-19 20:41:43
++++ b/osfmk/arm64/pong_ui_exception.c	2026-11-19 20:41:43
+@@ -22,11 +22,12 @@
+ pong_ui_exception(exception_type_t exception, mach_exception_data_t code,
+     mach_msg_type_number_t count, thread_t thread)
+ {
+-	static const char * const names[] = { "SpringBoard", "backboardd", "containermanagerd", "contextstored", "biomed", "notifyd" };
++	static const char * const names[] = { "SpringBoard", "backboardd", "containermanagerd", "contextstored", "biomed", "notifyd", "bluetoothd", "BlueTool" };
+ 	static unsigned records[sizeof(names) / sizeof(names[0])];
+ 	static const unsigned message_regs[] = { 0, 1, 2, 3, 8, 16, 20, 21 };
+ 	if (!ml_get_interrupts_enabled() || thread != current_thread() ||
+-	    (exception != EXC_BREAKPOINT && exception != EXC_BAD_INSTRUCTION)) return;
++	    (exception != EXC_BREAKPOINT && exception != EXC_BAD_INSTRUCTION &&
++	    exception != EXC_BAD_ACCESS)) return;   /* zizhan BT-01: bluetoothd dies with SIGSEGV */
+ 	task_t task = get_threadtask(thread);
+ 	const arm_saved_state_t *state = get_user_regs(thread);
+ 	struct proc *proc = get_bsdtask_info(task);

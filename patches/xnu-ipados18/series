@@ -20,3 +20,5 @@
 0021-zizhan-display-owner-accounting.patch
 0022-zizhan-kmem-range-diagnostics.patch
 0023-zizhan-bt-uart.patch
+0024-zizhan-crash-capture-bt.patch
+0025-zizhan-bt-identity.patch

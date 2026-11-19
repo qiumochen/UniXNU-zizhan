@@ -16,6 +16,7 @@
 #include "ZizhanAudioSck.h"
 #include "ZizhanAudioDataPin.h"
 namespace {
+extern "C" unsigned zizhan_cs35l41_run_size(void);
 struct Page {
     IOMemoryMap *map = nullptr;
     volatile uint8_t *va = nullptr;
@@ -265,12 +266,13 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                                                     if(!din){zizhan_amp_echo=0;}}
                                                 if((mode==39||mode==40)&&zizhan_amp_checkpoint)zizhan_amp_checkpoint(0,0);
                                                 if(mode==40){zizhan_pin_sample::pads[0]=&sck;zizhan_pin_sample::pads[1]=&ws;zizhan_pin_sample::pads[2]=&data_pin;zizhan_pin_sample::pads[3]=zizhan_amp_echo?&din_pin:nullptr;}
-                                                if(mode==40)zizhan_cs35l41_native_play_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
-                                                if(mode==40&&zizhan_play_pin_sample){using namespace zizhan_pin_sample;
+                                                if(mode==40)IOLog("ZIZHAN_AUDIO_PLAY: call play_ms=%u flags=%x transfer=%u stream=%u run_size=%u/%u\n",zizhan_amp_play_ms,zizhan_amp_pulse_flags,transfer?1u:0u,transfer&&transfer->stream?1u:0u,(unsigned)sizeof(ZizhanAmpRun),zizhan_cs35l41_run_size());
+                                                if(mode==40){zizhan_cs35l41_native_play_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
+                                                if(zizhan_play_pin_sample){using namespace zizhan_pin_sample;
                                                     IOLog("ZIZHAN_PIN_SAMPLE: n=%u ns=%llu sck ones=%u edges=%u ws ones=%u edges=%u dout ones=%u edges=%u first64 sck=%08x%08x ws=%08x%08x dout=%08x%08x\n",
                                                           samples,elapsed_ns,ones[0],edges[0],ones[1],edges[1],ones[2],edges[2],first[0][1],first[0][0],first[1][1],first[1][0],first[2][1],first[2][0]);
                                                     if(pads[3])IOLog("ZIZHAN_PIN_SAMPLE: din122 ones=%u edges=%u first64=%08x%08x\n",ones[3],edges[3],first[3][1],first[3][0]);
-                                                    zizhan_play_pin_sample=nullptr;pads[0]=pads[1]=pads[2]=pads[3]=nullptr;}
+                                                    zizhan_play_pin_sample=nullptr;pads[0]=pads[1]=pads[2]=pads[3]=nullptr;}}
                                                 else if(mode==39)zizhan_cs35l41_native_pulse_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==38)zizhan_cs35l41_native_iv_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==37)zizhan_cs35l41_native_mailbox_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);

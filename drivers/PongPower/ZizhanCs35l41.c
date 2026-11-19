@@ -1477,7 +1477,7 @@ int zizhan_cs35l41_native_iv_transfer(unsigned enabled,unsigned verified,GeniI2c
 
 int zizhan_cs35l41_native_play_transfer(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpCoefficients *coeff,const ZizhanAmpSpeakerCalibration *cal,const ZizhanAudioTransfer *transfer,ZizhanAmpRun *out){
- if(!transfer||!transfer->stream||zizhan_amp_play_ms<100||zizhan_amp_play_ms>2000){if(out){memset(out,0,sizeof *out);out->reason=ZizhanAmpPrerequisite;}return 0;}
+ if(!transfer||!transfer->stream||zizhan_amp_play_ms<100||zizhan_amp_play_ms>2000){if(out){memset(out,0,sizeof *out);out->reason=ZizhanAmpPrerequisite;out->play_stage=90u+(!transfer?1u:!transfer->stream?2u:3u);}return 0;}
  const int rc=silent_run(enabled,verified,bus,clock,coeff,out,0,1,19,cal,transfer);
  return rc;
 }
@@ -1486,3 +1486,6 @@ int zizhan_cs35l41_native_pulse_transfer(unsigned enabled,unsigned verified,Geni
  if(!transfer||!transfer->once){if(out){memset(out,0,sizeof *out);out->reason=ZizhanAmpPrerequisite;}return 0;}
  return silent_run(enabled,verified,bus,clock,coeff,out,0,1,18,cal,transfer);
 }
+
+/* Diagnostics: the C view of the run receipt size, compared by the C++ caller. */
+unsigned zizhan_cs35l41_run_size(void){return (unsigned)sizeof(ZizhanAmpRun);}

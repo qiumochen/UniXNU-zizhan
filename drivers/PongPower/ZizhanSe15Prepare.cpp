@@ -56,7 +56,7 @@ static void run(){
         for(unsigned p=0;p<count;++p){
             const uint32_t bit=pads[p]->read(4)&1u;
             if(n<64u&&bit)first[p][n>>5]|=1u<<(n&31u);
-            ones[p]+=bit;if(last[p]!=2u&&bit!=last[p])++edges[p];last[p]=bit;}
+            ones[p]+=bit;if(last[p]!=2u&&bit!=last[p]){++edges[p];}last[p]=bit;}
         ++samples;}
     absolutetime_to_nanoseconds(mach_absolute_time()-t0,&elapsed_ns);
 }
@@ -102,7 +102,7 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
     if(mode==39||mode==40){unsigned attended=0,dry=0,nopup=0,lvl=0;PE_parse_boot_argn("zizhan_pulse_dry",&dry,sizeof dry);PE_parse_boot_argn("zizhan_pulse_nopup",&nopup,sizeof nopup);
         PE_parse_boot_argn("zizhan_amp_lvl",&lvl,sizeof lvl);
         zizhan_amp_pulse_flags=(dry==1?1u:0u)|(nopup==1?2u:0u)|(mode==40&&lvl==1?4u:0u);
-        if(zizhan_amp_pulse_flags&4u)IOLog("ZIZHAN_AUDIO_PULSE: android_level=1 volume=0dB gain=0x253\n");if(zizhan_amp_pulse_flags)IOLog("ZIZHAN_AUDIO_PULSE: flags dry=%u nopup=%u\n",zizhan_amp_pulse_flags&1u,(zizhan_amp_pulse_flags>>1)&1u);
+        if(zizhan_amp_pulse_flags&4u){IOLog("ZIZHAN_AUDIO_PULSE: android_level=1 volume=0dB gain=0x253\n");}if(zizhan_amp_pulse_flags)IOLog("ZIZHAN_AUDIO_PULSE: flags dry=%u nopup=%u\n",zizhan_amp_pulse_flags&1u,(zizhan_amp_pulse_flags>>1)&1u);
         if((!PE_parse_boot_argn("zizhan_audio_attended",&attended,sizeof attended)||attended!=1)&&dry!=1){IOLog("ZIZHAN_AUDIO_PULSE: SKIP attended=0 output_enables=0\n");return;}
         unsigned checkpoint=0;if(PE_parse_boot_argn("zizhan_audio_checkpoint",&checkpoint,sizeof checkpoint)&&checkpoint==1){
             zizhan_amp_checkpoint=amp_checkpoint;IOLog("ZIZHAN_AUDIO_CHECKPOINT: armed klog=%u\n",pong_klog_flush?1u:0u);}

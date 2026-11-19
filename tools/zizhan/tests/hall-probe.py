@@ -17,7 +17,7 @@ probe = probe.replace('__asm__ volatile("dmb oshld" ::: "memory");', '')
 # FOLD-01 follow mode (zizhan_hall_observe=2) collaborators; mode 1 never calls them.
 LID_STUBS = r"""
 extern "C" int zizhan_display_power_state(void) { return 1; }
-extern "C" volatile uint32_t pong_zc_flipped_tag = 1;
+extern "C" { volatile uint32_t pong_zc_flipped_tag = 1; }
 extern "C" void pong_touch_post(uint32_t, uint32_t, uint32_t, uint32_t) {}
 extern "C" void zizhan_outer_fold_show(int) {}
 """

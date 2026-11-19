@@ -632,7 +632,7 @@ __attribute__((noinline)) bool graph_round(){
  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300004u,ZizhanPcmPort)){return false;}++o.graph_acks;
  if(dec){n=loop==3?zizhan_pcm_dec_cnv_config(b,sizeof b,0x7a30000du):loop?zizhan_pcm_loopback_config(b,sizeof b,0x7a30000du,loop==1?1u:0u):zizhan_pcm_dec_cnv_config(b,sizeof b,0x7a30000du);
   if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a30000du,ZizhanPcmPort)){return false;}++o.graph_acks;}
- IOLog("ZIZHAN_AUDIO_GRAPH: stream decoder=%u dec=%x cnv=%x\n",dec,dec?ZizhanPcmDecIid:0u,dec?ZizhanPcmCnvIid:0u);
+ IOLog("ZIZHAN_AUDIO_GRAPH: stream decoder=%u dec=%x cnv=%x\n",dec,dec?(unsigned)ZizhanPcmDecIid:0u,dec?(unsigned)ZizhanPcmCnvIid:0u);
  unsigned echo=0;if(o.mode!=41||!PE_parse_boot_argn("zizhan_audio_echo",&echo,sizeof echo)||echo!=1){echo=0;}
  {unsigned dry=0;if(!PE_parse_boot_argn("zizhan_pulse_dry",&dry,sizeof dry)||dry!=1){echo=0;}}
  o.graph_echo=0;

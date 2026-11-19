@@ -42,3 +42,8 @@
 
 - [fairplayd：其他项目的做法与静态核对](../research/2026-11-19-weather-fairplay.md)：没有项目在非苹果硬件上让 fairplayd 正常工作；WeatherDaemon 的 JWT 请求要 Mescal（基于 FairPlay）签名。天气保持挂起。
 - [蜂窝可行性](../research/2026-11-19-cellular-feasibility.md)：QcomBaseband 在 SC7180 + iOS 17 上已做到 LTE 注册和 IPv4 数据；本机 ADSP 的 PAS 启动、GLINK、QRTR 可复用；阶段 1（启动 MPSS、只读 rmtfs、列 QMI 服务、保持低功耗不发射）可无人值守，阶段 2 需用户决定。
+
+## CI 精简内核链接修复
+
+推送前按惯例补编 `pong_ipados18_ci_defconfig`（关掉 Adreno 与 PongPower），发现链接失败：zizhan 服务弱引用了背光、DSI、扫描输出标记和 GENI I2C 函数，而静态内核链接不允许未定义的弱符号（11-18/19 引入，云端 macOS 内核 CI 需手动触发，所以之前没暴露）。`ArmDTPlatform.cpp` 在缺少对应组件时提供替身定义（扫描输出从不翻页、显示/背光请求一律失败），外屏触控盘点在没有 PongPower 时记 SKIP。CI 与 GPU（build-play50）两种内核都已链接通过。
+

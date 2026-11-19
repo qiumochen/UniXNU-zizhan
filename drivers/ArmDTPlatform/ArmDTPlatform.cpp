@@ -31,6 +31,22 @@
 #include "ZizhanDisplayPowerService.h"
 
 extern "C" bool pong_cpu_start(IOService *platform);
+
+/* The zizhan services refer to display, scanout and backlight entry points weakly, but the static kernel link has no
+ * undefined weak symbols. Reduced kernels (pong_ipados18_ci_defconfig) lack those components, so define stand-ins:
+ * no scanout ever flips, and every display/backlight request fails, which the services already treat as unavailable. */
+#if !XNU_PONG_ADRENO_PLATFORM
+extern "C" {
+volatile uint32_t pong_zc_flipped_tag = 0;
+int zizhan_dsi_power_sequence(const uint8_t *, const uint16_t *, uint32_t, int) { return -1; }
+}
+#endif
+#if !(XNU_PONG_WIFI || XNU_PONG_POWER)
+extern "C" {
+int pong_backlight_level(uint32_t *) { return -1; }
+int pong_backlight_set(uint32_t, uint32_t) { return -1; }
+}
+#endif
 #if XNU_PONG_WIFI
 extern "C" void pong_wifi_start_optional(void);
 #endif

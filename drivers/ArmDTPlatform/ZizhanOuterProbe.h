@@ -100,6 +100,11 @@ static uint32_t se_rd(void *c, uint32_t reg) { return static_cast<Rw *>(c)->r(re
 static void se_wr(void *c, uint32_t reg, uint32_t v) { static_cast<Rw *>(c)->w(reg, v); }
 static void outer_spi();
 static void touch_inventory(bool alive_test, bool spi_test) {
+#if !(XNU_PONG_WIFI || XNU_PONG_POWER)
+  /* Reduced kernels (pong_ipados18_ci_defconfig) do not build PongPower, so there is no GENI I2C for the WL2866D. */
+  (void)alive_test; (void)spi_test;
+  IOLog("ZIZHAN_OUTER_TOUCH: SKIP kernel-without-pong-power\n");
+#else
   Ro vote, w0, w2;
   if (!vote.open(0x162000, 0x1000) || !w0.open(0x127000, 0x1000) || !w2.open(0x12e000, 0x1000)) { IOLog("ZIZHAN_OUTER_TOUCH: FAIL map\n"); return; }
   const uint32_t s1 = w0.r(0x140), s4 = w2.r(0x4dc);
@@ -193,6 +198,7 @@ static void touch_inventory(bool alive_test, bool spi_test) {
   const bool r1 = wr8(0x0e, en0), r2 = wr8(0x04, dv0), r3 = wr8(0x06, av0);
   rst.w(0, s_rst); rst.w(4, s_rst_io); irq.w(0, s_irq);
   IOLog("ZIZHAN_OUTER_TOUCH: DONE alive-test restored=%u\n", (r1 && r2 && r3) ? 1u : 0u);
+#endif
 }
 
 /* mode 5: the outer FTS over SE19 SPI, as bsd/dev/pong_fts.c does it for the inner one (st fst2 driver 6.0.3):

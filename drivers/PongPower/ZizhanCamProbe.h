@@ -96,18 +96,22 @@ struct Sensor {
   uint32_t mclk_rcg, mclk_cbcr; unsigned mclk_pin, reset_pin;
   uint64_t cci_base; uint32_t cci_rcg, cci_cbcr; unsigned master, pad0, pad1;
   uint8_t addrs[3]; uint16_t id_reg; unsigned id_len;
+  unsigned extra_gpio;   /* second analog rail as a GPIO regulator (main: CAMERA_W_AVDD1 GPIO70 1.8 V), 0 = none */
 };
 static const Sensor kSensors[] = {
   // mode 2: CCI1 / cam-sensor3 = IMX663 tele (cam-1: 0x1a -> 0x0663)
-  {"tele", 53, 1, 1056, 0, 0x15054, 0x1506c, 103, 128, 0xac16000, 0x13148, 0x13160, 0, 114, 115, {0x1a, 0x10, 0}, 0x0016, 2},
+  {"tele", 53, 1, 1056, 0, 0x15054, 0x1506c, 103, 128, 0xac16000, 0x13148, 0x13160, 0, 114, 115, {0x1a, 0x10, 0}, 0x0016, 2, 0},
   // mode 3: CCI0 master 1 / cam-sensor1 = front IMX596: vdig PM8008J L2 1.152 V, vana GPIO97 2.9 V, MCLK5 GPIO105, reset GPIO127
-  {"front", 97, 2, 1152, 0, 0x1508c, 0x150a4, 105, 127, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x10, 0x1a, 0x37}, 0x0016, 2},
+  {"front", 97, 2, 1152, 0, 0x1508c, 0x150a4, 105, 127, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x10, 0x1a, 0x37}, 0x0016, 2, 0},
   // mode 4: CCI0 master 1 / cam-sensor2 = ultra OV13B10: vdig GPIO92 1.2 V, vana GPIO6 2.8 V, MCLK1 GPIO101, reset GPIO24
-  {"ultra", 6, 0, 0, 92, 0x1501c, 0x15034, 101, 24, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x36, 0x10, 0}, 0x300a, 3},
+  {"ultra", 6, 0, 0, 92, 0x1501c, 0x15034, 101, 24, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x36, 0x10, 0}, 0x300a, 3, 0},
+  // mode 5: CCI0 master 0 / cam-sensor0 = main IMX766: vdig GPIO68 1.104 V, vana GPIO42 2.8 V, avdd1 GPIO70 1.8 V
+  // (vana1 = pm8350_s12, input of the DVDD regulators, already on), MCLK2/GPIO102, reset GPIO126; AF/OIS rails not needed for the id
+  {"main", 42, 0, 0, 68, 0x15038, 0x15050, 102, 126, 0xac15000, 0x1312c, 0x13144, 0, 110, 111, {0x1a, 0x10, 0}, 0x0016, 2, 70},
 };
 
 static void attended(const Sensor &sn) {
-  Win vote, wrap, se, camcc, cci, pm_en, vana, vdig, mclk, rst, pad[2], i2c[2];
+  Win vote, wrap, se, camcc, cci, pm_en, vana, vdig, mclk, rst, pad[2], i2c[2], extra;
   if (!vote.open(0x162000, 0x1000, true) || !wrap.open(0x127000, 0x1000, true) || !se.open(0x994000, 0x4000, true) ||
       !camcc.open(0xade0000, 0x20000, true) || !cci.open(sn.cci_base, 0x1000, true)) { IOLog("ZIZHAN_CAM_PROBE: FAIL map\n"); return; }
   {
@@ -119,9 +123,10 @@ static void attended(const Sensor &sn) {
   auto pin_open = [](Win &w, unsigned n) { return w.open(0xf100000ull + uint64_t(n) * 0x1000, 0x1000, true); };
   if (!pin_open(pm_en, 11) || !pin_open(vana, sn.vana_gpio) || (sn.vdig_gpio && !pin_open(vdig, sn.vdig_gpio)) ||
       !pin_open(mclk, sn.mclk_pin) || !pin_open(rst, sn.reset_pin) || !pin_open(pad[0], sn.pad0) || !pin_open(pad[1], sn.pad1) ||
-      !pin_open(i2c[0], 206) || !pin_open(i2c[1], 207)) { IOLog("ZIZHAN_CAM_PROBE: FAIL pin-map\n"); return; }
+      !pin_open(i2c[0], 206) || !pin_open(i2c[1], 207) || (sn.extra_gpio && !pin_open(extra, sn.extra_gpio))) { IOLog("ZIZHAN_CAM_PROBE: FAIL pin-map\n"); return; }
   const uint32_t s_pm = pm_en.r(0), s_vana = vana.r(0), s_vdig = sn.vdig_gpio ? vdig.r(0) : 0, s_mclk = mclk.r(0), s_rst = rst.r(0),
-                 s_pad0 = pad[0].r(0), s_pad1 = pad[1].r(0), s_i2c0 = i2c[0].r(0), s_i2c1 = i2c[1].r(0);
+                 s_pad0 = pad[0].r(0), s_pad1 = pad[1].r(0), s_i2c0 = i2c[0].r(0), s_i2c1 = i2c[1].r(0),
+                 s_extra = sn.extra_gpio ? extra.r(0) : 0;
   IOLog("ZIZHAN_CAM_PROBE: %s start vana%u=%x vdig%u=%x mclk%u=%x reset%u=%x pads%u/%u=%x/%x\n", sn.name, sn.vana_gpio, s_vana,
         sn.vdig_gpio, s_vdig, sn.mclk_pin, s_mclk, sn.reset_pin, s_rst, sn.pad0, sn.pad1, s_pad0, s_pad1);
   const uint32_t i2c_cfg[2] = {s_i2c0, s_i2c1};
@@ -156,7 +161,7 @@ static void attended(const Sensor &sn) {
     }
     unsigned done = 0, stage = 0;
     if (!rc) rc = zizhan_pm8008_rails_on(&pm, &vio, 1, &done);                 // vio
-    if (!rc) { gpio_out(vana, 1); IOSleep(1); }                               // vana
+    if (!rc) { gpio_out(vana, 1); if (sn.extra_gpio) gpio_out(extra, 1); IOSleep(1); }   // vana (+ second analog rail)
     if (!rc) {                                                                 // vdig
       if (sn.vdig_ldo) rc = zizhan_pm8008_rails_on(&pm, &dig, 1, &done);
       else { gpio_out(vdig, 1); IOSleep(1); }
@@ -190,11 +195,12 @@ static void attended(const Sensor &sn) {
       (void)zizhan_camcc_mclk_off(&cc, sn.mclk_cbcr);
     }
     if (sn.vdig_ldo) (void)zizhan_pm8008_enable(&pm, sn.vdig_ldo, 0); else gpio_out(vdig, 0);
+    if (sn.extra_gpio) gpio_out(extra, 0);
     gpio_out(vana, 0);
     (void)zizhan_pm8008_enable(&pm, 5, 0);
   }
   pm_en.w(0, s_pm); vana.w(0, s_vana); if (sn.vdig_gpio) vdig.w(0, s_vdig); mclk.w(0, s_mclk); rst.w(0, s_rst);
-  i2c[0].w(0, s_i2c0); i2c[1].w(0, s_i2c1);
+  i2c[0].w(0, s_i2c0); i2c[1].w(0, s_i2c1); if (sn.extra_gpio) extra.w(0, s_extra);
   IOLog("ZIZHAN_CAM_PROBE: DONE %s rails_off=1 pins_restored=1\n", sn.name);
 }
 
@@ -214,7 +220,7 @@ static void start() {
     IOLog("ZIZHAN_CAM_PROBE: SKIP mode=2 needs zizhan_user_present=1\n");
     return;
   }
-  if (mode > 4) { IOLog("ZIZHAN_CAM_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
+  if (mode > 5) { IOLog("ZIZHAN_CAM_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, reinterpret_cast<void *>(uintptr_t(mode)), &t) == KERN_SUCCESS) thread_deallocate(t);
   IOLog("ZIZHAN_CAM_PROBE: RUNNING mode=%u\n", mode);

@@ -80,3 +80,16 @@
 - **超广角 OV13B10**（CCI0 master 1，0x36，寄存器 0x300a）→ **0x560d42**，与 OV13B10 一致。
 - 前置（CCI0 master 1）：供电（PM8008J L2 1.2 → 1.152 V、GPIO97、L5）、MCLK5、复位均正常，但 0x1a NACK，之后两个地址超时——NACK 后 CCI 队列停住，探针没有复位就试下一个地址。已改为 NACK 后先复位，地址顺序改为 0x10、0x1a、0x37 再测。
 - 已确认：长焦 IMX663（CCI1 m0 0x1a）、超广角 OV13B10（CCI0 m1 0x36）。主摄 IMX766（CCI0 m0）需要额外的 custom/vaf/vana1 供电，暂未做。
+
+## 2026-11-19 14:30：四颗传感器全部在 iPadOS 下应答（cam-front2 / cam-main）
+
+| 模块 | 传感器 | 总线 / 地址 | 芯片 ID | 供电（vio 均为 PM8008J L5 1.8 V） | MCLK / 复位 |
+| --- | --- | --- | --- | --- | --- |
+| 主摄 | IMX766 | CCI0 m0 / 0x1a | **0x0766** | vdig GPIO68 1.104 V，vana GPIO42 2.8 V，avdd1 GPIO70 1.8 V | MCLK2 GPIO102 / GPIO126 |
+| 前置 | IMX596 | CCI0 m1 / **0x10** | **0x0596** | vdig PM8008J L2 1.152 V，vana GPIO97 2.9 V | MCLK5 GPIO105 / GPIO127 |
+| 超广角 | OV13B10 | CCI0 m1 / 0x36 | **0x560d42** | vdig GPIO92 1.2 V，vana GPIO6 2.8 V | MCLK1 GPIO101 / GPIO24 |
+| 长焦 | IMX663 | CCI1 m0 / 0x1a | **0x0663** | vdig PM8008J L1 1.056 V，vana GPIO53 2.8 V | MCLK3 GPIO103 / GPIO128 |
+
+`zizhan_cam_probe=2..5`（默认关闭）。每轮都按反序下电、恢复引脚，无 panic。CCI 时钟、MCLK 都只用 XO 19.2 MHz。
+
+下一步：CSIPHY + CSID + IFE-lite RDI 取一帧 RAW（先用超广角或前置，分辨率小），再做软件去马赛克。

@@ -31,3 +31,19 @@
 
 - [GSMArena 评测](https://m.gsmarena.com/xiaomi_mix_fold_2-review-2475p5.php)，[Fudzilla](https://www.fudzilla.net/news/mobile/55311-xiaomi-mix-fold-2-is-an-impressive-foldable-smartphone)，[Kimovil](https://www.kimovil.com/en/where-to-buy-xiaomi-mix-fold-2-12gb-512gb)，[Wikipedia](https://en.wikipedia.org/wiki/Xiaomi_MIX_Fold_2)
 - [Xiaomi Nabu camss 补丁](https://download.copr.fedorainfracloud.org/results/mcc45tr/nabu-linux/srpm-builds/10932122/rpmbuild/SOURCES/0023-media-qcom-add-Xiaomi-Nabu-camera-support.patch)
+
+## 2026-11-19 中午：前置 IMX596 上电所需资源（离线，只读 DT）
+
+| 资源 | DT | 实际来源 |
+| --- | --- | --- |
+| vio 1.8 V | `cam_vio-supply` | **PM8008J LDO5**（PM8008 是独立的 I2C 电源芯片，需要单独驱动） |
+| vdig 1.056 V | `cam_vdig-supply` | **PM8008J LDO1** |
+| vana 2.8 V | `cam_vana-supply` | `CAMERA_T_AVDD`：GPIO53 控制的 gpio-regulator |
+| 时钟域 | `cam_clk-supply` | `cam_cc_titan_top_gdsc`（0xadf31dc） |
+| MCLK | `CAMIF_MCLK3` 19.2 MHz | GPIO103，时钟来自 CAM_CC mclk3 |
+| 复位 | `CAM_RESET10` | GPIO128 |
+| 总线 | CCI1（0xac16000）master 0 | CSIPHY2 |
+
+上电顺序（参照 Linux Sony 传感器驱动的通用顺序，待与 CamX 模块 bin 的 power-up 表核对）：复位拉低 → vio → vana → vdig → MCLK → 复位释放 → 等 ≥ 8 ms → CCI 读 chip-id。
+
+前置条件：先实现 PM8008 的 I2C 稳压器控制和 CAM_CC（titan top GDSC + mclk3 RCG/branch），这两块在 iPadOS 内核里都还没有。第一次真正上电按计划放到有人在场时。

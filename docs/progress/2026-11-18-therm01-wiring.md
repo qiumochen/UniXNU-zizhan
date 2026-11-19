@@ -115,3 +115,19 @@ T3 的 `test_cpu` 必须在 40..100 且低于 110；若 T1 待机 +8 超过 100�
   “未给”和“解析失败”；越界数值会被拒绝，但拼写错误会回落到默认阈值。
 - 32 路逐秒全量日志、GPU 单独测试阈值轮、NTC/PMIC 传感器、thermalmonitord/HID
   发布、vendor thermal conf 解密和 suspend 都不在本版范围。
+
+## 2026-11-19 GPU 封顶单独验证（therm-g1，静音）
+
+`zizhan_thermal=2 zizhan_thermal_test_gpu=55 zizhan_thermal_load=60 pong_touch_synth=2`（kernel build-play31）：
+
+- GPU 传感器到 56.8 °C 时 `reason=GPU_HOT`、`gpu=12`（最低档），之后 `PONG GPU DCVS` 一直停在 level 1（220 MHz），合成滑动照常（busy 37–46%）。**GPU 封顶生效。**
+- 合成滑动持续加热，GPU 一直在 54–57 °C，没低于 50 °C 的释放阈值，所以这一轮没有看到释放（cap 一直 0/12）。
+- 4 线程负载 2 s 后因 80.9 °C `reason=hot` 自动停止；CPU 最高 93.5 °C（本轮 CPU 阈值保持默认 110 °C）。无 panic。
+
+## 2026-11-19 GPU 封顶 → 释放（therm-g2，静音）
+
+同样的 `test_gpu=55`，去掉合成滑动，只靠 60 s CPU 负载加热（负载 8 s 后在 75.3 °C 按 `reason=hot` 自停）：
+
+- 55.2 °C `GPU_HOT` → `gpu=12`，峰值 65.1 °C 期间一直保持最低档；
+- 降到 50 °C 以下后 `reason=RELEASE` 每约 3 s 释放一档：12 → 11 → 10 → 9 → 8 → 7 → 6 → 5 → 4（本轮到时结束，未见到完全回 0）；
+- 无 panic。**GPU 的封顶和逐级释放都已在设备上成立。**

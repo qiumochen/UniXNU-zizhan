@@ -55,3 +55,10 @@
 ## 外屏触控（资料，未操作）
 
 ST FTS（`st,spi-sec`），SPI 在 **QUP wrap2 S4 / SE19（0x890000）**，IRQ GPIO119，复位 GPIO52，坐标 10800×25200；AVDD = WL2866D avdd2，VDD = WL2866D dvdd2（同一颗 WL2866D 已经在给外屏面板供电）。现有内屏触控驱动（`bsd/dev/pong_fts.c`，XNU patch 0002）把 QUP0 SE4 的 GCC 偏移和 RPMh 的 ldoc7/ldoc2 写死，接外屏需要先把这几项参数化（GCC wrap2 S4 时钟、WL2866D I2C 供电），再在 ADT 里加第二个触控节点。
+
+## 2026-11-19 下午：外屏触控芯片上电并应答（outer-3b / outer-4）
+
+- SE1 I2C（wrap0 S1）时钟和 pads 由启动程序留好，但 SCL 计数器为 0；按 Linux geni-i2c 100 kHz（10/11/26）补上后可读 WL2866D（0x28）。
+- WL2866D（V1.6 手册：DVDD = 0.6 V + 6 mV×码，AVDD = 1.2 V + 12.5 mV×码）：DVDD1 0xc8 = 1.8 V、AVDD1 0x90 = 3.0 V 已开（外屏面板）；**DVDD2/AVDD2（外屏触控）关闭**，复位 GPIO52 低，SE19 时钟关。
+- `zizhan_outer_probe=4`：DVDD2 设 1.8 V、AVDD2 设 3.0 V（与内屏同型号触控芯片的电压相同），只加 0x0e 的 bit1/bit3（面板的 bit0/bit2 不动），读回一致；释放复位后 **7 ms IRQ（GPIO119）被拉低并保持**——FTS 已启动并报告就绪事件。测试后复位拉低、三个寄存器恢复原值。
+- 下一步：SE19 GENI SPI（wrap2 S4，pads GPIO72-75 qup19）读芯片 ID 和事件，或把内屏 `pong_fts` 驱动参数化成第二个实例。

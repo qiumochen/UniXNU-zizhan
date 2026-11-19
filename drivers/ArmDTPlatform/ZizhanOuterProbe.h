@@ -10,6 +10,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
+#include "../PongPower/GeniI2c.h"
 
 namespace zizhan_outer_probe {
 struct Ro {
@@ -89,10 +90,111 @@ static void picture_test() {
         (na && after[8] == after[9]) ? 1u : 0u);
 }
 
+/* zizhan_outer_probe=3: read-only outer touch inventory. ST FTS st,spi-sec on SE19 SPI (0x890000, wrap2 S4: vote 0x162010
+ * bit 8, CBCR 0x12e4dc; pads GPIO72-75 qup19), reset GPIO52, IRQ GPIO119; supplies WL2866D avdd2/dvdd2 on SE1 I2C
+ * (0x984000, wrap0 S1: vote 0x162008 bit 11, CBCR 0x127140; pads GPIO4/5 qup1) at 0x28. WL2866D (datasheet V1.6): reg 0x0E
+ * bit0 DVDD1, bit1 DVDD2, bit2 AVDD1, bit3 AVDD2 enables. Only reads; the I2C is used only when the boot loader left it set up. */
+static uint32_t se_rd(void *c, uint32_t reg) { return static_cast<Rw *>(c)->r(reg); }
+static void se_wr(void *c, uint32_t reg, uint32_t v) { static_cast<Rw *>(c)->w(reg, v); }
+static void touch_inventory(bool alive_test) {
+  Ro vote, w0, w2;
+  if (!vote.open(0x162000, 0x1000) || !w0.open(0x127000, 0x1000) || !w2.open(0x12e000, 0x1000)) { IOLog("ZIZHAN_OUTER_TOUCH: FAIL map\n"); return; }
+  const uint32_t s1 = w0.r(0x140), s4 = w2.r(0x4dc);
+  IOLog("ZIZHAN_OUTER_TOUCH: gcc vote8=%x vote10=%x wrap0_s1=%x wrap2_s4=%x\n", vote.r(0x8), vote.r(0x10), s1, s4);
+  static const uint16_t pins[] = {4, 5, 52, 119, 72, 73, 74, 75};
+  uint32_t cfg4 = 0, cfg5 = 0;
+  for (uint16_t pin : pins) {
+    Ro p;
+    if (!p.open(0xf100000ull + uint64_t(pin) * 0x1000, 0x1000)) continue;
+    const uint32_t cfg = p.r(0), io = p.r(4);
+    if (pin == 4) cfg4 = cfg;
+    if (pin == 5) cfg5 = cfg;
+    IOLog("ZIZHAN_OUTER_TOUCH: pin=%u cfg=%x func=%u oe=%u pull=%u in=%u out=%u\n", pin, cfg, (cfg >> 2) & 15, (cfg >> 9) & 1, cfg & 3, io & 1,
+          (io >> 1) & 1);
+  }
+  if ((s1 & 0x80000000u) || ((cfg4 >> 2) & 15) != 1 || ((cfg5 >> 2) & 15) != 1) {
+    IOLog("ZIZHAN_OUTER_TOUCH: DONE i2c=not-set-up wl2866d_read=0 writes=0\n");
+    return;
+  }
+  Rw se;
+  if (!se.open(0x984000, 0x4000, kIOMapInhibitCache)) { IOLog("ZIZHAN_OUTER_TOUCH: FAIL se-map\n"); return; }
+  // The loader leaves M_CLK_CFG (div 7 from 19.2 MHz) but no SCL counters: set Linux geni-i2c 100 kHz timing (10/11/26).
+  if ((se.r(0x48) & 1u) && !se.r(0x278)) { se.w(0x278, (10u << 20) | (11u << 10) | 26u); IOLog("ZIZHAN_OUTER_TOUCH: se1 scl counters set 100 kHz (clk_cfg=%x)\n", se.r(0x48)); }
+  GeniI2c g;
+  const GeniIo io = {se_rd, se_wr, &se};
+  uint32_t config = 0;
+  if (geni_i2c_prepare_poll(&g, &io, 0x28, &config)) { IOLog("ZIZHAN_OUTER_TOUCH: DONE i2c-prepare-refused config=%x writes=0\n", config); return; }
+  uint8_t regs[16] = {};
+  unsigned ok = 0;
+  for (unsigned r = 0; r < 16; ++r) {
+    if (geni_i2c_start_read(&g, uint8_t(r))) break;
+    int st = GeniPending;
+    for (unsigned i = 0; i < 2000 && st == GeniPending; ++i) { st = geni_i2c_poll(&g); if (st == GeniPending) IODelay(50); }
+    for (unsigned k = 0; k < 3 && st == GeniPending; ++k) { st = geni_i2c_timeout(&g); IODelay(1000); }
+    if (st != GeniDone) { IOLog("ZIZHAN_OUTER_TOUCH: wl2866d reg=%x failed error=%u status=%x\n", r, g.error, g.error_status); break; }
+    regs[r] = g.data;
+    ++ok;
+  }
+  IOLog("ZIZHAN_OUTER_TOUCH: wl2866d reads=%u regs00-07=%02x %02x %02x %02x %02x %02x %02x %02x regs08-0f=%02x %02x %02x %02x %02x %02x %02x %02x\n", ok,
+        regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], regs[8], regs[9], regs[10], regs[11], regs[12], regs[13], regs[14], regs[15]);
+  IOLog("ZIZHAN_OUTER_TOUCH: enables dvdd1=%u dvdd2(touch vdd)=%u avdd1=%u avdd2(touch avdd)=%u\n", regs[14] & 1, (regs[14] >> 1) & 1,
+        (regs[14] >> 2) & 1, (regs[14] >> 3) & 1);
+  if (!alive_test || ok != 16) { IOLog("ZIZHAN_OUTER_TOUCH: DONE inventory writes=0\n"); return; }
+  /* mode 4: is the outer FTS alive? Touch rails at the inner touch's voltages (VDD 1.8 V = DVDD2 code 0xc8, AVDD 3.0 V = AVDD2
+   * code 0x90; WL2866D: DVDD = 0.6 V + 6 mV*code, AVDD = 1.2 V + 12.5 mV*code), the panel's DVDD1/AVDD1 bits untouched; then
+   * reset GPIO52 released and IRQ GPIO119 (pull-up input) watched: an ST FTS pulls it low with its boot/ready event. */
+  auto wr8 = [&](uint8_t reg, uint8_t v) -> bool {
+    const uint8_t b[2] = {reg, v};
+    if (geni_i2c_start_write_bytes(&g, b, 2)) return false;
+    int st = GeniPending;
+    for (unsigned i = 0; i < 2000 && st == GeniPending; ++i) { st = geni_i2c_poll(&g); if (st == GeniPending) IODelay(50); }
+    for (unsigned k = 0; k < 3 && st == GeniPending; ++k) { st = geni_i2c_timeout(&g); IODelay(1000); }
+    return st == GeniDone;
+  };
+  auto rd8 = [&](uint8_t reg, uint8_t *v) -> bool {
+    if (geni_i2c_start_read(&g, reg)) return false;
+    int st = GeniPending;
+    for (unsigned i = 0; i < 2000 && st == GeniPending; ++i) { st = geni_i2c_poll(&g); if (st == GeniPending) IODelay(50); }
+    for (unsigned k = 0; k < 3 && st == GeniPending; ++k) { st = geni_i2c_timeout(&g); IODelay(1000); }
+    if (st != GeniDone) return false;
+    *v = g.data; return true;
+  };
+  Rw rst, irq;
+  if (!rst.open(0xf100000ull + 52ull * 0x1000, 0x1000, kIOMapInhibitCache) || !irq.open(0xf100000ull + 119ull * 0x1000, 0x1000, kIOMapInhibitCache)) {
+    IOLog("ZIZHAN_OUTER_TOUCH: FAIL pin-map\n"); return;
+  }
+  const uint32_t s_rst = rst.r(0), s_irq = irq.r(0), s_rst_io = rst.r(4);
+  const uint8_t en0 = regs[14], dv0 = regs[4], av0 = regs[6];
+  rst.w(0, (s_rst & ~0x3ffu) | (1u << 9)); rst.w(4, 0);                 // reset low (output)
+  irq.w(0, (s_irq & ~0x3ffu) | 3u);                                       // IRQ: GPIO input, pull-up
+  uint8_t back[3] = {};
+  bool ok_w = wr8(0x04, 0xc8) && wr8(0x06, 0x90) && rd8(0x04, &back[0]) && rd8(0x06, &back[1]) && back[0] == 0xc8 && back[1] == 0x90;
+  if (ok_w) ok_w = wr8(0x0e, uint8_t((en0 | 0x0a) & 0x0f)) && rd8(0x0e, &back[2]) && (back[2] & 0x0f) == ((en0 | 0x0a) & 0x0f);
+  IOLog("ZIZHAN_OUTER_TOUCH: rails ok=%u dvdd2=%x avdd2=%x enable=%x (panel bits kept %x)\n", ok_w ? 1u : 0u, back[0], back[1], back[2], en0 & 5u);
+  unsigned lows = 0, first_low_ms = 0, highs = 0;
+  if (ok_w) {
+    IOSleep(10);
+    rst.w(4, 2);                                                          // reset released
+    for (unsigned ms = 0; ms < 1000; ++ms) {
+      const unsigned v = irq.r(4) & 1u;
+      if (!v) { if (!lows) first_low_ms = ms; ++lows; } else ++highs;
+      IOSleep(1);
+    }
+  }
+  IOLog("ZIZHAN_OUTER_TOUCH: irq119 samples low=%u high=%u first_low_ms=%u -> %s\n", lows, highs, first_low_ms,
+        lows ? "controller alive (IRQ asserted)" : "no IRQ");
+  // restore: reset low, rails back to how the loader left them, pins as before
+  rst.w(4, 0);
+  IOSleep(2);
+  const bool r1 = wr8(0x0e, en0), r2 = wr8(0x04, dv0), r3 = wr8(0x06, av0);
+  rst.w(0, s_rst); rst.w(4, s_rst_io); irq.w(0, s_irq);
+  IOLog("ZIZHAN_OUTER_TOUCH: DONE alive-test restored=%u\n", (r1 && r2 && r3) ? 1u : 0u);
+}
+
 static uint32_t probe_mode;
 static void worker(void *, wait_result_t) {
   IOSleep(40000);
-  if (probe_mode == 2) { picture_test(); thread_terminate(current_thread()); thread_block(THREAD_CONTINUE_NULL); return; }
+  if (probe_mode >= 2) { if (probe_mode == 2) picture_test(); else touch_inventory(probe_mode == 4); thread_terminate(current_thread()); thread_block(THREAD_CONTINUE_NULL); return; }
   {
     Ro cc, dsi0;
     if (!cc.open(0xaf00000, 0x10000) || !dsi0.open(0xae94000, 0x1000)) {
@@ -134,10 +236,10 @@ static void worker(void *, wait_result_t) {
 static void start() {
   uint32_t mode = 0;
   if (!PE_parse_boot_argn("zizhan_outer_probe", &mode, sizeof mode) || !mode) return;
-  if (mode != 1 && mode != 2) { IOLog("ZIZHAN_OUTER_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
+  if (mode < 1 || mode > 4) { IOLog("ZIZHAN_OUTER_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
   probe_mode = mode;
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t);
-  IOLog("ZIZHAN_OUTER_PROBE: RUNNING mode=%u readonly=%u\n", mode, mode == 1 ? 1u : 0u);
+  IOLog("ZIZHAN_OUTER_PROBE: RUNNING mode=%u readonly=%u\n", mode, (mode == 1 || mode == 3) ? 1u : 0u);
 }
 } // namespace zizhan_outer_probe

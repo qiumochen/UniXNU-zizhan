@@ -10,6 +10,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
+#include <kern/clock.h>
 #include "../PongPower/GeniI2c.h"
 
 namespace zizhan_outer_probe {
@@ -298,6 +299,84 @@ static void outer_spi() {
 pads_back:
   for (unsigned i = 0; i < 4; ++i) pads[i].w(0, saved[i]);
   IOLog("ZIZHAN_OUTER_SPI: DONE pads_restored=1 (clock votes kept)\n");
+}
+
+/* zizhan_outer_fold=1 (FOLD-01 step 2): the outer panel follows the lid. The loader keeps CTL1/INTF_2 scanning VIG2 from
+ * 0xb8fc9900 (1080x2520, stride 4320, no-map splash tail); closed draws a big HH:MM (UTC+8) in white seven-segment digits on
+ * black and refreshes it every 30 s, open clears to black. The INTF_2 MISR after each draw is logged as the closed-loop check. */
+namespace fold {
+/* Kept for the life of the system (no function-local statics: the kernel has no guard variables). */
+static IOMemoryMap *fb_map, *intf_map;
+static volatile uint8_t *fb_va, *intf_va;
+static bool ready, misr_on;
+static volatile uint8_t *map_once(uint64_t base, uint64_t bytes, IOOptionBits cache, IOMemoryMap **out) {
+  auto m = IODeviceMemory::withRange(base, bytes);
+  *out = m ? m->map(kIOMapAnywhere | cache) : nullptr;
+  if (m) m->release();
+  return *out ? reinterpret_cast<volatile uint8_t *>((*out)->getVirtualAddress()) : nullptr;
+}
+static uint32_t ir(uint32_t at) { const uint32_t v = *reinterpret_cast<volatile uint32_t *>(intf_va + at); __asm__ volatile("dmb oshld" ::: "memory"); return v; }
+static void iw(uint32_t at, uint32_t v) { *reinterpret_cast<volatile uint32_t *>(intf_va + at) = v; __asm__ volatile("dsb sy" ::: "memory"); }
+static bool init() {
+  if (ready) return true;
+  const uint64_t base = 0xb8fc9900ull, page = base & ~0xfffull, skew = base - page;
+  {
+    Rw mdss;
+    if (!mdss.open(0xae00000, 0x84000, kIOMapInhibitCache)) return false;
+    if (mdss.r(0x9000 + 0x14) != uint32_t(base)) { IOLog("ZIZHAN_OUTER_FOLD: SKIP vig2 not on the outer buffer\n"); return false; }
+  }
+  fb_va = map_once(page, ((skew + 2520ull * 4320) + 0xfff) & ~0xfffull, kIOMapWriteCombineCache, &fb_map);
+  intf_va = map_once(0xae37000, 0x1000, kIOMapInhibitCache, &intf_map);
+  ready = fb_va && intf_va;
+  return ready;
+}
+static inline volatile uint32_t *row(unsigned y) { return reinterpret_cast<volatile uint32_t *>(fb_va + (0xb8fc9900ull & 0xfffull) + uint64_t(y) * 4320); }
+static void rect(unsigned x0, unsigned y0, unsigned w, unsigned h, uint32_t c) {
+  for (unsigned y = y0; y < y0 + h && y < 2520; ++y) { volatile uint32_t *r = row(y); for (unsigned x = x0; x < x0 + w && x < 1080; ++x) r[x] = c; }
+}
+/* seven segments a..g of a W x H digit at (x, y), stroke t */
+static void digit(unsigned d, unsigned x, unsigned y, unsigned W, unsigned H, unsigned t, uint32_t c) {
+  static const uint8_t seg[10] = {0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f};
+  const uint8_t m = seg[d % 10]; const unsigned h2 = H / 2;
+  if (m & 0x01) rect(x, y, W, t, c);                       // a
+  if (m & 0x02) rect(x + W - t, y, t, h2, c);              // b
+  if (m & 0x04) rect(x + W - t, y + h2, t, H - h2, c);     // c
+  if (m & 0x08) rect(x, y + H - t, W, t, c);               // d
+  if (m & 0x10) rect(x, y + h2, t, H - h2, c);             // e
+  if (m & 0x20) rect(x, y, t, h2, c);                      // f
+  if (m & 0x40) rect(x, y + h2 - t / 2, W, t, c);          // g
+}
+static uint32_t misr() {
+  if (!misr_on) { iw(0x180, 1u << 10); iw(0x180, 0x1u | (1u << 8) | (1u << 31) | (1u << 24)); misr_on = true; }
+  IOSleep(60);
+  return (ir(0x180) & (1u << 9)) ? ir(0x184) : 0;
+}
+static void draw(bool closed) {
+  if (!init()) return;
+  rect(0, 0, 1080, 2520, 0xff000000u);
+  if (closed) {
+    clock_sec_t sec = 0; clock_usec_t usec = 0;
+    clock_get_calendar_microtime(&sec, &usec);
+    const unsigned local = unsigned((sec + 8 * 3600) % 86400), hh = local / 3600, mm = (local / 60) % 60;
+    const unsigned W = 190, H = 360, t = 40, y = 980, gap = 40;
+    digit(hh / 10, 60, y, W, H, t, 0xffffffffu);
+    digit(hh % 10, 60 + W + gap, y, W, H, t, 0xffffffffu);
+    rect(540 - t / 2, y + H / 3 - t / 2, t, t, 0xffffffffu);
+    rect(540 - t / 2, y + 2 * H / 3 - t / 2, t, t, 0xffffffffu);
+    digit(mm / 10, 1080 - 60 - 2 * W - gap, y, W, H, t, 0xffffffffu);
+    digit(mm % 10, 1080 - 60 - W, y, W, H, t, 0xffffffffu);
+    __asm__ volatile("dsb sy" ::: "memory");
+    IOLog("ZIZHAN_OUTER_FOLD: closed clock %02u:%02u misr=%x\n", hh, mm, misr());
+  } else {
+    __asm__ volatile("dsb sy" ::: "memory");
+    IOLog("ZIZHAN_OUTER_FOLD: open black misr=%x\n", misr());
+  }
+}
+}  // namespace fold
+extern "C" void zizhan_outer_fold_show(int closed) {
+  uint32_t on = 0;
+  if (!PE_parse_boot_argn("zizhan_outer_fold", &on, sizeof on) || on != 1) return;
+  fold::draw(closed != 0);
 }
 
 static uint32_t probe_mode;

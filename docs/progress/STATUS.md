@@ -53,7 +53,7 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 | 事项 | 时长 | 前置 |
 | --- | --- | --- |
 | M1：试听 loud-1（Android 电平、同相 1 kHz、1 s） | 约 5 分钟 | 已打包，`ZIZHAN_USER_PRESENT=yes bash work/m1-firstsound/run-loud-1.sh` |
-| M2：折叠验证（合上熄屏、打开亮屏）+ 熄屏/亮屏人工看屏 | 约 10 分钟 | `daily-6`/`soak-4` 同配置，含 `zizhan_hall_observe=2` |
+| M2：真实折叠一次：合上应内屏熄灭、外屏出大号时钟，打开恢复 | 约 5 分钟 | 模拟合盖已闭环（fold-2）；包 `out/fold-2` 去掉 `zizhan_hall_simulate` 即可 |
 | M3：写 boot_a 并切到 a 槽（内存启动测试 11-19 已通过：选 Android 后 49 s 自动回到 Android，不再卡菜单） | 约 5 分钟，需要手在机器旁 | 若 magic 不保留会在菜单与重启间循环，需按音量键进 fastboot 后 `fastboot set_active b` |
 | 天气：是否接第三方数据源（需重装 userland） | 决策 | [天气结论](../research/2026-11-19-weather-fairplay.md) |
 | 日用配置是否默认：熄屏/亮屏 + 触控暂停 + 合盖跟随 + 温控 mode 2（CPU 90/GPU 85 °C） | 决策 | `soak-4` 10 分钟通过 |

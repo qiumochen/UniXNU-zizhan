@@ -16,6 +16,7 @@ extern "C" struct vnode *rootvnode;
 extern "C" int zizhan_display_power_state(void) __attribute__((weak));
 extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
+extern "C" void zizhan_outer_fold_show(int closed) __attribute__((weak));
 
 namespace zizhan_hall {
 struct Inputs {
@@ -113,6 +114,7 @@ static void worker(void *arg, wait_result_t) {
   bool pressed = false;
   uint64_t last_press_ms = 0;
   unsigned presses = 0, skips = 0;
+  uint64_t outer_refresh_ns = 0;
 
   while (config.follow || (nowNs() - begin < 120ULL * 1000000000ULL && reads < 24000)) {
     const uint32_t cfg = *control;
@@ -151,6 +153,7 @@ static void worker(void *arg, wait_result_t) {
                                     : zizhan_lid::Action::None;
         IOLog("ZIZHAN_LID: %s lid=%s display=%d desktop=%u presses=%u skips=%u\n", zizhan_lid::name(action),
               update.stable ? "closed" : "open", display, desktop ? 1u : 0u, presses, skips);
+        if (zizhan_outer_fold_show) { zizhan_outer_fold_show(update.stable ? 1 : 0); outer_refresh_ns = when; }
         if (action == zizhan_lid::Action::PressSleep || action == zizhan_lid::Action::PressWake) {
           pong_touch_post(4u, 0u, 0, 0);   // PongButtonDown, power
           IOSleep(120);
@@ -162,6 +165,10 @@ static void worker(void *arg, wait_result_t) {
           ++skips;
         }
       }
+    }
+    if (config.follow && zizhan_outer_fold_show && state.has_stable && state.stable && when - outer_refresh_ns >= 30000000000ULL) {
+      zizhan_outer_fold_show(1);   // keep the outer clock current while closed
+      outer_refresh_ns = when;
     }
     IOSleep(config.follow ? 20 : 5);
   }

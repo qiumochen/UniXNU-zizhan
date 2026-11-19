@@ -56,8 +56,7 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 | M2：真实折叠一次：合上应内屏熄灭、外屏出大号时钟，打开恢复 | 约 5 分钟 | 模拟合盖已闭环（fold-2）；已打包，`bash work/m1-firstsound/run-fold-3.sh` |
 | M3：写 boot_a 并切到 a 槽（内存启动测试 11-19 已通过：选 Android 后 49 s 自动回到 Android，不再卡菜单） | 约 5 分钟，需要手在机器旁 | 若 magic 不保留会在菜单与重启间循环，需按音量键进 fastboot 后 `fastboot set_active b` |
 | 外屏触控：在场摸外屏，验证触点坐标（事件协议 11-19 已闭环） | 约 5 分钟 | 需先把外屏触点接进触摸输入 |
-| 蓝牙：是否允许开射频（`zizhan_bt_probe=4` 后 bluetoothd 会接管控制器） | 决策 | 串口已编译（build-play49），未上机 |
-| 蜂窝阶段 2：是否让基带用你的 SIM 注册网络 | 决策 | 阶段 1（不发射）可先无人值守做，[可行性](../research/2026-11-19-cellular-feasibility.md) |
+| 蜂窝阶段 2：插 SIM 后是否让基带注册网络 | 决策 + 插卡 | 阶段 1b 基带已能启动到 ready（modem-6），[可行性](../research/2026-11-19-cellular-feasibility.md) |
 | IO-01 音量键实体按键 | 并入 M1 末验收 | M1 服务就绪 |
 
 ## 2026-11-19 夜间无人值守小结（全部静音）
@@ -102,4 +101,11 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 - **首帧 UX-01**：慢在 CPU 侧渲染准备（约 39 ms）；内屏触控 8 ms 轮询另加约 4 ms；本轮只分析不改。
 - **蜂窝**：QcomBaseband（SC7180 + iOS 17）已做到 LTE 数据，本机可复用 ADSP 的启动方式；阶段 1 不发射可无人值守。
 - 详情：[晚间记录](2026-11-19-evening-daily-default.md)。
+
+## 2026-11-19 深夜（用户 20:30：蓝牙可开射频、首帧找优化、蜂窝先做无 SIM 部分；全部静音，未写分区，本批未推送）
+
+- **蓝牙**：bluetoothd 崩溃的根因查清并绕过（MobileGestalt 缺 `product-id`，补丁 0025 只对蓝牙进程给 J171 的值），bluetoothd 现在常驻；BlueTool 还需要 `AppleBluetoothModule` 服务，是下一步。
+- **首帧**：基线 83.6/82.2 ms 可复现；`fb_swapwait=0`、一直满频两个候选都否决；慢在 CPU 侧渲染准备，下一步细分 SpringBoard→backboardd。
+- **蜂窝**：固件和 EFS 只读可达（modem-1）；**基带在 iPadOS 下第一次启动到 ready+handover**（modem-6，元数据须在 4 GiB 以下）；随后显示路径 panic，待补 `rproc_ddr` 带宽票。未发 QMI、未上线、无发射。
+- 详情：[晚间记录 · 深夜](2026-11-19-evening-daily-default.md)。
 

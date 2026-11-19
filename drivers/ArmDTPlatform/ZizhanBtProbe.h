@@ -18,6 +18,10 @@
 #include <mach/mach_time.h>
 
 extern "C" struct vnode *rootvnode;
+/* BT-01 step 3 (zizhan_bt_probe=4): bsd/dev/zizhan_bt_uart.c, the tty half of /dev/cu.bluetooth. Weak so this header
+ * still links into kernels built without that XNU patch (mode 4 then logs SKIP). */
+extern "C" int zizhan_bt_uart_attach(int (*tx)(const uint8_t *, uint32_t)) __attribute__((weak));
+extern "C" void zizhan_bt_uart_input(const uint8_t *, uint32_t) __attribute__((weak));
 
 namespace zizhan_bt_probe {
 static uint32_t probe_mode;
@@ -170,6 +174,76 @@ static void nvm_fixup(uint8_t *d, unsigned size) {
   IOLog("ZIZHAN_BT_PROBE: nvm fixup hci=%u deep_sleep=%u baud=115200 ibs=0\n", hci, sleep);
 }
 
+/* Mode 4: the tty's t_oproc copies into this single-producer ring (the tty lock serializes producers); the worker below
+ * is the only consumer. tx(nullptr, 0) reports the free space, so the tty only dequeues what fits; after a full ring
+ * drains, the worker kicks the tty with zizhan_bt_uart_input(nullptr, 0). */
+static bool tx_was_full;
+static uint8_t tx_ring[4096];
+static uint32_t tx_head, tx_tail;
+static int uart_tx_hook(const uint8_t *b, uint32_t n) {
+  uint32_t head = __atomic_load_n(&tx_head, __ATOMIC_RELAXED);
+  const uint32_t tail = __atomic_load_n(&tx_tail, __ATOMIC_ACQUIRE);
+  if (!b) {
+    const uint32_t room = uint32_t(sizeof tx_ring) - (head - tail);
+    if (!room) {
+      __atomic_store_n(&tx_was_full, true, __ATOMIC_RELEASE);
+    }
+    return int(room);
+  }
+  uint32_t i = 0;
+  for (; i < n && head - tail < sizeof tx_ring; ++i, ++head) {
+    tx_ring[head % sizeof tx_ring] = b[i];
+  }
+  __atomic_store_n(&tx_head, head, __ATOMIC_RELEASE);
+  return int(i);
+}
+/* Never returns while the bridge runs: TX ring -> GENI TX FIFO, GENI RX FIFO -> tty, polled every 2 ms. */
+static void serve(Window &se) {
+  if (!zizhan_bt_uart_attach || !zizhan_bt_uart_input) {
+    IOLog("ZIZHAN_BT_PROBE: SKIP bridge kernel-without-bt-uart\n");
+    return;
+  }
+  const int attached = zizhan_bt_uart_attach(uart_tx_hook);
+  IOLog("ZIZHAN_BT_PROBE: bridge attach=%d (bluetoothd may now power the radio)\n", attached);
+  if (attached != 0) {
+    return;
+  }
+  if (ev_have) {
+    zizhan_bt_uart_input(ev_buf, ev_have);
+    ev_have = 0;
+  }
+  uint8_t in[256], out[64];
+  uint64_t rx_total = 0, tx_total = 0, last_log = now_us();
+  for (;;) {
+    uint32_t tail = __atomic_load_n(&tx_tail, __ATOMIC_RELAXED);
+    const uint32_t head = __atomic_load_n(&tx_head, __ATOMIC_ACQUIRE);
+    while (tail != head) {
+      unsigned n = 0;
+      while (n < sizeof out && tail != head) {
+        out[n++] = tx_ring[tail % sizeof tx_ring];
+        ++tail;
+      }
+      if (!tx_bytes(se, out, n)) {
+        IOLog("ZIZHAN_BT_PROBE: bridge tx-timeout bytes=%u\n", n);
+      }
+      tx_total += n;
+      __atomic_store_n(&tx_tail, tail, __ATOMIC_RELEASE);
+    }
+    if (__atomic_exchange_n(&tx_was_full, false, __ATOMIC_ACQ_REL)) {
+      zizhan_bt_uart_input(nullptr, 0);
+    }
+    const unsigned got = rx_bytes(se, in, sizeof in, 2);
+    if (got) {
+      zizhan_bt_uart_input(in, got);
+      rx_total += got;
+    }
+    if (now_us() - last_log >= 60000000ull) {
+      last_log = now_us();
+      IOLog("ZIZHAN_BT_PROBE: bridge rx=%llu tx=%llu\n", rx_total, tx_total);
+    }
+  }
+}
+
 static void active() {
   Window vote, wrap, wrapper, se, pins[6];
   static const uint16_t pin_no[6] = {76, 77, 78, 79, 81, 82};
@@ -283,7 +357,8 @@ static void active() {
   // Command Complete: 04 0e len 01 00 fc | cresp 00 | rtype 23 | data[0] data[1] data[2]; bid = data[1]<<8 | data[2]
   if (n >= 11 && rx[1] == 0x0e && rx[6] == 0x00 && rx[7] == 0x23)
     IOLog("ZIZHAN_BT_PROBE: board_id=%x\n", (unsigned(rx[9]) << 8) | rx[10]);
-  if (probe_mode == 3) {
+  bool bridge_ready = false;
+  if (probe_mode >= 3) {
     uint8_t *patch = nullptr, *nvm = nullptr;
     unsigned patch_size = 0, nvm_size = 0;
     const bool have = chosen_blob("zizhan-bt-rampatch", patch, patch_size) && chosen_blob("zizhan-bt-nvm", nvm, nvm_size);
@@ -307,10 +382,14 @@ static void active() {
         sent = tx_bytes(se, local_ver, sizeof local_ver);
         n = read_event(se, rx, sizeof rx, 500);
         log_bytes("local-version-event", rx, n);
+        bridge_ready = true;
       }
     }
     if (patch) IOFree(patch, patch_size);
     if (nvm) IOFree(nvm, nvm_size);
+  }
+  if (probe_mode == 4 && bridge_ready) {
+    serve(se);   // returns only when the bridge could not attach; then fall through to the normal cleanup
   }
   // 6. Cleanup: stop RX, BT_EN low, pins back. Clock votes stay (never removed, as SE15).
   se.write(0x634, 4u);                            // S_CMD_CTRL cancel
@@ -374,7 +453,7 @@ static void worker(void *, wait_result_t) {
 static void start() {
   uint32_t mode = 0;
   if (!PE_parse_boot_argn("zizhan_bt_probe", &mode, sizeof mode) || !mode) return;
-  if (mode < 1 || mode > 3) {
+  if (mode < 1 || mode > 4) {
     IOLog("ZIZHAN_BT_PROBE: SKIP unsupported-mode=%u\n", mode);
     return;
   }

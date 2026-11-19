@@ -1,0 +1,250 @@
+--- a/bsd/conf/files	2026-11-19 20:06:30
++++ b/bsd/conf/files	2026-11-19 20:06:30
+@@ -403,6 +403,7 @@
+ bsd/dev/pong_input.c			standard
+ bsd/dev/pong_goodix.c			standard
+ bsd/dev/pong_buttons.c			standard
++bsd/dev/zizhan_bt_uart.c		standard
+ bsd/kern/kern_event.c			standard
+ bsd/kern/kern_control.c			optional networking bound-checks
+ bsd/kern/kern_exec.c			standard
+--- a/bsd/dev/zizhan_bt_uart.c	1970-01-01 08:00:00
++++ b/bsd/dev/zizhan_bt_uart.c	2026-11-19 20:06:30
+@@ -0,0 +1,237 @@
++/*
++ * zizhan Bluetooth H4 UART: the BSD tty half of /dev/cu.bluetooth (and the alias /dev/uart.bluetooth) for bluetoothd.
++ *
++ * bluetoothd opens /dev/cu.bluetooth, calls tcgetattr/cfmakeraw/cfsetspeed/tcsetattr and waits with select/kevent, so
++ * this is a real struct tty (line discipline, termios, select and kqueue through ttselect). The UART itself (QCA6490 on
++ * the SE20 GENI UART, firmware already downloaded by the kernel) lives in ArmDTPlatform: it calls
++ * zizhan_bt_uart_attach() once with its transmit hook, then zizhan_bt_uart_input() for every received chunk.
++ * The hook takes at most what its ring can hold; tx(NULL, 0) returns the free space. When the ring drains after being
++ * full, the UART side calls zizhan_bt_uart_input(NULL, 0) to restart output.
++ * Nothing exists until attach is called, so the node is absent unless the UART side is enabled (default off).
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/conf.h>
++#include <sys/tty.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <sys/fcntl.h>
++#include <sys/kernel.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++
++typedef int (*zizhan_bt_tx_t)(const uint8_t *buf, uint32_t len);
++int zizhan_bt_uart_attach(zizhan_bt_tx_t tx);
++void zizhan_bt_uart_input(const uint8_t *buf, uint32_t len);
++
++static struct tty *bt_tty;
++static zizhan_bt_tx_t bt_tx;
++static int bt_major = -1;
++static uint32_t bt_rx_dropped, bt_tx_bytes, bt_rx_bytes;
++
++/* t_oproc: called by the line discipline with the tty locked. bt_tx only copies into the UART worker's ring. */
++static void
++bt_start(struct tty *tp)
++{
++	uint8_t chunk[128];
++	if (tp->t_state & (TS_TIMEOUT | TS_BUSY | TS_TTSTOP)) {
++		return;
++	}
++	while (tp->t_outq.c_cc > 0 && bt_tx) {
++		int room = bt_tx(NULL, 0);
++		if (room <= 0) {
++			break;          /* the UART side kicks us when its ring drains */
++		}
++		int n = q_to_b(&tp->t_outq, chunk, room < (int)sizeof chunk ? room : (int)sizeof chunk);
++		if (n <= 0) {
++			break;
++		}
++		int sent = bt_tx(chunk, (uint32_t)n);
++		if (sent > 0) {
++			bt_tx_bytes += (uint32_t)sent;
++		}
++	}
++	ttwwakeup(tp);
++}
++
++/* The UART runs at the speed the kernel set up for the firmware download; termios speed changes are accepted and recorded. */
++static int
++bt_param(struct tty *tp, struct termios *t)
++{
++	tp->t_ispeed = t->c_ispeed;
++	tp->t_ospeed = t->c_ospeed;
++	tp->t_cflag = t->c_cflag;
++	return 0;
++}
++
++static int
++bt_open(dev_t dev, int flag, __unused int devtype, __unused proc_t p)
++{
++	struct tty *tp = bt_tty;
++	int error;
++	if (tp == NULL) {
++		return ENXIO;
++	}
++	tty_lock(tp);
++	if ((tp->t_state & TS_ISOPEN) == 0) {
++		termioschars(&tp->t_termios);
++		tp->t_iflag = 0;
++		tp->t_oflag = 0;
++		tp->t_lflag = 0;
++		tp->t_cflag = CS8 | CREAD | CLOCAL;
++		tp->t_ispeed = tp->t_ospeed = 115200;
++		ttsetwater(tp);
++	}
++	tp->t_dev = dev;
++	tp->t_oproc = bt_start;
++	tp->t_param = bt_param;
++	tp->t_state |= TS_CARR_ON;
++	error = (*linesw[tp->t_line].l_open)(dev, tp);
++	tty_unlock(tp);
++	printf("ZIZHAN_BT_UART: open flag=%x error=%d\n", flag, error);
++	return error;
++}
++
++static int
++bt_close(__unused dev_t dev, int flag, __unused int mode, __unused proc_t p)
++{
++	struct tty *tp = bt_tty;
++	if (tp == NULL) {
++		return ENXIO;
++	}
++	tty_lock(tp);
++	(*linesw[tp->t_line].l_close)(tp, flag);
++	ttyclose(tp);
++	tty_unlock(tp);
++	printf("ZIZHAN_BT_UART: close tx=%u rx=%u rx_dropped=%u\n", bt_tx_bytes, bt_rx_bytes, bt_rx_dropped);
++	return 0;
++}
++
++static int
++bt_read(__unused dev_t dev, struct uio *uio, int flag)
++{
++	struct tty *tp = bt_tty;
++	int error;
++	if (tp == NULL) {
++		return ENXIO;
++	}
++	tty_lock(tp);
++	error = (*linesw[tp->t_line].l_read)(tp, uio, flag);
++	tty_unlock(tp);
++	return error;
++}
++
++static int
++bt_write(__unused dev_t dev, struct uio *uio, int flag)
++{
++	struct tty *tp = bt_tty;
++	int error;
++	if (tp == NULL) {
++		return ENXIO;
++	}
++	tty_lock(tp);
++	error = (*linesw[tp->t_line].l_write)(tp, uio, flag);
++	tty_unlock(tp);
++	return error;
++}
++
++static int
++bt_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, int flag, proc_t p)
++{
++	struct tty *tp = bt_tty;
++	int error;
++	if (tp == NULL) {
++		return ENXIO;
++	}
++	tty_lock(tp);
++	error = (*linesw[tp->t_line].l_ioctl)(tp, cmd, data, flag, p);
++	if (error == ENOTTY) {
++		error = ttioctl_locked(tp, cmd, data, flag, p);
++	}
++	tty_unlock(tp);
++	return error;
++}
++
++static int
++bt_select(dev_t dev, int which, void *wql, proc_t p)
++{
++	struct tty *tp = bt_tty;
++	int ready;
++	if (tp == NULL) {
++		return ENXIO;
++	}
++	tty_lock(tp);
++	ready = ttselect(dev, which, wql, p);
++	tty_unlock(tp);
++	return ready;
++}
++
++static struct tty *bt_ttys[1];
++
++static int
++bt_stop(__unused struct tty *tp, __unused int rw)
++{
++	return 0;
++}
++
++static const struct cdevsw bt_cdevsw = {
++	.d_open = bt_open, .d_close = bt_close, .d_read = bt_read, .d_write = bt_write,
++	.d_ioctl = bt_ioctl, .d_stop = bt_stop, .d_reset = eno_reset,
++	.d_ttys = bt_ttys, .d_select = bt_select, .d_mmap = eno_mmap, .d_strategy = eno_strat,
++	.d_reserved_1 = eno_getc, .d_reserved_2 = eno_putc, .d_type = D_TTY,
++};
++
++int
++zizhan_bt_uart_attach(zizhan_bt_tx_t tx)
++{
++	if (bt_tty != NULL || tx == NULL) {
++		return EBUSY;
++	}
++	struct tty *tp = ttymalloc();
++	if (tp == NULL) {
++		return ENOMEM;
++	}
++	bt_major = cdevsw_add(-24, &bt_cdevsw);
++	if (bt_major < 0) {
++		ttyfree(tp);
++		return ENXIO;
++	}
++	if (cdevsw_setkqueueok(bt_major, &bt_cdevsw, CDEVSW_SELECT_KQUEUE) == -1) {
++		printf("ZIZHAN_BT_UART: kqueue not enabled (select only)\n");
++	}
++	bt_tx = tx;
++	bt_ttys[0] = tp;
++	bt_tty = tp;
++	void *cu = devfs_make_node(makedev(bt_major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "cu.bluetooth");
++	void *uart = devfs_make_node(makedev(bt_major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "uart.bluetooth");
++	printf("ZIZHAN_BT_UART: attached major=%d cu=%u uart=%u\n", bt_major, cu ? 1u : 0u, uart ? 1u : 0u);
++	return (cu || uart) ? 0 : ENXIO;
++}
++
++/* RX from the UART worker thread (not interrupt context). Bytes arriving while nobody has the tty open are dropped. */
++void
++zizhan_bt_uart_input(const uint8_t *buf, uint32_t len)
++{
++	struct tty *tp = bt_tty;
++	if (tp == NULL) {
++		return;
++	}
++	tty_lock(tp);
++	if (buf == NULL) {              /* kick: the transmit ring has room again */
++		if ((tp->t_state & TS_ISOPEN) && tp->t_outq.c_cc > 0) {
++			bt_start(tp);
++		}
++		tty_unlock(tp);
++		return;
++	}
++	if ((tp->t_state & TS_ISOPEN) == 0) {
++		bt_rx_dropped += len;
++		tty_unlock(tp);
++		return;
++	}
++	for (uint32_t i = 0; i < len; ++i) {
++		(*linesw[tp->t_line].l_rint)(buf[i], tp);
++	}
++	bt_rx_bytes += len;
++	tty_unlock(tp);
++}

@@ -73,3 +73,9 @@
 - 另一路 `marconi-bt` 仍报 `Unable to match bluetooth service in device tree`（匹配条件不同，待查）。
 
 结论：设备树节点这一步有效，下一个必需件是内核串口设备（第 2 步）。默认打包不加这个节点。
+
+## 2026-11-19 深夜：bluetoothd 常驻，卡在 AppleBluetoothModule
+
+- bluetoothd 的 SIGSEGV 根因：`IODeviceTree:/product` 无 `product-id`，MobileGestalt 产品类型未知，控制器平台对象为空。补丁 0025 只对 bluetoothd/BlueTool 给出 J171 的 product-id 后，bluetoothd 常驻。
+- BlueTool 需要 IOKit 服务 `AppleBluetoothModule`（`marconi-bt: Unable to match bluetooth service in device tree`）；真机由同名驱动匹配 `bluetooth,n88` 节点发布。下一步是反推它的用户客户端方法并实现兼容服务。
+

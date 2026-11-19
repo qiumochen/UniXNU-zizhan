@@ -47,3 +47,37 @@
 
 推送前按惯例补编 `pong_ipados18_ci_defconfig`（关掉 Adreno 与 PongPower），发现链接失败：zizhan 服务弱引用了背光、DSI、扫描输出标记和 GENI I2C 函数，而静态内核链接不允许未定义的弱符号（11-18/19 引入，云端 macOS 内核 CI 需手动触发，所以之前没暴露）。`ArmDTPlatform.cpp` 在缺少对应组件时提供替身定义（扫描输出从不翻页、显示/背光请求一律失败），外屏触控盘点在没有 PongPower 时记 SKIP。CI 与 GPU（build-play50）两种内核都已链接通过。
 
+## 深夜（用户 20:30 授权：蓝牙可以开射频、首帧找优化、蜂窝先做不需要 SIM 的部分；全部静音，未写分区）
+
+### 蓝牙 BT-01
+
+- bt-1：内核侧全通（固件下载、`/dev/cu.bluetooth` 创建），但 bluetoothd 启动约 95 ms 就 SIGSEGV，从没打开串口。
+- 补丁 0024 把崩溃捕获扩到 EXC_BAD_ACCESS 和 bluetoothd/BlueTool；bt-2 的回溯与反汇编完全对上：`MGGetProductType()` 未知（`IODeviceTree:/product` 没有 `product-id`，MobileGestalt 的 437 项设备表查不到），bluetoothd 的控制器平台对象为空。
+- 只改 `hw.product`/`hw.machine`（bt-3）无效。补丁 0025：仅在 `zizhan_bt_probe>=4` 时、仅对 bluetoothd/BlueTool 返回本 IPSW 里 J171（iPad7,11）的 `product-id`，其他进程不变。
+- bt-4：**bluetoothd 不再崩溃**，常驻并调用 BlueTool。BlueTool 约 31 s 后 exit(1) 循环；`applog=1`（bt-6/7）显示 `marconi-bt: Unable to match bluetooth service in device tree`、`Device not open yet`。
+- bt-7：ADT 节点改成 J171 形状（`bluetooth,n88`、transport-encoding 3 等）仍不匹配。BlueTool 需要的是 IOKit 服务 `AppleBluetoothModule`（真机由同名驱动匹配该节点发布，BlueTool `IOServiceOpen` 后用它上电/复位）。**下一步**：从 J171 内核缓存反推 AppleBluetoothModule 的用户客户端方法，做一个兼容服务。
+
+### 首帧 UX-01：对照结果
+
+| 轮 | 内核 | 变量 | 空闲首帧 median / p90 | Began→swap median |
+| --- | --- | --- | --- | --- |
+| ux-a | play50 | 基线 | 83.6 / 92.3 ms（14） | 36.2 ms |
+| ux-a2 | play52 | 基线重复 | 82.2 / 86.4 ms（12） | 35.6 ms |
+| ux-b | play50 | `pong_cpu_boost_ms=60000` | 作废：7 s 内 CPU 58→90 °C，温控压到最低档 | — |
+| ux-c | play52 | `fb_swapwait=0` | 85.3 / 97.9 ms（25） | 45.5 ms，p90 393 ms |
+
+- 基线可复现（±2%）。`fb_swapwait=0` 更差，否决；一直满频会烫到触发温控，否决。
+- 合成触摸按下后分步移动，“按下→识别”的 ~28 ms 主要是合成节奏；可优化的是 Began→swap（~36 ms，CPU 侧渲染准备）与 swap→面板（~12 ms）。
+- 发现的体验问题：温控一触发就压到最低档、每 ~3 s 放一档，持续高负载时界面会卡约 1 分钟；可改为分级下调。
+- **下一步**：细分 SpringBoard 提交到 backboardd 首次 GPU 提交这一段；内屏触控 8 ms 轮询可改为触摸期间更短或真正的 GPIO 中断（真实手指约省 4 ms）。
+
+### 蜂窝 MODEM-01
+
+- 阶段 1a（modem-1，`zizhan_modem=1`）：UFS LUN 4/5 只读 + FAT 读取器，modem_b 的 30 个文件/108 MB 用 8.8 s 读出，哈希与 Android 文件一致；LUN 5 找到 modemst1/modemst2/fsg/fsc。
+- 阶段 1b（`zizhan_modem=2`，`pong_adsp=0`）：
+  - modem-2…5：拼接固件、电源投票（cx/mss NOM）、AOSS load_state、SMP2P 都通过，但 `PAS_INIT_IMAGE(4)` 返回 0xffcfffbb。
+  - Android 日志显示 MPSS 的元数据来自 `linux,cma`（4 GiB 以下）；我们的物理连续缓冲在 0x86d…（4 GiB 以上），而 4 GiB 以下的连续分配会失败。
+  - modem-6：元数据放进 iPadOS 不用的 CVP 保留区 0x9ee00000 后，**INIT_IMAGE、加载 108 MB（3.6 s）、AUTH_AND_RESET 全部成功，122 ms 后基带报 ready=1、handover=1**：基带第一次在 iPadOS 下启动。
+  - 随后内核 panic：`preemption disable timeout`，回溯在 `IOMobileFramebuffer::show → PE_initialize_console → gc_enable`。modem-1…5 同样 `pong_adsp=0` 却没有出现，推测是基带启动后 DDR 带宽不足（我们没投 Linux 那张 `rproc_ddr` 票）拖慢了显示路径。panic 后自动回到 Android。
+  - **下一步**：补 `rproc_ddr` 带宽投票；诊断轮放宽抢占阈值；然后 rmtfs（EFS 只读、写回只留内存）和 GLINK 上的 QRTR。全程未发 QMI、未上线，无射频发射。
+

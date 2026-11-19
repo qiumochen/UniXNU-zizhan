@@ -30,6 +30,9 @@ namespace {
 constexpr uint64_t kSmem = 0x80900000, kSmemSize = 0x200000, kMutex = 0x1f40000 + 3 * 0x1000, kIpcc = 0x0ed18000, kAoss = 0xc300000;
 constexpr uint64_t kCmdDb = 0x80860000, kCmdDbSize = 0x20000;
 constexpr uint64_t kMpssBase = 0x8bc00000, kMpssSize = 0x13200000;
+/* Android gives the modem PAS device the linux,cma pool (alloc-ranges below 4 GiB) for its metadata; our contiguous
+ * sub-4 GiB allocation fails, so the metadata goes into the unused, no-map CVP carveout instead (iPadOS never runs CVP). */
+constexpr uint64_t kMetaBase = 0x9ee00000, kMetaSize = 0x10000;
 constexpr uint32_t kPas = 4, kRemote = 1, kItemIn = 435, kItemOut = 428, kItemCrash = 421, kIpccMpss = 2;
 constexpr uint32_t kFatal = 1u << 0, kReady = 1u << 1, kHandover = 1u << 2, kStopAck = 1u << 3;
 constexpr unsigned kPieces = 40;
@@ -221,14 +224,27 @@ void worker(void *, wait_result_t) {
   IOLog("ZIZHAN_MPSS: rails cx=%u mss=%u (NOM) load_state=on smp2p_out=ok\n", cxIdx, mssIdx);
   {
     const uint64_t bytes = qcom_mdt_metadata_size(&gMdt);
-    meta = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, (IOOptionBits)kIODirectionInOut | (IOOptionBits)kIOMemoryPhysicallyContiguous,
-                                                            bytes, 0x00000000fffff000ull);   // below 4 GiB for the secure world
-    STEP(19, meta && meta->prepare() == kIOReturnSuccess);
-    uint8_t *va = static_cast<uint8_t *>(meta->getBytesNoCopy());
-    STEP(20, !(rc = qcom_mdt_metadata(&gMdt, joinedRead, nullptr, va, bytes)));
-    cleanToPoc(va, bytes);
-    const uint64_t phys = meta->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
+    Win metaWin = {};
+    STEP(19, bytes <= kMetaSize && mapWin(metaWin, kMetaBase, kMetaSize, kIOMapInhibitCache));
+    uint8_t *staging = static_cast<uint8_t *>(IOMallocData(kMetaSize));
+    STEP(20, staging && !(rc = qcom_mdt_metadata(&gMdt, joinedRead, nullptr, staging, bytes)));
+    for (uint64_t i = 0; i < bytes; i += 4) {
+      uint32_t w = 0;
+      memcpy(&w, staging + i, bytes - i < 4 ? size_t(bytes - i) : 4);
+      wr(metaWin, i, w);
+    }
+    IOFreeData(staging, kMetaSize);
+    unmapWin(metaWin);
+    const uint64_t phys = kMetaBase;
     const ScmResult sup = scm(0x07u /* PAS_IS_SUPPORTED */, qcom_scm_args(1, 0, 0, 0), kPas, 0, 0);
+    {   // which PAS ids does the secure world accept from this VM? (ADSP = 1 is known to boot)
+      uint64_t yes = 0, err = 0;
+      for (unsigned id = 0; id < 48; ++id) {
+        const ScmResult q = scm(0x07u, qcom_scm_args(1, 0, 0, 0), id, 0, 0);
+        if (q.x0) err |= 1ull << id; else if (q.x1) yes |= 1ull << id;
+      }
+      IOLog("ZIZHAN_MPSS: pas_supported_mask=%llx error_mask=%llx\n", yes, err);
+    }
     const ScmResult pre = scm(QCOM_SCM_PAS_SHUTDOWN, qcom_scm_args(1, 0, 0, 0), kPas, 0, 0);
     IOLog("ZIZHAN_MPSS: is_supported x0=%llx x1=%llx pre_shutdown x0=%llx x1=%llx meta_phys=%llx\n", uint64_t(sup.x0), sup.x1,
           uint64_t(pre.x0), pre.x1, phys);

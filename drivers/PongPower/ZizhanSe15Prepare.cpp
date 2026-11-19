@@ -44,15 +44,15 @@ struct Page {
 /* zizhan_audio_pinsample=1 (dry diagnostics): read the GPIO_IN bit of the TDM pads (121 sck, 123 ws, 124 dout) in a tight
  * loop while the stream runs. Counts ones and level changes per pad: a stuck dout with a toggling sck means the SoC drives no data. */
 namespace zizhan_pin_sample {
-static Page *pads[3];
-static uint32_t ones[3],edges[3],samples,first[3][2];
+static Page *pads[4];
+static uint32_t ones[4],edges[4],samples,first[4][2];
 static uint64_t elapsed_ns;
 static void run(){
     if(!pads[0]||!pads[1]||!pads[2])return;
-    uint32_t last[3]={2,2,2};
+    const unsigned count=pads[3]?4u:3u;uint32_t last[4]={2,2,2,2};
     const uint64_t t0=mach_absolute_time();
     for(uint32_t n=0;n<20000u;++n){
-        for(unsigned p=0;p<3;++p){
+        for(unsigned p=0;p<count;++p){
             const uint32_t bit=pads[p]->read(4)&1u;
             if(n<64u&&bit)first[p][n>>5]|=1u<<(n&31u);
             ones[p]+=bit;if(last[p]!=2u&&bit!=last[p])++edges[p];last[p]=bit;}
@@ -262,12 +262,13 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                                                     IOLog("ZIZHAN_AUDIO_ECHO: din pin=122 connected=%u config=%x original=%x\n",din?1u:0u,din?din_pin.read(0):0u,din_state.config);
                                                     if(!din){zizhan_amp_echo=0;}}
                                                 if((mode==39||mode==40)&&zizhan_amp_checkpoint)zizhan_amp_checkpoint(0,0);
-                                                if(mode==40){zizhan_pin_sample::pads[0]=&sck;zizhan_pin_sample::pads[1]=&ws;zizhan_pin_sample::pads[2]=&data_pin;}
+                                                if(mode==40){zizhan_pin_sample::pads[0]=&sck;zizhan_pin_sample::pads[1]=&ws;zizhan_pin_sample::pads[2]=&data_pin;zizhan_pin_sample::pads[3]=zizhan_amp_echo?&din_pin:nullptr;}
                                                 if(mode==40)zizhan_cs35l41_native_play_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 if(mode==40&&zizhan_play_pin_sample){using namespace zizhan_pin_sample;
                                                     IOLog("ZIZHAN_PIN_SAMPLE: n=%u ns=%llu sck ones=%u edges=%u ws ones=%u edges=%u dout ones=%u edges=%u first64 sck=%08x%08x ws=%08x%08x dout=%08x%08x\n",
                                                           samples,elapsed_ns,ones[0],edges[0],ones[1],edges[1],ones[2],edges[2],first[0][1],first[0][0],first[1][1],first[1][0],first[2][1],first[2][0]);
-                                                    zizhan_play_pin_sample=nullptr;pads[0]=pads[1]=pads[2]=nullptr;}
+                                                    if(pads[3])IOLog("ZIZHAN_PIN_SAMPLE: din122 ones=%u edges=%u first64=%08x%08x\n",ones[3],edges[3],first[3][1],first[3][0]);
+                                                    zizhan_play_pin_sample=nullptr;pads[0]=pads[1]=pads[2]=pads[3]=nullptr;}
                                                 else if(mode==39)zizhan_cs35l41_native_pulse_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==38)zizhan_cs35l41_native_iv_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);
                                                 else if(mode==37)zizhan_cs35l41_native_mailbox_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,transfer,&executed);

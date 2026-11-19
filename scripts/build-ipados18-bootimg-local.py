@@ -45,6 +45,7 @@ def main():
     parser.add_argument('--cs35l41-protection', type=Path, default=None)
     parser.add_argument('--cs35l41-coefficients', type=Path, default=None)
     parser.add_argument('--chosen-blob', action='append', default=[])
+    parser.add_argument('--bt-node', default=None)
     parser.add_argument('--data-ramdisk', type=Path, default=None,
                         help='packed DBRDISK1 APFS scratch Data seed passed as DarwinBoot initrd')
     parser.add_argument('--packed-data-ramdisk', action='store_true',
@@ -159,6 +160,7 @@ def main():
         *(['--cs35l41-protection', str(args.cs35l41_protection)] if args.cs35l41_protection else []),
         *(['--cs35l41-coefficients', str(args.cs35l41_coefficients)] if args.cs35l41_coefficients else []),
         *[x for spec in args.chosen_blob for x in ('--chosen-blob', spec)],
+        *(['--bt-node', args.bt_node] if args.bt_node else []),
         *(['--ufs-probe'] if args.ufs_probe else []),
         *(['--root-match-volume-uuid', args.root_match_volume_uuid]
           if args.root_match_volume_uuid else [])], check=True)

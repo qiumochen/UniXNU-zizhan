@@ -63,3 +63,13 @@
 4. BlueTool：找出 `manufacturer` 取哪个值时它不跑博通脚本，或者用 `bt-transport-override` 跳过。这是最大未知，需要反汇编 BlueTool 的平台选择逻辑。
 
 工作量：1–3 约 2 天；4 未知。
+
+### 设备树节点试验（bt-n1，蓝牙芯片不上电）
+
+打包加 `--bt-node 02:5a:69:7a:68:01`（本地管理的假地址，不是手机真实地址）：ADT 多出 `/arm-io/bluetooth`（`local-mac-address`、`transport-encoding`=1、`manufacturer`=29），平台驱动发布了它的 nub。
+
+- `bluetooth: Got local-mac-address: 02:5a:69:7a:68:01`，不再报 `No bluetooth on this device`。
+- bluetoothd 随后运行 0.05–1.4 s 后 **SIGSEGV** 崩溃并被 launchd 反复拉起；没有其它日志。最可能是缺 `/dev/cu.bluetooth` 串口或其后的传输服务。
+- 另一路 `marconi-bt` 仍报 `Unable to match bluetooth service in device tree`（匹配条件不同，待查）。
+
+结论：设备树节点这一步有效，下一个必需件是内核串口设备（第 2 步）。默认打包不加这个节点。

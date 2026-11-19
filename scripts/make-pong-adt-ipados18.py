@@ -151,6 +151,8 @@ def main():
                         help='private original zizhan protection WMFW for opt-in RAM-only probe; never enables sound')
     parser.add_argument('--cs35l41-coefficients',type=Path,default=None,
                         help='private original T/B protection parameter directory for opt-in RAM-only probe')
+    parser.add_argument('--bt-node',default=None,metavar='MAC',
+                        help='opt-in experiment: /arm-io/bluetooth with this locally administered local-mac-address (aa:bb:..)')
     parser.add_argument('--chosen-blob',action='append',default=[],metavar='NAME=PATH',
                         help='private RAM-only /chosen/NAME data (zizhan-bt-* only, <=256 KiB), e.g. BT firmware for a probe')
     parser.add_argument('--skip-image-verification', action='store_true',
@@ -277,6 +279,13 @@ def main():
         data=Path(path).read_bytes()
         if not data or len(data)>256*1024:parser.error('--chosen-blob size out of range: '+name)
         chosen.append((name,data))
+    bt_nodes=[]
+    if args.bt_node:
+        mac=bytes(int(x,16) for x in args.bt_node.split(':'))
+        if len(mac)!=6 or not (mac[0]&2):parser.error('--bt-node needs a locally administered 6-byte MAC')
+        # bluetoothd: IODeviceTree "bluetooth" + local-mac-address, then /dev/cu.bluetooth (H4).
+        bt_nodes=[node('bluetooth',[('compatible',b'bluetooth,qca6490\0'),('local-mac-address',mac),
+                                    ('transport-encoding',struct.pack('<I',1)),('manufacturer',struct.pack('<I',29))])]
     chosen.append(('psci-method', b'smc\0'))
     cpus = [node(f'cpu{i}', [
         ('state', b'running\0' if i == 0 else b'stopped\0'),
@@ -362,7 +371,7 @@ def main():
             ('ee', struct.pack('<I', 0)),
             ('pon-ppid', struct.pack('<I', 0x013)),
             ('volume-up-ppid', struct.pack('<I', 0x18d)),
-        ]), *([ufs] if args.ufs_probe else [])]),
+        ]), *([ufs] if args.ufs_probe else []), *bt_nodes]),
         node('defaults', [('sleep-disabled', struct.pack('<I', 1))]),
         node('options'),
         # Missing HomeButtonType defaults to a Home-button iPad in Gestalt.

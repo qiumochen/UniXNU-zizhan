@@ -23,6 +23,7 @@
 #include "PongCpuPark.h"
 #include "ZizhanHallProbe.h"
 #include "ZizhanBtProbe.h"
+#include "ZizhanOuterProbe.h"
 #include "ZizhanPowerInject.h"
 #include "ZizhanTsensProbe.h"
 #include "ZizhanThermalService.h"
@@ -244,6 +245,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   zizhan_power_audit::start(provider);
   zizhan_power_inject::start();
   zizhan_bt_probe::start();
+  zizhan_outer_probe::start();
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack
 #endif

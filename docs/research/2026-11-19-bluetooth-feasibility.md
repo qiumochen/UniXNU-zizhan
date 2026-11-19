@@ -45,3 +45,21 @@
 - 全程未开扫描/射频，结束拉低 BT_EN。
 
 下一步：切换到 3 Mbps、设置 BD 地址；然后调研 iPadOS bluetoothd 能否接受一个已初始化的 H4 控制器（BlueTool 的厂商初始化是最大未知）。
+
+## 接入 iPadOS bluetoothd 需要什么（22H374 二进制只读分析）
+
+当前系统日志：`bluetoothd` 启动 0.1 s 即退出，报 `Unable to match bluetooth service in device tree` → `Not a valid MAC address (all 00s)` → `No bluetooth on this device`。
+
+从只读挂载的 22H374 系统卷拷出 `/usr/sbin/bluetoothd` 和 `/usr/sbin/BlueTool`（仅本机 `work/bt-ios`）看到：
+
+- **bluetoothd**：在 IODeviceTree 找 `bluetooth` 节点读 `local-mac-address`；控制器走**串口**，依次尝试 `/dev/cu.bluetooth`、`/dev/uart.bluetooth`（内含 H4 收发状态机）。所以不需要苹果的 PCIe 蓝牙栈，传统 UART 路径仍在。
+- **BlueTool**（launchd `com.apple.BlueTool`，`-R`）：读 `bluetooth` 节点的 `transport-encoding`、`manufacturer`、`bt-transport-override` 和各种校准属性；通过 `/dev/btpoweroff`、`/dev/btreset`、`/dev/btwake` 控制供电/复位/唤醒；按 `manufacturer`（Broadcom / Apple ACI）选内置的 BCM43xx 启动脚本，找不到时报 `No boot script for the platform`。
+
+接入方案（按顺序，每步可单独验证）：
+
+1. ADT 增加 `bluetooth` 节点：`local-mac-address`（设备自己的地址，从 Android 侧读取后只放进启动包，不入仓库）、`transport-encoding`、`manufacturer`。
+2. 内核串口设备：把 SE20 GENI UART 做成 tty（`/dev/cu.bluetooth`），内核在开机时完成本页的 rampatch/NVM 下载，交出“已初始化的标准 H4 控制器”。
+3. `/dev/btpoweroff|btreset|btwake` 三个设备：映射到 BT_EN（GPIO81）等，供 BlueTool 使用。
+4. BlueTool：找出 `manufacturer` 取哪个值时它不跑博通脚本，或者用 `bt-transport-override` 跳过。这是最大未知，需要反汇编 BlueTool 的平台选择逻辑。
+
+工作量：1–3 约 2 天；4 未知。

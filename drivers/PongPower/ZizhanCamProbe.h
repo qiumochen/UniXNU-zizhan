@@ -101,7 +101,7 @@ static const Sensor kSensors[] = {
   // mode 2: CCI1 / cam-sensor3 = IMX663 tele (cam-1: 0x1a -> 0x0663)
   {"tele", 53, 1, 1056, 0, 0x15054, 0x1506c, 103, 128, 0xac16000, 0x13148, 0x13160, 0, 114, 115, {0x1a, 0x10, 0}, 0x0016, 2},
   // mode 3: CCI0 master 1 / cam-sensor1 = front IMX596: vdig PM8008J L2 1.152 V, vana GPIO97 2.9 V, MCLK5 GPIO105, reset GPIO127
-  {"front", 97, 2, 1152, 0, 0x1508c, 0x150a4, 105, 127, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x1a, 0x10, 0x37}, 0x0016, 2},
+  {"front", 97, 2, 1152, 0, 0x1508c, 0x150a4, 105, 127, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x10, 0x1a, 0x37}, 0x0016, 2},
   // mode 4: CCI0 master 1 / cam-sensor2 = ultra OV13B10: vdig GPIO92 1.2 V, vana GPIO6 2.8 V, MCLK1 GPIO101, reset GPIO24
   {"ultra", 6, 0, 0, 92, 0x1501c, 0x15034, 101, 24, 0xac15000, 0x1312c, 0x13144, 1, 112, 113, {0x36, 0x10, 0}, 0x300a, 3},
 };
@@ -173,7 +173,8 @@ static void attended(const Sensor &sn) {
       for (uint8_t a : sn.addrs) {
         if (!a) continue;
         uint8_t id[3] = {0, 0, 0};
-        const int r = ccirc ? ccirc : zizhan_cci_read16_m(&co, sn.master, a, sn.id_reg, id, sn.id_len);
+        int r = ccirc ? ccirc : zizhan_cci_read16_m(&co, sn.master, a, sn.id_reg, id, sn.id_len);
+        if (r && !ccirc) (void)zizhan_cci_reset_init_m(&co, sn.master);   // a NACK leaves the queue halted: reset before the next address
         IOLog("ZIZHAN_CAM_PROBE: %s cci m%u addr=%x reg=%x rc=%d id=%02x%02x%02x\n", sn.name, sn.master, a, sn.id_reg, r, id[0], id[1], id[2]);
         if (!r) break;
       }

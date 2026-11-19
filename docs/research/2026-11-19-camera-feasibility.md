@@ -74,3 +74,9 @@
 - 结束：CCI 分支 → MCLK3 → GDSC 收起，LDO 反序关闭，GPIO 全部恢复；无 panic，返回 Android。
 
 下一步：分别对 CCI0 上的三路（cam-sensor0/1/2）做同样的只读 ID 读取，确认主摄 IMX766（0x0766）、超广角 OV13B10、前置 IMX596 各在哪一路；之后才是 CSIPHY/CSID/IFE 取 RAW 帧。
+
+## 2026-11-19 下午：按表探测四路中的三路（cam-front / cam-ultra）
+
+- **超广角 OV13B10**（CCI0 master 1，0x36，寄存器 0x300a）→ **0x560d42**，与 OV13B10 一致。
+- 前置（CCI0 master 1）：供电（PM8008J L2 1.2 → 1.152 V、GPIO97、L5）、MCLK5、复位均正常，但 0x1a NACK，之后两个地址超时——NACK 后 CCI 队列停住，探针没有复位就试下一个地址。已改为 NACK 后先复位，地址顺序改为 0x10、0x1a、0x37 再测。
+- 已确认：长焦 IMX663（CCI1 m0 0x1a）、超广角 OV13B10（CCI0 m1 0x36）。主摄 IMX766（CCI0 m0）需要额外的 custom/vaf/vana1 供电，暂未做。

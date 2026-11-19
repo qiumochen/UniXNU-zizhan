@@ -54,8 +54,6 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 | --- | --- | --- |
 | M1：试听 loud-1（Android 电平、同相 1 kHz、1 s） | 约 5 分钟 | 已打包，`ZIZHAN_USER_PRESENT=yes bash work/m1-firstsound/run-loud-1.sh` |
 | M2：折叠验证（合上熄屏、打开亮屏）+ 熄屏/亮屏人工看屏 | 约 10 分钟 | `daily-6`/`soak-4` 同配置，含 `zizhan_hall_observe=2` |
-| M2：外屏只读探针 `zizhan_outer_probe=1` | 约 5 分钟 | 已编译（build-play33），未运行 |
-| CAM-01：前置摄像头首次上电读芯片 ID（`zizhan_cam_probe=1` 再 `=2 zizhan_user_present=1`） | 约 15 分钟 | 已编译，未运行 |
 | M3：写 boot_a 并切到 a 槽（内存启动测试 11-19 已通过：选 Android 后 49 s 自动回到 Android，不再卡菜单） | 约 5 分钟，需要手在机器旁 | 若 magic 不保留会在菜单与重启间循环，需按音量键进 fastboot 后 `fastboot set_active b` |
 | 天气：是否接第三方数据源（需重装 userland） | 决策 | [天气结论](../research/2026-11-19-weather-fairplay.md) |
 | 日用配置是否默认：熄屏/亮屏 + 触控暂停 + 合盖跟随 + 温控 mode 2（CPU 90/GPU 85 °C） | 决策 | `soak-4` 10 分钟通过 |
@@ -78,3 +76,11 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 - **蓝牙**：SE20 串口握手、HCI Reset、rampatch + NVM 下载成功（BT 5.3、Qualcomm）；bluetoothd 走串口 + 设备树节点，节点试验后它读到地址、随后因缺串口崩溃（[蓝牙](../research/2026-11-19-bluetooth-feasibility.md)）。未开射频。
 - **相机**：PM8008、CAM_CC MCLK3、CCI 读芯片 ID 的逻辑（宿主机测试）和默认关闭的内核探针（未运行）（[相机](../research/2026-11-19-camera-feasibility.md)）。
 - **稳定性**：daily-5/6、soak-3/4 共 80 次熄屏/亮屏全部成功，0 崩溃，Wi-Fi 正常。
+
+## 2026-11-19 下午（用户要求尽量自己闭环；全部静音，未写分区）
+
+- **折叠链路自测**：`zizhan_hall_simulate` 模拟合盖 → 按键熄屏 → 内屏 TE（GPIO86）0 次跳变；开盖 → 亮屏 → TE 44 次/100 ms。面板侧确认真的停帧/出帧。只差真实霍尔一次折叠。
+- **外屏显示**：启动程序已把外屏（DSI1/INTF_2）点亮并让 VIG2 从 0xb8fc9900 取帧；写入彩条后 INTF_2 的输出签名（MISR）从恒定的 0x0c3d2ca8 变为恒定的 0xbe2dceaf——**外屏显示我们写的画面已闭环确认**（[外屏](../research/2026-11-19-outer-panel.md)）。
+- **外屏触控**：WL2866D 给触控上电（1.8/3.0 V）后，FTS 在复位释放 7 ms 拉低中断——芯片活着；SPI 读芯片 ID 的轮次已备，等电量回升。
+- **相机**：四颗传感器全部在 iPadOS 下应答芯片 ID：主摄 IMX766 0x0766、前置 IMX596 0x0596、超广角 OV13B10 0x560d42、长焦 IMX663 0x0663（[相机](../research/2026-11-19-camera-feasibility.md)）。
+- **M3**：内存启动测试通过（选 Android 后 49 s 回到 Android，不再卡菜单）；写 boot_a 仍留到你手在机器旁时。

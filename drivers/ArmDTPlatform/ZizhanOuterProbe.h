@@ -96,7 +96,8 @@ static void picture_test() {
  * bit0 DVDD1, bit1 DVDD2, bit2 AVDD1, bit3 AVDD2 enables. Only reads; the I2C is used only when the boot loader left it set up. */
 static uint32_t se_rd(void *c, uint32_t reg) { return static_cast<Rw *>(c)->r(reg); }
 static void se_wr(void *c, uint32_t reg, uint32_t v) { static_cast<Rw *>(c)->w(reg, v); }
-static void touch_inventory(bool alive_test) {
+static void outer_spi();
+static void touch_inventory(bool alive_test, bool spi_test) {
   Ro vote, w0, w2;
   if (!vote.open(0x162000, 0x1000) || !w0.open(0x127000, 0x1000) || !w2.open(0x12e000, 0x1000)) { IOLog("ZIZHAN_OUTER_TOUCH: FAIL map\n"); return; }
   const uint32_t s1 = w0.r(0x140), s4 = w2.r(0x4dc);
@@ -183,6 +184,7 @@ static void touch_inventory(bool alive_test) {
   }
   IOLog("ZIZHAN_OUTER_TOUCH: irq119 samples low=%u high=%u first_low_ms=%u -> %s\n", lows, highs, first_low_ms,
         lows ? "controller alive (IRQ asserted)" : "no IRQ");
+  if (spi_test && ok_w) outer_spi();
   // restore: reset low, rails back to how the loader left them, pins as before
   rst.w(4, 0);
   IOSleep(2);
@@ -191,10 +193,103 @@ static void touch_inventory(bool alive_test) {
   IOLog("ZIZHAN_OUTER_TOUCH: DONE alive-test restored=%u\n", (r1 && r2 && r3) ? 1u : 0u);
 }
 
+/* mode 5: the outer FTS over SE19 SPI, as bsd/dev/pong_fts.c does it for the inner one (st fst2 driver 6.0.3):
+ * GCC wrap2 votes 0x162010 bits 0-3 + S4 bit 8; S4 branch 0x12e4dc, RCG CMD 0x12e4e4 / CFG +4 / DFSR +0x14 / PERF +0x1c/+0x5c/+0x9c;
+ * pads GPIO72-75 qup19; GENI SPI mode 0, 8-bit, 1 MHz; configure_spi4 writes, chip id (0xfb 0x20000000), one event (0xb1 0x0060). */
+static void outer_spi() {
+  Rw vote, w2, se, pads[4];
+  if (!vote.open(0x162000, 0x1000, kIOMapInhibitCache) || !w2.open(0x12e000, 0x1000, kIOMapInhibitCache)) { IOLog("ZIZHAN_OUTER_SPI: FAIL map\n"); return; }
+  uint32_t saved[4];
+  for (unsigned i = 0; i < 4; ++i) {
+    if (!pads[i].open(0xf100000ull + uint64_t(72 + i) * 0x1000, 0x1000, kIOMapInhibitCache)) { IOLog("ZIZHAN_OUTER_SPI: FAIL pad-map\n"); return; }
+    saved[i] = pads[i].r(0);
+  }
+  vote.w(0x10, vote.r(0x10) | 0xfu);
+  uint32_t src_hz = 19200000, sel = 0;
+  if (w2.r(0x4f8) & 1u) {
+    static const uint32_t parent[8] = {19200000, 600000000, 0, 0, 0, 0, 300000000, 0};
+    src_hz = 0;
+    for (uint32_t l = 0; l < 8; ++l) {
+      const uint32_t cfg = w2.r(0x500 + 4 * l), m = w2.r(0x540 + 4 * l), nn = w2.r(0x580 + 4 * l);
+      uint64_t hz = parent[(cfg >> 8) & 7];
+      const uint32_t div = cfg & 0x1f, mode = (cfg >> 12) & 3;
+      if (div) hz = hz * 2 / (div + 1);
+      if (mode) { const uint32_t n = (~nn & 0xffff) + (m & 0xffff); if (n) hz = hz * (m & 0xffff) / n; }
+      if (hz >= 4000000 && (!src_hz || hz < src_hz)) { src_hz = uint32_t(hz); sel = l; }
+    }
+  } else {
+    w2.w(0x4e8, (w2.r(0x4e8) & ~0x371fu) | 1u);
+    w2.w(0x4e4, w2.r(0x4e4) | 1u);
+    for (unsigned i = 0; i < 500 && (w2.r(0x4e4) & 1u); ++i) IODelay(10);
+  }
+  vote.w(0x10, vote.r(0x10) | (1u << 8));
+  bool on = false;
+  auto off = [](uint32_t cbcr) { return (cbcr & 2u) ? 0u : (cbcr & 0x80000000u); };
+  for (unsigned i = 0; i < 1000 && !on; ++i) { on = !(off(w2.r(0x004)) | off(w2.r(0x008)) | off(w2.r(0x4dc))); if (!on) IODelay(10); }
+  IOLog("ZIZHAN_OUTER_SPI: clocks on=%u src_hz=%u sel=%u s4=%x\n", on ? 1u : 0u, src_hz, sel, w2.r(0x4dc));
+  if (!on || !src_hz) return;
+  for (unsigned i = 0; i < 4; ++i) pads[i].w(0, (saved[i] & ~0x3ffu) | (1u << 2) | (2u << 6));   // qup19, 6 mA, no pull
+  if (!se.open(0x890000, 0x4000, kIOMapInhibitCache)) { IOLog("ZIZHAN_OUTER_SPI: FAIL se-map\n"); goto pads_back; }
+  {
+    const uint32_t fw = se.r(0x68), depth = (se.r(0xe24) >> 16) & 0x3f;
+    IOLog("ZIZHAN_OUTER_SPI: se19 fw=%x protocol=%u fifo=%u if_disable=%x\n", fw, (fw >> 8) & 255, depth, se.r(0x64));
+    if (((fw >> 8) & 255) != 1 || (se.r(0x64) & 1u) || depth < 4) goto pads_back;
+    se.w(0xe18, 0); se.w(0x618, ~0u); se.w(0x648, ~0u); se.w(0xc44, ~0u); se.w(0xd44, ~0u);
+    se.w(0x28, se.r(0x28) | 0x7f); se.w(0xe30, se.r(0xe30) | 0xf); se.w(0x24, 0x7f); se.w(0x20, 1);
+    se.w(0x258, se.r(0x258) & ~1u); se.w(0x810, depth - 3); se.w(0x814, depth - 2); se.w(0x80c, 0);
+    se.w(0xe1c, se.r(0xe1c) | 0xf); se.w(0x614, se.r(0x614) | 0x7fc0007fu);
+    se.w(0x22c, 0); se.w(0x250, 0); se.w(0x224, 0); se.w(0x230, 0); se.w(0x24c, 0);
+    se.w(0x25c, se.r(0x25c) & ~2u); se.w(0x278, 0);
+    se.w(0x260, 0x0007f8fe); se.w(0x264, 0x000ffefe); se.w(0x284, 0x0007f8fe); se.w(0x288, 0x000ffefe);
+    se.w(0x254, 0); se.w(0x268, 8 - 4);
+    const uint32_t div = (src_hz + 1000000 - 1) / 1000000;
+    se.w(0x7c, sel & 7); se.w(0x48, (div ? div : 1) << 4 | 1);
+    auto xfer = [&](const uint8_t *tx, uint8_t *rx, uint32_t len) -> bool {
+      uint32_t sent = 0, got = 0;
+      for (unsigned i = 0; (se.r(0x40) & 1u) && i < 2000; ++i) IODelay(100);
+      se.w(0x618, ~0u); se.w(0x26c, len); se.w(0x270, len); se.w(0x600, 3u << 27);
+      for (unsigned spin = 0; spin < 20000; ++spin) {
+        while (sent < len && (se.r(0x800) & 0x0fffffffu) + 1 < depth) {
+          uint32_t w = 0;
+          for (unsigned j = 0; j < 4 && sent < len; ++j, ++sent) w |= uint32_t(tx ? tx[sent] : 0) << (8 * j);
+          se.w(0x700, w);
+        }
+        const uint32_t st = se.r(0x610);
+        const uint32_t rs = se.r(0x804), words = rs & 0x1ffffff;
+        uint32_t bytes = words * 4;
+        if ((rs & 0x80000000u) && ((rs >> 28) & 7)) bytes -= 4 - ((rs >> 28) & 7);
+        for (uint32_t i = 0; i < words && words <= depth; ++i) {
+          const uint32_t v = se.r(0x780);
+          for (unsigned j = 0; j < 4 && bytes; ++j, --bytes) { if (got < len) { if (rx) rx[got] = uint8_t(v >> (8 * j)); ++got; } }
+        }
+        if (st & ((1u << 1) | (1u << 2) | (1u << 3) | (1u << 24) | (1u << 25) | (1u << 28) | (1u << 29))) break;
+        if (st & 1u) { se.w(0x618, st); return got == len; }
+        IODelay(10);
+      }
+      se.w(0x604, 1u << 2); IODelay(1000); se.w(0x618, ~0u);
+      return false;
+    };
+    uint8_t tx[16] = {}, rx[16] = {};
+    auto hw_w8 = [&](uint32_t a, uint8_t v) { const uint8_t b[6] = {0xfa, uint8_t(a >> 24), uint8_t(a >> 16), uint8_t(a >> 8), uint8_t(a), v}; return xfer(b, nullptr, 6); };
+    const bool cfg = hw_w8(0x20000034u, 0x02) && hw_w8(0x2000003eu, 0x07) && hw_w8(0x2000002du, 0x02);
+    tx[0] = 0xfb; tx[1] = 0x20; tx[2] = 0; tx[3] = 0; tx[4] = 0;
+    const bool idok = xfer(tx, rx, 4 + 1 + 1 + 2);
+    IOLog("ZIZHAN_OUTER_SPI: configure_spi4=%u chip_id_xfer=%u id=%02x%02x (inner FST2 is 3652)\n", cfg ? 1u : 0u, idok ? 1u : 0u, rx[6], rx[7]);
+    uint8_t ev[16] = {};
+    memset(tx, 0, sizeof tx); tx[0] = 0xb1; tx[1] = 0x00; tx[2] = 0x60;
+    const bool evok = xfer(tx, ev, 3 + 1 + 8);
+    IOLog("ZIZHAN_OUTER_SPI: event_xfer=%u event=%02x %02x %02x %02x %02x %02x %02x %02x (0x03 = controller ready)\n", evok ? 1u : 0u,
+          ev[4], ev[5], ev[6], ev[7], ev[8], ev[9], ev[10], ev[11]);
+  }
+pads_back:
+  for (unsigned i = 0; i < 4; ++i) pads[i].w(0, saved[i]);
+  IOLog("ZIZHAN_OUTER_SPI: DONE pads_restored=1 (clock votes kept)\n");
+}
+
 static uint32_t probe_mode;
 static void worker(void *, wait_result_t) {
   IOSleep(40000);
-  if (probe_mode >= 2) { if (probe_mode == 2) picture_test(); else touch_inventory(probe_mode == 4); thread_terminate(current_thread()); thread_block(THREAD_CONTINUE_NULL); return; }
+  if (probe_mode >= 2) { if (probe_mode == 2) picture_test(); else touch_inventory(probe_mode >= 4, probe_mode == 5); thread_terminate(current_thread()); thread_block(THREAD_CONTINUE_NULL); return; }
   {
     Ro cc, dsi0;
     if (!cc.open(0xaf00000, 0x10000) || !dsi0.open(0xae94000, 0x1000)) {
@@ -236,7 +331,7 @@ static void worker(void *, wait_result_t) {
 static void start() {
   uint32_t mode = 0;
   if (!PE_parse_boot_argn("zizhan_outer_probe", &mode, sizeof mode) || !mode) return;
-  if (mode < 1 || mode > 4) { IOLog("ZIZHAN_OUTER_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
+  if (mode < 1 || mode > 5) { IOLog("ZIZHAN_OUTER_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
   probe_mode = mode;
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t);

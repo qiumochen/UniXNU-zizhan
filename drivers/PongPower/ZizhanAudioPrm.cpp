@@ -423,8 +423,8 @@ static int echo_receive(volatile uint8_t *dma,uint64_t tagged,const uint8_t *dat
   const uint32_t status=zizhan_tdm_le32(raw.payload),size=zizhan_tdm_le32(raw.payload+16),offset=zizhan_tdm_le32(raw.payload+20);
   if(status){++e.status;}
   if(size<=0x2000u&&offset<=0x2000u&&offset+size<=0x2000u){e.bytes+=size;const volatile uint8_t *d=dma+0xC000u+k*0x2000u+offset;
-   for(unsigned f=0;f+8<=size;f+=8,++e.frames){
-    for(unsigned c=0;c<4;++c){const int16_t v=int16_t(d[f+2*c]|(d[f+2*c+1]<<8));const unsigned a=unsigned(v<0?-v:v);
+   for(unsigned f=0;f+4<=size;f+=4,++e.frames){   /* ACDB TX: 2ch 16-bit interleaved */
+    for(unsigned c=0;c<2;++c){const int16_t v=int16_t(d[f+2*c]|(d[f+2*c+1]<<8));const unsigned a=unsigned(v<0?-v:v);
      if(a>e.maxabs[c]){e.maxabs[c]=a;}if(v){++e.nonzero[c];}if(a>=128){++e.loud[c];}
      if(c==0){if((v>0&&e.last0<0)||(v<0&&e.last0>0)){++e.toggles;}if(v){e.last0=v;}}
      if(v&&e.nonzero[0]+e.nonzero[1]+e.nonzero[2]+e.nonzero[3]<=2&&c<4){e.sample[2*(e.nonzero[0]+e.nonzero[1]+e.nonzero[2]+e.nonzero[3]-1)]=int16_t(c);e.sample[2*(e.nonzero[0]+e.nonzero[1]+e.nonzero[2]+e.nonzero[3]-1)+1]=v;}}}}
@@ -539,7 +539,7 @@ bool service_wait(){
  * analysed as 16-bit interleaved FL/FR and re-queued. PASS: data came back and >=90% of the
  * analysed frames are +-512 with R=-L. */
 static unsigned payload_count(const uint8_t *p,unsigned bytes){return bytes>=40?zizhan_tdm_le32(p+36):0u;}
-struct Loopback {unsigned writes,write_acks,reads,read_dones,read_status,bytes,frames,nonzero,match,maxabs,first_nonzero,loud,opposed,center_max;int16_t sample[12];};
+struct Loopback {unsigned writes,write_acks,reads,read_dones,read_status,bytes,frames,nonzero,match,maxabs,first_nonzero,loud,opposed,center_max,same,in_phase;int16_t sample[12];};
 Loopback loopback_stats;
 __attribute__((noinline)) bool loopback_round(){
  auto &o=owner;auto &r=loopback_stats;memset(&r,0,sizeof r);r.first_nonzero=~0u;
@@ -551,8 +551,10 @@ __attribute__((noinline)) bool loopback_round(){
  if(!map){return false;}
  auto dma=reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress());
  for(unsigned i=0x9000;i<0x10000;++i){dma[i]=0;}
+ /* zizhan_amp_lvl=1: the in-phase tone of the attended level check (R=L), so the dec-mfc-sal path is checked as played. */
+ {unsigned lvl=0;r.in_phase=PE_parse_boot_argn("zizhan_amp_lvl",&lvl,sizeof lvl)&&lvl==1?1u:0u;}
  for(unsigned slot=0;slot<2;++slot){for(unsigned f=0;f<480;++f){
-  const int32_t l=int32_t(runtime_sample(f))*256,rr=-l;volatile uint8_t *p=dma+slot*0x3000u+6u*f;
+  const int32_t l=int32_t(runtime_sample(f))*256,rr=r.in_phase?l:-l;volatile uint8_t *p=dma+slot*0x3000u+6u*f;
   p[0]=uint8_t(l);p[1]=uint8_t(l>>8);p[2]=uint8_t(l>>16);p[3]=uint8_t(rr);p[4]=uint8_t(rr>>8);p[5]=uint8_t(rr>>16);}}
 #if defined(__aarch64__) && defined(KERNEL)
  __asm__ volatile("dsb sy":::"memory");
@@ -574,7 +576,7 @@ __attribute__((noinline)) bool loopback_round(){
    const int16_t L=int16_t(d[f]|(d[f+1]<<8)),R=int16_t(d[f+2]|(d[f+3]<<8)),Cc=stride==6?int16_t(d[f+4]|(d[f+5]<<8)):int16_t(0);
    const unsigned a=unsigned(L<0?-L:L),c=unsigned(Cc<0?-Cc:Cc);if(a>r.maxabs){r.maxabs=a;}if(c>r.center_max){r.center_max=c;}
    if(L||R){if(r.first_nonzero==~0u){r.first_nonzero=r.frames;}if(r.nonzero<4){r.sample[3*r.nonzero]=L;r.sample[3*r.nonzero+1]=R;r.sample[3*r.nonzero+2]=Cc;}++r.nonzero;}
-   if(a>=256){++r.loud;if((L>0&&R<0)||(L<0&&R>0)){++r.opposed;}}
+   if(a>=256){++r.loud;if((L>0&&R<0)||(L<0&&R>0)){++r.opposed;}if((L>0&&R>0)||(L<0&&R<0)){++r.same;}}
    if((L==512||L==-512)&&R==-L){++r.match;}}
   for(unsigned i=0;i<0x3000u;++i){dma[read_at[k]+i]=0;}
  };
@@ -605,9 +607,9 @@ __attribute__((noinline)) bool loopback_round(){
   if(write_index>=20&&!waiting&&now_us()-began>2000000ull){break;}
   if(!p.bytes){IOSleep(2);}
  }
- const bool pass=ok&&r.write_acks==20&&r.read_dones>0&&r.frames>0&&(o.loopback==3?(r.loud*2>=r.frames&&r.opposed*10>=r.loud*9):r.match*10>=r.frames*9);
- IOLog("ZIZHAN_AUDIO_LOOPBACK: %s variant=%s writes=%u write_acks=%u reads=%u read_dones=%u read_status=%u bytes=%u frames=%u nonzero=%u match=%u loud=%u opposed=%u maxabs=%u center_max=%u first_nonzero=%u sample=%d/%d/%d,%d/%d/%d,%d/%d/%d,%d/%d/%d audio_output=0\n",
-  pass?"PASS":"FAIL",o.loopback==1?"dec":o.loopback==3?"dec-mfc-sal":"nodec",r.writes,r.write_acks,r.reads,r.read_dones,r.read_status,r.bytes,r.frames,r.nonzero,r.match,r.loud,r.opposed,r.maxabs,r.center_max,r.first_nonzero,
+ const bool pass=ok&&r.write_acks==20&&r.read_dones>0&&r.frames>0&&(o.loopback==3?(r.loud*2>=r.frames&&(r.in_phase?r.same:r.opposed)*10>=r.loud*9):r.match*10>=r.frames*9);
+ IOLog("ZIZHAN_AUDIO_LOOPBACK: %s variant=%s writes=%u write_acks=%u reads=%u read_dones=%u read_status=%u bytes=%u frames=%u nonzero=%u match=%u loud=%u opposed=%u same=%u in_phase=%u maxabs=%u center_max=%u first_nonzero=%u sample=%d/%d/%d,%d/%d/%d,%d/%d/%d,%d/%d/%d audio_output=0\n",
+  pass?"PASS":"FAIL",o.loopback==1?"dec":o.loopback==3?"dec-mfc-sal":"nodec",r.writes,r.write_acks,r.reads,r.read_dones,r.read_status,r.bytes,r.frames,r.nonzero,r.match,r.loud,r.opposed,r.same,r.in_phase,r.maxabs,r.center_max,r.first_nonzero,
   r.sample[0],r.sample[1],r.sample[2],r.sample[3],r.sample[4],r.sample[5],r.sample[6],r.sample[7],r.sample[8],r.sample[9],r.sample[10],r.sample[11]);
  o.loopback_pass=pass?1u:0u;map->release();
  // A diagnostic verdict, not a graph failure: the graph must still stop and close cleanly.

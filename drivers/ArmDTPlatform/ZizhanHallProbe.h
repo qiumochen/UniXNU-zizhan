@@ -9,8 +9,13 @@
 #include <pexpert/pexpert.h>
 #include <libkern/c++/OSData.h>
 #include "ZizhanHallState.h"
+#include "ZizhanLidPolicy.h"
 
 extern "C" struct vnode *rootvnode;
+/* zizhan_hall_observe=2 (FOLD-01): the inner display follows the lid through one power-key press. */
+extern "C" int zizhan_display_power_state(void) __attribute__((weak));
+extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
+extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 
 namespace zizhan_hall {
 struct Inputs {
@@ -20,6 +25,7 @@ struct Inputs {
   uint32_t gpio;
   uint32_t active_low;
   uint32_t debounce_ms;
+  uint32_t follow;
 };
 
 static bool read32(IORegistryEntry *entry, const char *key, uint32_t &value) {
@@ -69,8 +75,8 @@ static void worker(void *arg, wait_result_t) {
   auto *copy = static_cast<Inputs *>(arg);
   const Inputs config = *copy;
   IODelete(copy, Inputs, 1);
-  IOLog("ZIZHAN_HALL: RUNNING gpio=%u active_low=%u debounce_ms=%u readonly=1 display_switch=0\n",
-        config.gpio, config.active_low, config.debounce_ms);
+  IOLog("ZIZHAN_HALL: RUNNING gpio=%u active_low=%u debounce_ms=%u readonly=1 display_switch=%u\n",
+        config.gpio, config.active_low, config.debounce_ms, config.follow);
 
   for (unsigned i = 0; i < 1200 && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE); ++i)
     IOSleep(100);
@@ -103,8 +109,11 @@ static void worker(void *arg, wait_result_t) {
   unsigned reads = 0, changes = 0, reports = 0;
   bool baseline = false;
   bool prerequisite_failed = false;
+  bool pressed = false;
+  uint64_t last_press_ms = 0;
+  unsigned presses = 0, skips = 0;
 
-  while (nowNs() - begin < 120ULL * 1000000000ULL && reads < 24000) {
+  while (config.follow || (nowNs() - begin < 120ULL * 1000000000ULL && reads < 24000)) {
     const uint32_t cfg = *control;
     __asm__ volatile("dmb oshld" ::: "memory");
     // Function bits 5:2 must be GPIO and bit 9 must not drive an output.
@@ -127,8 +136,27 @@ static void worker(void *arg, wait_result_t) {
             update.event == Event::Baseline ? "BASELINE" : "TRANSITION",
             raw, rawName(high), update.stable ? 1u : 0u,
             static_cast<unsigned long long>(when));
+      if (config.follow && update.event == Event::Transition) {
+        const int display = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+        const bool desktop = &pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE);
+        const uint64_t now_ms = when / 1000000ULL;
+        const auto action = desktop ? zizhan_lid::decide(true, update.stable, display, now_ms, pressed, last_press_ms)
+                                    : zizhan_lid::Action::None;
+        IOLog("ZIZHAN_LID: %s lid=%s display=%d desktop=%u presses=%u skips=%u\n", zizhan_lid::name(action),
+              update.stable ? "closed" : "open", display, desktop ? 1u : 0u, presses, skips);
+        if (action == zizhan_lid::Action::PressSleep || action == zizhan_lid::Action::PressWake) {
+          pong_touch_post(4u, 0u, 0, 0);   // PongButtonDown, power
+          IOSleep(120);
+          pong_touch_post(5u, 0u, 0, 0);   // PongButtonUp
+          pressed = true;
+          last_press_ms = now_ms;
+          ++presses;
+        } else if (action != zizhan_lid::Action::None) {
+          ++skips;
+        }
+      }
     }
-    IOSleep(5);
+    IOSleep(config.follow ? 20 : 5);
   }
 
   IOLog("ZIZHAN_HALL: %s baseline=%u transitions=%u reads=%u readonly=1 fold_qualified=0 finished=1\n",
@@ -142,7 +170,7 @@ static void worker(void *arg, wait_result_t) {
 static void start(IOService *platform) {
   uint32_t mode = 0;
   if (!PE_parse_boot_argn("zizhan_hall_observe", &mode, sizeof(mode)) || !mode) return;
-  if (mode != 1) {
+  if (mode != 1 && mode != 2) {
     IOLog("ZIZHAN_HALL: SKIP unsupported-mode finished=1\n");
     return;
   }
@@ -158,6 +186,7 @@ static void start(IOService *platform) {
     IOLog("ZIZHAN_HALL: FAIL input-allocation finished=1\n");
     return;
   }
+  config.follow = mode == 2 ? 1u : 0u;
   *copy = config;
   if (kernel_thread_start(worker, copy, &thread) != KERN_SUCCESS) {
     IODelete(copy, Inputs, 1);

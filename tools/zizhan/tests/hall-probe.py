@@ -14,6 +14,12 @@ probe = (ROOT / "drivers/ArmDTPlatform/ZizhanHallProbe.h").read_text()
 probe = "\n".join(line for line in probe.splitlines()
                   if not line.startswith(("#include", "#pragma")))
 probe = probe.replace('__asm__ volatile("dmb oshld" ::: "memory");', '')
+# FOLD-01 follow mode (zizhan_hall_observe=2) collaborators; mode 1 never calls them.
+LID_STUBS = r"""
+extern "C" int zizhan_display_power_state(void) { return 1; }
+extern "C" volatile uint32_t pong_zc_flipped_tag = 1;
+extern "C" void pong_touch_post(uint32_t, uint32_t, uint32_t, uint32_t) {}
+"""
 harness = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -24,6 +30,7 @@ harness = r'''
 #include <string>
 #include <vector>
 #include "ZizhanHallState.h"
+#include "ZizhanLidPolicy.h"
 using wait_result_t = int;
 using thread_t = int;
 constexpr int THREAD_NULL=0, THREAD_CONTINUE_NULL=0, KERN_SUCCESS=0;
@@ -109,7 +116,7 @@ int main(int argc,char **argv) {
   node.props["compatible"].value.assign(id,id+sizeof(id));
   registers[1]=1;
   if(which=="off")mode=0;
-  else if(which=="mode")mode=2;
+  else if(which=="mode")mode=3;   /* 2 = FOLD-01 follow mode */
   else if(which=="foreign")node.props["compatible"].value[0]='x';
   else if(which=="missing")node.props.erase("hall-gpio");
   else if(which=="width")node.props["hall-gpio"].value.resize(3);
@@ -143,7 +150,7 @@ int main(int argc,char **argv) {
 '''
 with tempfile.TemporaryDirectory(prefix="zizhan-hall-probe-") as temp:
     source = Path(temp) / "probe.cpp"
-    source.write_text(harness.replace("/* ACTUAL_PROBE */", probe))
+    source.write_text(harness.replace("/* ACTUAL_PROBE */", probe + LID_STUBS))
     binary = Path(temp) / "probe"
     subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra",
                     "-Werror", "-fsanitize=address,undefined",

@@ -55,6 +55,13 @@ static int dsi_sequence(const uint8_t *dcs, const uint16_t *wait_ms, uint32_t co
 }
 } // namespace zizhan_display_power_service
 
+/* FOLD-01: 0 off, 1 on, 2 transitioning; on until the first request (the panel boots lit). */
+extern "C" int zizhan_display_power_state(void) {
+  using namespace zizhan_display_power_service;
+  if (mode() <= 0) return -1;
+  return runtime_ready ? (int)runtime.state.state : 1;
+}
+
 extern "C" int zizhan_display_power_request(uint32_t count,const uint64_t *in,
                                             size_t bytes) {
   using namespace zizhan_display_power_service;

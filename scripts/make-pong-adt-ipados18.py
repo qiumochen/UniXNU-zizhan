@@ -151,6 +151,8 @@ def main():
                         help='private original zizhan protection WMFW for opt-in RAM-only probe; never enables sound')
     parser.add_argument('--cs35l41-coefficients',type=Path,default=None,
                         help='private original T/B protection parameter directory for opt-in RAM-only probe')
+    parser.add_argument('--chosen-blob',action='append',default=[],metavar='NAME=PATH',
+                        help='private RAM-only /chosen/NAME data (zizhan-bt-* only, <=256 KiB), e.g. BT firmware for a probe')
     parser.add_argument('--skip-image-verification', action='store_true',
                         help='emit the DT without an additional output audit')
     args = parser.parse_args()
@@ -269,6 +271,12 @@ def main():
             data=path.read_bytes()
             if len(data)!=length or hashlib.sha256(data).hexdigest()!=digest:parser.error('CS35L41 coefficient hash mismatch')
             chosen.append(('zizhan-cs35l41-prot-'+prefix.lower(),data))
+    for spec in args.chosen_blob:
+        name,_,path=spec.partition('=')
+        if not name.startswith('zizhan-bt-') or not path:parser.error('--chosen-blob needs zizhan-bt-NAME=PATH')
+        data=Path(path).read_bytes()
+        if not data or len(data)>256*1024:parser.error('--chosen-blob size out of range: '+name)
+        chosen.append((name,data))
     chosen.append(('psci-method', b'smc\0'))
     cpus = [node(f'cpu{i}', [
         ('state', b'running\0' if i == 0 else b'stopped\0'),

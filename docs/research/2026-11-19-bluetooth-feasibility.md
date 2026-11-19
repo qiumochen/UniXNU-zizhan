@@ -34,3 +34,14 @@
   - 结束：S 命令取消、BT_EN 拉低、引脚恢复；时钟投票保留。
 
 下一步：rampatch（`hpbtfw21.tlv`）+ NVM 下载（参考 Linux btqca），之后 `Read BD_ADDR`、切换到 3 Mbps；再研究把它作为标准 H4 HCI 交给 bluetoothd。
+
+## 2026-11-19 中午：rampatch + NVM 下载成功（bt-r4/r5）
+
+- `EDL_GET_BID`（`01 00 fc 01 23`）→ board id 0；SoC id 0x400c1211 属 GF 工艺（`soc_id & 0xff00 == 0x1200`），按 Linux btqca 命名用 `hpnv21g.bin`。
+- 固件通过打包脚本新增的 `--chosen-blob zizhan-bt-*=PATH` 放进 `/chosen`（仅 RAM 启动包，不写分区；固件文件只在本机 `work/bt-fw`，不入仓库）。
+- `zizhan_bt_probe=3`（bt-r5）：rampatch `hpbtfw21.tlv` 125468 B / 517 段，下载模式 3（只确认最后一段）→ 确认；NVM 6390 B / 27 段逐段确认（改为 115200、关闭 in-band sleep 与 deep sleep，适配当前轮询主机）；之后 `HCI Reset` 成功。
+- `Read Local Version`：HCI/LMP 0x0c（5.3），厂商 0x001d（Qualcomm），LMP subversion 0x4b61。
+- `Read BD_ADDR` 为全 0：芯片里还没有地址，Android 由系统属性写入；接入 bluetoothd 前需要处理（不在日志里记录真实地址）。
+- 全程未开扫描/射频，结束拉低 BT_EN。
+
+下一步：切换到 3 Mbps、设置 BD 地址；然后调研 iPadOS bluetoothd 能否接受一个已初始化的 H4 控制器（BlueTool 的厂商初始化是最大未知）。

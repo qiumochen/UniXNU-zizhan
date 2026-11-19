@@ -11,6 +11,9 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
+#include <IOKit/IODeviceTreeSupport.h>
+#include <libkern/c++/OSData.h>
+#include <string.h>
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 
@@ -72,6 +75,8 @@ static bool tx_bytes(Window &se, const uint8_t *data, unsigned len) {
   for (unsigned i = 0; i < len; i += 4) {
     uint32_t w = 0;
     for (unsigned b = 0; b < 4 && i + b < len; ++b) w |= uint32_t(data[i + b]) << (8 * b);
+    const uint64_t room = now_us() + 100000;
+    while ((se.read(0x800) & 0x0fffffffu) >= 14 && now_us() < room) IODelay(20);   // TX_FIFO_STATUS word count
     se.write(0x700, w);                           // TX_FIFOn
   }
   const uint64_t end = now_us() + 200000;
@@ -87,6 +92,84 @@ static void log_bytes(const char *what, const uint8_t *b, unsigned n) {
   for (unsigned i = 0; i < n && i < 40; ++i) k += snprintf(text + k, sizeof text - k, "%02x ", b[i]);
   IOLog("ZIZHAN_BT_PROBE: %s bytes=%u [%s]\n", what, n, text);
 }
+
+/* HCI event reader: keeps bytes across calls, returns one complete H4 event (0x04 code len payload). */
+static uint8_t ev_buf[512];
+static unsigned ev_have;
+static unsigned read_event(Window &se, uint8_t *out, unsigned cap, unsigned wait_ms) {
+  const uint64_t end = now_us() + uint64_t(wait_ms) * 1000;
+  for (;;) {
+    while (ev_have && ev_buf[0] != 0x04) { memmove(ev_buf, ev_buf + 1, --ev_have); }
+    if (ev_have >= 3 && ev_have >= 3u + ev_buf[2]) {
+      const unsigned n = 3u + ev_buf[2];
+      const unsigned copy = n < cap ? n : cap;
+      memcpy(out, ev_buf, copy);
+      memmove(ev_buf, ev_buf + n, ev_have - n); ev_have -= n;
+      return copy;
+    }
+    if (now_us() >= end) return 0;
+    const unsigned got = rx_bytes(se, ev_buf + ev_have, sizeof ev_buf - ev_have, 5);
+    ev_have += got;
+    if (ev_have == sizeof ev_buf) ev_have = 0;     // garbage overflow: drop
+  }
+}
+static bool chosen_blob(const char *name, uint8_t *&data, unsigned &size) {
+  auto chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+  auto blob = chosen ? OSDynamicCast(OSData, chosen->getProperty(name)) : nullptr;
+  data = nullptr; size = 0;
+  if (blob && blob->getLength() && blob->getLength() <= 256 * 1024) {
+    size = blob->getLength();
+    data = static_cast<uint8_t *>(IOMalloc(size));
+    if (data) memcpy(data, blob->getBytesNoCopy(), size); else size = 0;
+  }
+  if (chosen) chosen->release();
+  return data != nullptr;
+}
+/* Linux btqca qca_download_firmware(): 243-byte EDL_PATCH_TLV_REQ_CMD segments; with download mode 0
+ * every segment is acked by Command Complete (rtype 0x1e on WCN3991+), otherwise only the last one. */
+static bool download(Window &se, const char *what, const uint8_t *data, unsigned size, unsigned mode) {
+  uint8_t cmd[4 + 2 + 243], ev[64];
+  unsigned segments = 0, acks = 0;
+  for (unsigned at = 0; at < size;) {
+    const unsigned seg = size - at < 243 ? size - at : 243;
+    const bool last = at + seg >= size || seg < 243;
+    cmd[0] = 0x01; cmd[1] = 0x00; cmd[2] = 0xfc; cmd[3] = uint8_t(seg + 2); cmd[4] = 0x1e; cmd[5] = uint8_t(seg);
+    memcpy(cmd + 6, data + at, seg);
+    if (!tx_bytes(se, cmd, 6 + seg)) { IOLog("ZIZHAN_BT_PROBE: %s tx-timeout segment=%u\n", what, segments); return false; }
+    ++segments; at += seg;
+    if (mode == 0 || last) {
+      const unsigned n = read_event(se, ev, sizeof ev, 2000);
+      if (n < 7 || ev[1] != 0x0e || ev[4] != 0x00 || ev[5] != 0xfc || ev[6] != 0x00) {
+        IOLog("ZIZHAN_BT_PROBE: %s bad-ack segment=%u bytes=%u code=%x status=%x\n", what, segments, n, n > 1 ? ev[1] : 0, n > 6 ? ev[6] : 0xff);
+        log_bytes("bad-ack", ev, n);
+        return false;
+      }
+      ++acks;
+    }
+  }
+  IOLog("ZIZHAN_BT_PROBE: %s done bytes=%u segments=%u acks=%u mode=%u\n", what, size, segments, acks, mode);
+  return true;
+}
+/* NVM for this polled host: 115200 (QCA_BAUDRATE_115200 = 0), no in-band sleep, no deep sleep. */
+static void nvm_fixup(uint8_t *d, unsigned size) {
+  if (size < 4) return;
+  unsigned off = 0;
+  uint32_t tl = d[0] | d[1] << 8 | d[2] << 16 | uint32_t(d[3]) << 24;
+  if ((tl & 0xff) == 4 && size >= 8) { off = 4; tl = d[4] | d[5] << 8 | d[6] << 16 | uint32_t(d[7]) << 24; }
+  if ((tl & 0xff) != 2) { IOLog("ZIZHAN_BT_PROBE: nvm type=%u untouched\n", tl & 0xff); return; }
+  const unsigned length = tl >> 8, base = off + 4;
+  unsigned idx = 0, hci = 0, sleep = 0;
+  while (idx + 12 <= length && base + idx + 12 <= size) {
+    uint8_t *t = d + base + idx;
+    const unsigned id = t[0] | t[1] << 8, len = t[2] | t[3] << 8;
+    if (base + idx + 12 + len > size) break;
+    if (id == 17 && len >= 3) { t[12] &= ~0x80u; t[13] = 0; ++hci; }
+    if (id == 27 && len >= 1) { t[12] &= ~0x01u; ++sleep; }
+    idx += 12 + len;
+  }
+  IOLog("ZIZHAN_BT_PROBE: nvm fixup hci=%u deep_sleep=%u baud=115200 ibs=0\n", hci, sleep);
+}
+
 static void active() {
   Window vote, wrap, wrapper, se, pins[6];
   static const uint16_t pin_no[6] = {76, 77, 78, 79, 81, 82};
@@ -192,13 +275,50 @@ static void active() {
   n = rx_bytes(se, rx, sizeof rx, 500);
   IOLog("ZIZHAN_BT_PROBE: getver sent=%u\n", sent ? 1u : 0u);
   log_bytes("getver-event", rx, n);
+  ev_have = 0;
+  static const uint8_t bid_cmd[] = {0x01, 0x00, 0xfc, 0x01, 0x23};   // EDL_GET_BID_REQ_CMD
+  sent = tx_bytes(se, bid_cmd, sizeof bid_cmd);
+  n = read_event(se, rx, sizeof rx, 500);
+  log_bytes("board-id-event", rx, n);
+  // Command Complete: 04 0e len 01 00 fc | cresp 00 | rtype 23 | data[0] data[1] data[2]; bid = data[1]<<8 | data[2]
+  if (n >= 11 && rx[1] == 0x0e && rx[6] == 0x00 && rx[7] == 0x23)
+    IOLog("ZIZHAN_BT_PROBE: board_id=%x\n", (unsigned(rx[9]) << 8) | rx[10]);
+  if (probe_mode == 3) {
+    uint8_t *patch = nullptr, *nvm = nullptr;
+    unsigned patch_size = 0, nvm_size = 0;
+    const bool have = chosen_blob("zizhan-bt-rampatch", patch, patch_size) && chosen_blob("zizhan-bt-nvm", nvm, nvm_size);
+    IOLog("ZIZHAN_BT_PROBE: firmware chosen=%u rampatch=%u nvm=%u\n", have ? 1u : 0u, patch_size, nvm_size);
+    if (have && patch_size > 16) {
+      const unsigned mode = patch[14];              // tlv_type_patch.download_mode
+      bool ok = download(se, "rampatch", patch, patch_size, mode);
+      IOSleep(10);
+      if (ok) { nvm_fixup(nvm, nvm_size); ok = download(se, "nvm", nvm, nvm_size, 0); }
+      if (ok) {
+        sent = tx_bytes(se, reset, sizeof reset);
+        n = read_event(se, rx, sizeof rx, 1000);
+        log_bytes("post-patch-reset", rx, n);
+        static const uint8_t bdaddr[] = {0x01, 0x09, 0x10, 0x00};   // HCI Read BD_ADDR
+        sent = tx_bytes(se, bdaddr, sizeof bdaddr);
+        n = read_event(se, rx, sizeof rx, 500);
+        if (n >= 13 && rx[1] == 0x0e && rx[6] == 0x00)
+          IOLog("ZIZHAN_BT_PROBE: bd_addr status=0 oui=%02x:%02x:%02x (rest not logged)\n", rx[12], rx[11], rx[10]);
+        else log_bytes("bd-addr-event", rx, n);
+        static const uint8_t local_ver[] = {0x01, 0x01, 0x10, 0x00};  // HCI Read Local Version
+        sent = tx_bytes(se, local_ver, sizeof local_ver);
+        n = read_event(se, rx, sizeof rx, 500);
+        log_bytes("local-version-event", rx, n);
+      }
+    }
+    if (patch) IOFree(patch, patch_size);
+    if (nvm) IOFree(nvm, nvm_size);
+  }
   // 6. Cleanup: stop RX, BT_EN low, pins back. Clock votes stay (never removed, as SE15).
   se.write(0x634, 4u);                            // S_CMD_CTRL cancel
   IOSleep(5);
   pins[4].write(4, saved_io[4] & ~2u);
   pins[4].write(0, saved_cfg[4]);
   for (unsigned i = 0; i < 4; ++i) pins[i].write(0, saved_cfg[i]);
-  IOLog("ZIZHAN_BT_PROBE: DONE active bt_en_restored=%u firmware_download=0 radio=0\n", (pins[4].read(4) >> 1) & 1 ? 0u : 1u);
+  IOLog("ZIZHAN_BT_PROBE: DONE active bt_en_restored=%u firmware_download=%u radio=0\n", (pins[4].read(4) >> 1) & 1 ? 0u : 1u, probe_mode == 3 ? 1u : 0u);
 }
 
 static void finish() {
@@ -209,7 +329,7 @@ static void finish() {
 static void worker(void *, wait_result_t) {
   for (unsigned i = 0; i < 1200 && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE); ++i) IOSleep(100);
   IOSleep(30000);  // after Wi-Fi bring-up, which shares the chip's power
-  if (probe_mode == 2) { active(); finish(); return; }
+  if (probe_mode >= 2) { active(); finish(); return; }
   {
     Window vote, wrap, core;
     if (!vote.open(0x162000) || !wrap.open(0x12e000) || !core.open(0x133000)) {
@@ -254,7 +374,7 @@ static void worker(void *, wait_result_t) {
 static void start() {
   uint32_t mode = 0;
   if (!PE_parse_boot_argn("zizhan_bt_probe", &mode, sizeof mode) || !mode) return;
-  if (mode != 1 && mode != 2) {
+  if (mode < 1 || mode > 3) {
     IOLog("ZIZHAN_BT_PROBE: SKIP unsupported-mode=%u\n", mode);
     return;
   }

@@ -115,3 +115,18 @@
 - 首帧细分（SpringBoard 提交 → backboardd 首次 GPU 提交）需要给 CoreAnimation 加测量点，留到下一轮；内屏触控轮询改短需要真实手指才能测出效果，也留待在场。
 - 蓝牙按“连续多轮无进展就换方向”的规则挂起，下一步见上文。
 
+## 11-20 第二轮无人值守（用户确认的 8 小时计划；全部静音，未写分区）
+
+### 蓝牙：iOS 18 的串口蓝牙是内核控制，不是 tty（仍挂起）
+
+- 反汇编 BlueTool 的 `device -D`：`socket(PF_SYSTEM, SOCK_STREAM, SYSPROTO_CONTROL)` → `CTLIOCGINFO("com.apple.uart.bluetooth")` → `connect`，数据走 read/write，波特率等用 `getsockopt/setsockopt(SYSPROTO_CONTROL, TIOCGETA/TIOCSETA)` 传 termios。
+- 补丁 0023 注册了同名内核控制（非特权、流式），收发接到现有 UART 桥；UART 桥加了厂商命令垫片：主机发来的 OGF 0x3f（博通私有）命令直接回 Command Complete，不转给 QCA6490。
+- bt-9：内核控制注册成功（id 11），但 BlueTool 从未连接；它自己“判断传输方式”的日志也没出现，说明 `device` 命令根本没执行。BlueTool 在开机约 3 s 就运行，而内核控制要等固件下载完（约 3 min）才注册，很可能第一次失败后整段脚本就中止了。
+- 已连续 5 轮无实质进展，按规则挂起。下一步：①开机即注册内核控制，固件就绪前先缓存；②给 BlueTool 的 socket/open/connect 加内核跟踪，看清它真正走的路径。
+
+### 蜂窝：基带稳定运行 8 分钟，不再需要放宽抢占阈值
+
+- modem-6 的 panic 根因：基带加载 108 MB 正好撞上第一帧上屏时的控制台释放（`beginGraphics` 一次性清屏，关抢占），清屏超过 6 ms 阈值。基带改为等到第一帧上屏后再过 10 s 才启动。
+- modem-16（play69，正常内核参数，观察 480 s）：基带一直 ready，GLINK/rmtfs 稳定，最后 stop-ack 0.5 s，CPU 最高 55 °C，无 panic。日志环形缓冲在长时间运行中覆盖了开头，DMS/UIM 应答见 modem-13。
+- 新增 `zizhan_modem_watch_s`（30–1800 s）；监督脚本要求 `pong_autoreset < 900`。
+

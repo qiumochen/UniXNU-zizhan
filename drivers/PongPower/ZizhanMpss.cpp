@@ -26,6 +26,7 @@
 extern "C" int pong_ufs_read_lun(uint8_t lun, uint64_t byte, void *dst, uint32_t length);
 extern "C" bool pong_ufs_ready(void);
 extern "C" bool pong_rpmh_vote(uint32_t address, uint32_t value);
+extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 
 namespace {
 constexpr uint64_t kSmem = 0x80900000, kSmemSize = 0x200000, kMutex = 0x1f40000 + 3 * 0x1000, kIpcc = 0x0ed18000, kAoss = 0xc300000;
@@ -132,8 +133,9 @@ void qrtrSendHello() {
 constexpr uint32_t kPdmPort = 0x4000, kModemNode = 0, kDmsClientPort = 0x4002;
 /* Stage 1d: two read-only QMI DMS requests (service 2): Get Revision (0x23) and Get Operating Mode (0x2d). Nothing that
  * changes state (no Set Operating Mode, no NAS/WDS), and no identifiers (no IMEI/serial request). */
-uint32_t gDmsPort;
+uint32_t gDmsPort, gUimPort;
 bool gDmsAsked;
+constexpr uint32_t kUimClientPort = 0x4003;
 
 unsigned gPdmRequests;
 void qrtrSend(uint32_t type, uint32_t dstNode, uint32_t dstPort, uint32_t srcPort, const uint8_t *payload, uint32_t len) {
@@ -212,6 +214,16 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
   const uint32_t type = h[1];
   if (type == 1) {   // DATA (QMI)
     if (h[7] == kPdmPort && h[5] <= n - 32) { pdmHandle(h[2], h[3], d + 32, h[5]); return; }
+    if (h[7] == kUimClientPort && h[5] >= 7 && h[5] <= n - 32) {   // UIM Get Card Status: result + first bytes only
+      const uint8_t *q = d + 32;
+      uint16_t result = 0xffff, error = 0xffff;
+      if (h[5] >= 14 && q[7] == 0x02) { memcpy(&result, q + 10, 2); memcpy(&error, q + 12, 2); }
+      char hex[3 * 24 + 1] = "";
+      unsigned k = 0;
+      for (unsigned i = 14; i < h[5] && i < 14 + 24; ++i) k += snprintf(hex + k, sizeof hex - k, "%02x ", q[i]);
+      IOLog("ZIZHAN_MPSS: uim card status result=%u error=%u tlv-bytes=[%s]\n", result, error, hex);
+      return;
+    }
     if (h[7] == kDmsClientPort && h[5] >= 7 && h[5] <= n - 32) {
       const uint8_t *q = d + 32;
       const uint16_t msg = uint16_t(q[3] | (q[4] << 8)), len = uint16_t(q[5] | (q[6] << 8));
@@ -243,6 +255,7 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
   uint32_t c[5] = {};
   memcpy(c, d + 32, n - 32 < sizeof c ? n - 32 : sizeof c);
   if (type == 4 && c[0] == 4 && c[1] == 2 && c[3] == kModemNode) gDmsPort = c[4];
+  if (type == 4 && c[0] == 4 && c[1] == 11 && c[3] == kModemNode) gUimPort = c[4];
   if (gCtlLogged++ < 60)
     IOLog("ZIZHAN_MPSS: qrtr ctrl type=%u from %u:%x cmd=%u service=%u instance=%x node=%u port=%x\n", type, h[2], h[3], c[0], c[1],
           c[2], c[3], c[4]);
@@ -345,8 +358,15 @@ bool qmpLoadState(bool on) {
 void worker(void *, wait_result_t) {
   thread_set_thread_name(current_thread(), "zizhan_mpss");
   for (unsigned i = 0; i < 1200 && !pong_ufs_ready(); ++i) IOSleep(100);
-  IOSleep(20000);   // after SpringBoard and Wi-Fi settle
+  // modem-6: loading 108 MB while the first desktop frame releases the boot console (a one-time full-panel clear with
+  // preemption off) pushed that clear past the 6 ms preemption limit and panicked. Start only after the first frame.
+  for (unsigned i = 0; i < 1200 && !(&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)); ++i) IOSleep(100);
+  IOLog("ZIZHAN_MPSS: desktop frame seen=%u, starting in 10 s\n", (&pong_zc_flipped_tag && pong_zc_flipped_tag) ? 1u : 0u);
+  IOSleep(10000);
   uint64_t t0 = nowMs(), nextReport = 0;
+  uint32_t watchS = 60;
+  (void)PE_parse_boot_argn("zizhan_modem_watch_s", &watchS, sizeof watchS);
+  if (watchS < 30 || watchS > 1800) watchS = 60;
   int stage = 0, rc = 0;
   IOBufferMemoryDescriptor *meta = nullptr;
   bool pasStarted = false;
@@ -470,13 +490,18 @@ void worker(void *, wait_result_t) {
   }
   t0 = nowMs();
   nextReport = t0 + 10000;
-  for (uint64_t now = t0; now - t0 < 60000; now = nowMs()) {   // up to 10 s for ready, then watch to 60 s
+  for (uint64_t now = t0; now - t0 < uint64_t(watchS) * 1000; now = nowMs()) {   // up to 10 s for ready, then watch
     if (gDmsPort && !gDmsAsked && gIpcrtr && gIpcrtr->up && now - t0 > 20000) {
       gDmsAsked = true;
       static const uint8_t rev[7] = {0, 1, 0, 0x23, 0, 0, 0}, opmode[7] = {0, 2, 0, 0x2d, 0, 0, 0};
       qrtrSend(1, kModemNode, gDmsPort, kDmsClientPort, rev, sizeof rev);
       qrtrSend(1, kModemNode, gDmsPort, kDmsClientPort, opmode, sizeof opmode);
       IOLog("ZIZHAN_MPSS: dms requests sent to 0:%x (get revision, get operating mode)\n", gDmsPort);
+      if (gUimPort) {
+        static const uint8_t card[7] = {0, 3, 0, 0x2f, 0, 0, 0};
+        qrtrSend(1, kModemNode, gUimPort, kUimClientPort, card, sizeof card);
+        IOLog("ZIZHAN_MPSS: uim get card status sent to 0:%x\n", gUimPort);
+      }
     }
     if (now >= nextReport) {
       nextReport += 10000;

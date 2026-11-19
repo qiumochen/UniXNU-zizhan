@@ -51,3 +51,7 @@
 - outer-2（`zizhan_outer_probe=2`）：打开 INTF_2 的 MISR（0xae37180/184），写入前签名恒为 0x0c3d2ca8；往 0xb8fc9900 写彩条后签名变为 0xbe2dceaf 并保持不变，INTF_2 帧计数 3706 且在走。**外屏显示我们写进去的画面，已经闭环确认，无需任何 DSI/MDP 初始化。**
 
 下一步：合盖时把内容画到外屏（先做状态/时钟画面，再研究让 iPadOS 把外屏当成一块屏）；外屏触控（SE19）单独做。
+
+## 外屏触控（资料，未操作）
+
+ST FTS（`st,spi-sec`），SPI 在 **QUP wrap2 S4 / SE19（0x890000）**，IRQ GPIO119，复位 GPIO52，坐标 10800×25200；AVDD = WL2866D avdd2，VDD = WL2866D dvdd2（同一颗 WL2866D 已经在给外屏面板供电）。现有内屏触控驱动（`bsd/dev/pong_fts.c`，XNU patch 0002）把 QUP0 SE4 的 GCC 偏移和 RPMh 的 ldoc7/ldoc2 写死，接外屏需要先把这几项参数化（GCC wrap2 S4 时钟、WL2866D I2C 供电），再在 ADT 里加第二个触控节点。

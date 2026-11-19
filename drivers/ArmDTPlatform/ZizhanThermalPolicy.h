@@ -50,6 +50,10 @@ typedef struct {
  uint8_t cpu_max_level, gpu_max_level, release_samples;
  int32_t cpu_clamp_mc, cpu_release_mc;
  int32_t gpu_clamp_mc, gpu_release_mc;
+ /* Stepped clamp: each hot sample adds clamp_step levels (0 = jump straight to the lowest level, the v1 behaviour);
+  * a reading at clamp + critical_margin_mc or above always jumps to the lowest level. */
+ uint8_t clamp_step;
+ int32_t critical_margin_mc;
 } ZizhanThermalConfig;
 
 typedef struct {
@@ -67,6 +71,7 @@ static inline ZizhanThermalConfig zizhan_thermal_default_config(void){
  c.release_samples=(uint8_t)ZizhanThermalReleaseSamples;
  c.cpu_clamp_mc=110000; c.cpu_release_mc=105000;
  c.gpu_clamp_mc=95000; c.gpu_release_mc=90000;
+ c.clamp_step=0; c.critical_margin_mc=5000;
  return c;
 }
 
@@ -247,6 +252,12 @@ static inline void zizhan_thermal_scan(const ZizhanThermalSample *x,unsigned n,
  }
 }
 
+static inline uint8_t zizhan_thermal_raise(uint8_t level,uint8_t max,uint8_t step,int critical){
+ if(!step||critical)return max;
+ const unsigned next=(unsigned)level+step;
+ return (uint8_t)(next>max?max:next);
+}
+
 /* Apply one sample. Returns ZizhanThermalFresh/Stale/Invalid and updates the
  * caps in *s. Invalid config leaves the state untouched. */
 static inline int zizhan_thermal_step(const ZizhanThermalConfig *c,ZizhanThermalState *s,
@@ -259,13 +270,15 @@ static inline int zizhan_thermal_step(const ZizhanThermalConfig *c,ZizhanThermal
  zizhan_thermal_scan(x,(unsigned)ZizhanThermalCpuSensors,1,&cpu_max,&cpu_all,&cpu_any);
  zizhan_thermal_scan(x,(unsigned)ZizhanThermalGpuSensors,0,&gpu_max,&gpu_all,&gpu_any);
  if(cpu_any&&cpu_max>=c->cpu_clamp_mc){
-  s->cpu_level=c->cpu_max_level;s->cpu_fresh=0;
+  s->cpu_level=zizhan_thermal_raise(s->cpu_level,c->cpu_max_level,c->clamp_step,cpu_max>=c->cpu_clamp_mc+c->critical_margin_mc);
+  s->cpu_fresh=0;
  }else if(clock==ZizhanThermalClockFresh&&s->cpu_level>0&&banks_ok&&cpu_all&&
           cpu_max<c->cpu_release_mc){
   if(++s->cpu_fresh>=need){if(s->cpu_level)--s->cpu_level;s->cpu_fresh=0;}
  }else s->cpu_fresh=0;
  if(gpu_any&&gpu_max>=c->gpu_clamp_mc){
-  s->gpu_level=c->gpu_max_level;s->gpu_fresh=0;
+  s->gpu_level=zizhan_thermal_raise(s->gpu_level,c->gpu_max_level,c->clamp_step,gpu_max>=c->gpu_clamp_mc+c->critical_margin_mc);
+  s->gpu_fresh=0;
  }else if(clock==ZizhanThermalClockFresh&&s->gpu_level>0&&banks_ok&&gpu_all&&
           gpu_max<c->gpu_release_mc){
   if(++s->gpu_fresh>=need){if(s->gpu_level)--s->gpu_level;s->gpu_fresh=0;}

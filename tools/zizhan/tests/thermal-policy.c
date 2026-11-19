@@ -86,6 +86,24 @@ static void test_cpu_hot(void){
  CHECK(st.cpu_fresh==0,"cpu hot clears streak");
 }
 
+static void test_stepped_clamp(void){
+ ZizhanThermalConfig c=zizhan_thermal_default_config();c.clamp_step=4;
+ ZizhanThermalState st;zizhan_thermal_init(&st);
+ ZizhanThermalSample s=base(1000000);cpu(&s,4,110000);
+ CHECK(step_cfg(&c,&st,1000000,&s)==ZizhanThermalFresh&&st.cpu_level==4,"stepped clamp first hot +4");
+ s=base(2000000);cpu(&s,4,111000);
+ CHECK(step_cfg(&c,&st,2000000,&s)==ZizhanThermalFresh&&st.cpu_level==8,"stepped clamp second hot +4");
+ s=base(3000000);cpu(&s,4,107000);
+ CHECK(step_cfg(&c,&st,3000000,&s)==ZizhanThermalFresh&&st.cpu_level==8,"stepped clamp holds in hysteresis band");
+ s=base(4000000);cpu(&s,4,115000);
+ CHECK(step_cfg(&c,&st,4000000,&s)==ZizhanThermalFresh&&st.cpu_level==ZizhanThermalCpuLevels,"critical jumps to lowest");
+ ZizhanThermalState g;zizhan_thermal_init(&g);
+ for(unsigned i=0;i<10;++i){s=base(1000000ull*(i+1));gpu(&s,1,96000);step_cfg(&c,&g,1000000ull*(i+1),&s);}
+ CHECK(g.gpu_level==ZizhanThermalGpuLevels,"stepped gpu saturates at lowest");
+ c.clamp_step=0;ZizhanThermalState o;zizhan_thermal_init(&o);s=base(1000000);cpu(&s,4,110000);step_cfg(&c,&o,1000000,&s);
+ CHECK(o.cpu_level==ZizhanThermalCpuLevels,"step 0 keeps v1 jump");
+}
+
 static void test_cpu_hysteresis(void){
  ZizhanThermalState st;zizhan_thermal_init(&st);
  ZizhanThermalSample s=base(1000000);cpu(&s,4,110000);step(&st,1000000,&s);
@@ -480,6 +498,7 @@ int main(void){
  test_out_of_order_and_wrap();
  test_invalid_hot_does_not_clamp();
  test_both_release();
+ test_stepped_clamp();
  test_invalid_config();
  test_first_sample_hot();
  test_gpu_missing();

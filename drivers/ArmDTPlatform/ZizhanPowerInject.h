@@ -9,6 +9,7 @@
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
+#include "ZizhanDailyProfile.h"
 #include "ZizhanPowerInjectPlan.h"
 
 extern "C" struct vnode *rootvnode;
@@ -87,7 +88,7 @@ static void start(void) {
   uint32_t inject = 0, observe = 0;
   if (!PE_parse_boot_argn("zizhan_power_inject", &inject, sizeof inject) || !inject)
     return;
-  (void)PE_parse_boot_argn("zizhan_power_observe", &observe, sizeof observe);
+  (void)zizhan_daily::arg("zizhan_power_observe", &observe, zizhan_daily::kPowerObserve);
   const int mode = zizhan_power_inject_mode(inject, observe);
   if (mode == ZizhanPowerInjectSkipObserve) {
     IOLog("ZIZHAN_POWER_INJECT: SKIP observe-required inject=%u observe=%u\n",

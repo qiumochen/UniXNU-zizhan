@@ -1,5 +1,5 @@
---- a/bsd/conf/files	2026-11-19 20:06:30
-+++ b/bsd/conf/files	2026-11-19 20:06:30
+--- a/bsd/conf/files	2026-11-19 23:13:12
++++ b/bsd/conf/files	2026-11-19 23:13:12
 @@ -403,6 +403,7 @@
  bsd/dev/pong_input.c			standard
  bsd/dev/pong_goodix.c			standard
@@ -9,8 +9,8 @@
  bsd/kern/kern_control.c			optional networking bound-checks
  bsd/kern/kern_exec.c			standard
 --- a/bsd/dev/zizhan_bt_uart.c	1970-01-01 08:00:00
-+++ b/bsd/dev/zizhan_bt_uart.c	2026-11-19 20:06:30
-@@ -0,0 +1,237 @@
++++ b/bsd/dev/zizhan_bt_uart.c	2026-11-19 23:13:12
+@@ -0,0 +1,288 @@
 +/*
 + * zizhan Bluetooth H4 UART: the BSD tty half of /dev/cu.bluetooth (and the alias /dev/uart.bluetooth) for bluetoothd.
 + *
@@ -194,6 +194,49 @@
 +	.d_reserved_1 = eno_getc, .d_reserved_2 = eno_putc, .d_type = D_TTY,
 +};
 +
++/*
++ * /dev/btreset, /dev/btwake, /dev/btpoweroff: the J171 kext AppleBluetooth (class BTReset) asserts the GPIO while the node is
++ * open and deasserts it on close; BlueTool opens them around its controller bring-up. Here the kernel owns the QCA6490
++ * power and firmware, so the nodes only record the request (zizhan_bt_ctrl_state(): bit 0 reset, 1 wake, 2 power-off held).
++ */
++static uint32_t bt_ctrl_bits, bt_ctrl_opens[3];
++static int bt_ctrl_major = -1;
++static const char *const bt_ctrl_names[3] = { "btreset", "btwake", "btpoweroff" };
++uint32_t zizhan_bt_ctrl_state(void);
++uint32_t
++zizhan_bt_ctrl_state(void)
++{
++	return __atomic_load_n(&bt_ctrl_bits, __ATOMIC_ACQUIRE);
++}
++static int
++bt_ctrl_open(dev_t dev, __unused int flag, __unused int devtype, __unused proc_t p)
++{
++	const int m = minor(dev);
++	if (m < 0 || m > 2) {
++		return ENXIO;
++	}
++	__atomic_fetch_or(&bt_ctrl_bits, 1u << m, __ATOMIC_ACQ_REL);
++	bt_ctrl_opens[m]++;
++	printf("ZIZHAN_BT_CTRL: open %s (assert) count=%u\n", bt_ctrl_names[m], bt_ctrl_opens[m]);
++	return 0;
++}
++static int
++bt_ctrl_close(dev_t dev, __unused int flag, __unused int mode, __unused proc_t p)
++{
++	const int m = minor(dev);
++	if (m < 0 || m > 2) {
++		return ENXIO;
++	}
++	__atomic_fetch_and(&bt_ctrl_bits, ~(1u << m), __ATOMIC_ACQ_REL);
++	printf("ZIZHAN_BT_CTRL: close %s (deassert)\n", bt_ctrl_names[m]);
++	return 0;
++}
++static const struct cdevsw bt_ctrl_cdevsw = {
++	.d_open = bt_ctrl_open, .d_close = bt_ctrl_close, .d_read = eno_rdwrt, .d_write = eno_rdwrt,
++	.d_ioctl = eno_ioctl, .d_stop = eno_stop, .d_reset = eno_reset, .d_ttys = NULL, .d_select = eno_select,
++	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_reserved_1 = eno_getc, .d_reserved_2 = eno_putc, .d_type = 0,
++};
++
 +int
 +zizhan_bt_uart_attach(zizhan_bt_tx_t tx)
 +{
@@ -217,7 +260,15 @@
 +	bt_tty = tp;
 +	void *cu = devfs_make_node(makedev(bt_major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "cu.bluetooth");
 +	void *uart = devfs_make_node(makedev(bt_major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "uart.bluetooth");
-+	printf("ZIZHAN_BT_UART: attached major=%d cu=%u uart=%u\n", bt_major, cu ? 1u : 0u, uart ? 1u : 0u);
++	bt_ctrl_major = cdevsw_add(-24, &bt_ctrl_cdevsw);
++	unsigned ctrl = 0;
++	for (int m = 0; bt_ctrl_major >= 0 && m < 3; ++m) {
++		if (devfs_make_node(makedev(bt_ctrl_major, m), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "%s", bt_ctrl_names[m])) {
++			ctrl++;
++		}
++	}
++	printf("ZIZHAN_BT_UART: attached major=%d cu=%u uart=%u ctrl_major=%d ctrl_nodes=%u\n", bt_major, cu ? 1u : 0u, uart ? 1u : 0u,
++	    bt_ctrl_major, ctrl);
 +	return (cu || uart) ? 0 : ENXIO;
 +}
 +

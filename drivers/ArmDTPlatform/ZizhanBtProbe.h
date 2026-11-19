@@ -214,6 +214,7 @@ static void serve(Window &se) {
   }
   uint8_t in[256], out[64];
   uint64_t rx_total = 0, tx_total = 0, last_log = now_us();
+  unsigned tx_logged = 0, rx_logged = 0;
   for (;;) {
     uint32_t tail = __atomic_load_n(&tx_tail, __ATOMIC_RELAXED);
     const uint32_t head = __atomic_load_n(&tx_head, __ATOMIC_ACQUIRE);
@@ -222,6 +223,10 @@ static void serve(Window &se) {
       while (n < sizeof out && tail != head) {
         out[n++] = tx_ring[tail % sizeof tx_ring];
         ++tail;
+      }
+      if (tx_logged < 24) {   // what the host stack sends first (HCI commands from BlueTool/bluetoothd)
+        ++tx_logged;
+        log_bytes("bridge-tx", out, n < 32 ? n : 32);
       }
       if (!tx_bytes(se, out, n)) {
         IOLog("ZIZHAN_BT_PROBE: bridge tx-timeout bytes=%u\n", n);
@@ -234,6 +239,7 @@ static void serve(Window &se) {
     }
     const unsigned got = rx_bytes(se, in, sizeof in, 2);
     if (got) {
+      if (rx_logged < 24) { ++rx_logged; log_bytes("bridge-rx", in, got < 32 ? got : 32); }
       zizhan_bt_uart_input(in, got);
       rx_total += got;
     }

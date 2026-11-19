@@ -3,6 +3,7 @@
 #include <libkern/OSKextLib.h>
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
+#include "ZizhanCamProbe.h"
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" {
 void pong_rpmh_init(void);
@@ -21,6 +22,7 @@ void pong_power_start_optional(void) {
  zizhan_se15_probe();
  zizhan_se15_prepare_probe();
  zizhan_cmd_db_probe();
+ zizhan_cam_probe::start();   // default off; 1 read-only inventory, 2 attended front-camera chip id
  unsigned enabled=0;PE_parse_boot_argn("pong_adsp",&enabled,sizeof(enabled));
  if(!enabled)return;
  sheng_adsp_probe();   // pong_adsp=1: map and survey only (zizhan bring-up); 2: boot the DSP and its clients

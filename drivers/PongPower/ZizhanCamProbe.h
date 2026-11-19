@@ -36,8 +36,8 @@ static void pause_us(void *, unsigned us) { IODelay(us); }
 static const uint16_t kPins[] = {11, 53, 103, 128, 206, 207};
 
 static void inventory() {
-  Win vote, wrap, camcc;
-  if (!vote.open(0x162000, 0x1000, false) || !wrap.open(0x127000, 0x1000, false) || !camcc.open(0xade0000, 0x20000, false)) {
+  Win vote, wrap, camcc, cam_ahb;
+  if (!vote.open(0x162000, 0x1000, false) || !wrap.open(0x127000, 0x1000, false) || !cam_ahb.open(0x136000, 0x1000, false)) {
     IOLog("ZIZHAN_CAM_PROBE: FAIL map\n");
     return;
   }
@@ -50,6 +50,10 @@ static void inventory() {
     IOLog("ZIZHAN_CAM_PROBE: pin=%u cfg=%x func=%u oe=%u pull=%u egpio=%u/%u in=%u out=%u\n", pin, cfg, (cfg >> 2) & 15,
           (cfg >> 9) & 1, cfg & 3, (cfg >> 11) & 1, (cfg >> 12) & 1, io & 1, (io >> 1) & 1);
   }
+  // CAM_CC is only touched when GCC_CAMERA_AHB_CLK (0x136004, Linux keeps it always on) runs.
+  const uint32_t ahb = cam_ahb.r(0x004), xo = cam_ahb.r(0x020);
+  IOLog("ZIZHAN_CAM_PROBE: gcc camera_ahb=%x camera_xo=%x\n", ahb, xo);
+  if ((ahb & 0x80000000u) || !camcc.open(0xade0000, 0x20000, false)) { IOLog("ZIZHAN_CAM_PROBE: DONE inventory camcc_read=0 writes=0\n"); return; }
   IOLog("ZIZHAN_CAM_PROBE: camcc titan_gdscr=%x mclk3_rcg=%x/%x mclk3_cbcr=%x cci1_rcg=%x cci1_cbcr=%x cpas_ahb=%x\n",
         camcc.r(0x131dc), camcc.r(0x15054), camcc.r(0x15058), camcc.r(0x1506c), camcc.r(0x13148), camcc.r(0x13160), camcc.r(0x13164));
   IOLog("ZIZHAN_CAM_PROBE: DONE inventory writes=0\n");
@@ -89,6 +93,12 @@ static void attended() {
   uint32_t saved[6] = {};
   if (!vote.open(0x162000, 0x1000, true) || !wrap.open(0x127000, 0x1000, true) || !se.open(0x994000, 0x4000, true) ||
       !camcc.open(0xade0000, 0x20000, true) || !cci.open(0xac16000, 0x1000, true)) { IOLog("ZIZHAN_CAM_PROBE: FAIL map\n"); return; }
+  {
+    Win cam_ahb;
+    if (!cam_ahb.open(0x136000, 0x1000, true)) { IOLog("ZIZHAN_CAM_PROBE: FAIL map\n"); return; }
+    if (cam_ahb.r(0x004) & 0x80000000u) { cam_ahb.w(0x004, cam_ahb.r(0x004) | 1u); IODelay(100); }
+    if (cam_ahb.r(0x004) & 0x80000000u) { IOLog("ZIZHAN_CAM_PROBE: FAIL camera-ahb-off\n"); return; }
+  }
   for (unsigned i = 0; i < 6; ++i) {
     if (!pin[i].open(0xf100000ull + uint64_t(kPins[i]) * 0x1000, 0x1000, true)) { IOLog("ZIZHAN_CAM_PROBE: FAIL pin-map\n"); return; }
     saved[i] = pin[i].r(0);
@@ -134,6 +144,13 @@ static void attended() {
       if (!crc) { pin[2].w(0, (saved[2] & ~0x3ffu) | (1u << 2)); IOSleep(1); gpio_out(pin[3], 1); IOSleep(10); }
       int ccirc = -1;
       if (!crc) ccirc = zizhan_cci_clocks_on(&cc);
+      // CCI1 master 0 pads: GPIO114/115, function cci_i2c (1), pull-up, 2 mA (DT cci2_active).
+      Win cpin[2]; uint32_t csaved[2] = {0, 0}; bool cpins = false;
+      if (!crc && !ccirc && cpin[0].open(0xf100000ull + 114ull * 0x1000, 0x1000, true) && cpin[1].open(0xf100000ull + 115ull * 0x1000, 0x1000, true)) {
+        for (unsigned i = 0; i < 2; ++i) { csaved[i] = cpin[i].r(0); cpin[i].w(0, (csaved[i] & ~0x3ffu) | (1u << 2) | 3u); }
+        cpins = true;
+      }
+      if (!crc && !ccirc && !cpins) ccirc = -2;
       if (!crc && !ccirc) {
         ZizhanCciOps co = {&cci, win_read, win_write, pause_us, 2000};
         ccirc = zizhan_cci_reset_init(&co);
@@ -145,10 +162,16 @@ static void attended() {
           if (!r) break;
         }
       }
-      IOLog("ZIZHAN_CAM_PROBE: mclk rc=%d stage=%u cci_clocks=%d\n", crc, stage, ccirc);
+      if (cpins) for (unsigned i = 0; i < 2; ++i) cpin[i].w(0, csaved[i]);
+      IOLog("ZIZHAN_CAM_PROBE: mclk rc=%d stage=%u cci_clocks=%d cci_pins=%u\n", crc, stage, ccirc, cpins ? 1u : 0u);
       gpio_out(pin[3], 0);
       pin[2].w(0, saved[2]);
-      if (!crc) (void)zizhan_camcc_mclk3_off(&cc);
+      if (!crc) {   // CCI branches off before the GDSC collapses (as Linux), then MCLK3 and the GDSC
+        static const uint32_t cci_branches[] = {0x13160u, 0x131acu, 0x13164u};
+        for (uint32_t br : cci_branches) (void)zizhan_camcc_branch(&cc, br, 0);
+        camcc.w(0x131f0u, camcc.r(0x131f0u) & ~1u);
+        (void)zizhan_camcc_mclk3_off(&cc);
+      }
       (void)zizhan_pm8008_rails_off(&pm, zizhan_pm8008_front_rails, 2);
       gpio_out(pin[1], 0);
     }

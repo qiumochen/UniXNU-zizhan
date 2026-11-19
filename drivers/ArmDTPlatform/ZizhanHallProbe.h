@@ -26,6 +26,7 @@ struct Inputs {
   uint32_t active_low;
   uint32_t debounce_ms;
   uint32_t follow;
+  uint32_t simulate_s;
 };
 
 static bool read32(IORegistryEntry *entry, const char *key, uint32_t &value) {
@@ -125,8 +126,14 @@ static void worker(void *arg, wait_result_t) {
     const uint32_t raw = *input;
     __asm__ volatile("dmb oshld" ::: "memory");
     const bool high = (raw & 1u) != 0;
-    const bool asserted = config.active_low ? !high : high;
+    bool asserted = config.active_low ? !high : high;
     const uint64_t when = nowNs();
+    // zizhan_hall_simulate=<s> (follow mode self-test): closed from s to s+15 seconds after the observer started.
+    if (config.simulate_s) {
+      const uint64_t t = (when - begin) / 1000000000ULL;
+      const bool sim = t >= config.simulate_s && t < config.simulate_s + 15;
+      asserted = sim;
+    }
     const auto update = sample(state, asserted, when, debounce_ns);
     ++reads;
     if (update.event == Event::Baseline || update.event == Event::Transition) {
@@ -187,6 +194,11 @@ static void start(IOService *platform) {
     return;
   }
   config.follow = mode == 2 ? 1u : 0u;
+  uint32_t simulate = 0;
+  if (config.follow && PE_parse_boot_argn("zizhan_hall_simulate", &simulate, sizeof(simulate)) && simulate >= 30 && simulate <= 600) {
+    config.simulate_s = simulate;
+    IOLog("ZIZHAN_HALL: SIMULATE closed at %u s for 15 s (sensor ignored)\n", simulate);
+  }
   *copy = config;
   if (kernel_thread_start(worker, copy, &thread) != KERN_SUCCESS) {
     IODelete(copy, Inputs, 1);

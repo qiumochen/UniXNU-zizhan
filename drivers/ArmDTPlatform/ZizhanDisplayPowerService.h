@@ -6,6 +6,28 @@
 #include <pexpert/pexpert.h>
 #include <stdint.h>
 #include "ZizhanDisplayPowerExecutor.h"
+#include <IOKit/IODeviceMemory.h>
+#include <IOKit/IOMemoryDescriptor.h>
+
+/* Panel-side evidence for S3: the inner panel's TE line (GPIO86, mdp_vsync) pulses every frame while the panel
+ * scans out and stops in sleep. Read-only sampling of the pad level for ~100 ms after each transition. */
+static unsigned zizhan_te_edges(unsigned pin, unsigned *samples_out) {
+  auto memory = IODeviceMemory::withRange(0xf100000ull + uint64_t(pin) * 0x1000, 0x1000);
+  auto map = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache | kIOMapReadOnly) : nullptr;
+  if (memory) memory->release();
+  if (!map) { if (samples_out) *samples_out = 0; return ~0u; }
+  auto io = reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress() + 4);
+  unsigned edges = 0, samples = 0, last = *io & 1u;
+  for (; samples < 5000; ++samples) {
+    const unsigned v = *io & 1u;
+    if (v != last) ++edges;
+    last = v;
+    IODelay(20);
+  }
+  map->release();
+  if (samples_out) *samples_out = samples;
+  return edges;
+}
 
 /* Implemented in PongAdrenoScanout.cpp and PongBacklight.cpp. Weak so a
  * reduced kernel without the display/backlight components still links. */
@@ -95,6 +117,14 @@ extern "C" int zizhan_display_power_request(uint32_t count,const uint64_t *in,
           report.target == ZizhanDisplayTargetOff ? "off" : "on",
           (unsigned)report.sequence, (unsigned)runtime.saved_level,
           (unsigned)runtime.state.state);
+    uint32_t te_check = 0;
+    if (PE_parse_boot_argn("zizhan_display_te", &te_check, sizeof te_check) && te_check == 1) {
+    if (report.target == ZizhanDisplayTargetOn) IOSleep(150);   // let the panel resume scanning out
+    unsigned te_samples = 0;
+    const unsigned te = zizhan_te_edges(86, &te_samples);
+    IOLog("ZIZHAN_DISPLAY_POWER: te target=%s gpio86_edges=%u samples=%u\n",
+          report.target == ZizhanDisplayTargetOff ? "off" : "on", te, te_samples);
+    }
   } else if (result == ZizhanDisplayPowerNoOp) {
     IOLog("ZIZHAN_DISPLAY_POWER: NOOP target=%s state=%u\n",
           report.target == ZizhanDisplayTargetOff ? "off" : "on",

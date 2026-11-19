@@ -15,6 +15,7 @@
 #include <pexpert/pexpert.h>
 #include <string.h>
 #include "ZizhanFat.h"
+#include "QcomGlink.h"
 #include "QcomMdt.h"
 #include "QcomQmp.h"
 #include "QcomRpmh.h"
@@ -62,6 +63,10 @@ QcomMdtImage gMdt;
 uint8_t gHeaders[16384];
 uint8_t gDb[kCmdDbSize];
 
+/* Stage 1c-a: GLINK on the MPSS SMEM edge (descriptor 478, our FIFO 479, the modem's 480; IPCC client 2 signal 0) and the
+ * "IPCRTR" channel; QRTR v1 with APPS as node 1. We answer HELLO and log every control packet (the modem's NEW_SERVER list,
+ * its lookups); no QMI is sent. Polled from the worker, no IRQ. */
+
 uint64_t nowMs() { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000000; }
 void ring(uint32_t client, uint32_t signal) { wr(gIpcc, QCOM_IPCC_SEND, qcom_ipcc_id(client, signal)); }
 void kickAop(void *) { ring(QCOM_IPCC_CLIENT_AOP, QCOM_IPCC_SIGNAL_GLINK_QMP); }
@@ -95,6 +100,156 @@ void cleanToPoc(const void *start, size_t length) {
   for (uintptr_t a = reinterpret_cast<uintptr_t>(start) & ~(line - 1); a < reinterpret_cast<uintptr_t>(start) + length; a += line)
     __asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
   __asm__ volatile("dsb sy" ::: "memory");
+}
+
+#include "ZizhanRmtfs.h"
+
+void ring(uint32_t client, uint32_t signal);
+bool lockSmem();
+void unlockSmem();
+volatile uint8_t *smemItem(uint16_t id, uint32_t *size);
+QcomGlink gGlink;
+QcomGlinkChannel *gIpcrtr;
+uint8_t gIpcrtrStore[4 * 0x4400];
+bool gGlinkOn, gHelloSent;
+unsigned gCtlLogged, gDataSeen;
+constexpr uint32_t kQrtrNodeApps = 1, kQrtrPortCtrl = 0xfffffffeu;
+void kickGlink(void *) { ring(kIpccMpss, QCOM_IPCC_SIGNAL_GLINK_QMP); }
+void qrtrSendHello() {
+  uint32_t pkt[8 + 5] = {};
+  pkt[0] = 1; pkt[1] = 2;                     // version 1, HELLO
+  pkt[2] = kQrtrNodeApps; pkt[3] = kQrtrPortCtrl;
+  pkt[5] = 20;                                // payload: le32 cmd + 16 bytes
+  pkt[6] = 0xffffffffu; pkt[7] = kQrtrPortCtrl;
+  pkt[8] = 2;                                 // cmd HELLO
+  const int rc = qcom_glink_send(&gGlink, gIpcrtr, pkt, sizeof pkt);
+  IOLog("ZIZHAN_MPSS: qrtr hello sent rc=%d\n", rc);
+  gHelloSent = rc == QcomGlinkOk;
+}
+/* Stage 1c-b: a minimal pd-mapper. The modem asks the APPS SERVREG locator (QMI service 0x40, QRTR instance 0x101) which
+ * protection domains provide a service; Linux answers from the firmware's *.jsn. modemr.jsn: domain msm/modem/root_pd,
+ * instance 180, services tms/servreg and gps/gps_service. Anything else gets an empty list. */
+constexpr uint32_t kPdmPort = 0x4000, kModemNode = 0;
+unsigned gPdmRequests;
+void qrtrSend(uint32_t type, uint32_t dstNode, uint32_t dstPort, uint32_t srcPort, const uint8_t *payload, uint32_t len) {
+  static uint8_t pkt[32 + 512];
+  if (len > 512) return;
+  uint32_t h[8] = {1, type, kQrtrNodeApps, srcPort, 0, len, dstNode, dstPort};
+  memcpy(pkt, h, 32);
+  memcpy(pkt + 32, payload, len);
+  const uint32_t total = (32 + len + 3) & ~3u;
+  for (uint32_t i = 32 + len; i < total; ++i) pkt[i] = 0;
+  const int rc = qcom_glink_send(&gGlink, gIpcrtr, pkt, total);
+  if (rc != QcomGlinkOk) IOLog("ZIZHAN_MPSS: qrtr send type=%u rc=%d\n", type, rc);
+}
+void pdmAnnounce() {
+  uint32_t c[5] = {4, 0x40, 0x101, kQrtrNodeApps, kPdmPort};   // NEW_SERVER service 0x40 version 1 instance 1
+  qrtrSend(4, kModemNode, kQrtrPortCtrl, kQrtrPortCtrl, reinterpret_cast<const uint8_t *>(c), sizeof c);
+  IOLog("ZIZHAN_MPSS: pd-mapper announced service=0x40 instance=0x101 port=0x%x\n", kPdmPort);
+  if (zizhan_rmtfs::gReady) {
+    uint32_t r[5] = {4, 14, 0x1, kQrtrNodeApps, zizhan_rmtfs::kPort};   // NEW_SERVER rmtfs (service 14, version 1, instance 0 -> 0x1)
+    qrtrSend(4, kModemNode, kQrtrPortCtrl, kQrtrPortCtrl, reinterpret_cast<const uint8_t *>(r), sizeof r);
+    IOLog("ZIZHAN_MPSS: rmtfs announced service=14 instance=0x1 port=0x%x assigned=%u\n", zizhan_rmtfs::kPort,
+          zizhan_rmtfs::gAssigned ? 1u : 0u);
+  }
+}
+void pdmHandle(uint32_t srcNode, uint32_t srcPort, const uint8_t *q, uint32_t n) {
+  if (n < 7) return;
+  const uint8_t type = q[0];
+  const uint16_t txn = uint16_t(q[1] | (q[2] << 8)), msg = uint16_t(q[3] | (q[4] << 8)), len = uint16_t(q[5] | (q[6] << 8));
+  if (type != 0 || 7u + len > n) return;
+  char name[80] = "";
+  for (uint32_t at = 7; at + 3 <= 7u + len;) {
+    const uint8_t t = q[at];
+    const uint16_t l = uint16_t(q[at + 1] | (q[at + 2] << 8));
+    if (at + 3 + l > 7u + len) break;
+    if (t == 0x01) { const uint32_t k = l < sizeof name - 1 ? l : sizeof name - 1; memcpy(name, q + at + 3, k); name[k] = 0; }
+    at += 3 + l;
+  }
+  ++gPdmRequests;
+  uint8_t r[256];
+  uint32_t o = 7;
+  auto tlv = [&](uint8_t t, const uint8_t *v, uint16_t l) { r[o] = t; r[o + 1] = uint8_t(l); r[o + 2] = uint8_t(l >> 8); memcpy(r + o + 3, v, l); o += 3 + l; };
+  const uint8_t ok[4] = {0, 0, 0, 0};
+  tlv(0x02, ok, 4);
+  const bool ours = msg == 0x21 && (!strcmp(name, "tms/servreg") || !strcmp(name, "gps/gps_service"));
+  const uint16_t total = ours ? 1 : 0, rev = 1;
+  if (msg == 0x21) {
+    tlv(0x10, reinterpret_cast<const uint8_t *>(&total), 2);
+    tlv(0x11, reinterpret_cast<const uint8_t *>(&rev), 2);
+    uint8_t list[96];
+    uint32_t L = 0;
+    list[L++] = uint8_t(total);
+    if (ours) {
+      static const char dom[] = "msm/modem/root_pd";
+      list[L++] = uint8_t(sizeof dom - 1);
+      memcpy(list + L, dom, sizeof dom - 1); L += sizeof dom - 1;
+      const uint32_t inst = 180, data = 0;
+      memcpy(list + L, &inst, 4); L += 4;
+      list[L++] = 0;                       // service_data_valid
+      memcpy(list + L, &data, 4); L += 4;
+    }
+    tlv(0x12, list, uint16_t(L));
+  }
+  r[0] = 2; r[1] = uint8_t(txn); r[2] = uint8_t(txn >> 8); r[3] = uint8_t(msg); r[4] = uint8_t(msg >> 8);
+  r[5] = uint8_t(o - 7); r[6] = uint8_t((o - 7) >> 8);
+  qrtrSend(1, srcNode, srcPort, kPdmPort, r, o);
+  IOLog("ZIZHAN_MPSS: pd-mapper req msg=0x%x txn=%u name='%s' from %u:%x -> %u domain(s)\n", msg, txn, name, srcNode, srcPort, total);
+}
+void ipcrtrState(void *, QcomGlinkChannel *, int up) {
+  IOLog("ZIZHAN_MPSS: glink IPCRTR %s\n", up ? "up" : "down");
+}
+void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
+  if (n < 32) { IOLog("ZIZHAN_MPSS: qrtr short packet %u\n", n); return; }
+  uint32_t h[8];
+  memcpy(h, d, sizeof h);
+  if (h[0] != 1) { IOLog("ZIZHAN_MPSS: qrtr version %u len=%u\n", h[0], n); return; }
+  const uint32_t type = h[1];
+  if (type == 1) {   // DATA (QMI)
+    if (h[7] == kPdmPort && h[5] <= n - 32) { pdmHandle(h[2], h[3], d + 32, h[5]); return; }
+    if (h[7] == zizhan_rmtfs::kPort && h[5] <= n - 32) {
+      static uint8_t reply[128];
+      const uint32_t len = zizhan_rmtfs::handle(d + 32, h[5], reply);
+      if (len) qrtrSend(1, h[2], h[3], zizhan_rmtfs::kPort, reply, len);
+      return;
+    }
+    if (gDataSeen++ < 8) IOLog("ZIZHAN_MPSS: qrtr data %u:%x -> %u:%x size=%u\n", h[2], h[3], h[6], h[7], h[5]);
+    return;
+  }
+  uint32_t c[5] = {};
+  memcpy(c, d + 32, n - 32 < sizeof c ? n - 32 : sizeof c);
+  if (gCtlLogged++ < 60)
+    IOLog("ZIZHAN_MPSS: qrtr ctrl type=%u from %u:%x cmd=%u service=%u instance=%x node=%u port=%x\n", type, h[2], h[3], c[0], c[1],
+          c[2], c[3], c[4]);
+  if (type == 2 && !gHelloSent) { qrtrSendHello(); if (gHelloSent) pdmAnnounce(); }
+}
+void glinkStart() {
+  int rc = QcomSmemOk;
+  if (lockSmem()) {
+    rc = qcom_smem_alloc(&gSmem, &gPart, 478, 32);
+    if (rc == QcomSmemOk || rc == QcomSmemExists) rc = qcom_smem_alloc(&gSmem, &gPart, 479, 0x4000);
+    unlockSmem();
+  } else rc = -103;
+  uint32_t dsz = 0, tsz = 0;
+  volatile uint8_t *desc = smemItem(478, &dsz), *txf = smemItem(479, &tsz);
+  if ((rc != QcomSmemOk && rc != QcomSmemExists) || !desc || !txf) { IOLog("ZIZHAN_MPSS: glink smem rc=%d\n", rc); return; }
+  volatile uint32_t *dw = reinterpret_cast<volatile uint32_t *>(desc);
+  const QcomGlinkFifo tx = {&dw[1], &dw[0], txf, tsz}, rx = {&dw[3], &dw[2], nullptr, 0};
+  qcom_glink_init(&gGlink, tx, rx, kickGlink, nullptr);
+  static const QcomGlinkClient client = {ipcrtrState, ipcrtrReceive};
+  gIpcrtr = qcom_glink_channel(&gGlink, "IPCRTR", 0x4400, 4, gIpcrtrStore, &client, nullptr, 1);
+  gGlinkOn = gIpcrtr != nullptr;
+  IOLog("ZIZHAN_MPSS: glink start desc=%u tx=%u channel=%u\n", dsz, tsz, gGlinkOn ? 1u : 0u);
+  zizhan_rmtfs::setup();
+}
+void glinkService() {
+  if (!gGlinkOn) return;
+  if (!gGlink.rx.data) {
+    uint32_t size = 0;
+    if (volatile uint8_t *rx = smemItem(480, &size)) qcom_glink_set_rx(&gGlink, rx, size);
+  }
+  const int r = qcom_glink_poll(&gGlink);
+  if (r < 0 && !gGlink.broken) IOLog("ZIZHAN_MPSS: glink poll %d\n", r);
 }
 
 bool lockSmem() {
@@ -166,7 +321,7 @@ void worker(void *, wait_result_t) {
   thread_set_thread_name(current_thread(), "zizhan_mpss");
   for (unsigned i = 0; i < 1200 && !pong_ufs_ready(); ++i) IOSleep(100);
   IOSleep(20000);   // after SpringBoard and Wi-Fi settle
-  uint64_t t0 = nowMs();
+  uint64_t t0 = nowMs(), nextReport = 0;
   int stage = 0, rc = 0;
   IOBufferMemoryDescriptor *meta = nullptr;
   bool pasStarted = false;
@@ -289,13 +444,27 @@ void worker(void *, wait_result_t) {
     STEP(26, scmOk(r));
   }
   t0 = nowMs();
-  for (uint64_t now = t0; now - t0 < 40000; now = nowMs()) {   // up to 10 s for ready, then watch to 40 s
+  nextReport = t0 + 10000;
+  for (uint64_t now = t0; now - t0 < 60000; now = nowMs()) {   // up to 10 s for ready, then watch to 60 s
+    if (now >= nextReport) {
+      nextReport += 10000;
+      IOLog("ZIZHAN_MPSS: glink version=%u rx=%u tx=%u unknown_opens=%u '%s' ipcrtr_up=%u ctrl=%u data=%u pdm=%u rmtfs req=%u rd=%u/%llu wr=%u/%llu fail=%u\n", gGlink.version_agreed,
+            gGlink.rx_messages, gGlink.tx_messages, gGlink.unknown_opens, gGlink.unknown_names, (gIpcrtr && gIpcrtr->up) ? 1u : 0u,
+            gCtlLogged, gDataSeen, gPdmRequests, zizhan_rmtfs::gReqs, zizhan_rmtfs::gReads, zizhan_rmtfs::gReadBytes,
+            zizhan_rmtfs::gWrites, zizhan_rmtfs::gWriteBytes, zizhan_rmtfs::gFailures);
+      uint32_t d = 0, tx = 0, rx = 0;
+      const bool hd = smemItem(478, &d) != nullptr, ht = smemItem(479, &tx) != nullptr, hr = smemItem(480, &rx) != nullptr;
+      IOLog("ZIZHAN_MPSS: t=%llums bits=%x glink_desc=%u/%u fifo_tx=%u/%u fifo_rx=%u/%u\n", now - t0, lastBits, hd ? 1u : 0u, d,
+            ht ? 1u : 0u, tx, hr ? 1u : 0u, rx);
+    }
     if (slaveBits(&bits) && bits != lastBits) {
       IOLog("ZIZHAN_MPSS: t=%llums slave-kernel=%x ready=%u fatal=%u handover=%u\n", now - t0, bits, (bits & kReady) ? 1u : 0u,
             (bits & kFatal) ? 1u : 0u, (bits & kHandover) ? 1u : 0u);
       lastBits = bits;
       if (bits & kFatal) { readCrash(); break; }
+      if ((bits & kReady) && !gGlinkOn) glinkStart();
     }
+    glinkService();
     if (now - t0 > 10000 && !(lastBits != 0xffffffffu && (lastBits & kReady))) break;
     IOSleep(10);
   }

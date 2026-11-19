@@ -197,6 +197,49 @@ static int uart_tx_hook(const uint8_t *b, uint32_t n) {
   __atomic_store_n(&tx_head, head, __ATOMIC_RELEASE);
   return int(i);
 }
+/* Host-to-controller H4 framing for the vendor-command shim. BlueTool's builtin scripts are written for Broadcom
+ * controllers and send Broadcom vendor commands (OGF 0x3f: firmware download, baud change, ...). The QCA6490 already has
+ * its firmware from the kernel and would reject them, so vendor commands are answered here with Command Complete
+ * (status 0) and never reach the chip; standard HCI commands and ACL/SCO data pass through unchanged. */
+struct H4Tx { uint8_t pkt[1100]; unsigned have, need; unsigned logged, shimmed, forwarded; };
+static H4Tx h4;
+static void h4_complete(Window &se) {
+  const uint8_t type = h4.pkt[0];
+  if (type == 0x01 && h4.have >= 4) {
+    const uint16_t op = uint16_t(h4.pkt[1] | (h4.pkt[2] << 8));
+    const bool vendor = (op >> 10) == 0x3f;
+    if (h4.logged < 48) {
+      ++h4.logged;
+      IOLog("ZIZHAN_BT_HCI: cmd op=%04x ogf=%x ocf=%03x plen=%u %s\n", op, op >> 10, op & 0x3ff, h4.pkt[3], vendor ? "shimmed" : "forwarded");
+    }
+    if (vendor) {
+      const uint8_t cc[7] = {0x04, 0x0e, 0x04, 0x01, uint8_t(op), uint8_t(op >> 8), 0x00};
+      zizhan_bt_uart_input(cc, sizeof cc);
+      ++h4.shimmed;
+      return;
+    }
+  }
+  ++h4.forwarded;
+  if (!tx_bytes(se, h4.pkt, h4.have)) IOLog("ZIZHAN_BT_PROBE: bridge tx-timeout bytes=%u\n", h4.have);
+}
+static void h4_feed(Window &se, const uint8_t *b, unsigned n) {
+  for (unsigned i = 0; i < n; ++i) {
+    if (h4.have == 0) {
+      const uint8_t t = b[i];
+      if (t != 0x01 && t != 0x02 && t != 0x03) { const uint8_t one = t; tx_bytes(se, &one, 1); continue; }   // unknown: pass through
+      h4.need = t == 0x02 ? 5 : 4;   // type + header
+    }
+    h4.pkt[h4.have++] = b[i];
+    if (h4.have == h4.need) {
+      const uint8_t t = h4.pkt[0];
+      const unsigned body = t == 0x01 ? h4.pkt[3] : t == 0x02 ? unsigned(h4.pkt[3] | (h4.pkt[4] << 8)) : h4.pkt[3];
+      if (h4.need == (t == 0x02 ? 5u : 4u)) h4.need += body;
+      if (h4.need > sizeof h4.pkt) { tx_bytes(se, h4.pkt, h4.have); h4.have = 0; continue; }   // oversize: give up framing
+    }
+    if (h4.have == h4.need && h4.have >= (h4.pkt[0] == 0x02 ? 5u : 4u)) { h4_complete(se); h4.have = 0; }
+  }
+}
+
 /* Never returns while the bridge runs: TX ring -> GENI TX FIFO, GENI RX FIFO -> tty, polled every 2 ms. */
 static void serve(Window &se) {
   if (!zizhan_bt_uart_attach || !zizhan_bt_uart_input) {
@@ -224,13 +267,11 @@ static void serve(Window &se) {
         out[n++] = tx_ring[tail % sizeof tx_ring];
         ++tail;
       }
-      if (tx_logged < 24) {   // what the host stack sends first (HCI commands from BlueTool/bluetoothd)
+      if (tx_logged < 8) {   // the first raw host bytes
         ++tx_logged;
         log_bytes("bridge-tx", out, n < 32 ? n : 32);
       }
-      if (!tx_bytes(se, out, n)) {
-        IOLog("ZIZHAN_BT_PROBE: bridge tx-timeout bytes=%u\n", n);
-      }
+      h4_feed(se, out, n);
       tx_total += n;
       __atomic_store_n(&tx_tail, tail, __ATOMIC_RELEASE);
     }
@@ -245,7 +286,7 @@ static void serve(Window &se) {
     }
     if (now_us() - last_log >= 60000000ull) {
       last_log = now_us();
-      IOLog("ZIZHAN_BT_PROBE: bridge rx=%llu tx=%llu\n", rx_total, tx_total);
+      IOLog("ZIZHAN_BT_PROBE: bridge rx=%llu tx=%llu hci forwarded=%u shimmed=%u\n", rx_total, tx_total, h4.forwarded, h4.shimmed);
     }
   }
 }

@@ -1,5 +1,5 @@
---- a/bsd/conf/files	2026-11-19 23:13:12
-+++ b/bsd/conf/files	2026-11-19 23:13:12
+--- a/bsd/conf/files	2026-11-20 01:14:09
++++ b/bsd/conf/files	2026-11-20 01:14:09
 @@ -403,6 +403,7 @@
  bsd/dev/pong_input.c			standard
  bsd/dev/pong_goodix.c			standard
@@ -9,8 +9,8 @@
  bsd/kern/kern_control.c			optional networking bound-checks
  bsd/kern/kern_exec.c			standard
 --- a/bsd/dev/zizhan_bt_uart.c	1970-01-01 08:00:00
-+++ b/bsd/dev/zizhan_bt_uart.c	2026-11-19 23:13:12
-@@ -0,0 +1,288 @@
++++ b/bsd/dev/zizhan_bt_uart.c	2026-11-20 01:14:09
+@@ -0,0 +1,392 @@
 +/*
 + * zizhan Bluetooth H4 UART: the BSD tty half of /dev/cu.bluetooth (and the alias /dev/uart.bluetooth) for bluetoothd.
 + *
@@ -32,6 +32,9 @@
 +#include <sys/kernel.h>
 +#include <miscfs/devfs/devfs.h>
 +#include <kern/locks.h>
++#include <sys/kern_control.h>
++#include <sys/kpi_mbuf.h>
++#include <sys/termios.h>
 +
 +typedef int (*zizhan_bt_tx_t)(const uint8_t *buf, uint32_t len);
 +int zizhan_bt_uart_attach(zizhan_bt_tx_t tx);
@@ -237,6 +240,99 @@
 +	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_reserved_1 = eno_getc, .d_reserved_2 = eno_putc, .d_type = 0,
 +};
 +
++/*
++ * iOS 18 BlueTool opens the default device ("device -D") as the kernel control "com.apple.uart.bluetooth" (PF_SYSTEM,
++ * SOCK_STREAM): read/write carry the H4 bytes and getsockopt/setsockopt(SYSPROTO_CONTROL, TIOCGETA/TIOCSETA) carry a
++ * struct termios. This control feeds the same transmit hook as the tty and receives the same controller bytes.
++ */
++extern void IOSleep(unsigned int milliseconds);
++static kern_ctl_ref bt_kctl_ref;
++static uint32_t bt_kctl_unit, bt_kctl_connected, bt_kctl_tx, bt_kctl_rx, bt_kctl_rx_dropped;
++static struct termios bt_kctl_termios;
++
++static errno_t
++bt_kctl_connect(kern_ctl_ref ref, struct sockaddr_ctl *sac, void **unitinfo)
++{
++	(void)ref;
++	*unitinfo = NULL;
++	bt_kctl_unit = sac->sc_unit;
++	__atomic_store_n(&bt_kctl_connected, 1, __ATOMIC_RELEASE);
++	printf("ZIZHAN_BT_KCTL: connect unit=%u\n", sac->sc_unit);
++	return 0;
++}
++static errno_t
++bt_kctl_disconnect(kern_ctl_ref ref, u_int32_t unit, void *unitinfo)
++{
++	(void)ref; (void)unitinfo;
++	__atomic_store_n(&bt_kctl_connected, 0, __ATOMIC_RELEASE);
++	printf("ZIZHAN_BT_KCTL: disconnect unit=%u tx=%u rx=%u rx_dropped=%u\n", unit, bt_kctl_tx, bt_kctl_rx, bt_kctl_rx_dropped);
++	return 0;
++}
++static errno_t
++bt_kctl_send(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, mbuf_t m, int flags)
++{
++	(void)ref; (void)unit; (void)unitinfo; (void)flags;
++	for (mbuf_t n = m; n != NULL; n = mbuf_next(n)) {
++		const uint8_t *data = mbuf_data(n);
++		size_t len = mbuf_len(n), done = 0;
++		for (unsigned tries = 0; done < len && bt_tx && tries < 200; ) {
++			int room = bt_tx(NULL, 0);
++			if (room <= 0) { IOSleep(1); tries++; continue; }
++			size_t chunk = len - done < (size_t)room ? len - done : (size_t)room;
++			int sent = bt_tx(data + done, (uint32_t)chunk);
++			if (sent > 0) { done += (size_t)sent; bt_kctl_tx += (uint32_t)sent; }
++		}
++	}
++	mbuf_freem(m);
++	return 0;
++}
++static errno_t
++bt_kctl_setopt(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, int opt, void *data, size_t len)
++{
++	(void)ref; (void)unit; (void)unitinfo;
++	if ((unsigned)opt == (unsigned)TIOCSETA && data && len >= sizeof(struct termios)) {
++		memcpy(&bt_kctl_termios, data, sizeof(struct termios));
++		printf("ZIZHAN_BT_KCTL: TIOCSETA speed=%lu cflag=%lx (UART stays at its fixed speed)\n",
++		    (unsigned long)bt_kctl_termios.c_ospeed, (unsigned long)bt_kctl_termios.c_cflag);
++		return 0;
++	}
++	printf("ZIZHAN_BT_KCTL: setopt opt=%x len=%zu (accepted)\n", (unsigned)opt, len);
++	return 0;
++}
++static errno_t
++bt_kctl_getopt(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, int opt, void *data, size_t *len)
++{
++	(void)ref; (void)unit; (void)unitinfo;
++	if ((unsigned)opt == (unsigned)TIOCGETA && len) {
++		if (data && *len >= sizeof(struct termios)) memcpy(data, &bt_kctl_termios, sizeof(struct termios));
++		*len = sizeof(struct termios);
++		return 0;
++	}
++	printf("ZIZHAN_BT_KCTL: getopt opt=%x (empty)\n", (unsigned)opt);
++	if (len) *len = 0;
++	return 0;
++}
++static void
++bt_kctl_register(void)
++{
++	struct kern_ctl_reg reg;
++	bzero(&reg, sizeof(reg));
++	strlcpy(reg.ctl_name, "com.apple.uart.bluetooth", sizeof(reg.ctl_name));
++	reg.ctl_flags = CTL_FLAG_REG_SOCK_STREAM;   /* not privileged: BlueTool runs as mobile */
++	reg.ctl_sendsize = 64 * 1024;
++	reg.ctl_recvsize = 64 * 1024;
++	reg.ctl_connect = bt_kctl_connect;
++	reg.ctl_disconnect = bt_kctl_disconnect;
++	reg.ctl_send = bt_kctl_send;
++	reg.ctl_setopt = bt_kctl_setopt;
++	reg.ctl_getopt = bt_kctl_getopt;
++	bzero(&bt_kctl_termios, sizeof(bt_kctl_termios));
++	bt_kctl_termios.c_cflag = CS8 | CREAD | CLOCAL;
++	bt_kctl_termios.c_ispeed = bt_kctl_termios.c_ospeed = 115200;
++	const errno_t err = ctl_register(&reg, &bt_kctl_ref);
++	printf("ZIZHAN_BT_KCTL: register com.apple.uart.bluetooth err=%d id=%u\n", err, reg.ctl_id);
++}
++
 +int
 +zizhan_bt_uart_attach(zizhan_bt_tx_t tx)
 +{
@@ -260,6 +356,7 @@
 +	bt_tty = tp;
 +	void *cu = devfs_make_node(makedev(bt_major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "cu.bluetooth");
 +	void *uart = devfs_make_node(makedev(bt_major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "uart.bluetooth");
++	bt_kctl_register();
 +	bt_ctrl_major = cdevsw_add(-24, &bt_ctrl_cdevsw);
 +	unsigned ctrl = 0;
 +	for (int m = 0; bt_ctrl_major >= 0 && m < 3; ++m) {
@@ -279,6 +376,13 @@
 +	struct tty *tp = bt_tty;
 +	if (tp == NULL) {
 +		return;
++	}
++	if (buf != NULL && __atomic_load_n(&bt_kctl_connected, __ATOMIC_ACQUIRE) && bt_kctl_ref != NULL) {
++		if (ctl_enqueuedata(bt_kctl_ref, bt_kctl_unit, (void *)(uintptr_t)buf, len, 0) == 0) {
++			bt_kctl_rx += len;
++		} else {
++			bt_kctl_rx_dropped += len;
++		}
 +	}
 +	tty_lock(tp);
 +	if (buf == NULL) {              /* kick: the transmit ring has room again */

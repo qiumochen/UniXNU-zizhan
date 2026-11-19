@@ -6,6 +6,8 @@
 #include <kern/thread.h>
 #include <string.h>
 #include "ZizhanPowerQuery.h"
+#include <pexpert/pexpert.h>
+#include "ZizhanDailyProfile.h"
 #include "ZizhanPowerRequest.h"
 
 extern "C" struct vnode *rootvnode;
@@ -117,7 +119,7 @@ extern "C" void zizhan_display_power_observe(uint32_t count,const uint64_t *valu
     uint32_t enabled = __atomic_load_n(&mode,__ATOMIC_RELAXED);
     if (enabled == 2) {
         enabled = 0;
-        PE_parse_boot_argn("zizhan_power_observe",&enabled,sizeof(enabled));
+        (void)zizhan_daily::arg("zizhan_power_observe",&enabled,zizhan_daily::kPowerObserve);
         __atomic_store_n(&mode,enabled==1?1u:0u,__ATOMIC_RELAXED);
     }
     if (enabled != 1) return;

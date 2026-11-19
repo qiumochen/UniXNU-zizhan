@@ -44,6 +44,7 @@ static bool PE_parse_boot_argn(const char *name,void *out,size_t n) {
     assert(!strcmp(name,"zizhan_power_observe") && n==4);
     memcpy(out,&mode,4);return true;
 }
+#include "ZizhanDailyProfile.h"
 static void IOLog(const char *format,...) {
     char line[1024];va_list args;va_start(args,format);
     vsnprintf(line,sizeof line,format,args);va_end(args);logs.emplace_back(line);

@@ -12,6 +12,7 @@
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
+#include "ZizhanDailyProfile.h"
 #include <string.h>
 #include "ZizhanThermalPolicy.h"
 #include "ZizhanTsensCore.h"
@@ -313,7 +314,13 @@ static void worker(void *, wait_result_t) {
 static void start(IOService *provider) {
   uint32_t mode_arg = 0, test_cpu = 0, test_gpu = 0, load_s = 0;
   (void)PE_parse_boot_argn("zizhan_thermal_load", &load_s, sizeof load_s);
-  if (!PE_parse_boot_argn("zizhan_thermal", &mode_arg, sizeof mode_arg) || !mode_arg) {
+  const bool explicit_mode = PE_parse_boot_argn("zizhan_thermal", &mode_arg, sizeof mode_arg);
+  if (!explicit_mode && zizhan_daily::profile_on()) {
+    mode_arg = zizhan_daily::kThermalMode;
+    test_cpu = zizhan_daily::kThermalCpuC;
+    test_gpu = zizhan_daily::kThermalGpuC;
+  }
+  if (!mode_arg) {
     if (load_s)
       IOLog("ZIZHAN_THERMAL: SKIP load-without-mode load=%u\n", (unsigned)load_s);
     return;

@@ -49,8 +49,10 @@ static void IOLog(const char *fmt,...) {
 }
 static uint64_t mach_absolute_time() { return clock_ns; }
 static void absolutetime_to_nanoseconds(uint64_t ticks, uint64_t *out) { *out=ticks; }
+static unsigned sleep_limit;
 static void IOSleep(unsigned ms) {
   clock_ns+=uint64_t(ms)*1000000;++sleeps;
+  if(sleep_limit&&sleeps>=sleep_limit){throw 18;}  /* follow mode never ends on its own */
   if(transitions) registers[1]=(clock_ns>=30000000000ULL && clock_ns<70000000000ULL)?0:1;
 }
 static int current_thread(){return 1;}
@@ -60,10 +62,14 @@ static void thread_deallocate(int) {}
 static int kernel_thread_start(void(*worker)(void*,int),void *arg,int *thread) {
   ++started;*thread=1;worker(arg,0);return 0;
 }
+static bool daily_absent;
 static bool PE_parse_boot_argn(const char *key, void *out, size_t n) {
+  if(!strcmp(key,"zizhan_hall_simulate")){return false;}
+  if(!strcmp(key,"zizhan_daily")){unsigned off=0;assert(n==sizeof off);if(daily_absent){return false;}memcpy(out,&off,n);return true;}
   assert(!strcmp(key,"zizhan_hall_observe") && n==sizeof(mode));
   memcpy(out,&mode,n);return mode!=0;
 }
+#include "ZizhanDailyProfile.h"
 #define IONew(type, count) (++allocations, new type[count])
 #define IODelete(ptr, type, count) do { delete[] ptr; ptr=nullptr; --allocations; } while(0)
 struct OSData {
@@ -117,6 +123,7 @@ int main(int argc,char **argv) {
   node.props["compatible"].value.assign(id,id+sizeof(id));
   registers[1]=1;
   if(which=="off")mode=0;
+  else if(which=="daily"){mode=0;daily_absent=true;sleep_limit=200;}  /* no boot args: daily profile = follow mode 2 */
   else if(which=="mode")mode=3;   /* 2 = FOLD-01 follow mode */
   else if(which=="foreign")node.props["compatible"].value[0]='x';
   else if(which=="missing")node.props.erase("hall-gpio");
@@ -130,7 +137,8 @@ int main(int argc,char **argv) {
   else if(which=="transitions")transitions=true;
   else assert(which=="baseline");
   IOService platform;
-  try {zizhan_hall::start(&platform);} catch(int n) {assert(n==17);}
+  try {zizhan_hall::start(&platform);} catch(int n) {assert(n==17||(n==18&&which=="daily"));}
+  if(which=="daily"){assert(started==1 && maps==1 && logged("display_switch=1") && sleeps==200);return 0;}
   assert(allocations==0);
   if(which=="off")assert(logs.empty() && !maps && !started);
   else if(which=="mode")assert(logged("unsupported-mode") && !maps && !started);
@@ -158,6 +166,8 @@ with tempfile.TemporaryDirectory(prefix="zizhan-hall-probe-") as temp:
                     "-I" + str(ROOT / "drivers/ArmDTPlatform"), str(source),
                     "-o", str(binary)], check=True, timeout=30)
     for case in ("off", "mode", "foreign", "missing", "width", "pin", "base", "root",
-                 "map", "output", "mux", "baseline", "transitions"):
-        subprocess.run([str(binary), case], check=True, timeout=10)
-print("PASS actual Hall probe: 13 default-off, DT, map, pin mode, finite clock and transition controls; no device")
+                 "map", "output", "mux", "baseline", "transitions", "daily"):
+        # daily: the endless follow loop is cut by a throw, so the worker never frees its state.
+        env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0") if case == "daily" else None
+        subprocess.run([str(binary), case], check=True, timeout=10, env=env)
+print("PASS actual Hall probe: 14 default-off/daily-profile, DT, map, pin mode, finite clock and transition controls; no device")

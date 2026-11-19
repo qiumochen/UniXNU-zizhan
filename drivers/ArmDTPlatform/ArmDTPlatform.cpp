@@ -239,6 +239,8 @@ bool ArmDTPlatform::configure (IOService *provider)
     return false;
   }
   armdt_platform_configured = 1;
+  IOLog("ZIZHAN_DAILY: profile=%u (thermal=2 cpu90 gpu85, display_power=1, power_observe=1, hall_observe=2, outer_fold=1 unless set; zizhan_daily=0 disables)\n",
+        zizhan_daily::profile_on() ? 1u : 0u);
   zizhan_tsens::start(provider);
   zizhan_thermal::start(provider);
   zizhan_hall::start(provider);

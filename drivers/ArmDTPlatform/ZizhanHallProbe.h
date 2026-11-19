@@ -7,6 +7,7 @@
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
+#include "ZizhanDailyProfile.h"
 #include <libkern/c++/OSData.h>
 #include "ZizhanHallState.h"
 #include "ZizhanLidPolicy.h"
@@ -183,7 +184,7 @@ static void worker(void *arg, wait_result_t) {
 
 static void start(IOService *platform) {
   uint32_t mode = 0;
-  if (!PE_parse_boot_argn("zizhan_hall_observe", &mode, sizeof(mode)) || !mode) return;
+  if (!zizhan_daily::arg("zizhan_hall_observe", &mode, zizhan_daily::kHallObserve) || !mode) return;
   if (mode != 1 && mode != 2) {
     IOLog("ZIZHAN_HALL: SKIP unsupported-mode finished=1\n");
     return;

@@ -4,6 +4,7 @@
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
+#include "ZizhanDailyProfile.h"
 #include <stdint.h>
 #include "ZizhanDisplayPowerExecutor.h"
 #include <IOKit/IODeviceMemory.h>
@@ -54,7 +55,7 @@ static uint64_t uptime_us(void) {
 static int mode(void) {
   if (!mode_parsed) {
     mode_raw = 0;
-    (void)PE_parse_boot_argn("zizhan_display_power", &mode_raw, sizeof mode_raw);
+    (void)zizhan_daily::arg("zizhan_display_power", &mode_raw, zizhan_daily::kDisplayPower);
     mode_parsed = 1;
   }
   return zizhan_display_power_mode(mode_raw);

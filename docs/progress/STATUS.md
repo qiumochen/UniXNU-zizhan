@@ -56,7 +56,7 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 | M2：折叠验证（合上熄屏、打开亮屏）+ 熄屏/亮屏人工看屏 | 约 10 分钟 | `daily-6`/`soak-4` 同配置，含 `zizhan_hall_observe=2` |
 | M2：外屏只读探针 `zizhan_outer_probe=1` | 约 5 分钟 | 已编译（build-play33），未运行 |
 | CAM-01：前置摄像头首次上电读芯片 ID（`zizhan_cam_probe=1` 再 `=2 zizhan_user_present=1`） | 约 15 分钟 | 已编译，未运行 |
-| M3：`work/m3-fix2/android` 内存启动测试，通过后写 boot_a | 约 15 分钟 | 镜像 48/48 |
+| M3：写 boot_a 并切到 a 槽（内存启动测试 11-19 已通过：选 Android 后 49 s 自动回到 Android，不再卡菜单） | 约 5 分钟，需要手在机器旁 | 若 magic 不保留会在菜单与重启间循环，需按音量键进 fastboot 后 `fastboot set_active b` |
 | 天气：是否接第三方数据源（需重装 userland） | 决策 | [天气结论](../research/2026-11-19-weather-fairplay.md) |
 | 日用配置是否默认：熄屏/亮屏 + 触控暂停 + 合盖跟随 + 温控 mode 2（CPU 90/GPU 85 °C） | 决策 | `soak-4` 10 分钟通过 |
 | M3：是否授权写一次启动分区、写哪个槽、默认进哪个系统 | 决策 | 读双系统引导调研 |

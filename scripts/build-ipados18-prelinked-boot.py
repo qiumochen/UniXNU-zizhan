@@ -59,7 +59,10 @@ def main():
   # Absent means off for both software-UI switches (ui_compat18.c, kern_persona.c): leaving them out keeps the GPU build
   # software-free and saves the command line's bytes (DarwinBoot24 caps it at 1020; 11-01 g223 missed by one).
   opts+=['pong_adreno_start=1','pong_metal=1',
-         'pong_gpu_scanout=1','pong_gpu_pool_mib=256','pong_metal_global=1']
+         'pong_gpu_scanout=1','pong_gpu_pool_mib=256','pong_metal_global=1',
+         # ASTC through the GPU in SpringBoard/backboardd (ui_compat18.c): renders correctly since the bridge's ASTC block
+         # layout work (11-20 astc-0/1 and app checks); 11-01 measured 88.6 vs 46.9 moving fps. pong_astc=0 restores native.
+         'pong_astc=1']
  # PCM stays optional and publishes only after the real APM/amp/DMA route
  # is ready. Do not silently disable it in an otherwise audio-enabled build.
  # Match Wi-Fi startup to the actual compiled driver. The default device

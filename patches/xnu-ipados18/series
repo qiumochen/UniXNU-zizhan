@@ -24,3 +24,4 @@
 0025-zizhan-bt-identity.patch
 0026-zizhan-bt-syscall-trace.patch
 0027-zizhan-bt-stack-sample.patch
+0028-zizhan-cpu-exit.patch

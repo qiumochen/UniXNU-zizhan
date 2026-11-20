@@ -24,6 +24,7 @@
 #include "ZizhanHallProbe.h"
 #include "ZizhanBtProbe.h"
 #include "ZizhanTop.h"
+#include "ZizhanCpuOffline.h"
 #include "ZizhanOuterProbe.h"
 #include "ZizhanPowerInject.h"
 #include "ZizhanTsensProbe.h"
@@ -256,7 +257,7 @@ bool ArmDTPlatform::configure (IOService *provider)
     return false;
   }
   armdt_platform_configured = 1;
-  IOLog("ZIZHAN_DAILY: profile=%u (thermal=2 cpu90 gpu85, display_power=1, power_observe=1, hall_observe=2, outer_fold=1 unless set; zizhan_daily=0 disables)\n",
+  IOLog("ZIZHAN_DAILY: profile=%u (thermal=2 cpu90 gpu85, display_power=1, power_observe=1, hall_observe=2, outer_fold=1, cpu_offline=1 unless set; zizhan_daily=0 disables)\n",
         zizhan_daily::profile_on() ? 1u : 0u);
   zizhan_tsens::start(provider);
   zizhan_thermal::start(provider);
@@ -265,6 +266,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   zizhan_power_inject::start();
   zizhan_bt_probe::start();
   zizhan_top::start();          // default off; zizhan_top=1 logs the busiest processes every 30 s (POWER-03)
+  zizhan_cpu_offline::start();  // daily default: CPU 2..7 offline while the display is off (zizhan_cpu_offline=0 disables)
   zizhan_outer_probe::start();
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack

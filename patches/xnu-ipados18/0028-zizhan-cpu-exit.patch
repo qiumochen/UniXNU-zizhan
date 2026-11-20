@@ -1,0 +1,53 @@
+--- a/osfmk/arm/cpu_common.c	2026-11-20 16:39:42
++++ b/osfmk/arm/cpu_common.c	2026-11-20 16:39:42
+@@ -891,6 +891,17 @@
+ 
+ #endif /* USE_APPLEARMSMP */
+ 
++#if defined(ARM64_BOARD_CONFIG_PONG)
++	/*
++	 * zizhan POWER-04: no AppleARMSMP here, but every non-boot core can be stopped with PSCI CPU_OFF (ArmCpu::quiesceCPU)
++	 * and started again with CPU_ON (ArmCpu::startCPU). With boot-arg processor_exit=1, let the scheduler take non-boot
++	 * cores offline on request (processor_exit_from_user), as AppleARMSMP chips do; the boot core always stays.
++	 */
++	if (enable_processor_exit && cpu_id != master_cpu) {
++		return true;
++	}
++#endif
++
+ 	return false;
+ }
+ 
+--- a/osfmk/arm64/cpu.c	2026-11-20 16:39:42
++++ b/osfmk/arm64/cpu.c	2026-11-20 16:39:42
+@@ -359,6 +359,18 @@
+ #endif /* APPLEVIRTUALPLATFORM */
+ 	}
+ #else
++#if defined(ARM64_BOARD_CONFIG_PONG)
++	/*
++	 * zizhan POWER-04: a core taken offline by processor_exit (patch 0028, ml_cpu_can_exit) is only counted as down once it
++	 * publishes this token (cpu_common.c waits up to 10 s, then panics), as the AppleARMSMP branch above does before its CPU_OFF.
++	 * ArmCpu::quiesceCPU then turns the core off with PSCI CPU_OFF; system quiesce keeps its old path.
++	 */
++	if (!ml_is_quiescing()) {
++		cpu_data_ptr->cpu_sleep_token = ARM_CPU_ON_SLEEP_PATH;
++		__builtin_arm_dsb(DSB_ISH);
++		CleanPoU_Dcache();
++	}
++#endif
+ 	PE_cpu_machine_quiesce(cpu_data_ptr->cpu_id);
+ #endif
+ 	/*NOTREACHED*/
+--- a/osfmk/kern/processor.c	2026-11-20 16:39:42
++++ b/osfmk/kern/processor.c	2026-11-20 16:39:42
+@@ -149,7 +149,8 @@
+ TUNABLE(bool, support_bootcpu_shutdown, "support_bootcpu_shutdown", false);
+ #endif
+ 
+-#if __x86_64__ || XNU_ENABLE_PROCESSOR_EXIT
++/* zizhan POWER-04: on by default for PONG (ml_cpu_can_exit allows non-boot cores, patch 0028); processor_exit=0 turns it off. */
++#if __x86_64__ || XNU_ENABLE_PROCESSOR_EXIT || defined(PONG)
+ TUNABLE(bool, enable_processor_exit, "processor_exit", true);
+ #else
+ TUNABLE(bool, enable_processor_exit, "processor_exit", false);

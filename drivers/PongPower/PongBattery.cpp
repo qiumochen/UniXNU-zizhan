@@ -46,6 +46,16 @@ extern "C" {volatile int32_t native_charger_stats[16];}
 
 namespace {
 constexpr uint32_t kRequestMs = 2000, kRefreshMs = 60000, kSlowEvery = 10, kRing = 16, kMessage = 64;
+// zizhan_batt_ms=<5000..60000>: a faster refresh for power measurement rounds (POWER-05); the default stays one minute.
+uint32_t refreshMs() {
+    static uint32_t ms;
+    if (!ms) {
+        uint32_t v = kRefreshMs;
+        if (!PE_parse_boot_argn("zizhan_batt_ms", &v, sizeof v) || v < 5000 || v > kRefreshMs) { v = kRefreshMs; }
+        ms = v;
+    }
+    return ms;
+}
 }
 
 // Named as Apple's battery driver: PerfPowerServices' PLBatteryAgent records the battery (Settings > Battery charts) and answers the
@@ -195,9 +205,11 @@ class AppleSmartBattery : public IOPMPowerSource {
             native_battery_stats[0] = 4;IOLog("PongBattery: physical battery power source published %d%% %dmV\n",s.percent,s.voltage_mv);
         }
         updateStatus();
-        IOLog("PongBattery: %d%% %dmV %dmA temp %d flags 0x%x usb %d full %d design %d mAh cycles %d\n",native_battery_stats[1],
+        // "in" is the charger input as the firmware reports it (-1: no reading): system power = input + battery discharge, whatever
+        // the USB state (tools/zizhan/mac/zlog.py).
+        IOLog("PongBattery: %d%% %dmV %dmA temp %d flags 0x%x usb %d full %d design %d mAh cycles %d in %dmV %dmA\n",native_battery_stats[1],
             native_battery_stats[2],native_battery_stats[3],native_battery_stats[4],native_battery_stats[5],native_battery_stats[10],
-            native_battery_stats[11],native_battery_stats[12],native_battery_stats[13]);
+            native_battery_stats[11],native_battery_stats[12],native_battery_stats[13],native_charger_stats[6],native_charger_stats[7]);
     }
     void counters() {
         native_battery_stats[6] = (int32_t)bm.cycles_done;
@@ -223,7 +235,7 @@ class AppleSmartBattery : public IOPMPowerSource {
                 sheng_adsp_send(self->channel, enable, sheng_battmgr_enable_request(enable));
                 sheng_battmgr_refresh(&self->bm, 1);
                 self->pump();
-                self->refresh->setTimeoutMS(kRefreshMs);
+                self->refresh->setTimeoutMS(refreshMs());
             }
             if (!up && self->wasUp) {self->setBatteryInstalled(false);self->setExternalConnected(false);self->setIsCharging(false);self->updateStatus();self->request->cancelTimeout(); sheng_battmgr_init(&self->bm); self->bm.sdp_limit_ua = self->sdpLimit;}
             self->wasUp = up;
@@ -258,7 +270,7 @@ class AppleSmartBattery : public IOPMPowerSource {
         if (!self || !self->wasUp) return;
         sheng_battmgr_refresh(&self->bm, ++self->refreshes % kSlowEvery == 0);
         self->handle(BmAnswer);
-        sender->setTimeoutMS(kRefreshMs);
+        sender->setTimeoutMS(refreshMs());
     }
 
 public:

@@ -47,7 +47,7 @@ def main():
    '// no tfa98xx.cnt: not a Pong board, audio is not started\n'
    'static constexpr PongAmpField kPongAmp0[]={{0,0}};\nstatic constexpr PongAmpField kPongAmp1[]={{0,0}};\n')
  objects=[]
- for name in ('QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ZizhanSlpiPower.c','ZizhanCmdDb.cpp','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','ZizhanCs35l41.c','ZizhanSe15.cpp','ZizhanSe15Prepare.cpp','ZizhanMpss.cpp','ZizhanSlpi.cpp','ZizhanAudioPrm.cpp','ZizhanAudioDmaMap.cpp','ZizhanAudioZero.cpp','ZizhanAudioTone.cpp','ZizhanAudioTone48.cpp','ZizhanAudioBatch.c','PongFirmware.c','ZizhanIpcc.cpp','PongAdsp.cpp','PongBattery.cpp','PongAudio.cpp','PongAudioService.cpp','ZizhanAudioService.cpp','PongPower.cpp','PongBacklight.cpp'):
+ for name in ('QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ZizhanSlpiPower.c','ZizhanCmdDb.cpp','ZizhanStandbyRpmh.cpp','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','ZizhanCs35l41.c','ZizhanSe15.cpp','ZizhanSe15Prepare.cpp','ZizhanMpss.cpp','ZizhanSlpi.cpp','ZizhanAudioPrm.cpp','ZizhanAudioDmaMap.cpp','ZizhanAudioZero.cpp','ZizhanAudioTone.cpp','ZizhanAudioTone48.cpp','ZizhanAudioBatch.c','PongFirmware.c','ZizhanIpcc.cpp','PongAdsp.cpp','PongBattery.cpp','PongAudio.cpp','PongAudioService.cpp','ZizhanAudioService.cpp','PongPower.cpp','PongBacklight.cpp'):
   source=ROOT/'drivers/PongPower'/name;obj=out/(source.stem+'.o');cpp=source.suffix=='.cpp'
   cmd=['xcrun','clang++' if cpp else 'clang',*flags,*(['-std=gnu++17','-fno-exceptions','-fno-rtti'] if cpp else []),'-c',str(source),'-o',str(obj)]
   r=subprocess.run(cmd,env=env,capture_output=True,text=True);(out/(source.stem+'.log')).write_text(r.stdout+r.stderr)

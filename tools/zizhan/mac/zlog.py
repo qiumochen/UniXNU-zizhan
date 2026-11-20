@@ -5,7 +5,7 @@
 Usage: zlog.py LOG [--ping PINGLOG] [--grep REGEX ...] [--max N]
 
 Sections (each only when the log has it): boot args of interest, display transitions, panics, battery current by display
-state and USB presence, CPU offline transitions, CPU load (pong_cpu_load_log), busiest processes (zizhan_top), GPU DCVS,
+state and USB presence, system power by display state (logs with the charger input field), CPU offline transitions, CPU load (pong_cpu_load_log), busiest processes (zizhan_top), GPU DCVS,
 thermal maxima, Wi-Fi address, frame rate, and every --grep match (deduplicated, counted). --ping summarises a ping log
 written as "<epoch> <ping line>" (replies, gaps over 2 s, RTT).
 """
@@ -44,23 +44,42 @@ def boot_args(t, path):
     print("  " + " ".join(keep))
 
 
+EVENTS = re.compile(
+    r"ZIZHAN_STANDBY_BW: window (?P<phase>\d+) bus (?P<bus>\w+)"
+    r"|ZIZHAN_DISPLAY_POWER: (?P<result>PASS|FAIL) target=(?P<target>on|off)"
+    r"|PongBattery: (?P<pct>\d+)% (?P<mv>\d+)mV (?P<ma>-?\d+)mA temp (?P<temp>\d+) flags 0x\w+ usb (?P<usb>-?\d+)"
+    r"(?:[^\r\n]*? in (?P<vin>-?\d+)mV (?P<iin>-?\d+)mA)?")
+
+
 def display_and_battery(t):
-    state, usb = "on", "?"
+    state, window, label = "on", 0, "00"
     trans = collections.Counter()
     cur = collections.defaultdict(list)
     temp = collections.defaultdict(list)
+    power = collections.defaultdict(list)
     pct = []
-    for m in re.finditer(r"ZIZHAN_DISPLAY_POWER: (PASS|FAIL) target=(on|off)|PongBattery: (\d+)% \d+mV (-?\d+)mA temp (\d+) flags 0x\w+ usb (-?\d+)", t):
-        if m.group(1):
-            trans[m.group(1) + " " + m.group(2)] += 1
-            if m.group(1) == "PASS":
-                state = m.group(2)
+    for m in EVENTS.finditer(t):
+        if m["phase"]:   # an A/B phase inside one display-off period (ZizhanStandbyRpmh zizhan_standby_bw bit2)
+            label = f"{int(m['phase']):02d} bus {m['bus']}"
             continue
-        pct.append(int(m.group(3)))
-        usb = m.group(6)
-        key = f"display {state}, usb {usb}"
-        cur[key].append(int(m.group(4)))
-        temp[key].append(int(m.group(5)))
+        if m["result"]:
+            trans[m["result"] + " " + m["target"]] += 1
+            if m["result"] == "PASS":
+                state = m["target"]
+                if state == "off":
+                    window += 1
+                    label = f"{window:02d}"
+            continue
+        pct.append(int(m["pct"]))
+        key = f"display {state}, usb {m['usb']}"
+        cur[key].append(int(m["ma"]))
+        temp[key].append(int(m["temp"]))
+        if m["vin"] is not None:   # system power = battery discharge + charger input (input -1: no reading)
+            vin, iin = int(m["vin"]), int(m["iin"])
+            mw = int(m["mv"]) * -int(m["ma"]) // 1000 + (vin * iin // 1000 if vin > 0 and iin > 0 else 0)
+            power[f"display {state}"].append(mw)
+            if state == "off":
+                power[f"display off window {label}"].append(mw)
     if trans:
         section("display transitions")
         print("  " + ", ".join(f"{k}: {v}" for k, v in sorted(trans.items())))
@@ -69,6 +88,11 @@ def display_and_battery(t):
         for k in sorted(cur):
             print(f"  {k}: samples {len(cur[k])}, median {median(cur[k])}, min {min(cur[k])}, max {max(cur[k])}, temp {temp[k][0]}->{temp[k][-1]}")
         print(f"  charge {pct[0]}% -> {pct[-1]}%")
+    if power:
+        section("system power (mW = battery discharge + charger input, before charger losses)")
+        for k in sorted(power):
+            v = power[k]
+            print(f"  {k}: samples {len(v)}, median {median(v)}, min {min(v)}, max {max(v)}")
 
 
 def panics(t):
@@ -178,6 +202,9 @@ def main():
     ap.add_argument("--max", type=int, default=12)
     a = ap.parse_args()
     t = text(a.log)
+    if "Darwin Kernel Version" not in t:
+        print("note: early boot is not in this log (the 2 MiB console ring wrapped); one-time start-up lines such as RUNNING are missing,")
+        print("      so report them from a worker after boot instead of reading their absence as a failure")
     boot_args(t, a.log); panics(t); display_and_battery(t); offline(t); load(t); top(t, a.max); gpu(t); thermal(t); wifi_and_frames(t)
     greps(t, a.grep, a.max)
     if a.ping:

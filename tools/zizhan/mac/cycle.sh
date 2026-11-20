@@ -33,12 +33,20 @@ bash $S/boot.sh "$IMG" "第 $RUN 轮已自动启动，全程不需要操作；�
 if [ "$KLOG" = 1 ]; then printf '%s\n' "$IMG" > "$KLOG_MARKER"; fi
 echo "$(ts) booted $IMG; waiting up to ${WAIT}s for the autoreset into fastboot"
 sleep 20
-start=$(date +%s); nextkick=120
+# The supervisor passes WAIT = pong_autoreset + 150, so XNU itself resets into fastboot at about WAIT - 150 s. Do not kick the port
+# before then: a kick is a USB detach/attach, which iOS answers by lighting the screen (it ended every POWER standby window early)
+# and which turns the battery readings into charge transitions.
+# ZIZHAN_USB_OFF_AT=<s> (POWER measurements): switch the phone's port off once, that many seconds into the wait, so the battery alone
+# powers the phone (no charging, no attach events); the kicks after the autoreset power it again.
+start=$(date +%s); nextkick=$(( WAIT > 270 ? WAIT - 150 : 120 )); usboff=0
 until in_fastboot; do
   if in_adb; then echo "$(ts) phone came back in Android: the ramoops console is lost"; exit 3; fi
   el=$(( $(date +%s) - start ))
   [ $el -ge $WAIT ] && { echo "$(ts) no fastboot after ${WAIT}s"; exit 4; }
-  # XNU runs 60-350 s; after that the phone is in fastboot whether or not the Mac sees it, so from 120 s on kick the port every 45 s.
+  # After the autoreset the phone is in fastboot whether or not the Mac sees it, so from then on kick the port every 45 s.
+  if [ -n "${ZIZHAN_USB_OFF_AT:-}" ] && [ $usboff = 0 ] && [ $el -ge "$ZIZHAN_USB_OFF_AT" ] && [ $el -lt $nextkick ]; then
+    bash $S/usbkick.sh off; usboff=1
+  fi
   if [ $el -ge $nextkick ]; then bash $S/usbkick.sh kick; nextkick=$(( el + 45 )); fi
   sleep 3
 done

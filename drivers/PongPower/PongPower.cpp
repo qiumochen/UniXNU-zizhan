@@ -16,6 +16,7 @@ void sheng_battery_start(void);
 void zizhan_se15_probe(void);
 void zizhan_se15_prepare_probe(void);
 void zizhan_cmd_db_probe(void);
+void zizhan_standby_rpmh_start(void);
 void zizhan_audio_prm_probe(void);
 void zizhan_audio_service_probe(void);
 void PongBatteryStaticInit(void);
@@ -25,6 +26,7 @@ void pong_power_start_optional(void) {
  zizhan_se15_probe();
  zizhan_se15_prepare_probe();
  zizhan_cmd_db_probe();
+ zizhan_standby_rpmh_start();  // default off; POWER-05 zizhan_standby_cx=<level> / zizhan_rpmh_dump=1
  zizhan_modem_probe::start();  // default off; 1 = read-only firmware/EFS reachability (MODEM-01 stage 1a)
  zizhan_mpss_start();          // default off; zizhan_modem=2 with pong_adsp=0: boot the modem once, watch it, stop it (stage 1b)
  zizhan_slpi_start();          // default off; zizhan_slpi=1 with pong_adsp=0: boot the sensor DSP once, list its QMI services (SENS-01)

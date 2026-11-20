@@ -7,6 +7,8 @@
 # drop makes the bootloader attach again (16:48: enumerated 6 s after the cycle). The standard remote-lab trick (uhubctl README).
 #   usbkick.sh remember   while the phone is visible: record its hub/port in logs/phone-port.txt
 #   usbkick.sh kick       power-cycle the recorded port (re-recording first if the phone is visible); exit 1 if nothing recorded
+#   usbkick.sh off        switch the recorded port's power off (same checks as kick; a later kick turns it on again). For battery-only
+#                         power measurement: cycle.sh ZIZHAN_USB_OFF_AT, no charging and no attach events while the phone runs.
 #   usbkick.sh status     show uhubctl's view of the hubs
 set -u
 export PATH=/opt/homebrew/bin:$PATH
@@ -33,7 +35,7 @@ remember() {
 # uhubctl identifies the pair; require the same physical port on both,
 # and refuse unexpected hubs or an occupied companion before cycling.
 kick() {
-  local hp hub port extra line status lines
+  local action=${1:-cycle} hp hub port extra line status lines
   hp=$(find_port)
   [ -z "$hp" ] || echo "$hp" > "$F"
   [ -f "$F" ] || { echo "$(ts) usbkick: no recorded port (run 'usbkick.sh remember' while the phone is visible)"; return 1; }
@@ -62,6 +64,11 @@ kick() {
       return 1
     fi
   done <<< "$lines"
+  if [ "$action" = off ]; then
+    "$UHUBCTL_BIN" -l "$hub" -p "$port" -a off >/dev/null || return $?
+    echo "$(ts) usbkick: switched hub $hub port $port off"
+    return 0
+  fi
   "$UHUBCTL_BIN" -l "$hub" -p "$port" -a cycle -d 3 >/dev/null || return $?
   # macOS can retain the old USB object after uhubctl returns. On g279
   # it detached 1.3 s later, interrupting a transfer to that old object.
@@ -70,7 +77,8 @@ kick() {
 }
 case ${1:-kick} in
   remember) remember ;;
-  kick) kick ;;
+  kick) kick cycle ;;
+  off) kick off ;;
   status) "$UHUBCTL_BIN" ;;
-  *) echo "usage: usbkick.sh remember|kick|status"; exit 2 ;;
+  *) echo "usage: usbkick.sh remember|kick|off|status"; exit 2 ;;
 esac

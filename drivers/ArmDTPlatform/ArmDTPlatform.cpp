@@ -23,6 +23,7 @@
 #include "PongCpuPark.h"
 #include "ZizhanHallProbe.h"
 #include "ZizhanBtProbe.h"
+#include "ZizhanTop.h"
 #include "ZizhanOuterProbe.h"
 #include "ZizhanPowerInject.h"
 #include "ZizhanTsensProbe.h"
@@ -263,6 +264,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   zizhan_power_audit::start(provider);
   zizhan_power_inject::start();
   zizhan_bt_probe::start();
+  zizhan_top::start();          // default off; zizhan_top=1 logs the busiest processes every 30 s (POWER-03)
   zizhan_outer_probe::start();
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack

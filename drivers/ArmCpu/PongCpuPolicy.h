@@ -200,7 +200,10 @@ static void worker(void *,wait_result_t)
     uint64_t idle[8];for(unsigned c=0;c<8;++c)idle[c]=pong_cpu_idle_mach(c);
     uint64_t stamp=mach_absolute_time();
     unsigned boostMs=400;PE_parse_boot_argn("pong_cpu_boost_ms",&boostMs,sizeof boostMs);
-    uint64_t boostTicks=0,boostUntil=0,boosts=0,boostedTicks=0,reportAt=0,stateSum[3]{},stateN=0,l3Sum=0,l3N=0;nanoseconds_to_absolutetime(uint64_t(boostMs)*1000000ull,&boostTicks);
+    uint64_t boostTicks=0,boostUntil=0,boosts=0,boostedTicks=0,reportAt=0,stateSum[3]{},stateN=0,l3Sum=0,l3N=0;
+    /* POWER-03 diagnostic (pong_cpu_load_log=1): per-CPU busy and per-domain clock, averaged over each 30 s report window */
+    unsigned loadLog=0;PE_parse_boot_argn("pong_cpu_load_log",&loadLog,sizeof loadLog);
+    uint64_t busySum[8]{},busyN=0,khzSum[3]{};nanoseconds_to_absolutetime(uint64_t(boostMs)*1000000ull,&boostTicks);
     uint32_t touches=&pong_touch_activity?pong_touch_activity:0;
     bool l3Thermal=false;
     unsigned lastThermal=0;
@@ -236,6 +239,12 @@ static void worker(void *,wait_result_t)
                     boosts,ticksToNs(boostedTicks)/1000000ull,boostMs,stateN?stateSum[0]/stateN:0,stateN?stateSum[1]/stateN:0,
                     stateN?stateSum[2]/stateN:0,l3N?l3Sum/l3N:0);
             }
+            if(reportAt && loadLog && busyN) {
+                IOLog("Pong CPU: load 30s busy%% %llu %llu %llu %llu %llu %llu %llu %llu clock %llu/%llu/%llu MHz\n",
+                    busySum[0]/busyN,busySum[1]/busyN,busySum[2]/busyN,busySum[3]/busyN,busySum[4]/busyN,busySum[5]/busyN,
+                    busySum[6]/busyN,busySum[7]/busyN,khzSum[0]/busyN/1000,khzSum[1]/busyN/1000,khzSum[2]/busyN/1000);
+            }
+            busyN=0;for(auto &v:busySum)v=0;for(auto &v:khzSum)v=0;
             boosts=0;boostedTicks=0;stateN=0;l3Sum=0;l3N=0;for(auto &v:stateSum)v=0;
             nanoseconds_to_absolutetime(30000000000ull,&reportAt);reportAt+=now;
         }
@@ -247,6 +256,10 @@ static void worker(void *,wait_result_t)
                 busy[c]=delta>=elapsed?0u:unsigned(100-(delta*100/elapsed));valid[c]=true;
             }
             idle[c]=value;
+        }
+        if(loadLog) {
+            ++busyN;for(unsigned c=0;c<8;++c)busySum[c]+=busy[c];
+            for(unsigned i=0;i<3;++i)if(domains[i].live)khzSum[i]+=stateKhz(domains[i]);
         }
         for(auto &d:domains)if(d.live) {
             unsigned load=0;bool sampled=false;

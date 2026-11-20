@@ -367,6 +367,13 @@ void worker(void *, wait_result_t) {
   uint32_t watchS = 60;
   (void)PE_parse_boot_argn("zizhan_modem_watch_s", &watchS, sizeof watchS);
   if (watchS < 30 || watchS > 1800) watchS = 60;
+  // zizhan_modem_cycles=2|3: after a clean stop, boot the modem again in the same session (restart/cleanup check). Later
+  // cycles only wait for ready and stop again: GLINK/QRTR stay on the first cycle's state, so no QMI there.
+  // modem-18: the second load reset the whole SoC (no log survived), so leave this at 1 outside a deliberate test.
+  uint32_t cycles = 1, cycle = 0;
+  (void)PE_parse_boot_argn("zizhan_modem_cycles", &cycles, sizeof cycles);
+  if (cycles < 1 || cycles > 3) cycles = 1;
+  bool readySeen = false;
   int stage = 0, rc = 0;
   IOBufferMemoryDescriptor *meta = nullptr;
   bool pasStarted = false;
@@ -422,6 +429,8 @@ void worker(void *, wait_result_t) {
            !qcom_rpmh_level_index(&cx, 384, &cxIdx) && !qcom_rpmh_level_index(&mss, 384, &mssIdx));
   STEP(18, pong_rpmh_vote(cx.address, cxIdx) && pong_rpmh_vote(mss.address, mssIdx));
   IOLog("ZIZHAN_MPSS: rails cx=%u mss=%u (NOM) load_state=on smp2p_out=ok\n", cxIdx, mssIdx);
+again:
+  IOLog("ZIZHAN_MPSS: cycle %u/%u begin\n", cycle + 1, cycles);
   {
     const uint64_t bytes = qcom_mdt_metadata_size(&gMdt);
     Win metaWin = {};
@@ -490,8 +499,8 @@ void worker(void *, wait_result_t) {
   }
   t0 = nowMs();
   nextReport = t0 + 10000;
-  for (uint64_t now = t0; now - t0 < uint64_t(watchS) * 1000; now = nowMs()) {   // up to 10 s for ready, then watch
-    if (gDmsPort && !gDmsAsked && gIpcrtr && gIpcrtr->up && now - t0 > 20000) {
+  for (uint64_t now = t0; now - t0 < uint64_t(cycle ? 30 : watchS) * 1000; now = nowMs()) {   // up to 10 s for ready, then watch
+    if (!cycle && gDmsPort && !gDmsAsked && gIpcrtr && gIpcrtr->up && now - t0 > 20000) {
       gDmsAsked = true;
       static const uint8_t rev[7] = {0, 1, 0, 0x23, 0, 0, 0}, opmode[7] = {0, 2, 0, 0x2d, 0, 0, 0};
       qrtrSend(1, kModemNode, gDmsPort, kDmsClientPort, rev, sizeof rev);
@@ -519,9 +528,10 @@ void worker(void *, wait_result_t) {
             (bits & kFatal) ? 1u : 0u, (bits & kHandover) ? 1u : 0u);
       lastBits = bits;
       if (bits & kFatal) { readCrash(); break; }
-      if ((bits & kReady) && !gGlinkOn) glinkStart();
+      if (bits & kReady) readySeen = true;
+      if (!cycle && (bits & kReady) && !gGlinkOn) glinkStart();
     }
-    glinkService();
+    if (!cycle) glinkService();
     if (now - t0 > 10000 && !(lastBits != 0xffffffffu && (lastBits & kReady))) break;
     IOSleep(10);
   }
@@ -536,9 +546,31 @@ out:
       while (nowMs() - s0 < 5000 && !(slaveBits(&bits) && (bits & kStopAck))) IOSleep(10);
       IOLog("ZIZHAN_MPSS: stop-ack=%u after %llums\n", (bits & kStopAck) ? 1u : 0u, nowMs() - s0);
     }
-    const ScmResult r = scm(QCOM_SCM_PAS_SHUTDOWN, qcom_scm_args(1, 0, 0, 0), kPas, 0, 0);
-    IOLog("ZIZHAN_MPSS: pas_shutdown x0=%lld x1=%llu\n", r.x0, r.x1);
+    // Every run so far got 0xffcfffb8 from the first PAS_SHUTDOWN after a clean stop-ack. Linux qcom_pas_stop retries
+    // shutdown every 100 ms (50 times) where the secure world is still tearing the image down (decrypt_shutdown).
+    ScmResult r = scm(QCOM_SCM_PAS_SHUTDOWN, qcom_scm_args(1, 0, 0, 0), kPas, 0, 0);
+    const int64_t firstErr = r.x0;
+    unsigned tries = 1;
+    for (; r.x0 != 0 && tries < 50; ++tries) {
+      IOSleep(100);
+      r = scm(QCOM_SCM_PAS_SHUTDOWN, qcom_scm_args(1, 0, 0, 0), kPas, 0, 0);
+    }
+    IOLog("ZIZHAN_MPSS: pas_shutdown x0=%lld x1=%llu tries=%u first=%llx\n", r.x0, r.x1, tries, uint64_t(firstErr));
     if (stopEntry >= 0) qcom_smp2p_update(&gP2p, stopEntry, 1, 0);
+    IOLog("ZIZHAN_MPSS: cycle %u/%u end ready=%u stop-ack=%u shutdown_ok=%u\n", cycle + 1, cycles, readySeen ? 1u : 0u,
+          (bits & kStopAck) ? 1u : 0u, r.x0 == 0 ? 1u : 0u);
+    if (stage == 27 && readySeen && r.x0 == 0 && cycle + 1 < cycles) {
+      if (bounce) { IOFreeData(bounce, 256 * 1024); bounce = nullptr; }
+      unmapWin(region);
+      ++cycle;
+      readySeen = false;
+      pasStarted = false;
+      bits = 0;
+      lastBits = 0xffffffffu;
+      rc = 0;
+      IOSleep(2000);
+      goto again;
+    }
   }
   if (gQmp.state == QcomQmpOpen) qmpLoadState(false);
   if (bounce) IOFreeData(bounce, 256 * 1024);

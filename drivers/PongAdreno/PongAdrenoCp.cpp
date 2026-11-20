@@ -342,9 +342,11 @@ IOReturn PongAdrenoCpPrepare(const PongCpOps *ops)
            !sw(0xc00+slots[i]*4,0x20000|(ex?1024:0)))return kIOReturnIOError;
     }
     /* Sheng reserves the user BO pool before fragmentation. Pong has a
-     * smaller boot memory window: start at 256MiB, halve on allocation failure. */
+     * smaller boot memory window: start at 256MiB, halve on allocation failure.
+     * zizhan (12 GiB, UX-03): a full 256 MiB pool sends BOs to scattered 4 KiB spans whose BoAlloc/BoFree took 40-77 ms
+     * during app-exit animations, so up to 1024 MiB may be asked for; the halving keeps a smaller pool if that fails. */
     unsigned pool=256;PE_parse_boot_argn("pong_gpu_pool_mib",&pool,sizeof(pool));
-    if(pool>256)pool=256;
+    if(pool>1024)pool=1024;
     for(unsigned mib=pool;mib>=16;mib>>=1)
         if(!NativeAdrenoMemory::reservePool(gpu->output_bits,size_t(mib)<<20))break;
     if(NativeAdrenoMemory::poolBytes()) {

@@ -57,8 +57,17 @@ def analyze(text):
                         gpu_submits[0] <= down <= done <= gpu_submits[-1]),
                 })
         swap_panel.append((done - swap) / 1000)
+    # Animation hitches: for each touch-down, the longest interval between consecutive panel completions in the next second.
+    panel_done = sorted(d for _, _, d in frames.values())
+    hitch = []
+    for down in downs:
+        window = [t for t in panel_done if down <= t < down + 1000000]
+        if len(window) >= 2:
+            hitch.append(max(b - a for a, b in zip(window, window[1:])) / 1000)
     return {
         "retained_downs": len(downs),
+        "hitch_max_gap_1s": distribution(hitch),
+        "hitch_over_50ms": sum(1 for h in hitch if h > 50),
         "down_to_first_panel": distribution(all_first),
         "idle_down_to_first_panel": distribution(idle_first),
         "down_to_native_pan_began": distribution(recognition),

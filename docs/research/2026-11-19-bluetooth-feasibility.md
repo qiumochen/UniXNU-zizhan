@@ -84,3 +84,7 @@
 - BlueTool `device -D` 打开的是 PF_SYSTEM 内核控制 `com.apple.uart.bluetooth`（read/write 收发 H4，TIOCGETA/TIOCSETA 作为 socket 选项）；已在补丁 0023 中实现该控制，并在 UART 桥里对博通厂商命令（OGF 0x3f）直接应答。
 - 系统调用跟踪（补丁 0026）显示 BlueTool 与 bluetoothd 从未调用 socket 或打开 /dev 节点：卡在平台/初始化路径选择，详见晚间记录。
 
+## 2026-11-20 第三轮：根因是固件表的 Wi-Fi 厂商键
+
+BlueTool 的 boot 脚本按 MobileGestalt `ProductHash` 加 `WifiVendor` 查内置固件表（J171 → BCM4355C1 RudderA，分 MUR/USI）。`WifiVendor` 来自博通 WLAN HAL 服务 AppleOLYHAL 的 `vendor-id`，本板没有，于是 BlueTool 卡在 “No WiFi” 循环直至自身看门狗退出。覆盖脚本、占位 HAL 服务和 os_log 通道三种绕法都无效，详见 [第三轮记录](../progress/2026-11-20-round3.md)。
+

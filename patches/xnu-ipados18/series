@@ -23,3 +23,4 @@
 0024-zizhan-crash-capture-bt.patch
 0025-zizhan-bt-identity.patch
 0026-zizhan-bt-syscall-trace.patch
+0027-zizhan-bt-stack-sample.patch

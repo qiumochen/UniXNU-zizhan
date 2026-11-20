@@ -1,0 +1,109 @@
+--- a/bsd/dev/arm/systemcalls.c	2026-11-20 11:17:00
++++ b/bsd/dev/arm/systemcalls.c	2026-11-20 11:17:01
+@@ -86,7 +86,85 @@
+  *
+  * Outputs:	none
+  */
++/*
++ * zizhan BT-01 diagnostic (zizhan_bt_probe>=4, BlueTool only): BlueTool's boot request hangs ~31 s and exits(1) without a
++ * single os_log line reaching the console. At each blocking BSD call and at mach_msg, log the thread, time and the user
++ * frame-pointer chain (8 return addresses, PAC bits stripped) so the waiting loop can be located in the disassembly.
++ */
++void zizhan_bt_stack(struct arm_saved_state *state, int code);
+ void
++zizhan_bt_stack(struct arm_saved_state *state, int code)
++{
++	extern int zizhan_bt_trace_proc(proc_t p);
++	static uint32_t lines[2];
++	const uint64_t mask = 0x0000007fffffffffULL;
++	proc_t p = current_proc();
++	if (zizhan_bt_trace_proc(p) != 0) {
++		return;
++	}
++	const int mach = code < 0;
++	if (mach) {
++		if (code != -31 && code != -47) {
++			return;
++		}
++	} else {
++		switch (code) {
++		case 93: case 230: case 305: case 334: case 363: case 369: case 374: case 407: case 423: case 515: case 544:
++			break;
++		default:
++			return;
++		}
++	}
++	/* skip the first 1.5 s of the process (dyld and libSystem start-up), then log each distinct stack once */
++	struct timeval now, age;
++	microtime(&now);
++	timersub(&now, &p->p_start, &age);
++	if (age.tv_sec == 0 && age.tv_usec < 500000) {
++		return;
++	}
++	if (age.tv_sec < 1 || (age.tv_sec == 1 && age.tv_usec < 500000)) {
++		return;
++	}
++	uint64_t fp = get_saved_state_fp(state), ra[16] = {0};
++	for (int i = 0; i < 16 && fp != 0 && (fp & 7) == 0; ++i) {
++		uint64_t fr[2] = {0, 0};
++		if (copyin((user_addr_t)fp, fr, sizeof(fr)) != 0) {
++			break;
++		}
++		ra[i] = fr[1] & mask;
++		fp = fr[0];
++	}
++	static uint64_t seen[512];
++	uint64_t h = (uint64_t)(int64_t)code * 0x9e3779b97f4a7c15ULL;
++	for (int i = 0; i < 16; ++i) {
++		h = (h ^ ra[i]) * 0x100000001b3ULL;
++	}
++	h |= 1;
++	for (int i = 0; i < 512; ++i) {
++		uint64_t cur = __atomic_load_n(&seen[i], __ATOMIC_RELAXED);
++		if (cur == h) {
++			return;
++		}
++		if (cur == 0) {
++			if (__atomic_compare_exchange_n(&seen[i], &cur, h, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
++				break;
++			}
++			if (cur == h) {
++				return;
++			}
++		}
++	}
++	if (__atomic_fetch_add(&lines[mach], 1, __ATOMIC_RELAXED) >= 200) {
++		return;
++	}
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	printf("ZIZHAN_BT_STACK: %d.%llu t=%llu age=%ld code=%d lr=%llx ra=%llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx\n",
++	    proc_pid(p), thread_tid(current_thread()), ns / 1000000, (long)age.tv_sec, code, get_saved_state_lr(state) & mask, ra[0], ra[1],
++	    ra[2], ra[3], ra[4], ra[5], ra[6], ra[7], ra[8], ra[9], ra[10], ra[11], ra[12], ra[13], ra[14], ra[15]);
++}
++
++void
+ unix_syscall(
+ 	struct arm_saved_state * state,
+ 	thread_t thread_act,
+@@ -189,6 +267,7 @@
+ 		    code, (void *)callp->sy_call, (void *)open);
+ 	}
+ #endif
++	zizhan_bt_stack(state, (int)code);
+ 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
+ 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
+ 
+--- a/osfmk/arm64/bsd_arm64.c	2026-11-20 11:17:00
++++ b/osfmk/arm64/bsd_arm64.c	2026-11-20 11:17:01
+@@ -198,6 +198,10 @@
+ 
+ 	assert(call_number < 0); /* Otherwise it would be a Unix syscall */
+ 	call_number = -call_number;
++	{
++		extern void zizhan_bt_stack(struct arm_saved_state *state, int code);
++		zizhan_bt_stack(state, -call_number);   /* zizhan BT-01 diagnostic, bsd/dev/arm/systemcalls.c */
++	}
+ 
+ 	if (call_number >= MACH_TRAP_TABLE_COUNT) {
+ 		goto bad;

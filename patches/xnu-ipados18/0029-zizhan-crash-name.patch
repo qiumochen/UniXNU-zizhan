@@ -1,0 +1,37 @@
+--- a/osfmk/arm64/pong_ui_exception.c
++++ b/osfmk/arm64/pong_ui_exception.c
+@@ -9,6 +9,7 @@
+ #include <kern/thread.h>
+ #include <mach/exception_types.h>
+ #include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
+ #include <string.h>
+ #include <vm/vm_map.h>
+ #include <vm/vm_shared_region_xnu.h>
+@@ -33,9 +34,25 @@
+ 	struct proc *proc = get_bsdtask_info(task);
+ 	if (task == kernel_task || proc == NULL || state == NULL || !is_saved_state64(state)) return;
+ 	const char *name = proc_name_address(proc);
++	/* zizhan: pong_crash_name=<process> captures one more process (kbd: the software keyboard never appears, 11-20). */
++	static char extra[32];
++	static unsigned extra_records;
++	static int extra_parsed;
++	if (!extra_parsed) {
++		if (!PE_parse_boot_argn("pong_crash_name", extra, sizeof(extra))) {
++			extra[0] = 0;
++		}
++		extra_parsed = 1;
++	}
+ 	unsigned which;
+ 	for (which = 0; which < sizeof(names) / sizeof(names[0]) && strcmp(name, names[which]) != 0; which++) { }
+-	if (which == sizeof(names) / sizeof(names[0]) || __atomic_fetch_add(&records[which], 1, __ATOMIC_RELAXED) >= 4) return;
++	if (which == sizeof(names) / sizeof(names[0])) {
++		if (!extra[0] || strcmp(name, extra) != 0 || __atomic_fetch_add(&extra_records, 1, __ATOMIC_RELAXED) >= 4) {
++			return;
++		}
++	} else if (__atomic_fetch_add(&records[which], 1, __ATOMIC_RELAXED) >= 4) {
++		return;
++	}
+ 	vm_shared_region_t region = vm_shared_region_get(task);
+ 	uint32_t slide = region ? region->sr_slide : 0;
+ 	if (region) vm_shared_region_deallocate(region);

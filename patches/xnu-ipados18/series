@@ -25,3 +25,5 @@
 0026-zizhan-bt-syscall-trace.patch
 0027-zizhan-bt-stack-sample.patch
 0028-zizhan-cpu-exit.patch
+0029-zizhan-crash-name.patch
+0030-zizhan-touch-edge-drag.patch

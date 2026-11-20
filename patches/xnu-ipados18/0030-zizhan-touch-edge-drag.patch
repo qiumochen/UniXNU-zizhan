@@ -1,0 +1,14 @@
+--- a/bsd/dev/pong_fts.c
++++ b/bsd/dev/pong_fts.c
+@@ -1070,7 +1070,10 @@
+     if (maximum > 100) maximum = 100;
+     if (drag) {
+         const uint32_t a = drag / 100, b = drag % 100;
+-        if (vertical || a < 5 || a > 95 || b < 5 || b > 95 || a == b || line < 5 || line > 95) {
++        /* zizhan: with tsv=<x%> the drag is vertical and may start at the edge (1..99%): tsv=95 tsdrag=0160 tscount=1 pulls
++         * Control Center down from the top right corner. */
++        const uint32_t lo = vertical ? 1 : 5, hi = vertical ? 99 : 95;
++        if (a < lo || a > hi || b < lo || b > hi || a == b || (!vertical && (line < 5 || line > 95))) {
+             printf("zizhan touch: custom drag FAIL invalid geometry\n");
+             thread_terminate(current_thread()); return;
+         }

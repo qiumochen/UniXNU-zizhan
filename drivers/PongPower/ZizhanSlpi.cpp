@@ -409,6 +409,181 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
   if (type == 2 && !gHelloSent) { qrtrSendHello(); if (gHelloSent) pdmAnnounce(); }
 }
 
+void glinkService();
+/* SENS-01 stage 3a (zizhan_slpi=3): the SSC gets its sensor JSON configs from the APPS side over FastRPC (sscrpcd on Android).
+ * First step only: answer SLPI's "fastrpcglink-apps-dsp" channel, give its compute context (SID 0x541, label sdsprpc-smd)
+ * a bypass context bank with the UFS planner, attach to the sensors PD (handle 1 method 0, PD 2), start the reverse-tunnel
+ * listener (handle 3 method 3) and log the first request it hands back from adsp_listener_next2 (method 4). Message and
+ * buffer layout as in Linux drivers/misc/fastrpc.c; listener methods as documented by hexagonrpc (protocol facts only). The
+ * RPC buffer is 1 MiB of the unused CVP carveout (below 4 GiB, address carries the context index in bits 32+). */
+namespace zizhan_frpc {
+constexpr uint64_t kBufPa = 0x9ee00000ull + 0x100000, kBufSize = 0x100000;
+constexpr uint32_t kTgid = 0x2a;
+uint32_t gPd = 2;   // 0 root PD (sdsprpcd on Android), 2 sensors PD (sscrpcd)
+uint32_t gSidCb = 1;   // context index carried in address bits 32+ (0x541 -> 1, shared 0x543 -> 3)
+Win gBuf, gSmmu;
+QcomGlinkChannel *gCh;
+uint8_t gChStore[4 * 0x400];
+bool gUp, gRsp, gDone, gSetup;
+struct Done { uint64_t ctx; int32_t ret; bool used; } gDoneTab[8];
+uint64_t gUpMs;
+unsigned gTry;
+uint64_t gRspCtx, gCtxSeq = 1;
+int32_t gRspRet;
+const char *gSmmuWhy = "not run";
+unsigned gBank, gPages;
+void state(void *, QcomGlinkChannel *, int up) { gUp = up != 0; gUpMs = nowMs(); IOLog("ZIZHAN_SLPI: fastrpc channel %s\n", up ? "up" : "down"); }
+void receive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
+  if (n < 12) { IOLog("ZIZHAN_SLPI: fastrpc short message %u\n", n); return; }
+  memcpy(&gRspCtx, d, 8); memcpy(&gRspRet, d + 8, 4); gRsp = true;
+  for (auto &e : gDoneTab) if (!e.used) { e = {gRspCtx, gRspRet, true}; break; }
+  static unsigned logged;
+  if (logged++ < 24) IOLog("ZIZHAN_SLPI: fastrpc rx len=%u ctx=%llx ret=%d (%x)\n", n, gRspCtx, gRspRet, uint32_t(gRspRet));
+}
+const QcomGlinkClient kClient = {state, receive};
+#include "../NativeUfs/SmmuTakeover.h"
+bool smmuSetup(uint32_t kSid) {
+  if (!gSmmu.va && !mapWin(gSmmu, 0x15000000, 0x100000)) { gSmmuWhy = "map"; return false; }
+  auto read = [](unsigned off) { return rd(gSmmu, off); };
+  const UfsSmmuPlan plan = planUfsSmmu(uint16_t(kSid), kBufPa, kBufSize, read, 78, 120);
+  IOLog("ZIZHAN_SLPI: fastrpc smmu plan sid=%x slot=%u bank=%u reuse=%u migrate=%u smr=%x s2cr=%x error=%s\n", kSid, plan.slot, plan.bank,
+        plan.reuse ? 1u : 0u, plan.migrate ? 1u : 0u, plan.smr, plan.s2cr, plan.error ? plan.error : "none");
+  gBank = plan.bank; gPages = plan.pages;
+  gSmmuWhy = configureUfsSmmu(plan, uint16_t(kSid), read, [](unsigned off, uint32_t v) { wr(gSmmu, off, v); });
+  IOLog("ZIZHAN_SLPI: fastrpc smmu configure %s\n", gSmmuWhy ? gSmmuWhy : "ok (bypass context)");
+  return !gSmmuWhy;
+}
+/* Read-only fault snapshot: global fault status and syndromes (an unmatched stream ID shows up in sGFSYNR1), and the FSR/FAR of
+ * the bank configured above. */
+void faults(const char *when) {
+  if (!gSmmu.va) return;
+  const uint64_t cb = uint64_t(gPages + gBank) * 4096;
+  IOLog("ZIZHAN_SLPI: fastrpc smmu %s sGFSR=%x sGFSYNR0=%x sGFSYNR1=%x sGFSYNR2=%x sGFAR=%x%08x cbFSR=%x cbFAR=%x%08x\n", when,
+        rd(gSmmu, 0x48), rd(gSmmu, 0x50), rd(gSmmu, 0x54), rd(gSmmu, 0x58), rd(gSmmu, 0x44), rd(gSmmu, 0x40), rd(gSmmu, cb + 0x58),
+        rd(gSmmu, cb + 0x64), rd(gSmmu, cb + 0x60));
+}
+void put64(uint64_t at, uint64_t v) { wr(gBuf, at, uint32_t(v)); wr(gBuf, at + 4, uint32_t(v >> 32)); }
+struct Arg { void *p; uint32_t len; };
+/* One synchronous invocation; returns the remote retval, or a negative local error. */
+uint64_t gLastCtx;
+int invokeAt(uint64_t base, uint32_t clientId, uint32_t handle, uint32_t sc, const Arg *in, unsigned nin, Arg *out, unsigned nout, uint32_t timeoutMs);
+int invoke(uint32_t clientId, uint32_t handle, uint32_t sc, const Arg *in, unsigned nin, Arg *out, unsigned nout, uint32_t timeoutMs) {
+  return invokeAt(0, clientId, handle, sc, in, nin, out, nout, timeoutMs);
+}
+/* base: byte offset of this call's region in the RPC buffer (two calls may be outstanding); timeoutMs 0 = send only. */
+int invokeAt(uint64_t base, uint32_t clientId, uint32_t handle, uint32_t sc, const Arg *in, unsigned nin, Arg *out, unsigned nout, uint32_t timeoutMs) {
+  const unsigned n = nin + nout;
+  const uint64_t meta = (16 + 8 + 16) * uint64_t(n) + 8 * 16 + 4 * 64 + 4;
+  for (uint64_t i = 0; i < ((meta + 3) & ~3ull); i += 4) wr(gBuf, base + i, 0);
+  uint64_t off = base + ((meta + 127) & ~127ull), at[16] = {};
+  if (n > 16) return -2;
+  for (unsigned i = 0; i < n; ++i) {
+    const uint32_t len = i < nin ? in[i].len : out[i - nin].len;
+    const uint64_t ra = base + 16ull * i, li = base + 16ull * n + 8ull * i, pg = base + 24ull * n + 16ull * i;
+    wr(gBuf, li + 4, i);
+    if (!len) continue;
+    off = (off + 127) & ~127ull;
+    if (off + len > kBufSize) return -3;
+    at[i] = off;
+    put64(ra, uint64_t(uintptr_t(gBuf.va + off))); put64(ra + 8, len);
+    wr(gBuf, li, 1);
+    const uint64_t first = (kBufPa + off) & ~0xfffull, last = (kBufPa + off + len - 1) & ~0xfffull;
+    put64(pg, (uint64_t(gSidCb) << 32) | first); put64(pg + 8, last - first + 0x1000);
+    if (i < nin) { const uint8_t *src = static_cast<const uint8_t *>(in[i].p); for (uint32_t k = 0; k < len; ++k) gBuf.va[off + k] = src[k]; }
+    off += len;
+  }
+  __asm__ volatile("dsb sy" ::: "memory");
+  struct __attribute__((packed)) { int32_t client; int32_t tid; uint64_t ctx; uint32_t handle, sc; uint64_t addr, size; } msg = {
+      int32_t(clientId), int32_t(kTgid), (gCtxSeq++ << 8) | gPd, handle, sc, (uint64_t(gSidCb) << 32) | (kBufPa + base), (off - base + 0xfff) & ~0xfffull};
+  gRsp = false;
+  gLastCtx = msg.ctx;
+  int rc = qcom_glink_send(&gGlink, gCh, &msg, sizeof msg);
+  for (uint64_t s0 = nowMs(); rc == QcomGlinkAgain && nowMs() - s0 < 2000;) {   // first send asks the remote for an intent
+    glinkService(); IOSleep(2);
+    rc = qcom_glink_send(&gGlink, gCh, &msg, sizeof msg);
+  }
+  if (rc != QcomGlinkOk) { IOLog("ZIZHAN_SLPI: fastrpc send rc=%d\n", rc); return -4; }
+  if (!timeoutMs) return 0;
+  const uint64_t t0 = nowMs();
+  auto mine = [&](int32_t *ret) { for (auto &e : gDoneTab) if (e.used && e.ctx == msg.ctx) { *ret = e.ret; e.used = false; return true; } return false; };
+  int32_t ret = 0;
+  bool got = false;
+  while (!(got = mine(&ret)) && nowMs() - t0 < timeoutMs) { glinkService(); IOSleep(1); }
+  if (!got) { IOLog("ZIZHAN_SLPI: fastrpc handle=%u sc=%x timeout (rsp=%u ctx=%llx)\n", handle, sc, gRsp ? 1u : 0u, gRspCtx); return -5; }
+  for (unsigned i = nin; i < n; ++i) {
+    if (!at[i]) continue;
+    uint8_t *dst = static_cast<uint8_t *>(out[i - nin].p);
+    for (uint32_t k = 0; k < out[i - nin].len; ++k) dst[k] = gBuf.va[at[i] + k];
+  }
+  return ret;
+}
+constexpr uint32_t sc(uint32_t method, uint32_t in, uint32_t out) { return (method << 24) | (in << 16) | (out << 8); }
+bool takeDone(uint64_t ctx, int32_t *ret) {
+  for (auto &e : gDoneTab) if (e.used && e.ctx == ctx) { *ret = e.ret; e.used = false; return true; }
+  return false;
+}
+/* next2 primary/sequence buffers per listener (root = region 0x80000, sensors = 0x40000). */
+struct Listener { const char *name; uint64_t base; uint32_t client, pd; uint64_t ctx; bool armed; uint32_t prim[4], outPrim[4]; uint8_t outSeq[256]; };
+Listener gL[2] = {{"root", 0x80000, kTgid + 1, 0, 0, false, {}, {}, {}}, {"sensors", 0x40000, kTgid, 2, 0, false, {}, {}, {}}};
+bool arm(Listener &l) {
+  l.prim[0] = 0; l.prim[1] = 0xffffffffu; l.prim[2] = 0; l.prim[3] = 256;
+  Arg in[2] = {{l.prim, 16}, {nullptr, 0}}, out[2] = {{l.outPrim, 16}, {l.outSeq, 256}};
+  gPd = l.pd;
+  const int r = invokeAt(l.base, l.client, 3, sc(4, 2, 2), in, 2, out, 2, 0);
+  l.ctx = gLastCtx; l.armed = r == 0;
+  IOLog("ZIZHAN_SLPI: fastrpc %s next2 armed=%u ctx=%llx\n", l.name, l.armed ? 1u : 0u, l.ctx);
+  return l.armed;
+}
+bool attachAndListen(Listener &l) {
+  int32_t id = int32_t(l.client);
+  Arg a = {&id, 4};
+  gPd = l.pd;
+  int r = invoke(0, 1, sc(0, 1, 0), &a, 1, nullptr, 0, 3000);
+  if (r) return false;
+  IOLog("ZIZHAN_SLPI: fastrpc %s pd attached at +%llums\n", l.name, nowMs() - gUpMs);
+  gPd = l.pd;
+  r = invoke(l.client, 3, sc(3, 0, 0), nullptr, 0, nullptr, 0, 3000);
+  IOLog("ZIZHAN_SLPI: fastrpc %s adsp_listener_init2 -> %d\n", l.name, r);
+  return !r && arm(l);
+}
+/* Watch-loop step: root PD attach + listener (sdsprpcd's role), sensors PD attach retried every 500 ms from channel-up (sscrpcd's
+ * role) + listener; then report whatever request either listener receives. Requests are only logged in this stage. */
+void run() {
+  static uint64_t nextTry;
+  static unsigned tries;
+  static bool rootOk, snsOk;
+  if (!gSetup) {
+    gSetup = true;
+    const bool s1 = gBuf.va && smmuSetup(0x541), s3 = gBuf.va && smmuSetup(0x543);
+    if (!s1 && !s3) { IOLog("ZIZHAN_SLPI: fastrpc stop: buffer=%u smmu=%s\n", gBuf.va ? 1u : 0u, gSmmuWhy); gDone = true; return; }
+    gSidCb = 1;
+    rootOk = attachAndListen(gL[0]);
+  }
+  const uint64_t now = nowMs();
+  if (!snsOk && tries < 40 && now >= nextTry) {
+    ++tries; nextTry = now + 500;
+    snsOk = attachAndListen(gL[1]);
+    if (!snsOk && tries == 40) IOLog("ZIZHAN_SLPI: fastrpc sensors pd attach gave up\n");
+  }
+  for (auto &l : gL) {
+    int32_t ret;
+    if (!l.armed || !takeDone(l.ctx, &ret)) continue;
+    l.armed = false;
+    // read the out primary and sequence straight from this call's region: rpra[2]/rpra[3] point there
+    const uint64_t n = 4, meta = (16 + 8 + 16) * n + 8 * 16 + 4 * 64 + 4;
+    uint64_t off = l.base + ((meta + 127) & ~127ull);
+    off = (off + 16 + 127) & ~127ull;               // after in prim (16 bytes); in seq is empty
+    for (unsigned i = 0; i < 4; ++i) l.outPrim[i] = rd(gBuf, off + 4 * i);
+    off = (off + 16 + 127) & ~127ull;
+    char hex[3 * 64 + 1] = "";
+    unsigned k = 0;
+    for (unsigned i = 0; i < 64 && i < l.outPrim[3] && i < 256; ++i) k += snprintf(hex + k, sizeof hex - k, "%02x ", gBuf.va[off + i]);
+    IOLog("ZIZHAN_SLPI: fastrpc %s request ret=%d rctx=%x handle=%u sc=%x inbufs=%u [%s]\n", l.name, ret, l.outPrim[0], l.outPrim[1],
+          l.outPrim[2], l.outPrim[3], hex);
+  }
+  if (!rootOk && snsOk == false && tries >= 40) gDone = true;
+}
+}  // namespace zizhan_frpc
 void glinkStart() {
   int rc = QcomSmemOk;
   if (lockSmem()) {
@@ -425,6 +600,10 @@ void glinkStart() {
   static const QcomGlinkClient client = {ipcrtrState, ipcrtrReceive};
   gIpcrtr = qcom_glink_channel(&gGlink, "IPCRTR", 0x4400, 4, gIpcrtrStore, &client, nullptr, 1);
   gGlinkOn = gIpcrtr != nullptr;
+  if (gSlpiMode == 3) {
+    zizhan_frpc::gCh = qcom_glink_channel(&gGlink, "fastrpcglink-apps-dsp", 0x400, 4, zizhan_frpc::gChStore, &zizhan_frpc::kClient, nullptr, 0);
+    if (!mapWin(zizhan_frpc::gBuf, zizhan_frpc::kBufPa, zizhan_frpc::kBufSize, kIOMapInhibitCache)) IOLog("ZIZHAN_SLPI: fastrpc buffer map failed\n");
+  }
   IOLog("ZIZHAN_SLPI: glink start desc=%u tx=%u channel=%u\n", dsz, tsz, gGlinkOn ? 1u : 0u);
 }
 void glinkService() {
@@ -679,7 +858,8 @@ again:
       if (!cycle && (bits & kReady) && !gGlinkOn) glinkStart();
     }
     if (!cycle) glinkService();
-    if (gSlpiMode == 2 && !cycle && gSnsNode != 0xffffffffu && gIpcrtr && gIpcrtr->up && now >= gSnsNextMs) {
+    if (gSlpiMode == 3 && !cycle && zizhan_frpc::gUp && !zizhan_frpc::gDone) zizhan_frpc::run();
+    if (gSlpiMode >= 2 && !cycle && gSnsNode != 0xffffffffu && gIpcrtr && gIpcrtr->up && now >= gSnsNextMs) {
       switch (gSnsStage) {   // one step per slot: registry, accel, ambient_light lookups, then the accelerometer stream
       case 0: gSnsNextMs = now + 3000; break;
       case 1: snsSuid("registry"); gSnsNextMs = now + 1500; break;
@@ -753,7 +933,7 @@ out:
 
 extern "C" void zizhan_slpi_start(void) {
   uint32_t mode = 0, adsp = 0, modem = 0;
-  if (!PE_parse_boot_argn("zizhan_slpi", &mode, sizeof mode) || mode < 1 || mode > 2) return;
+  if (!PE_parse_boot_argn("zizhan_slpi", &mode, sizeof mode) || mode < 1 || mode > 3) return;
   gSlpiMode = mode;
   if (PE_parse_boot_argn("pong_adsp", &adsp, sizeof adsp) && adsp) { IOLog("ZIZHAN_SLPI: SKIP needs pong_adsp=0 (AOSS/SMEM owner)\n"); return; }
   if (PE_parse_boot_argn("zizhan_modem", &modem, sizeof modem) && modem == 2) { IOLog("ZIZHAN_SLPI: SKIP zizhan_modem=2 owns the same resources\n"); return; }

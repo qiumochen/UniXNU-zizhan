@@ -18,8 +18,24 @@ enum {
 /* zizhan_power_inject=N (2..10): N off/on cycles (2N presses) 5 s apart, so ten cycles finish
  * well inside the 210 s autoreset window. N=1 keeps the S1 schedule above. */
 enum {ZizhanPowerCyclesMax=10u,ZizhanPowerCycleGapMs=5000u};
-static inline unsigned zizhan_power_inject_presses(uint32_t inject){return inject>=2u&&inject<=ZizhanPowerCyclesMax?2u*inject:ZizhanPowerPressCount;}
-static inline uint32_t zizhan_power_inject_gap_ms(uint32_t inject){return inject>=2u?ZizhanPowerCycleGapMs:ZizhanPowerPressGapMs;}
+/* zizhan_power_inject=100 (POWER-03 standby): one press turns the display off, the second press after
+ * standby_s seconds (zizhan_power_standby_s, 30..1200, default 480) turns it back on. */
+enum {ZizhanPowerStandbyMode=100u,ZizhanPowerStandbyDefaultS=480u,ZizhanPowerStandbyMinS=30u,ZizhanPowerStandbyMaxS=1200u};
+static inline uint32_t zizhan_power_standby_s(uint32_t requested){
+ if(!requested)return ZizhanPowerStandbyDefaultS;
+ if(requested<ZizhanPowerStandbyMinS)return ZizhanPowerStandbyMinS;
+ if(requested>ZizhanPowerStandbyMaxS)return ZizhanPowerStandbyMaxS;
+ return requested;
+}
+static inline unsigned zizhan_power_inject_presses(uint32_t inject){
+ if(inject==ZizhanPowerStandbyMode)return 2u;
+ return inject>=2u&&inject<=ZizhanPowerCyclesMax?2u*inject:ZizhanPowerPressCount;
+}
+static inline uint32_t zizhan_power_inject_gap_ms_s(uint32_t inject,uint32_t standby_s){
+ if(inject==ZizhanPowerStandbyMode)return zizhan_power_standby_s(standby_s)*1000u;
+ return inject>=2u?ZizhanPowerCycleGapMs:ZizhanPowerPressGapMs;
+}
+static inline uint32_t zizhan_power_inject_gap_ms(uint32_t inject){return zizhan_power_inject_gap_ms_s(inject,0u);}
 
 enum {
  ZizhanPowerInjectOff=0,
@@ -30,7 +46,7 @@ enum {
 
 static inline int zizhan_power_inject_mode(uint32_t inject,uint32_t observe){
  if(!inject)return ZizhanPowerInjectOff;
- if(inject>ZizhanPowerCyclesMax)return ZizhanPowerInjectSkipMode;
+ if(inject>ZizhanPowerCyclesMax&&inject!=ZizhanPowerStandbyMode)return ZizhanPowerInjectSkipMode;
  if(observe!=1u)return ZizhanPowerInjectSkipObserve;
  return ZizhanPowerInjectRun;
 }

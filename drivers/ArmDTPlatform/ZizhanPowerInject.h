@@ -67,7 +67,9 @@ static void worker(void *, wait_result_t) {
   }
   IOSleep(ZizhanPowerInjectDelayMs);
   const unsigned presses = zizhan_power_inject_presses(inject_value);
-  const uint32_t gap_ms = zizhan_power_inject_gap_ms(inject_value);
+  uint32_t standby_s = 0;
+  (void)PE_parse_boot_argn("zizhan_power_standby_s", &standby_s, sizeof standby_s);
+  const uint32_t gap_ms = zizhan_power_inject_gap_ms_s(inject_value, standby_s);
   for (unsigned press = 0; press < presses; ++press) {
     const uint64_t down = uptime_ms();
     IOLog("ZIZHAN_POWER_INJECT: press=%u phase=down t_ms=%llu\n",

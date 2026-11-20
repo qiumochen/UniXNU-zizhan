@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Decode PONG SHOT log lines into PNGs. Usage: shot.py LOG [OUTDIR].
+"""Decode PONG SHOT log lines into PNGs. Usage: shot.py LOG [OUTDIR] [--diff].
+--diff also reports, for each pair of consecutive complete shots, how many sampled pixels changed and their bounding box
+(percent of the screen), to find what keeps redrawing a static screen.
 
 Current kernels print each row in 32-pixel chunks to stay under IOLog's line
 limit. Older logs contain a truncated whole-row line; crop those screenshots to
@@ -23,6 +25,24 @@ def write_png(path, width, height, rows):
         output.write(b'\x89PNG\r\n\x1a\n' +
                      chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) +
                      chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
+
+
+def diff(shots):
+    done = [(n, sh) for n, sh in sorted(shots.items()) if len(sh['rows']) == sh['height'] and not sh.get('conflict')]
+    for (na, a), (nb, b) in zip(done, done[1:]):
+        if a['width'] != b['width'] or a['height'] != b['height']:
+            continue
+        w, h = a['width'], a['height']
+        changed, box = 0, [w, h, -1, -1]
+        for y in range(h):
+            ra, rb = a['rows'][y], b['rows'][y]
+            for x in range(w):
+                if ra[x * 3:x * 3 + 3] != rb[x * 3:x * 3 + 3]:
+                    changed += 1
+                    box = [min(box[0], x), min(box[1], y), max(box[2], x), max(box[3], y)]
+        where = (f"x {100 * box[0] // w}-{100 * (box[2] + 1) // w}% y {100 * box[1] // h}-{100 * (box[3] + 1) // h}%"
+                 if changed else "none")
+        print(f"diff shot {na}->{nb} ({(b['at'] - a['at']) // 1000} ms apart): {changed}/{w * h} samples changed, {where}")
 
 
 def decode(log_path, out_dir):
@@ -55,6 +75,8 @@ def decode(log_path, out_dir):
             row[target * 3:target * 3 + 3] = data[pixel * 3:pixel * 3 + 3]
             coverage[target] = 1
 
+    if '--diff' in sys.argv:
+        diff(shots)
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(log_path))[0]
     for number, shot in sorted(shots.items()):
@@ -83,6 +105,7 @@ def decode(log_path, out_dir):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) not in (2, 3):
+    args = [a for a in sys.argv[1:] if a != '--diff']
+    if len(args) not in (1, 2):
         raise SystemExit(__doc__)
-    decode(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else os.path.dirname(os.path.abspath(sys.argv[1])))
+    decode(args[0], args[1] if len(args) == 2 else os.path.dirname(os.path.abspath(args[0])))

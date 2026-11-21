@@ -46,7 +46,16 @@ def adapt_dispatcher_timers(source):
 """
     if source.count(old) != 1:
         raise RuntimeError('shared dispatcher timer ABI differs')
-    return source.replace(old, new)
+    source = source.replace(old, new)
+    # POWER-06: every pump marked every interrupt pending once a millisecond, so the MHI handler read the QCA6490's registers
+    # over PCIe all the time and the device never left M0 (wifi-mhi-1: M0 1, M2 0 over 7 min). pong_wifi_irq_due
+    # (PongWifiPlatform.cpp) raises them when an MSI arrived or zizhan_wifi_raise_ms has passed (default 1 = as before).
+    raise_old = '  { static u64 last_raise; u64 t = lx_now_ms(); if (t != last_raise) { last_raise = t; lx_irq_raise_all(); } }'
+    raise_new = ('  { extern int pong_wifi_irq_due(u64 now); static u64 last_raise; u64 t = lx_now_ms();'
+                 ' if (t != last_raise && pong_wifi_irq_due(t)) { last_raise = t; lx_irq_raise_all(); } }')
+    if source.count(raise_old) != 1:
+        raise RuntimeError('shared dispatcher interrupt ABI differs')
+    return source.replace(raise_old, raise_new)
 
 
 def main():
@@ -288,7 +297,7 @@ int nw_wifi_set_ps(int on)
     nm = pong_paths.tool('llvm-nm', 'PONG_LLVM_NM', ('/opt/local/bin/llvm-nm-mp-18',))
     undefined = subprocess.check_output([nm, '-u', '-j', str(linked)], text=True).splitlines()
     (out / 'undefined-symbols.txt').write_text('\n'.join(undefined) + '\n')
-    allowed = {'_PongWifiRandom','_pong_wifi_ps','_bzero','_memcmp','_memcpy','_memmove','_memset','_snprintf','_strchr','_strcmp','_strlen','_strncmp','_strncpy','_strtoul','_vsnprintf'}
+    allowed = {'_PongWifiRandom','_pong_wifi_ps','_pong_wifi_irq_due','_bzero','_memcmp','_memcpy','_memmove','_memset','_snprintf','_strchr','_strcmp','_strlen','_strncmp','_strncpy','_strtoul','_vsnprintf'}
     if set(undefined) - allowed: raise RuntimeError('unimplemented ath11k imports: ' + repr(set(undefined) - allowed))
     # Export only the documented board/station boundary. Linux shims have the
     # same C names as XNU helpers, so namespace every other defined symbol.

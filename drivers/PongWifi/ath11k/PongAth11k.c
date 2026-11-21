@@ -11,6 +11,7 @@
 #include "core.h"
 #include "debug.h"
 #include <linux/mhi.h>
+#include "pci.h"
 
 int pong_ath11k_pci_init(void);
 void pong_ath11k_pci_exit(void);
@@ -103,6 +104,21 @@ void nw_wifi_stop(void)
 /* Optional extended diagnostic counters are not part of the station path.
  * Their absence is recorded rather than reporting firmware statistics that
  * were never requested or received. */
+/* POWER-06 diagnostic: the QCA6490's MHI state and its M0/M2/M3 entry counts (Linux mhi_controller counters), so the 15 s
+ * runtime line shows whether the device ever leaves M0 while the link is idle. Read-only. */
+void nw_wifi_mhi_state(char *out, int n)
+{
+    struct ieee80211_hw *hw = nw_wifi_hw();
+    if (n <= 0) return;
+    out[0] = 0;
+    if (!hw) return;
+    struct ath11k *ar = hw->priv;
+    struct ath11k_pci *ab_pci = ar && ar->ab ? ath11k_pci_priv(ar->ab) : NULL;
+    struct mhi_controller *m = ab_pci ? ab_pci->mhi_ctrl : NULL;
+    if (!m) { snprintf(out, n, "MHI unavailable"); return; }
+    snprintf(out, n, "MHI dev_state %d pm 0x%x M0 %u M2 %u M3 %u dev_wake %d pending %d wake_set %d", (int)m->dev_state,
+             (unsigned)m->pm_state, m->M0, m->M2, m->M3, atomic_read(&m->dev_wake), atomic_read(&m->pending_pkts), (int)m->wake_set);
+}
 void nw_wifi_htt_stats(int type) { lx_log(7, "ath11k: optional HTT counter type %d not requested", type); }
 void nw_wifi_rx_state(char *out, int n) { if (n > 0) snprintf(out, n, "RX frames=%u", nw_wifi_stats.frames); }
 void nw_wifi_ring_state(char *out, int n) { if (n > 0) snprintf(out, n, "ath11k ring snapshot unavailable"); }

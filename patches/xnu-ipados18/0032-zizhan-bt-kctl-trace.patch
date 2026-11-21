@@ -1,0 +1,18 @@
+--- a/bsd/kern/kern_control.c
++++ b/bsd/kern/kern_control.c
+@@ -1482,6 +1482,15 @@
+ 			error = ENOENT;
+ 		}
+ 		lck_mtx_unlock(&ctl_mtx);
++		{
++			/* zizhan BT-01 diagnostic (zizhan_bt_probe>=4): which kernel control BlueTool/bluetoothd look up, and whether it exists */
++			extern int zizhan_bt_trace(proc_t p);
++			proc_t zz_p = current_proc();
++			if (zizhan_bt_trace(zz_p)) {
++				printf("ZIZHAN_BT_TRACE: %s CTLIOCGINFO '%s' -> err=%d id=%u\n", zz_p->p_comm, ctl_info.ctl_name, error,
++				    error == 0 ? ctl_info.ctl_id : 0);
++			}
++		}
+ 
+ 		if (error == 0) {
+ 			bcopy(&ctl_info, data, sizeof(ctl_info));

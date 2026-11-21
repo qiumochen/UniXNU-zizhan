@@ -240,6 +240,81 @@ static void h4_feed(Window &se, const uint8_t *b, unsigned n) {
   }
 }
 
+/* Qualcomm in-band sleep (IBS), host side as in Linux hci_qca.c. Even with the NVM fixup the QCA6490 sleeps when idle:
+ * it sends SLEEP_IND (0xfe), and before it sends anything it sends WAKE_IND (0xfd) every ~10 ms until the host answers
+ * WAKE_ACK (0xfc). The host must also wake it with WAKE_IND before sending after a SLEEP_IND, or the first bytes are lost.
+ * IBS bytes only appear between H4 packets, so the receive side keeps H4 framing to tell them from payload bytes. */
+struct IbsRx { uint8_t hdr[5]; unsigned have, hdr_len, need; bool asleep, acked; uint32_t wake_ind, wake_ack, sleep_ind, wakes, wake_fail; };
+static IbsRx ibs;
+static unsigned ibs_rx(Window &se, const uint8_t *in, unsigned n, uint8_t *out) {
+  unsigned k = 0;
+  for (unsigned i = 0; i < n; ++i) {
+    const uint8_t b = in[i];
+    if (ibs.hdr_len == 0) {   // between packets
+      if (b == 0xfd) {
+        ++ibs.wake_ind;
+        const uint8_t ack = 0xfc;
+        tx_bytes(se, &ack, 1);
+        ibs.asleep = false;
+        continue;
+      }
+      if (b == 0xfe) { ++ibs.sleep_ind; ibs.asleep = true; continue; }
+      if (b == 0xfc) { ++ibs.wake_ack; ibs.acked = true; ibs.asleep = false; continue; }
+      const unsigned hl = b == 0x04 ? 3u : b == 0x02 ? 5u : b == 0x03 ? 4u : b == 0x05 ? 5u : 0u;
+      out[k++] = b;
+      if (!hl) {
+        continue;             // not H4: pass through unframed
+      }
+      ibs.hdr[0] = b;
+      ibs.have = 1;
+      ibs.hdr_len = hl;
+      ibs.need = hl;
+      ibs.asleep = false;
+      continue;
+    }
+    out[k++] = b;
+    if (ibs.have < ibs.hdr_len) {
+      ibs.hdr[ibs.have] = b;
+    }
+    ++ibs.have;
+    if (ibs.have == ibs.hdr_len) {
+      const uint8_t *h = ibs.hdr;
+      const unsigned body = h[0] == 0x04 ? h[2] : h[0] == 0x03 ? h[3] : h[0] == 0x02 ? unsigned(h[3] | (h[4] << 8))
+                                                                                    : unsigned((h[3] | (h[4] << 8)) & 0x3fff);
+      ibs.need = ibs.hdr_len + body;
+    }
+    if (ibs.have >= ibs.hdr_len && ibs.have == ibs.need) {
+      ibs.hdr_len = 0;
+      ibs.have = 0;
+    }
+  }
+  return k;
+}
+/* After a SLEEP_IND: WAKE_IND, wait up to 3 x 30 ms for WAKE_ACK (or the controller's own WAKE_IND), passing RX through. */
+static void ibs_wake(Window &se) {
+  uint8_t in[256], out[256];
+  ibs.acked = false;
+  ++ibs.wakes;
+  for (unsigned tries = 0; tries < 3 && ibs.asleep; ++tries) {
+    const uint8_t wake = 0xfd;
+    tx_bytes(se, &wake, 1);
+    const uint64_t end = now_us() + 30000;
+    while (now_us() < end && !ibs.acked && ibs.asleep) {
+      const unsigned got = rx_bytes(se, in, sizeof in, 2);
+      const unsigned k = got ? ibs_rx(se, in, got, out) : 0;
+      if (k) {
+        zizhan_bt_uart_input(out, k);
+      }
+    }
+  }
+  if (ibs.asleep) {
+    if (ibs.wake_fail++ < 4) {
+      IOLog("ZIZHAN_BT_PROBE: ibs wake-timeout (sending anyway)\n");
+    }
+    ibs.asleep = false;
+  }
+}
+
 /* Never returns while the bridge runs: TX ring -> GENI TX FIFO, GENI RX FIFO -> tty, polled every 2 ms. */
 static void serve(Window &se) {
   if (!zizhan_bt_uart_attach || !zizhan_bt_uart_input) {
@@ -271,6 +346,9 @@ static void serve(Window &se) {
         ++tx_logged;
         log_bytes("bridge-tx", out, n < 32 ? n : 32);
       }
+      if (ibs.asleep) {
+        ibs_wake(se);
+      }
       h4_feed(se, out, n);
       tx_total += n;
       __atomic_store_n(&tx_tail, tail, __ATOMIC_RELEASE);
@@ -281,12 +359,17 @@ static void serve(Window &se) {
     const unsigned got = rx_bytes(se, in, sizeof in, 2);
     if (got) {
       if (rx_logged < 24) { ++rx_logged; log_bytes("bridge-rx", in, got < 32 ? got : 32); }
-      zizhan_bt_uart_input(in, got);
+      uint8_t h4rx[sizeof in];
+      const unsigned k = ibs_rx(se, in, got, h4rx);
+      if (k) {
+        zizhan_bt_uart_input(h4rx, k);
+      }
       rx_total += got;
     }
     if (now_us() - last_log >= 60000000ull) {
       last_log = now_us();
-      IOLog("ZIZHAN_BT_PROBE: bridge rx=%llu tx=%llu hci forwarded=%u shimmed=%u\n", rx_total, tx_total, h4.forwarded, h4.shimmed);
+      IOLog("ZIZHAN_BT_PROBE: bridge rx=%llu tx=%llu hci forwarded=%u shimmed=%u ibs wake_ind=%u wake_ack=%u sleep_ind=%u wakes=%u fail=%u\n",
+            rx_total, tx_total, h4.forwarded, h4.shimmed, ibs.wake_ind, ibs.wake_ack, ibs.sleep_ind, ibs.wakes, ibs.wake_fail);
     }
   }
 }

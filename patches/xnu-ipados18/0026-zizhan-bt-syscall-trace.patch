@@ -76,7 +76,7 @@
 +		/* only /dev nodes and bluetooth/uart paths: system plist reads would use up the budget */
 +		if (segflg == UIO_USERSPACE && zizhan_bt_trace_proc(zz_p) >= 0 &&
 +		    copyinstr(path, zz_path, sizeof(zz_path), &zz_len) == 0 &&
-+		    (!strncmp(zz_path, "/dev/", 5) || strnstr(zz_path, "luetoo", sizeof(zz_path)) || strnstr(zz_path, "uart", sizeof(zz_path)) || strnstr(zz_path, "BlueTool", sizeof(zz_path))) &&
++		    (!strncmp(zz_path, "/dev/", 5) || strnstr(zz_path, "uart", sizeof(zz_path)) || strnstr(zz_path, "/etc/bluetool", sizeof(zz_path))) &&
 +		    zizhan_bt_trace(zz_p)) {
 +			printf("ZIZHAN_BT_TRACE: %s open '%s' flags=%x\n", zz_p->p_comm, zz_path, flags);
 +		}

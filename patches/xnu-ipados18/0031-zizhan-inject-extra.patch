@@ -1,16 +1,21 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5986,6 +5986,17 @@
+@@ -5986,6 +5986,22 @@
  	lck_mtx_unlock(&exec_inject_lock);
  	int error = sysctl_io_string(req, conf, sizeof(conf), 0, &changed);
  	if (error == 0 && changed) {
 +		/* zizhan BT-01: boot-arg pong_inj=<library>:<program> adds "; <library> <program>" to what init configures, so one
-+		 * experiment library reaches one more program without rebuilding init (e.g. pong_inj=/pong/bt.dylib:BlueTool). */
++		 * experiment library reaches one more program without rebuilding init (e.g. pong_inj=/pong/bt.dylib:BlueTool,bluetoothd). */
 +		char extra[96];
 +		if (PE_parse_boot_argn("pong_inj", extra, sizeof(extra)) && extra[0] == '/') {
 +			char *colon = strchr(extra, ':');
 +			if (colon != NULL && colon[1] != 0) {
 +				*colon = ' ';
++				for (char *c = colon; *c; c++) {
++					if (*c == ',') {
++						*c = ' ';   /* pong_inj=<library>:<program>,<program> */
++					}
++				}
 +				strlcat(conf, "; ", sizeof(conf));
 +				strlcat(conf, extra, sizeof(conf));
 +			}

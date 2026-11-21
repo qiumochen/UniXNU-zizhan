@@ -245,6 +245,26 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     sta = sta.replace(assign, rate_selection +
         '  lx_log(6, "zizhan station: pre-start band=%u basic_rates=0x%x", band, g_vif->bss_conf.basic_rates);\n'
         '  g_ops->link_info_changed(g_hw, g_vif, &g_vif->bss_conf, BSS_CHANGED_BASIC_RATES);\n' + assign)
+    # POWER-06: the shared station never asks for 802.11 power save, so the QCA6490 stays awake (CAM) for as long as it is associated.
+    # ath11k sets it up on BSS_CHANGED_PS (mac.c ath11k_mac_vif_setup_ps: WMI_STA_PS_MODE_ENABLED, inactivity = dynamic_ps_timeout
+    # or one beacon interval); boot-arg zizhan_wifi_ps=1 keeps it on, =2 follows the display (on while it is off); PongWifiPlatform.cpp pong_wifi_ps / nw_wifi_set_ps.
+    up = '  C.state = NW_STA_UP; C.bmiss_at = 0;'
+    if sta.count(up) != 1:
+        raise RuntimeError('shared station link-up ABI differs')
+    at = sta.index('\n', sta.index(up)) + 1   # after the whole link-up line: nw_wifi_set_ps needs NW_STA_UP
+    sta = ('static int g_ps_on = -1;\nint nw_wifi_set_ps(int on);\n' + sta[:at] +
+           '  { extern int pong_wifi_ps(void); g_ps_on = -1; nw_wifi_set_ps(pong_wifi_ps()); }\n' + sta[at:] + '''
+/* zizhan POWER-06: 802.11 station power save, from the Wi-Fi worker thread only (the station is single-threaded there).
+ * Sent when the link is up and the wanted state differs; a new association starts from "unknown" again. */
+int nw_wifi_set_ps(int on)
+{
+  on = on ? 1 : 0;
+  if (C.state != NW_STA_UP || !g_vif || g_ps_on == on) return 0;
+  g_ps_on = on; g_vif->cfg.ps = on; g_ops->vif_cfg_changed(g_hw, g_vif, BSS_CHANGED_PS);
+  lx_log(6, "zizhan station: 802.11 power save %s", on ? "on" : "off");
+  return 1;
+}
+''')
     (out / 'nw_sta_pong.c').write_text(sta)
     (out / 'lx_rt_pong.c').write_text(adapt_dispatcher_timers((shared / 'shim/src/lx_rt.c').read_text()))
     common_sources = ['src/nw_crypto.c', 'src/nw_mac80211.c', 'src/nw_net.c', 'src/nw_pci.c',
@@ -268,7 +288,7 @@ void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work) { i
     nm = pong_paths.tool('llvm-nm', 'PONG_LLVM_NM', ('/opt/local/bin/llvm-nm-mp-18',))
     undefined = subprocess.check_output([nm, '-u', '-j', str(linked)], text=True).splitlines()
     (out / 'undefined-symbols.txt').write_text('\n'.join(undefined) + '\n')
-    allowed = {'_PongWifiRandom','_bzero','_memcmp','_memcpy','_memmove','_memset','_snprintf','_strchr','_strcmp','_strlen','_strncmp','_strncpy','_strtoul','_vsnprintf'}
+    allowed = {'_PongWifiRandom','_pong_wifi_ps','_bzero','_memcmp','_memcpy','_memmove','_memset','_snprintf','_strchr','_strcmp','_strlen','_strncmp','_strncpy','_strtoul','_vsnprintf'}
     if set(undefined) - allowed: raise RuntimeError('unimplemented ath11k imports: ' + repr(set(undefined) - allowed))
     # Export only the documented board/station boundary. Linux shims have the
     # same C names as XNU helpers, so namespace every other defined symbol.

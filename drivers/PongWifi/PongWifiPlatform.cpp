@@ -59,6 +59,10 @@ Window pmicCore,pmicConfig,pmicObserver;
 unsigned pmicChannels;
 IOBufferMemoryDescriptor *arena,*tables,*msiPage;
 uint8_t *arenaVa; uint64_t tablePa,msiPa; uint64_t cbOffset;
+uint32_t idleMs=5;   // zizhan_wifi_idle_ms (POWER-06)
+uint32_t psMode=2;   // zizhan_wifi_ps (POWER-06): daily default 2 = power save while the display is off; 0 disables
+extern "C" int zizhan_display_power_state(void);
+extern "C" int nw_wifi_set_ps(int on);
 unsigned pcieCap,msiCap; volatile uint32_t stopped,wake; bool dmaOwned,hostMmioReady;
 uint64_t initDeadline;
 uint64_t now() {uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;}
@@ -609,6 +613,17 @@ void testNetwork(const nw_wifi_status &st) {
    attempted,st.state,st.result,pong_wifi_net_has_ipv4());
  }
 }
+// POWER-06 experiment (zizhan_wifi_aspm=1, default off): enable ASPM L1 on the live link, upstream (root port, DBI LNKCTL 0x80) first and
+// then the QCA6490 (LNKCTL at its PCIe capability + 0x10), as Linux aspm.c orders an L1 enable. Both LNKCAP must advertise L1. PARF
+// PM_CTRL REQ_NOT_ENTR_L1 is already clear (coldLink). L0s and L1 substates stay off.
+uint32_t aspmMode;
+void enableAspm() {
+ const unsigned rcCap=dbi.r(0x7c),epCap=cfg.r(pcieCap+0x0c),rcCtl=dbi.r(0x80),epCtl=cfg.r(pcieCap+0x10);
+ const bool l1=((rcCap>>11)&1)&&((epCap>>11)&1);
+ if(l1){dbi.w(0x80,(rcCtl&0xfffcu)|2u);cfg.w(pcieCap+0x10,(epCtl&0xfffcu)|2u);}
+ IOLog("PongWifi: ASPM L1 %s rc cap %x ctl %x->%x ep cap %x ctl %x->%x\n",l1?"enabled":"SKIP unsupported",
+  rcCap,rcCtl&0xffff,dbi.r(0x80)&0xffff,epCap,epCtl&0xffff,cfg.r(pcieCap+0x10)&0xffff);
+}
 void signalWorker() {__atomic_store_n(&wake,1,__ATOMIC_RELEASE);thread_wakeup(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)));}
 void irq(void *) {
  unsigned pending=dbi.r(MsiStatus);
@@ -644,6 +659,10 @@ void worker(void *,wait_result_t) {
   if(cfgWrite(4,2,6))goto done;
   initDeadline=now()+90000;int r=nw_wifi_start(&platform,&board);if(r){IOLog("PongWifi: ath11k start failed=%d\n",r);goto done;}
  }
+ if(PE_parse_boot_argn("zizhan_wifi_idle_ms",&idleMs,sizeof idleMs)&&(idleMs<1||idleMs>500))idleMs=5;
+ IOLog("PongWifi: idle wait %u ms\n",idleMs);
+ PE_parse_boot_argn("zizhan_wifi_aspm",&aspmMode,sizeof aspmMode);
+ PE_parse_boot_argn("zizhan_wifi_ps",&psMode,sizeof psMode);
  {bool net=false,irqSeen=false;uint64_t diagnosticsAt=0;for(;;){if(!irqSeen&&__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED)){irqSeen=true;log(6,"QCA6490 MSI delivered by GIC");}progress(1);poll();progress(2);int busy=nw_wifi_step();progress(3);nw_wifi_status st={};nw_wifi_status_get(&st);progress(4);
    if(!net&&st.channels&&st.state!=NW_STA_OFF&&nw_wifi_stats.stage>=4&&!nw_wifi_stats.last_err){bool valid=false;for(unsigned i=0;i<6;i++)valid|=st.mac[i]!=0;if(valid&&!(st.mac[0]&1)){initDeadline=0;net=true;
      auto chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);if(chosen){chosen->setProperty("mac-address-wifi0",st.mac,6);chosen->release();}
@@ -652,6 +671,9 @@ void worker(void *,wait_result_t) {
      pong_wifi_net_start(st.mac);log(6,"QCA6490 station ready; starting actual scan");nw_wifi_scan(nullptr,0);
    }}
    if(net) {
+    static uint64_t aspmAt;
+    if(aspmMode==1&&aspmAt!=~0ull){if(!aspmAt)aspmAt=now()+30000;else if(now()>=aspmAt){aspmAt=~0ull;enableAspm();}}
+    if(psMode==2){static int shown=-1;const int off=zizhan_display_power_state()==0;if(off!=shown){shown=off;nw_wifi_set_ps(off);}}
     progress(5);testNetwork(st);
     if(now()>=diagnosticsAt) {
      diagnosticsAt=now()+15000;
@@ -661,7 +683,18 @@ void worker(void *,wait_result_t) {
      progress(6);pong_wifi_net_diagnostics();
     }
    }
-   progress(7);IOSleep(busy?1:5);
+   progress(7);
+   // POWER-06: an idle pass used to sleep a fixed 5 ms (200 wake-ups a second, each polling the rings over PCIe). With
+   // zizhan_wifi_idle_ms=<ms> an idle pass waits for the MSI handler or a queued frame (signalWorker) for at most that long;
+   // the timeout stays because irq() turns MSI off after 64 empty interrupts. Default 5 keeps the old cadence.
+   if(busy)IOSleep(1);
+   else if(!__atomic_exchange_n(&wake,0,__ATOMIC_ACQ_REL)) {
+    assert_wait_timeout(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)),THREAD_UNINT,idleMs,kMillisecondScale);
+    // A signal that landed between the exchange and assert_wait is not lost: wake ourselves, so the block returns at once.
+    if(__atomic_load_n(&wake,__ATOMIC_ACQUIRE)){thread_wakeup(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)));}
+    thread_block(THREAD_CONTINUE_NULL);
+    __atomic_store_n(&wake,0,__ATOMIC_RELEASE);
+   }
  }}
  done: stopped=1;
  // A mapped address does not prove a powered device. Failed GDSC/clock
@@ -677,6 +710,9 @@ extern "C" bool pong_wifi_test_reconnect(void) {
  return __atomic_compare_exchange_n(&testReconnectState,&ready,2,false,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED);
 }
 extern "C" void pong_wifi_wake(void) {signalWorker();}
+// POWER-06: 802.11 station power save (build-pong-ath11k.py patches the shared nw_sta). zizhan_wifi_ps=1 always, =2 (default) while
+// the display is off (the worker follows the display and calls nw_wifi_set_ps); the wanted state at each link-up comes from here.
+extern "C" int pong_wifi_ps(void) {return psMode==1||(psMode==2&&zizhan_display_power_state()==0);}
 extern "C" void native_wifi_logf(int level,const char *fmt,...) {char line[256];va_list a;va_start(a,fmt);vsnprintf(line,sizeof line,fmt,a);va_end(a);log(level,line);}
 extern "C" void pong_wifi_start_optional(void) {
  pong_rpmh_init();

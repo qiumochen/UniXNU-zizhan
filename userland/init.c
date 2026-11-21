@@ -366,14 +366,23 @@ failed:
 static void
 prepare_device_identity(void)
 {
-    static const char marker[]="/private/var/.pong-identity-iPhone17,1-22H374-island";
+    /* MobileGestalt keeps ProductType/DeviceClass answers in these caches. The ADT identity is chosen when the boot image is
+     * packaged (iPhone17,1 presentation or the restore's own iPad7,12, make-pong-adt-ipados18.py --identity) and may change
+     * between boots, so drop the caches whenever hw.product differs from the one recorded at the last refresh. */
+    static const char marker[]="/private/var/.pong-identity";
     static const char *paths[]={
         "/private/var/mobile/Library/Caches/com.apple.MobileGestalt.plist",
         "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist"
     };
-    char product[64]={0};size_t length=sizeof(product);struct stat st;
-    if(sysctlbyname("hw.product",product,&length,NULL,0)!=0 ||
-       strcmp(product,"iPhone17,1") || lstat(marker,&st)==0)return;
+    char product[64]={0},recorded[64]={0};size_t length=sizeof(product)-1;struct stat st;
+    if(sysctlbyname("hw.product",product,&length,NULL,0)!=0 || !product[0])return;
+    int fd=open(marker,O_RDONLY,0);
+    if(fd>=0) {
+        ssize_t n=read(fd,recorded,sizeof(recorded)-1);
+        close(fd);
+        if(n>0)recorded[n]=0;
+    }
+    if(!strcmp(recorded,product))return;
     int ok=1,removed=0;
     for(unsigned i=0;i<sizeof(paths)/sizeof(paths[0]);i++) {
         if(lstat(paths[i],&st)!=0) {if(errno!=2)ok=0;continue;}
@@ -381,14 +390,14 @@ prepare_device_identity(void)
         removed++;
     }
     if(ok) {
-        int fd=open(marker,O_CREAT|O_EXCL|O_WRONLY,0600);
-        if(fd>=0) {const char value[]="iPhone17,1 / iPhone 16 Pro / phone\n";
-            if(write(fd,value,sizeof(value)-1)!=(ssize_t)sizeof(value)-1 || fsync(fd)!=0) {
-                close(fd);unlink(marker);ok=0;
-            } else close(fd);
-        } else ok=0;
+        fd=open(marker,O_CREAT|O_TRUNC|O_WRONLY,0600);
+        size_t n=strlen(product);
+        if(fd<0 || write(fd,product,n)!=(ssize_t)n || fsync(fd)!=0)ok=0;
+        if(fd>=0)close(fd);
+        if(!ok)unlink(marker);
     }
-    printf("Pong init: iPhone 16 Pro identity cache refresh %s removed=%d\n",ok?"PASS":"FAIL",removed);
+    printf("Pong init: identity %s (was %s) MobileGestalt cache refresh %s removed=%d\n",product,recorded[0]?recorded:"unrecorded",
+           ok?"PASS":"FAIL",removed);
 }
 
 static void

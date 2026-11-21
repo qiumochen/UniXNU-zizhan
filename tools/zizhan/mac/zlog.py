@@ -166,7 +166,11 @@ def wifi_and_frames(t):
 
 def greps(t, patterns, n):
     for p in patterns:
-        c = collections.Counter(m.group(0)[:220] for m in re.finditer(p + r"[^\r\n]*", t))
+        try:
+            rx = re.compile(p + r"[^\r\n]*")
+        except re.error:   # zround splits GREP on '|', so a grouped alternation arrives broken: match it literally
+            rx = re.compile(re.escape(p) + r"[^\r\n]*")
+        c = collections.Counter(m.group(0)[:220] for m in rx.finditer(t))
         section(f"grep {p} ({sum(c.values())} lines, {len(c)} distinct)")
         for line, k in c.most_common(n):
             print(f"  {k}x {line}")

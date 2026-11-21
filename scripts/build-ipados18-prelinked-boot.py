@@ -23,6 +23,7 @@ def main():
  p.add_argument('--cs35l41-coefficients',type=Path,default=None)
  p.add_argument('--chosen-blob',action='append',default=[])
  p.add_argument('--bt-node',default=None)
+ p.add_argument('--identity',default=None)
  a=p.parse_args()
  if (a.output_dir/'pong-xnu-initial.img').exists():raise SystemExit('Existing boot image retained; choose another --output-dir before prelinking')
  a.output_dir.mkdir(parents=True,exist_ok=True)
@@ -96,6 +97,7 @@ def main():
  if a.cs35l41_coefficients:cmd+=['--cs35l41-coefficients',str(a.cs35l41_coefficients)]
  for spec in a.chosen_blob:cmd+=['--chosen-blob',spec]
  if a.bt_node:cmd+=['--bt-node',a.bt_node]
+ if a.identity:cmd+=['--identity',a.identity]
  env=dict(os.environ)
  # This maintained 22H374 recipe always applies the AMP patch. Direct use of
  # this entry point must carry the same input as ci_boot_ufs.sh; an explicit

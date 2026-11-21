@@ -151,6 +151,9 @@ def main():
                         help='private original zizhan protection WMFW for opt-in RAM-only probe; never enables sound')
     parser.add_argument('--cs35l41-coefficients',type=Path,default=None,
                         help='private original T/B protection parameter directory for opt-in RAM-only probe')
+    parser.add_argument('--identity', choices=('iphone17-1', 'ipad7-12'), default='iphone17-1',
+                        help='presentation identity: iphone17-1 (inherited from Pong) or ipad7-12, the cellular J172 of this '
+                             'iPadOS restore (values from its DeviceTree.j172ap)')
     parser.add_argument('--bt-node',default=None,metavar='MAC',
                         help='opt-in experiment: /arm-io/bluetooth with this locally administered local-mac-address (aa:bb:..)')
     parser.add_argument('--chosen-blob',action='append',default=[],metavar='NAME=PATH',
@@ -347,16 +350,47 @@ def main():
         ('hall-debounce-ms', struct.pack('<I', 15)),
         ('max-x', struct.pack('<I', 19140)), ('max-y', struct.pack('<I', 21600)),
     ])
+    # UX-05: the ADT identity decides MobileGestalt's ProductType/DeviceClass. iphone17-1 is Pong's phone presentation; on this
+    # iPad restore it sends keyboard layouts, Control Center, the home screen grid and bluetoothd down iPhone paths whose iPad
+    # root lacks the resources. ipad7-12 is the restore's own cellular model (J172AP); the board policy stays J171's.
+    if args.identity == 'ipad7-12':
+        identity_root = [('model', b'iPad7,12\0'), ('compatible', b'J172AP\0iPad7,12\0qcom,sm8475\0'),
+                         ('target-type', b'J172\0'), ('target-sub-type', b'J172AP\0')]
+        identity_product = [
+            ('product-name', b'iPad (7th generation)\0'),
+            ('product-description', b'iPad (7th generation)\0'),
+            ('product-id', bytes.fromhex('ae5208f95834c10486a11d761fe2e38c7a10e280')),
+            ('artwork-device-idiom', b'pad\0'),
+            ('artwork-device-subtype', struct.pack('<I', 0)),
+            ('artwork-dynamic-displaymode', b'0\0'),
+            ('artwork-display-gamut', b'sRGB\0'),
+            ('compatible-device-fallback', b'iPad7,6\0'),
+            ('baseband-chipset', b'ice18\0'),
+            ('gps-capable', struct.pack('<I', 1)),
+            ('personal-hotspot', struct.pack('<I', 1)),
+            ('location-reminders', struct.pack('<I', 1)),
+        ]
+    else:
+        identity_root = [('model', b'iPhone17,1\0'), ('compatible', b'J171AP\0iPhone17,1\0qcom,sm8475\0'),
+                         ('target-type', b'J171\0'), ('target-sub-type', b'J171AP\0')]
+        identity_product = [
+            ('product-name', b'iPhone 16 Pro\0'),
+            ('product-description', b'iPhone 16 Pro\0'),
+            ('artwork-device-idiom', b'phone\0'),
+            # iPhone 16 Pro artwork family. Physical display geometry stays
+            # 1080x2412 in /chosen and the framebuffer, not 1206x2622.
+            ('artwork-device-subtype', struct.pack('<I', 2622)),
+            ('artwork-dynamic-displaymode', b'0\0'),
+            ('artwork-display-gamut', b'sRGB\0'),
+            ('compatible-device-fallback', b'iPhone17,1\0'),
+        ]
     tree = node('device-tree', [
         # Keys use the actual SM8475 PMIC-arbiter resources below.
         # MobileGestalt derives ProductType/DeviceClass from hw.product, which
         # comes from this model. Keep the restore's J171 board policy (jetsam,
         # arm64 ABI) separate from the requested iPhone presentation identity.
         # Physical resources remain Pong/SM8475; /product is an ADT node.
-        ('model', b'iPhone17,1\0'),
-        ('compatible', b'J171AP\0iPhone17,1\0qcom,sm8475\0'),
-        ('target-type', b'J171\0'),
-        ('target-sub-type', b'J171AP\0'),
+        *(identity_root),
         ('pong,physical-model', b'Nothing Phone (2)\0'),
         ('#address-cells', struct.pack('<I', 2)),
         ('#size-cells', struct.pack('<I', 2)),
@@ -389,15 +423,7 @@ def main():
             ('opposed-power-vol-buttons', struct.pack('<I', 1)),
         ]),
         node('product', [
-            ('product-name', b'iPhone 16 Pro\0'),
-            ('product-description', b'iPhone 16 Pro\0'),
-            ('artwork-device-idiom', b'phone\0'),
-            # iPhone 16 Pro artwork family. Physical display geometry stays
-            # 1080x2412 in /chosen and the framebuffer, not 1206x2622.
-            ('artwork-device-subtype', struct.pack('<I', 2622)),
-            ('artwork-dynamic-displaymode', b'0\0'),
-            ('artwork-display-gamut', b'sRGB\0'),
-            ('compatible-device-fallback', b'iPhone17,1\0'),
+            *identity_product,
             ('compatible-app-variant', b'0\0'),
             # Keep Pong's v82 memory performance tier. Phone artwork does
             # not authorize a higher memory budget in the 1 GiB XNU window.

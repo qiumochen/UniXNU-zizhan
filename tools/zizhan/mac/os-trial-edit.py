@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 """Mac: derive a new OS trial from the installed one by editing files in its system image, install it, verify it.
 
-usage: os-trial-edit.py NEW [SNIPPET] [--ui] [--from TRIAL] [--full] [--activate]
+usage: os-trial-edit.py NEW [SNIPPET] [--ui] [--init] [--from TRIAL] [--full] [--activate]
        os-trial-edit.py --reinstall TRIAL [--full] [--activate]
 
 A trial is work/userland-22H374/<name>/ (ufs-layout.json, resume-install.json, libpong-ui.dylib, wifi-service18), the unit the
@@ -16,6 +16,8 @@ round preflight (app-preflight.py, NIGHT_OS_TRIAL in work/m1-firstsound/run-dail
 --ui rebuilds the UI adapter (/pong/libpong-ui18.dylib) from userland/ with prepared/ui-compile-command.json (a removed Xcode or SDK
 in that command is replaced by the active one), puts it in the image and the trial, and --activate also updates
 APP01_EXPECTED_UI_SHA256.
+--init rebuilds the boot helper (/sbin/launchd and /pong/init = userland/init.c) with prepared/compile-command.json, the active
+Xcode/SDK and build-ipados18.py's current PONG_UI_EXTRA_PROCESSES, and replaces both copies in the image (owner and mode kept).
 --reinstall TRIAL writes an existing trial back (rollback). The phone must be in Android with adb; no round may be running.
 """
 import argparse
@@ -83,6 +85,25 @@ def build_ui(out):
     run(["codesign", "--force", "--sign", "-", "--pagesize", "4096", str(out)])
 
 
+def build_init(out):
+    cmd = json.loads((TRIALS / "prepared/compile-command.json").read_text())
+    dev = subprocess.check_output(["xcode-select", "-p"], text=True).strip()
+    sdks = sorted(Path(dev, "Platforms/iPhoneOS.platform/Developer/SDKs").glob("iPhoneOS[0-9]*.sdk"))
+    extra = re.search(r"-DPONG_UI_EXTRA_PROCESSES=\" ([^\"]*)\"", (REPO / "userland/build-ipados18.py").read_text())
+    if not extra:
+        sys.exit("build-ipados18.py has no PONG_UI_EXTRA_PROCESSES")
+    fixed = []
+    for x in cmd:
+        x = re.sub(r"/Applications/Xcode[^/]*\.app/Contents/Developer", dev, x)
+        if x.endswith(".sdk") and not Path(x).exists() and sdks:
+            x = str(sdks[-1])
+        if x.startswith("-DPONG_UI_EXTRA_PROCESSES="):
+            x = f'-DPONG_UI_EXTRA_PROCESSES=" {extra.group(1)}"'
+        fixed.append(x)
+    fixed[fixed.index("-o") + 1] = str(out)
+    run(fixed, env=dict(os.environ, DEVELOPER_DIR=dev))
+
+
 def guard():
     if subprocess.run(["bash", str(REPO / "tools/zizhan/mac/adb-visible.sh")], env=dict(os.environ, ZIZHAN_SRC=str(ROOT))).returncode:
         sys.exit("Android adb device required")
@@ -91,7 +112,7 @@ def guard():
         sys.exit("a device round or writer is running")
 
 
-def edit_image(image, snippet, ui=None):
+def edit_image(image, snippet, ui=None, init=None):
     mount = Path(subprocess.check_output(["mktemp", "-d", str(image.parent / "os-mount.XXXXXX")], text=True).strip())
     out = subprocess.check_output(["sudo", "-n", "hdiutil", "attach", "-readwrite", "-nobrowse", "-noverify", "-owners", "on",
                                    "-mountpoint", str(mount), str(image)], text=True, stderr=subprocess.DEVNULL)
@@ -106,6 +127,12 @@ def edit_image(image, snippet, ui=None):
             run(["sudo", "-n", "cp", str(ui), str(target)])
             run(["sudo", "-n", "chown", "0:0", str(target)])
             run(["sudo", "-n", "chmod", "755", str(target)])
+        if init:
+            for rel in ("sbin/launchd", "pong/init"):
+                target = mount / rel
+                if not target.is_file():
+                    sys.exit(f"image has no /{rel}")
+                run(["sudo", "-n", "cp", str(init), str(target)])   # cp onto the existing file keeps its owner and mode
         if snippet:
             run(["sudo", "-n", "env", f"M={mount}", *[f"{k}={v}" for k, v in os.environ.items() if k.startswith("BT_") or k.startswith("SNIPPET_")],
                  "bash", str(snippet)])
@@ -151,6 +178,7 @@ def main():
     ap.add_argument("--reinstall")
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--ui", action="store_true")
+    ap.add_argument("--init", action="store_true")
     ap.add_argument("--activate", action="store_true")
     a = ap.parse_args()
     _, env = template_env()
@@ -167,8 +195,8 @@ def main():
         if a.activate:
             activate(trial.name)
         return
-    if not a.new or not re.fullmatch(r"[A-Za-z0-9_-]+", a.new) or (a.snippet and not a.snippet.is_file()) or not (a.snippet or a.ui):
-        ap.error("NEW (letters, digits, _ -) and an existing SNIPPET and/or --ui are required")
+    if not a.new or not re.fullmatch(r"[A-Za-z0-9_-]+", a.new) or (a.snippet and not a.snippet.is_file()) or not (a.snippet or a.ui or a.init):
+        ap.error("NEW (letters, digits, _ -) and an existing SNIPPET and/or --ui/--init are required")
     src = TRIALS / (a.source or env["NIGHT_OS_TRIAL"])
     trial = TRIALS / a.new
     if trial.exists():
@@ -184,9 +212,11 @@ def main():
         shutil.copy2(src / name, trial / name)
     if a.ui:
         build_ui(trial / "libpong-ui.dylib")
+    if a.init:
+        build_init(trial / "init")
     image = trial / "pong-ipados18-system.cdr"
     run(["cp", "-c", str(old_image), str(image)])
-    edit_image(image, a.snippet, trial / "libpong-ui.dylib" if a.ui else None)
+    edit_image(image, a.snippet, trial / "libpong-ui.dylib" if a.ui else None, trial / "init" if a.init else None)
     log("comparing chunks")
     before, after = chunk_hashes(old_image, window["size"]), chunk_hashes(image, window["size"])
     changed = [i * install.CHUNK for i, (x, y) in enumerate(zip(before, after)) if x != y]

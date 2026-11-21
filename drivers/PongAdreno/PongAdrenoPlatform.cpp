@@ -428,6 +428,12 @@ static void dcvs(void *,wait_result_t)
     (void)PE_parse_boot_argn("pong_gpu_max_level",&bootTop,sizeof(bootTop));
     (void)PE_parse_boot_argn("pong_gpu_dcvs_min",&bootFloor,sizeof(bootFloor));
     (void)PE_parse_boot_argn("pong_gpu_dcvs_boost_ms",&boostMs,sizeof(boostMs));
+    /* UX-04/POWER-07: the wake boost asks for twice the current clock (at least 578 MHz). On an idle home screen the live Clock
+     * icon wakes the GPU ~10 times a second, before the previous boost has decayed, so the doubling climbs to the top level
+     * (stby-wifi5: busy 0%, ~10% of the time at each of levels 6/9/11/13, 2% at the floor). pong_gpu_dcvs_wake_mhz=<MHz> boosts
+     * to that fixed clock instead (1 = no wake boost); 0 (default) keeps the doubling. */
+    unsigned wakeMhz=0;
+    (void)PE_parse_boot_argn("pong_gpu_dcvs_wake_mhz",&wakeMhz,sizeof(wakeMhz));
     if(bootTop<1 || bootTop>13)bootTop=13;
     if(bootFloor<1)bootFloor=1;
     if(bootFloor>bootTop)bootFloor=bootTop;
@@ -511,7 +517,7 @@ static void dcvs(void *,wait_result_t)
         }
         if(t<touchEnd)want=top;
         else if(t<wakeEnd) {
-            const unsigned wake=levelFor(dcvsMHz(cur)*2>578?dcvsMHz(cur)*2:578);
+            const unsigned wake=levelFor(wakeMhz?wakeMhz:(dcvsMHz(cur)*2>578?dcvsMHz(cur)*2:578));
             if(want<wake)want=wake;
         }
         if(want<floor)want=floor;

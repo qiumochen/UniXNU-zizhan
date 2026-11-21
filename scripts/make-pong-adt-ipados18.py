@@ -151,9 +151,9 @@ def main():
                         help='private original zizhan protection WMFW for opt-in RAM-only probe; never enables sound')
     parser.add_argument('--cs35l41-coefficients',type=Path,default=None,
                         help='private original T/B protection parameter directory for opt-in RAM-only probe')
-    parser.add_argument('--identity', choices=('iphone17-1', 'ipad7-12'), default='iphone17-1',
-                        help='presentation identity: iphone17-1 (inherited from Pong) or ipad7-12, the cellular J172 of this '
-                             'iPadOS restore (values from its DeviceTree.j172ap)')
+    parser.add_argument('--identity', choices=('iphone17-1', 'ipad7-12'), default='ipad7-12',
+                        help='presentation identity: ipad7-12 (default since 2026-11-21, user hands-on passed), the cellular '
+                             'J172 of this iPadOS restore (values from its DeviceTree.j172ap), or iphone17-1 (inherited from Pong)')
     parser.add_argument('--bt-node',default=None,metavar='MAC',
                         help='opt-in experiment: /arm-io/bluetooth with this locally administered local-mac-address (aa:bb:..)')
     parser.add_argument('--chosen-blob',action='append',default=[],metavar='NAME=PATH',

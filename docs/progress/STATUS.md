@@ -142,3 +142,18 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 - **显示**：静止主屏 10 fps 合成来自时钟图标秒针，属 iOS 正常行为；`pong_astc=1` 已不再全黑，正在逐个应用验证后考虑默认开启。
 - **工具**：`zlog.py`（整轮日志汇总）、`shot.py --diff`（截图差分）、Mac `zround.sh`（一条命令完成一轮上机）、Linux `tools/mrun`（无引号问题地在 Mac 上执行脚本）。
 - 详情：[第三轮记录](2026-11-20-round3.md) 第四轮起各节。
+
+## 2026-11-21 持续无人值守（用户亲测之后）
+
+- **输入法修好**：根因是 DeviceClass=iPhone，TextInputUI 去找 `KBLayouts_iPhone.dat`，而 iPadOS 根卷里没有这个文件。OS trial 加了一个指向 iPad 布局的符号链接；kb-4 截图里拼音键盘完整，kbd 不再崩。
+- **退出/打开应用卡顿减轻**：GPU BO 池默认 768 MiB。256 MiB 时池满后改为零散分配，单次分配/释放要 40～77 ms；改后动画最大帧间隔 p90 从 283 ms 降到约 67 ms。
+- **待机功耗**（只用电池实测）：熄屏从 -555 降到 **-505 mA**。熄屏时开 802.11 省电，Wi-Fi 中断按 MSI 触发，ASPM L1 默认开。网卡仍停在 MHI M0，L1 子状态暂缓。
+- **控制中心偏大**：SpringBoard 以 iPhone 屏幕类型布局，缩放钩子会把控制中心弄空，已删除；暂缓。
+- **25 min 浸泡测试通过**：无 panic、无 jetsam、无 Wi-Fi 中断。
+- **工具**：
+  - `os-trial-edit.py`：基于当前 trial 修改系统镜像，支持 `--ui`，只写有变化的分块并整卷回读校验。
+  - `dscsym.py`：符号化用户态崩溃，配合 boot-arg `pong_crash_name=<进程名>`。
+  - `zround.sh`：门槛等待时长、八进制参数检查、自动重建、只用电池测量（`ZIZHAN_USB_OFF_AT`）。
+  - `zlog.py`：输出系统功率和按窗口/段的统计。
+  - `cycle.sh`：iOS 运行期间不再给 USB 口断电重启。
+- 详情：[第三轮记录](2026-11-20-round3.md) 第十轮起各节。

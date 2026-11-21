@@ -107,7 +107,8 @@ def edit_image(image, snippet, ui=None):
             run(["sudo", "-n", "chown", "0:0", str(target)])
             run(["sudo", "-n", "chmod", "755", str(target)])
         if snippet:
-            run(["sudo", "-n", "env", f"M={mount}", "bash", str(snippet)])
+            run(["sudo", "-n", "env", f"M={mount}", *[f"{k}={v}" for k, v in os.environ.items() if k.startswith("BT_") or k.startswith("SNIPPET_")],
+                 "bash", str(snippet)])
     finally:
         if dev:
             subprocess.run(["sudo", "-n", "hdiutil", "detach", dev], check=False, stdout=subprocess.DEVNULL)

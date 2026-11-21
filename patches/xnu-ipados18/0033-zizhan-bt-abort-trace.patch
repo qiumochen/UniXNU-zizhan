@@ -1,0 +1,69 @@
+--- a/osfmk/arm64/pong_ui_exception.c
++++ b/osfmk/arm64/pong_ui_exception.c
+@@ -79,4 +79,49 @@
+ 		fp = frame[0];
+ 	}
+ }
++/* zizhan BT-01: bluetoothd ends with abort_with_payload ("Bluetooth fatal error - crashing { reason=102 }"), which raises no
++ * exception, so pong_ui_exception never sees it. kern_exit.c calls this first: for BlueTool and bluetoothd (4 records each) it
++ * prints the reason, the reason string and the user frame chain of the aborting thread, for dscsym.py. */
++void pong_ui_abort_trace(uint32_t reason_namespace, uint64_t reason_code, user_addr_t reason_string);
++void
++pong_ui_abort_trace(uint32_t reason_namespace, uint64_t reason_code, user_addr_t reason_string)
++{
++	static unsigned records[2];
++	thread_t thread = current_thread();
++	task_t task = get_threadtask(thread);
++	struct proc *proc = get_bsdtask_info(task);
++	const arm_saved_state_t *state = get_user_regs(thread);
++	if (task == kernel_task || proc == NULL || state == NULL || !is_saved_state64(state)) return;
++	const char *name = proc_name_address(proc);
++	const unsigned which = strcmp(name, "BlueTool") == 0 ? 0u : strcmp(name, "bluetoothd") == 0 ? 1u : 2u;
++	if (which > 1 || __atomic_fetch_add(&records[which], 1, __ATOMIC_RELAXED) >= 4) return;
++	vm_shared_region_t region = vm_shared_region_get(task);
++	uint32_t slide = region ? region->sr_slide : 0;
++	if (region) vm_shared_region_deallocate(region);
++	char text[128] = { 0 };
++	vm_size_t length = 0;
++	if (reason_string == 0 || copyinstr(reason_string, text, sizeof(text) - 1, &length) != 0) text[0] = 0;
++	printf("Pong UI crash: %s[%d] abort ns=%u code=0x%llx pc=0x%llx lr=0x%llx sp=0x%llx cache_slide=0x%x why=%s\n",
++	    name, proc_pid(proc), reason_namespace, reason_code, (uint64_t)get_saved_state_pc(state),
++	    (uint64_t)get_saved_state_lr(state), (uint64_t)get_saved_state_sp(state), slide, text);
++	uint64_t fp = get_saved_state_fp(state), sp = get_saved_state_sp(state), frame[2];
++	for (unsigned depth = 0; depth < 16; depth++) {
++		if (fp < sp || fp - sp > 1024 * 1024 || fp >= MACH_VM_MAX_ADDRESS - sizeof(frame) ||
++		    (fp & 15) || copyin(fp, frame, sizeof(frame)) != 0) break;
++		printf("Pong UI crash: frame%u lr=0x%llx\n", depth, frame[1]);
++		if (frame[0] <= fp) break;
++		fp = frame[0];
++	}
++}
++#else
++#include <stdint.h>
++#include <mach/vm_types.h>
++void pong_ui_abort_trace(uint32_t reason_namespace, uint64_t reason_code, user_addr_t reason_string);
++void
++pong_ui_abort_trace(uint32_t reason_namespace, uint64_t reason_code, user_addr_t reason_string)
++{
++	(void)reason_namespace;
++	(void)reason_code;
++	(void)reason_string;
++}
+ #endif
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1399,6 +1399,14 @@
+ {
+ 	os_reason_t exit_reason = OS_REASON_NULL;
+ 	kern_return_t kr = KERN_SUCCESS;
++
++	{
++		/* zizhan BT-01: where bluetoothd/BlueTool abort (osfmk/arm64/pong_ui_exception.c) */
++		extern void pong_ui_abort_trace(uint32_t reason_namespace, uint64_t reason_code, user_addr_t reason_string);
++		if (p == current_proc() && !(internal_flags & OS_REASON_IFLAG_USER_FAULT)) {
++			pong_ui_abort_trace(reason_namespace, reason_code, reason_string);
++		}
++	}
+ 
+ 	if (internal_flags & OS_REASON_IFLAG_USER_FAULT) {
+ 		uint32_t old_value = atomic_load_explicit(&p->p_user_faults,

@@ -179,6 +179,37 @@ static CFTypeRef bt_copy_answer(CFStringRef key, CFDictionaryRef options)
     return MGCopyAnswer(key, options);
 }
 
+/*
+ * bluetoothd's transport (env BT_HCI_TRANSPORT > boot-arg bt-transport-override > device tree) is H4BC here: the Skywalk
+ * UART (kernel control com.apple.uart.sk.bluetooth + an os_channel), which this kernel does not provide, so bluetoothd
+ * exits with reason 1201 (bt-25). Its boot-arg override is not applied (bt-26, probably no kern.bootargs in its sandbox),
+ * so the environment is set here, in bluetoothd only: H4 is the plain tty /dev/cu.bluetooth of XNU patch 0023.
+ * zizhan_bt_transport=<name> picks another transport name (H4, H4DS, H4BC, H5, ...) when the boot-args are readable.
+ */
+__attribute__((constructor)) static void bt_transport(void)
+{
+    if (strcmp(getprogname(), "bluetoothd") != 0) {
+        return;
+    }
+    char name[16] = "H4";
+    char args[2048];
+    size_t length = sizeof(args) - 1;
+    if (sysctlbyname("kern.bootargs", args, &length, NULL, 0) == 0) {
+        args[length < sizeof(args) ? length : sizeof(args) - 1] = 0;
+        const char *p = strstr(args, "zizhan_bt_transport=");
+        if (p && (p == args || p[-1] == ' ')) {
+            p += strlen("zizhan_bt_transport=");
+            size_t n = strcspn(p, " \t");
+            if (n > 0 && n < sizeof(name)) {
+                memcpy(name, p, n);
+                name[n] = 0;
+            }
+        }
+    }
+    setenv("BT_HCI_TRANSPORT", name, 1);
+    fprintf(stderr, "Zizhan BT: bluetoothd BT_HCI_TRANSPORT=%s\n", name);
+}
+
 __attribute__((used)) static const struct {
     const void *replacement;
     const void *replacee;

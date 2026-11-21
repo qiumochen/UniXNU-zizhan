@@ -264,7 +264,19 @@ bool AGXDeviceUserClient::mount(bool kernel)
     if(kernel)slot=g.kernel_client?NativeAdrenoMaxClients:0;
     else {
         if(!strncmp(name_,"backboardd",sizeof name_) && !g.slots[0])slot=0;
-        for(unsigned i=1;slot==NativeAdrenoMaxClients && i<NativeAdrenoMaxClients;++i)if(!g.slots[i])slot=i;
+        /* The 256 MiB windows (slots 4-7) go to WebKit's GPU process first: in a 128/170 MiB window Safari's page
+         * textures failed with OutOfMemory(Device) (user-ipad-1, a black baidu.com). Everyone else takes slots 1-3 and
+         * 8-15 first and the 256 MiB ones last. */
+        const bool web=!strncmp(name_,"com.apple.WebKit",16);
+        static const uint8_t kOther[]={1,2,3,8,9,10,11,12,13,14,15,4,5,6,7};
+        static const uint8_t kWeb[]={4,5,6,7,1,2,3,8,9,10,11,12,13,14,15};
+        static_assert(sizeof kOther==NativeAdrenoMaxClients-1 && sizeof kWeb==NativeAdrenoMaxClients-1);
+        const uint8_t *order=web?kWeb:kOther;
+        for(unsigned i=0;slot==NativeAdrenoMaxClients && i<NativeAdrenoMaxClients-1;++i) {
+            if(!g.slots[order[i]]) {
+                slot=order[i];
+            }
+        }
     }
     const IOReturn opened=slot<NativeAdrenoMaxClients?core->open(NativeAdrenoAbiVersion,g.vm,g.submit,g.ring,g.input_bits,g.output_bits):kIOReturnNoSpace;
     if(opened!=kIOReturnSuccess) {native_adreno_mount_fail[0]=slot<NativeAdrenoMaxClients?2:1;native_adreno_mount_fail[1]=uint32_t(opened);native_adreno_mount_fail[2]=slot;native_adreno_mount_fail[3]=native_adreno_mount_fail[3]+1;}
@@ -279,6 +291,9 @@ bool AGXDeviceUserClient::mount(bool kernel)
             if(kernel)g.kernel_client=true;else g.slots[slot]=true;
             ++g.opened;
             if(NativeAdrenoClientRecord *record=clientRecord(name_))record->slot=slot;
+            if(!kernel) {
+                IOLog("PONG ADRENO: client %s slot %u window %llu MiB\n",name_,slot,kClientWindows[slot].bytes>>20);
+            }
         } else {
             native_adreno_mount_fail[0]=3;native_adreno_mount_fail[1]=uint32_t(scoped);native_adreno_mount_fail[2]=slot;native_adreno_mount_fail[3]=native_adreno_mount_fail[3]+1;
             core->releaseAll(&g.clock,0);
@@ -360,6 +375,10 @@ IOReturn AGXDeviceUserClient::clientClose()
             if(NativeAdrenoClientRecord *record=clientRecord(name_)) {
                 record->closes=record->closes+1;record->slot=0xff;
                 if(peak>>20>record->peak_mib)record->peak_mib=uint32_t(peak>>20);
+            }
+            if(!kernel_ && slot_<NativeAdrenoMaxClients) {
+                const uint64_t start=kClientWindows[slot_].start,used=peak>start?peak-start:0;
+                IOLog("PONG ADRENO: client %s closed slot %u peak %llu of %llu MiB\n",name_,slot_,used>>20,kClientWindows[slot_].bytes>>20);
             }
         }
     }

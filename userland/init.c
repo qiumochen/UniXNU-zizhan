@@ -281,6 +281,53 @@ prepare_runtime_paths(void)
             symlink("/var/db/timezone/zoneinfo/UTC", local) != 0)
             printf("Pong init: localtime fallback failed: errno=%d\n", errno);
     }
+    /* Boot-arg pong_tz=<Area/City> (e.g. Asia/Shanghai): the restore's Data volume keeps iOS's factory zone
+     * (America/Los_Angeles, sbar-1 showed 07:14 at 15:14 UTC) and nothing on this board sets it from location.
+     * The link is only replaced when the zone exists and differs, so a zone chosen later in Settings is kept
+     * until the boot-arg changes. */
+    {
+        char args[4096] = {0}, tz[64] = {0}, want[128] = "/var/db/timezone/zoneinfo/", have[128] = {0};
+        char file[128] = "/usr/share/zoneinfo.default/";
+        size_t len = sizeof(args);
+        if (sysctlbyname("kern.bootargs", args, &len, NULL, 0) == 0) {
+            args[sizeof(args) - 1] = 0;
+            for (char *p = args; *p;) {
+                while (*p == ' ') {
+                    p++;
+                }
+                if (strncmp(p, "pong_tz=", 8) == 0) {
+                    size_t n = 0;
+                    p += 8;
+                    while (p[n] && p[n] != ' ' && p[n] != '.' && n + 1 < sizeof(tz)) {
+                        tz[n] = p[n];
+                        n++;
+                    }
+                    if (p[n] && p[n] != ' ') {
+                        tz[0] = 0;   /* too long, or a dot: not a zone name */
+                    }
+                    break;
+                }
+                while (*p && *p != ' ') {
+                    p++;
+                }
+            }
+        }
+        if (tz[0] && strlen(want) + strlen(tz) < sizeof(want) && strlen(file) + strlen(tz) < sizeof(file)) {
+            memcpy(want + strlen(want), tz, strlen(tz) + 1);
+            memcpy(file + strlen(file), tz, strlen(tz) + 1);
+            if (stat(file, &st) == 0) {
+                ssize_t got = readlink(local, have, sizeof(have) - 1);
+                if (got < 0 || strcmp(have, want) != 0) {
+                    (void)unlink(local);
+                    if (symlink(want, local) == 0) {
+                        printf("Pong init: timezone %s (was %s)\n", tz, got < 0 ? "unset" : have);
+                    } else {
+                        printf("Pong init: timezone %s failed: errno=%d\n", tz, errno);
+                    }
+                }
+            }
+        }
+    }
     if (lstat("/private/var/cores", &st) != 0) {
         if (mkdir("/private/var/cores", 01775) == 0)
             (void)chmod("/private/var/cores", 01775);

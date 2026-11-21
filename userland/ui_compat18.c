@@ -2393,6 +2393,40 @@ static void display_link_rates(void)
     fprintf(stderr,"Pong UI18: display links: made %d fps %d range %d, in-process animations at the panel's rate %d\n",
         made!=NULL,fps!=NULL,range!=NULL,link_full);
 }
+/* UX-02: Control Center modules follow SpringBoard's phone screen type (SBHScreenTypeForCurrentDevice: the iPhone17,1 identity at
+ * 1080x958 pt), so four very large columns fill the panel and the last rows need a scroll. Boot-arg zizhan_cc_scale=<40..100>
+ * scales CCUILayoutOptions' item edge and spacing inside SpringBoard; the first value of each is logged with its scaled one. */
+static double cc_scale;
+static double (*cc_edge_original)(id,SEL);
+static double (*cc_spacing_original)(id,SEL);
+static double cc_edge(id self,SEL cmd)
+{
+    const double v=cc_edge_original(self,cmd);
+    static int logged;
+    if(!logged) {logged=1;fprintf(stderr,"Zizhan CC: itemEdgeSize %.1f -> %.1f\n",v,v*cc_scale);}
+    return v*cc_scale;
+}
+static double cc_spacing(id self,SEL cmd)
+{
+    const double v=cc_spacing_original(self,cmd);
+    static int logged;
+    if(!logged) {logged=1;fprintf(stderr,"Zizhan CC: itemSpacing %.1f -> %.1f\n",v,v*cc_scale);}
+    return v*cc_scale;
+}
+static void cc_layout_image(const struct mach_header *header,intptr_t slide)
+{
+    (void)header;(void)slide;
+    if(cc_edge_original) {return;}
+    Class options=objc_getClass("CCUILayoutOptions");
+    if(!options) {return;}
+    Method edge=class_getInstanceMethod(options,sel_registerName("itemEdgeSize"));
+    Method spacing=class_getInstanceMethod(options,sel_registerName("itemSpacing"));
+    if(!edge || !spacing) {return;}
+    cc_edge_original=(double (*)(id,SEL))method_setImplementation(edge,(IMP)cc_edge);
+    cc_spacing_original=(double (*)(id,SEL))method_setImplementation(spacing,(IMP)cc_spacing);
+    fprintf(stderr,"Zizhan CC: layout scale %.2f installed\n",cc_scale);
+}
+
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
     const char *name=getprogname();
@@ -2410,6 +2444,13 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         return;
     }
     if(!strcmp(name,"SpringBoard") && boot_option("zizhan_app_diag=1"))app_diag_start(name);
+    if(!strcmp(name,"SpringBoard")) {
+        char value[16];
+        if(boot_value("zizhan_cc_scale=",value,sizeof value)) {
+            const int percent=atoi(value);
+            if(percent>=40 && percent<=100) {cc_scale=percent/100.0;_dyld_register_func_for_add_image(cc_layout_image);}
+        }
+    }
     if(strcmp(name,"backboardd")==0 && boot_option("pong_backlight_diag=1")) {
         struct sigaction action={0};action.sa_sigaction=backboard_fatal;
         action.sa_flags=SA_SIGINFO|SA_RESETHAND;sigemptyset(&action.sa_mask);

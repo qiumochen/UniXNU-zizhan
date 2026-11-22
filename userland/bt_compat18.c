@@ -17,6 +17,9 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
 #include <string.h>
+#include <libkern/OSCacheControl.h>
+#include <mach/mach.h>
+#include <execinfo.h>
 #include <termios.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -60,7 +63,11 @@ static void read_vendor(void)
     vendor[n] = 0;
 }
 
-static int script_mode = 1;
+/* 3 (default since bt-36b, 2026-11-23): the kernel probe already loaded the rampatch and NVM, and bluetoothd talks HCI over
+ * the VIRT bridge; a BlueTool boot script that also sends HCI (modes 1/2) interleaves its commands and events with
+ * bluetoothd's on the same controller (bt-36b: 50 bluetoothd exit(1), ~50 BlueTool kctl sessions). Mode 3 serves no-op
+ * scripts so BlueTool reports success without touching the UART. */
+static int script_mode = 3;
 static void read_script_mode(void)
 {
     static int done;
@@ -86,6 +93,7 @@ static const char *const scripts[] = {
     NULL,
     "device -D\nwake on\nmsleep 100\nhci reset\nbcm -N\n",
     "device -D\nhci reset\n",
+    "msleep 10\n",
 };
 /* init and deepsleep follow boot in the same BlueTool; their built-in versions are Broadcom too, so they become no-ops. */
 static const char script_noop[] = "msleep 10\n";
@@ -100,7 +108,7 @@ static const char *script_for(const char *path)
     const int boot = n > 12 && strcmp(path + n - 12, ".boot.script") == 0;
     const int other = (n > 12 && strcmp(path + n - 12, ".init.script") == 0) ||
                       (n > 17 && strcmp(path + n - 17, ".deepsleep.script") == 0);
-    const int serve = (boot || other) && script_mode > 0 && script_mode < 3;
+    const int serve = (boot || other) && script_mode > 0 && script_mode < 4;
     static int logged;
     if (logged++ < 16) {
         fprintf(stderr, "Zizhan BT: script path %s -> %s\n", path, serve ? "served" : "absent");
@@ -157,6 +165,62 @@ static int bt_tty_open(int flags)
     }
     return fd;
 }
+/* bt-39: HCI init (0x1001c2374) fails after VSC init; log the HCI bytes bluetoothd writes and reads on the VIRT fds. */
+static int bt_virt_tx_fd = -1, bt_virt_rx_fd = -1;
+static unsigned bt_hci_logged;
+static void bt_hci_log(const char *dir, const void *buf, ssize_t n)
+{
+    if (n <= 0 || bt_hci_logged >= 300) {
+        return;
+    }
+    bt_hci_logged++;
+    const uint8_t *b = buf;
+    char line[3 * 24 + 1];
+    int k = 0;
+    for (ssize_t i = 0; i < n && i < 24; i++) {
+        k += snprintf(line + k, sizeof(line) - (size_t)k, "%02x ", b[i]);
+    }
+    fprintf(stderr, "Zizhan HCI %s %zd: %s\n", dir, n, line);
+}
+/* bt-44: log only vendor commands (OGF 0x3f, opcode high byte 0xfc..0xff) and the next 4 reads after each. */
+static unsigned bt_rx_follow;
+static int bt_is_vendor_cmd(const void *buf, ssize_t n)
+{
+    const uint8_t *b = buf;
+    return n >= 4 && b[0] == 0x01 && b[2] >= 0xfc;
+}
+static ssize_t bt_write(int fd, const void *buf, size_t n)
+{
+    /*
+     * bt-40: HCI init sends Write LE Host Support (0x0c6d) with Simultaneous_LE_Host = 1. Core 4.1+ controllers must reject
+     * that; the QCA6490 answers 0x11 and HCI init then fails ("Bluetooth error - restarting", exit(1)). Send 0 instead.
+     */
+    static const uint8_t le_host[] = {0x01, 0x6d, 0x0c, 0x02, 0x01, 0x01};
+    if (fd >= 0 && fd == bt_virt_tx_fd && n == sizeof(le_host) && memcmp(buf, le_host, sizeof(le_host)) == 0) {
+        uint8_t fixed[sizeof(le_host)];
+        memcpy(fixed, le_host, sizeof(le_host));
+        fixed[5] = 0x00;
+        fprintf(stderr, "Zizhan BT: Write LE Host Support simultaneous 1 -> 0\n");
+        ssize_t w = write(fd, fixed, sizeof(fixed));
+        bt_hci_log("tx", fixed, w);
+        return w;
+    }
+    ssize_t r = write(fd, buf, n);
+    if (fd >= 0 && fd == bt_virt_tx_fd && bt_is_vendor_cmd(buf, r)) {
+        bt_hci_log("tx", buf, r);
+        bt_rx_follow = 4;
+    }
+    return r;
+}
+static ssize_t bt_read(int fd, void *buf, size_t n)
+{
+    ssize_t r = read(fd, buf, n);
+    if (fd >= 0 && fd == bt_virt_rx_fd && r > 0 && bt_rx_follow > 0) {
+        bt_rx_follow--;
+        bt_hci_log("rx", buf, r);
+    }
+    return r;
+}
 static int bt_virt_open(const char *path, int flags)
 {
     static int write_fd = -1;
@@ -168,11 +232,13 @@ static int bt_virt_open(const char *path, int flags)
     if (strcmp(path + n, "-in") == 0) {
         fd = bt_tty_open(O_WRONLY);
         write_fd = fd;
+        bt_virt_tx_fd = fd;
     } else if (strcmp(path + n, "-out") == 0) {
         fd = bt_tty_open(O_RDONLY | (flags & O_NONBLOCK));
         if (fd < 0 && write_fd >= 0) {
             fd = dup(write_fd);   /* a second open was refused: share the description (flags are shared too) */
         }
+        bt_virt_rx_fd = fd;
     } else {
         return -2;
     }
@@ -328,6 +394,98 @@ static void *bt_vse_watch(void *arg)
     return NULL;
 }
 
+
+/*
+ * bt-41: HCI init ends with "Bluetooth error - restarting" right after the last command succeeds, so the reason is a
+ * local check. bluetoothd's own OI log functions (printf-like: fmt in x0, the rest on the stack) are internal, so with
+ * code signing enforcement off the constructor patches their entries with a jump to bt_oi_log, which prints the format
+ * and its arguments (%s as text, every other conversion, including OI's %!, as a number). zizhan_bt_oilog=0 disables.
+ */
+#define BT_OI_LOG_A 0x100280db8ULL   /* "Searching for transport", "Bluetooth error - restarting { ... }" */
+#define BT_OI_LOG_B 0x10003aa9cULL
+static unsigned bt_oi_lines;
+static void bt_oi_log(const char *fmt, ...)
+{
+    if (!fmt || bt_oi_lines >= 600) {
+        return;
+    }
+    bt_oi_lines++;
+    char out[512];
+    size_t k = 0;
+    va_list ap;
+    va_start(ap, fmt);
+    for (const char *f = fmt; *f && k + 40 < sizeof(out); f++) {
+        if (*f == '\n') {
+            continue;
+        }
+        if (*f != '%') {
+            out[k++] = *f;
+            continue;
+        }
+        f++;
+        if (*f == '%') {
+            out[k++] = '%';
+            continue;
+        }
+        if (*f == '{') {   /* os_log style privacy annotation */
+            while (*f && *f != '}') {
+                f++;
+            }
+            if (*f) {
+                f++;
+            }
+        }
+        while (*f && strchr("-+ #0123456789.*lhqjztL", *f)) {
+            f++;
+        }
+        if (!*f) {
+            break;
+        }
+        uint64_t v = va_arg(ap, uint64_t);
+        if (*f == 's' && v > 0x100000000ULL) {
+            k += (size_t)snprintf(out + k, sizeof(out) - k, "%.80s", (const char *)(uintptr_t)v);
+        } else {
+            k += (size_t)snprintf(out + k, sizeof(out) - k, "<%#llx>", (unsigned long long)v);
+        }
+    }
+    va_end(ap);
+    out[k] = 0;
+    fprintf(stderr, "Zizhan OI: %s\n", out);
+}
+static int bt_patch_jump(uint64_t address, void *target)
+{
+    uint32_t code[4] = {0x58000050u /* ldr x16, #8 */, 0xd61f0200u /* br x16 */,
+                        (uint32_t)(uintptr_t)target, (uint32_t)((uintptr_t)target >> 32)};
+    vm_address_t page = (vm_address_t)(address & ~(uint64_t)0x3fff);
+    kern_return_t kr = vm_protect(mach_task_self(), page, 0x8000, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        return (int)kr;
+    }
+    memcpy((void *)(uintptr_t)address, code, sizeof(code));
+    sys_icache_invalidate((void *)(uintptr_t)address, sizeof(code));
+    kr = vm_protect(mach_task_self(), page, 0x8000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    return kr == KERN_SUCCESS ? 0 : 1000 + (int)kr;
+}
+static void bt_oi_hook(void)
+{
+    intptr_t slide = 0;
+    int found = 0;
+    for (uint32_t i = 0, n = _dyld_image_count(); i < n; i++) {
+        const struct mach_header *header = _dyld_get_image_header(i);
+        if (header && header->filetype == MH_EXECUTE) {
+            slide = _dyld_get_image_vmaddr_slide(i);
+            found = 1;
+            break;
+        }
+    }
+    if (!found) {
+        return;
+    }
+    int a = bt_patch_jump(BT_OI_LOG_A + (uint64_t)slide, (void *)bt_oi_log);
+    int b = bt_patch_jump(BT_OI_LOG_B + (uint64_t)slide, (void *)bt_oi_log);
+    fprintf(stderr, "Zizhan BT: OI log hooks %d %d\n", a, b);
+}
+
 __attribute__((constructor)) static void bt_transport(void)
 {
     if (strcmp(getprogname(), "bluetoothd") != 0) {
@@ -353,12 +511,60 @@ __attribute__((constructor)) static void bt_transport(void)
     }
     setenv("BT_HCI_TRANSPORT", name, 1);
     fprintf(stderr, "Zizhan BT: bluetoothd BT_HCI_TRANSPORT=%s\n", name);
+    if (strstr(args, "zizhan_bt_oilog=0") == NULL) {
+        bt_oi_hook();
+    }
     if (strstr(args, "zizhan_bt_watch=0") == NULL) {
         pthread_t thread;
         if (pthread_create(&thread, NULL, bt_vse_watch, NULL) == 0) {
             pthread_detach(thread);
         }
     }
+}
+
+
+/*
+ * bt-37 (2026-11-23): with the VIRT bridge and no-op BlueTool scripts bluetoothd passes transport, HCI API and VSC init
+ * (vsevent callback registered) and still ends with exit(1) about 1 s after start, 51 times a round. Print who calls
+ * exit(): the return addresses of the first frames, converted to the binary's static addresses.
+ */
+static void bt_exit_trace(int status)
+{
+    if (strcmp(getprogname(), "bluetoothd") != 0) {
+        return;
+    }
+    intptr_t slide = 0;
+    for (uint32_t i = 0, n = _dyld_image_count(); i < n; i++) {
+        const struct mach_header *header = _dyld_get_image_header(i);
+        if (header && header->filetype == MH_EXECUTE) {
+            slide = _dyld_get_image_vmaddr_slide(i);
+            break;
+        }
+    }
+    void *frames[12];
+    int count = backtrace(frames, 12);
+    fprintf(stderr, "Zizhan BT: bluetoothd exit(%d) slide=0x%lx", status, (unsigned long)slide);
+    for (int i = 1; i < count; i++) {
+        uintptr_t pc = (uintptr_t)frames[i];
+        fprintf(stderr, " %#lx", (unsigned long)(pc - (uintptr_t)slide));
+    }
+    fprintf(stderr, "\n");
+}
+static void bt_exit(int status)
+{
+    bt_exit_trace(status);
+    exit(status);
+}
+/* bt-38: exit(1) without the trace above, so the status comes through _exit()/_Exit(). */
+static void bt__exit(int status)
+{
+    bt_exit_trace(status);
+    _exit(status);
+}
+static void bt__Exit(int status)
+{
+    bt_exit_trace(status);
+    _Exit(status);
 }
 
 __attribute__((used)) static const struct {
@@ -369,4 +575,9 @@ __attribute__((used)) static const struct {
     {(const void *)bt_stat, (const void *)stat},
     {(const void *)bt_fopen, (const void *)fopen},
     {(const void *)bt_open, (const void *)open},
+    {(const void *)bt_exit, (const void *)exit},
+    {(const void *)bt_write, (const void *)write},
+    {(const void *)bt_read, (const void *)read},
+    {(const void *)bt__exit, (const void *)_exit},
+    {(const void *)bt__Exit, (const void *)_Exit},
 };

@@ -213,8 +213,19 @@ static void h4_complete(Window &se) {
       IOLog("ZIZHAN_BT_HCI: cmd op=%04x ogf=%x ocf=%03x plen=%u %s\n", op, op >> 10, op & 0x3ff, h4.pkt[3], vendor ? "shimmed" : "forwarded");
     }
     if (vendor) {
-      const uint8_t cc[7] = {0x04, 0x0e, 0x04, 0x01, uint8_t(op), uint8_t(op >> 8), 0x00};
+      // bt-43: the Broadcom VSC parsers in bluetoothd read return parameters after the status (AssertFail bcm_vsc
+      // 0x33b "ByteStream_NumReadBytesAvail(*pBs) >= 1" on op fd48, then SIGABRT). Answer status 0 plus 31 zero bytes.
+      uint8_t cc[7 + 31] = {0x04, 0x0e, uint8_t(4 + 31), 0x01, uint8_t(op), uint8_t(op >> 8), 0x00};
       zizhan_bt_uart_input(cc, sizeof cc);
+      ++h4.shimmed;
+      return;
+    }
+    // bt-42: bluetoothd's HCI init needs Read/Write Default Erroneous Data Reporting (0x0c5a/0x0c5b), which the QCA6490
+    // does not support (supported-commands octet 18 = 0x83): OI fails it locally (0x6c, "HCI initialization failed").
+    // The supported-commands event is patched in rx_patch(); both commands are answered here (reporting disabled).
+    if (op == 0x0c5b || op == 0x0c5a) {
+      const uint8_t cc[8] = {0x04, 0x0e, uint8_t(op == 0x0c5a ? 0x05 : 0x04), 0x01, uint8_t(op), uint8_t(op >> 8), 0x00, 0x00};
+      zizhan_bt_uart_input(cc, op == 0x0c5a ? 8u : 7u);
       ++h4.shimmed;
       return;
     }
@@ -237,6 +248,23 @@ static void h4_feed(Window &se, const uint8_t *b, unsigned n) {
       if (h4.need > sizeof h4.pkt) { tx_bytes(se, h4.pkt, h4.have); h4.have = 0; continue; }   // oversize: give up framing
     }
     if (h4.have == h4.need && h4.have >= (h4.pkt[0] == 0x02 ? 5u : 4u)) { h4_complete(se); h4.have = 0; }
+  }
+}
+
+/* Controller-to-host fixup: in the Command Complete of Read Local Supported Commands (04 0e 44 01 02 10 00, then 64
+ * octets) advertise Read/Write Default Erroneous Data Reporting (octet 18 bits 2 and 3), which h4_complete() answers. */
+struct RxPatch { unsigned state, param; uint32_t patched; };
+static RxPatch rxp;
+static void rx_patch(uint8_t *b, unsigned n) {
+  static const uint8_t head[7] = {0x04, 0x0e, 0x44, 0x01, 0x02, 0x10, 0x00};
+  for (unsigned i = 0; i < n; ++i) {
+    if (rxp.state < sizeof head) {
+      if (b[i] == head[rxp.state]) { ++rxp.state; } else { rxp.state = b[i] == head[0] ? 1u : 0u; }
+      rxp.param = 0;
+      continue;
+    }
+    if (rxp.param == 18) { b[i] = uint8_t(b[i] | 0x0c); ++rxp.patched; }
+    if (++rxp.param >= 64) { rxp.state = 0; }
   }
 }
 
@@ -362,14 +390,15 @@ static void serve(Window &se) {
       uint8_t h4rx[sizeof in];
       const unsigned k = ibs_rx(se, in, got, h4rx);
       if (k) {
+        rx_patch(h4rx, k);
         zizhan_bt_uart_input(h4rx, k);
       }
       rx_total += got;
     }
     if (now_us() - last_log >= 60000000ull) {
       last_log = now_us();
-      IOLog("ZIZHAN_BT_PROBE: bridge rx=%llu tx=%llu hci forwarded=%u shimmed=%u ibs wake_ind=%u wake_ack=%u sleep_ind=%u wakes=%u fail=%u\n",
-            rx_total, tx_total, h4.forwarded, h4.shimmed, ibs.wake_ind, ibs.wake_ack, ibs.sleep_ind, ibs.wakes, ibs.wake_fail);
+      IOLog("ZIZHAN_BT_PROBE: bridge rx=%llu tx=%llu hci forwarded=%u shimmed=%u cmdmask=%u ibs wake_ind=%u wake_ack=%u sleep_ind=%u wakes=%u fail=%u\n",
+            rx_total, tx_total, h4.forwarded, h4.shimmed, rxp.patched, ibs.wake_ind, ibs.wake_ack, ibs.sleep_ind, ibs.wakes, ibs.wake_fail);
     }
   }
 }

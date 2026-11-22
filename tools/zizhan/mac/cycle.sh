@@ -55,7 +55,7 @@ bash "$S/fastboot-boot.sh" "$S/out/ramoops-dump.img" 2>&1 | tail -1 || exit 7
 start=$(date +%s); nextkick=240   # M3 boot_b: RamoopsDump reset -> menu (10 s) -> magic reset -> Android ~65 s; 11-23 lock-2 took 4.5 min (5 ABL boots) and kicks may have disturbed it
 until in_adb; do
   el=$(( $(date +%s) - start ))
-  [ $el -ge 480 ] && { echo "$(ts) Android did not come back"; exit 5; }
+  [ $el -ge 900 ] && { echo "$(ts) Android did not come back"; exit 5; }
   if [ $el -ge $nextkick ]; then bash $S/usbkick.sh kick; nextkick=$(( el + 60 )); fi
   sleep 3
 done

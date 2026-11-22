@@ -170,7 +170,7 @@ static int bt_virt_tx_fd = -1, bt_virt_rx_fd = -1;
 static unsigned bt_hci_logged;
 static void bt_hci_log(const char *dir, const void *buf, ssize_t n)
 {
-    if (n <= 0 || bt_hci_logged >= 300) {
+    if (n <= 0 || bt_hci_logged >= 600) {
         return;
     }
     bt_hci_logged++;
@@ -187,7 +187,8 @@ static unsigned bt_rx_follow;
 static int bt_is_vendor_cmd(const void *buf, ssize_t n)
 {
     const uint8_t *b = buf;
-    return n >= 4 && b[0] == 0x01 && b[2] >= 0xfc;
+    /* bt-46: also LE commands (OGF 0x08, opcode high byte 0x20..0x23): "Read LE Advertising TX power failed 0x2c8". */
+    return n >= 4 && b[0] == 0x01 && (b[2] >= 0xfc || (b[2] >= 0x20 && b[2] <= 0x23));
 }
 static ssize_t bt_write(int fd, const void *buf, size_t n)
 {

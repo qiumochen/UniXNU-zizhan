@@ -215,7 +215,12 @@ static void h4_complete(Window &se) {
     if (vendor) {
       // bt-43: the Broadcom VSC parsers in bluetoothd read return parameters after the status (AssertFail bcm_vsc
       // 0x33b "ByteStream_NumReadBytesAvail(*pBs) >= 1" on op fd48, then SIGABRT). Answer status 0 plus 31 zero bytes.
+      // bt-45: zero return data made LE_META_ENA_FEATURES (fd3c, an 8-byte feature mask) restart with 0xe12; return the
+      // command's own parameters after the status, as a "set" command reports the applied value.
       uint8_t cc[7 + 31] = {0x04, 0x0e, uint8_t(4 + 31), 0x01, uint8_t(op), uint8_t(op >> 8), 0x00};
+      for (unsigned i = 0; i < h4.pkt[3] && i < 31 && 4 + i < h4.have; ++i) {
+        cc[7 + i] = h4.pkt[4 + i];
+      }
       zizhan_bt_uart_input(cc, sizeof cc);
       ++h4.shimmed;
       return;
@@ -223,6 +228,16 @@ static void h4_complete(Window &se) {
     // bt-42: bluetoothd's HCI init needs Read/Write Default Erroneous Data Reporting (0x0c5a/0x0c5b), which the QCA6490
     // does not support (supported-commands octet 18 = 0x83): OI fails it locally (0x6c, "HCI initialization failed").
     // The supported-commands event is patched in rx_patch(); both commands are answered here (reporting disabled).
+    // bt-47/48: after LE Read Periodic Advertiser List Size (0x204a), an "extended advertising command" in Core 5.x, the
+    // QCA6490 rejects every legacy advertising/scan command with Command Disallowed (0x2007 tx power, 0x200b scan
+    // parameters), as the spec requires, and bluetoothd restarts (0x2c8). Broadcom tolerates the mix. Answer 0x204a
+    // here with the list size the controller reported (3) so it never sees an extended command.
+    if (op == 0x204a) {
+      const uint8_t cc[8] = {0x04, 0x0e, 0x05, 0x01, 0x4a, 0x20, 0x00, 0x03};
+      zizhan_bt_uart_input(cc, sizeof cc);
+      ++h4.shimmed;
+      return;
+    }
     if (op == 0x0c5b || op == 0x0c5a) {
       const uint8_t cc[8] = {0x04, 0x0e, uint8_t(op == 0x0c5a ? 0x05 : 0x04), 0x01, uint8_t(op), uint8_t(op >> 8), 0x00, 0x00};
       zizhan_bt_uart_input(cc, op == 0x0c5a ? 8u : 7u);

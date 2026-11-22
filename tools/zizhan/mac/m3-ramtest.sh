@@ -15,6 +15,7 @@ export PATH=/opt/homebrew/bin:$PATH
 IMG=${1:?image}; OUT=${2:?outdir}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 KICK="$HERE/usbkick.sh"
+[ -f "$IMG" ] || { echo "no image: $IMG"; exit 2; }
 mkdir -p "$OUT"
 LOG="$OUT/ramtest.log"
 ts() { date '+%H:%M:%S'; }
@@ -47,6 +48,7 @@ boot_image() {
   [ $ok = 1 ] || { say "fastboot never appeared: needs a replug"; return 3; }
   slot=$(fastboot getvar current-slot 2>&1 | awk '/current-slot:/ {print $2}')
   [ "$slot" = b ] || { say "fastboot slot is '$slot', not b: stopping (fastboot reboot)"; fastboot reboot >/dev/null 2>&1; return 2; }
+  [ -f "$1" ] || { say "no image $1: fastboot reboot"; fastboot reboot >/dev/null 2>&1; return 2; }
   say "fastboot boot $(basename "$1")"
   fastboot boot "$1" 2>&1 | tail -1 | tee -a "$LOG"
   t0=$(date +%s)

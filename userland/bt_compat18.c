@@ -318,6 +318,9 @@ static CFTypeRef bt_copy_answer(CFStringRef key, CFDictionaryRef options)
  * 0x1009cd130. A read-only thread samples both every millisecond for 20 s and prints every change, with callback
  * addresses converted back to the binary's static addresses (main image slide). zizhan_bt_watch=0 disables it.
  */
+#ifndef BT_WATCH
+#define BT_WATCH 0
+#endif
 #define BT_VSE_CONFIG_PTR 0x1009e33f0ULL
 #define BT_VSE_LIST_HEAD  0x1009cd130ULL
 #define BT_OI_ZONE_PTR    0x1009c8fe8ULL   /* malloc zone of the OI allocator 0x1001436b4 (created by 0x100143614) */
@@ -515,7 +518,9 @@ __attribute__((constructor)) static void bt_transport(void)
     if (strstr(args, "zizhan_bt_oilog=0") == NULL) {
         bt_oi_hook();
     }
-    if (strstr(args, "zizhan_bt_watch=0") == NULL) {
+    /* The watch thread samples every 0.2 ms for 180 s: a diagnostic only (build with -DBT_WATCH=1). bluetoothd cannot read
+     * the boot-args in its sandbox, so a boot-arg cannot turn it on. */
+    if (BT_WATCH && strstr(args, "zizhan_bt_watch=0") == NULL) {
         pthread_t thread;
         if (pthread_create(&thread, NULL, bt_vse_watch, NULL) == 0) {
             pthread_detach(thread);

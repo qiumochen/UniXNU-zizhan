@@ -930,7 +930,13 @@ BootOnce (
       // segments/BSS, args, ADT, initrd, trustcache and copied trampoline.
       // Untouched free pages are not boot input. Clean only populated data,
       // while boot_args still advertises the complete owned window/banks.
-      if (AutoReset) { PongArmWatchdog (); }
+      if (AutoReset) {
+        PongArmWatchdog ();
+      } else {
+        // M3 (2026-11-23): the boot_b BootShim arms the Gunyah watchdog before the UEFI menu so a hung
+        // menu resets by itself. A kernel without pong_autoreset never pings it: switch it off here.
+        PongSmc (0x86000005, 2, 0);
+      }
       Enter (ArgsAddress, Address + Kernel.Entry - Kernel.Base, Address, Used, Video[0], Video[2] * Video[4]);
       CpuDeadLoop ();
     }

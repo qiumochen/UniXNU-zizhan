@@ -52,10 +52,10 @@ until in_fastboot; do
 done
 echo "$(ts) fastboot is back after $(( $(date +%s) - start + 20 ))s; saving the ramoops to logfs"
 bash "$S/fastboot-boot.sh" "$S/out/ramoops-dump.img" 2>&1 | tail -1 || exit 7
-start=$(date +%s); nextkick=120   # M3 boot_b (2026-11-22): RamoopsDump reset -> menu (10 s) -> magic reset -> Android takes ~65 s
+start=$(date +%s); nextkick=240   # M3 boot_b: RamoopsDump reset -> menu (10 s) -> magic reset -> Android ~65 s; 11-23 lock-2 took 4.5 min (5 ABL boots) and kicks may have disturbed it
 until in_adb; do
   el=$(( $(date +%s) - start ))
-  [ $el -ge 240 ] && { echo "$(ts) Android did not come back"; exit 5; }
+  [ $el -ge 480 ] && { echo "$(ts) Android did not come back"; exit 5; }
   if [ $el -ge $nextkick ]; then bash $S/usbkick.sh kick; nextkick=$(( el + 60 )); fi
   sleep 3
 done

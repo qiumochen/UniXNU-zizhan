@@ -2393,6 +2393,229 @@ static void display_link_rates(void)
     fprintf(stderr,"Pong UI18: display links: made %d fps %d range %d, in-process animations at the panel's rate %d\n",
         made!=NULL,fps!=NULL,range!=NULL,link_full);
 }
+
+/* Lock screen date/time overlap (2026-11-21 user check; sbar-2: the date line touches the clock).
+ * The zizhan panel is 1080x958 points, wider than tall, while SpringBoard runs portrait. Log the
+ * SBFLockScreenDateView geometry (first layouts only) and the landscape-time-font requests; boot-arg
+ * zizhan_lock_time=1 forces the portrait time font, =2 the landscape one. */
+static void (*lockdate_layout_original)(id,SEL);
+static void (*lockdate_landscape_original)(id,SEL,BOOL);
+static unsigned lockdate_layout_logs,lockdate_landscape_logs;
+static int lockdate_mode;
+static void lockdate_rect(const char *what,id view,unsigned level)
+{
+    Method frame=class_getInstanceMethod(object_getClass(view),sel_registerName("frame"));
+    if(!method_abi(frame,"{",0,"")) {
+        return;
+    }
+    CGRect f=((CGRect(*)(id,SEL))objc_msgSend)(view,sel_registerName("frame"));
+    fprintf(stderr,"Zizhan lockdate: %s L%u %s frame=%.1f/%.1f/%.1f/%.1f\n",what,level,object_getClassName(view),
+            f.origin.x,f.origin.y,f.size.width,f.size.height);
+}
+static void lockdate_tree(id view,unsigned level,unsigned *budget)
+{
+    if(!view || !*budget || level>4) {
+        return;
+    }
+    --*budget;
+    lockdate_rect("view",view,level);
+    id children=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
+    if(!children) {
+        return;
+    }
+    CFIndex count=CFArrayGetCount((CFArrayRef)children);
+    for(CFIndex i=0;i<count && *budget;++i) {
+        lockdate_tree((id)CFArrayGetValueAtIndex((CFArrayRef)children,i),level+1,budget);
+    }
+}
+static id lockdate_last;
+static void lockdate_report(id self,const char *when)
+{
+    int landscape=-1;
+    Method getter=class_getInstanceMethod(object_getClass(self),sel_registerName("useLandscapeTimeFontSize"));
+    if(method_abi(getter,"Bc",0,"")) {
+        landscape=((BOOL(*)(id,SEL))objc_msgSend)(self,sel_registerName("useLandscapeTimeFontSize"));
+    }
+    fprintf(stderr,"Zizhan lockdate: %s landscapeFont=%d mode=%d layouts=%u\n",when,landscape,lockdate_mode,lockdate_layout_logs);
+    unsigned budget=24;
+    lockdate_tree(self,0,&budget);
+}
+/* The console ring wraps during boot: report again at about 60/120/180 s after SpringBoard started. */
+static void lockdate_late(void *context)
+{
+    (void)context;
+    fprintf(stderr,"Zizhan lockdate: late hooks layout=%d landscape=%d view=%d\n",lockdate_layout_original!=NULL,
+            lockdate_landscape_original!=NULL,lockdate_last!=nil);
+    if(lockdate_last) {
+        lockdate_report(lockdate_last,"late");
+    }
+}
+static void lockdate_layout(id self,SEL selector)
+{
+    if(lockdate_layout_original) {
+        lockdate_layout_original(self,selector);
+    }
+    if(lockdate_last!=self) {
+        ((id(*)(id,SEL))objc_msgSend)(self,sel_registerName("retain"));
+        if(lockdate_last) {
+            ((void(*)(id,SEL))objc_msgSend)(lockdate_last,sel_registerName("release"));
+        }
+        lockdate_last=self;
+    }
+    if(lockdate_layout_logs>=6) {
+        ++lockdate_layout_logs;
+        return;
+    }
+    ++lockdate_layout_logs;
+    int landscape=-1;
+    Method getter=class_getInstanceMethod(object_getClass(self),sel_registerName("useLandscapeTimeFontSize"));
+    if(method_abi(getter,"Bc",0,"")) {
+        landscape=((BOOL(*)(id,SEL))objc_msgSend)(self,sel_registerName("useLandscapeTimeFontSize"));
+    }
+    fprintf(stderr,"Zizhan lockdate: layout #%u landscapeFont=%d mode=%d\n",lockdate_layout_logs,landscape,lockdate_mode);
+    unsigned budget=24;
+    lockdate_tree(self,0,&budget);
+}
+static void lockdate_set_landscape(id self,SEL selector,BOOL value)
+{
+    BOOL forced=lockdate_mode==1?NO:(lockdate_mode==2?YES:value);
+    if(lockdate_landscape_logs<16) {
+        ++lockdate_landscape_logs;
+        fprintf(stderr,"Zizhan lockdate: setUseLandscapeTimeFontSize %d -> %d\n",(int)value,(int)forced);
+    }
+    lockdate_landscape_original(self,selector,forced);
+}
+
+/* lock-2 (2026-11-23): CSProminentDisplayView placed the date container at y=79 (subtitle 36 pt tall,
+ * bottom 115) and the time container at y=84 (594x100) on the 1080x958-point panel: the clock overlaps
+ * the date line. After its layout, move a time container that overlaps the date down so the digits
+ * (their top is about 21% into the time frame) start 8 pt below the date. zizhan_lock_fix=0 disables. */
+static void (*lockfix_layout_original)(id,SEL);
+static bool lockfix_enabled;
+static unsigned lockfix_logs;
+static bool lockfix_contains(id view,const char *class_name,unsigned depth,CGRect *found,CGRect offset)
+{
+    if(!view || !depth) {
+        return false;
+    }
+    id children=((id(*)(id,SEL))objc_msgSend)(view,sel_registerName("subviews"));
+    if(!children) {
+        return false;
+    }
+    CFIndex count=CFArrayGetCount((CFArrayRef)children);
+    for(CFIndex i=0;i<count;++i) {
+        id child=(id)CFArrayGetValueAtIndex((CFArrayRef)children,i);
+        CGRect f=((CGRect(*)(id,SEL))objc_msgSend)(child,sel_registerName("frame"));
+        f.origin.x+=offset.origin.x;
+        f.origin.y+=offset.origin.y;
+        const char *name=object_getClassName(child);
+        if(name && !strcmp(name,class_name)) {
+            *found=f;
+            return true;
+        }
+        if(lockfix_contains(child,class_name,depth-1,found,f)) {
+            return true;
+        }
+    }
+    return false;
+}
+static void lockfix_layout(id self,SEL selector)
+{
+    if(lockfix_layout_original) {
+        lockfix_layout_original(self,selector);
+    }
+    if(!lockfix_enabled) {
+        return;
+    }
+    id children=((id(*)(id,SEL))objc_msgSend)(self,sel_registerName("subviews"));
+    if(!children) {
+        return;
+    }
+    id time_container=nil;
+    CGRect time_frame=CGRectZero,date=CGRectZero,inner=CGRectZero;
+    bool have_date=false;
+    CFIndex count=CFArrayGetCount((CFArrayRef)children);
+    for(CFIndex i=0;i<count;++i) {
+        id child=(id)CFArrayGetValueAtIndex((CFArrayRef)children,i);
+        CGRect f=((CGRect(*)(id,SEL))objc_msgSend)(child,sel_registerName("frame"));
+        if(!time_container && lockfix_contains(child,"CSProminentTimeView",3,&inner,f)) {
+            time_container=child;
+            time_frame=f;
+        } else if(!have_date && lockfix_contains(child,"CSProminentSubtitleDateView",3,&date,f)) {
+            have_date=true;
+        }
+    }
+    if(!time_container || !have_date || time_frame.size.height<=0 || date.size.height<=0) {
+        return;
+    }
+    double date_bottom=date.origin.y+date.size.height;
+    double digits_top=time_frame.origin.y+0.21*time_frame.size.height;
+    if(digits_top>=date_bottom+4) {
+        return;
+    }
+    double target=date_bottom+8-0.21*time_frame.size.height;
+    if(lockfix_logs<8) {
+        ++lockfix_logs;
+        fprintf(stderr,"Zizhan lockfix: date %.1f..%.1f time y %.1f h %.1f -> y %.1f\n",date.origin.y,date_bottom,
+                time_frame.origin.y,time_frame.size.height,target);
+    }
+    time_frame.origin.y=target;
+    ((void(*)(id,SEL,CGRect))objc_msgSend)(time_container,sel_registerName("setFrame:"),time_frame);
+}
+static void lockfix_install(void)
+{
+    Class cls=objc_lookUpClass("CSProminentDisplayView");
+    if(!cls) {
+        fprintf(stderr,"Zizhan lockfix: CSProminentDisplayView absent\n");
+        return;
+    }
+    SEL layout=sel_registerName("layoutSubviews");
+    Method own=class_getInstanceMethod(cls,layout);
+    Method inherited=class_getInstanceMethod(class_getSuperclass(cls),layout);
+    if(own && own!=inherited && method_abi(own,"v",0,"")) {
+        lockfix_layout_original=(void(*)(id,SEL))method_setImplementation(own,(IMP)lockfix_layout);
+    } else if(inherited && method_abi(inherited,"v",0,"")) {
+        lockfix_layout_original=(void(*)(id,SEL))method_getImplementation(inherited);
+        if(!class_addMethod(cls,layout,(IMP)lockfix_layout,"v16@0:8")) {
+            lockfix_layout_original=NULL;
+        }
+    }
+    fprintf(stderr,"Zizhan lockfix: hook=%d enabled=%d\n",lockfix_layout_original!=NULL,lockfix_enabled);
+}
+
+static void lockdate_install(void *context)
+{
+    (void)context;
+    lockfix_install();
+    Class cls=objc_lookUpClass("SBFLockScreenDateView");
+    if(!cls) {
+        fprintf(stderr,"Zizhan lockdate: SBFLockScreenDateView absent\n");
+        return;
+    }
+    SEL layout=sel_registerName("layoutSubviews");
+    Method own=class_getInstanceMethod(cls,layout);
+    Method inherited=class_getInstanceMethod(class_getSuperclass(cls),layout);
+    if(own && own!=inherited && method_abi(own,"v",0,"")) {
+        lockdate_layout_original=(void(*)(id,SEL))method_setImplementation(own,(IMP)lockdate_layout);
+    } else if(inherited && method_abi(inherited,"v",0,"")) {
+        /* Not overridden: add an override on this class only, calling the superclass implementation. */
+        lockdate_layout_original=(void(*)(id,SEL))method_getImplementation(inherited);
+        if(!class_addMethod(cls,layout,(IMP)lockdate_layout,"v16@0:8")) {
+            lockdate_layout_original=NULL;
+        }
+    }
+    SEL set=sel_registerName("setUseLandscapeTimeFontSize:");
+    Method landscape=class_getInstanceMethod(cls,set);
+    if(landscape && landscape!=class_getInstanceMethod(class_getSuperclass(cls),set) && (method_abi(landscape,"v",1,"B") || method_abi(landscape,"v",1,"c"))) {
+        lockdate_landscape_original=(void(*)(id,SEL,BOOL))method_setImplementation(landscape,(IMP)lockdate_set_landscape);
+    }
+    fprintf(stderr,"Zizhan lockdate: hooks layout=%d landscape=%d mode=%d\n",lockdate_layout_original!=NULL,
+            lockdate_landscape_original!=NULL,lockdate_mode);
+    for(int64_t seconds=50;seconds<=170;seconds+=60) {
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,seconds*(int64_t)NSEC_PER_SEC),dispatch_get_main_queue(),NULL,lockdate_late);
+    }
+}
+
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
     const char *name=getprogname();
@@ -2429,6 +2652,11 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     // cache it during the regular all-images callback below.
     if(gestalt_process)for(uint32_t i=0,n=_dyld_image_count();i<n;i++)
         phone_gestalt_image(_dyld_get_image_header(i),_dyld_get_image_vmaddr_slide(i));
+    if(!strcmp(name,"SpringBoard")) {
+        lockdate_mode=boot_option("zizhan_lock_time=1")?1:(boot_option("zizhan_lock_time=2")?2:0);
+        lockfix_enabled=!boot_option("zizhan_lock_fix=0");
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,lockdate_install);
+    }
     if(phone_ui_process) {
         dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,phone_repair_existing);
         dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,35*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,phone_repair_existing);

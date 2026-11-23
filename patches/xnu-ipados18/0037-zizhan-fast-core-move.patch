@@ -1,0 +1,79 @@
+zizhan UX-07: optional misfit migration of a UI-priority thread from an A710 to the idle Cortex-X2 (after 0014; boot-arg pong_fast_move=1, off by default: no measured gain).
+--- a/osfmk/kern/sched_clutch.c
++++ b/osfmk/kern/sched_clutch.c
+@@ -3741,6 +3741,34 @@
+ static bool
+ sched_edge_balance(processor_t cprocessor, processor_set_t cpset);
+ 
++/*
++ * zizhan UX-07 (after 0014-zizhan-fast-core): choose_processor() only places a thread when it is made runnable, so a UI thread
++ * that started on an A710 while the Cortex-X2 was busy stayed there for its whole burst: in app-open stalls SpringBoard's main
++ * thread ran 65 % of its samples on cpu 4-6 and 26 % on cpu 7 (ux-k1). As Linux moves a misfit task to an idle bigger CPU, a
++ * user thread at or above pong_fast_pri (below the realtime band, not bound) avoids its processor while pong_fast_cpu of the
++ * same pset sits idle; thread_select() then requeues it and 0014 picks the fast core. The fast core sends the rebalance IPI
++ * when it goes idle, so the move does not wait for the quantum.
++ * Off by default (boot-arg pong_fast_move=1 turns it on): it raised the main thread's share of cpu 7 from 24 % to 42 % but the
++ * app-open stall did not shrink (ux-k3/k4 and ux-m1/m2: median 183 ms with it, 166 ms without, 19 and 18 taps).
++ */
++extern uint32_t pong_fast_pri, pong_fast_cpu;
++TUNABLE(uint32_t, pong_fast_move, "pong_fast_move", 0);
++
++static bool
++pong_fast_misfit(processor_t processor, thread_t thread)
++{
++	if (pong_fast_move == 0 || pong_fast_pri == 0 || pong_fast_cpu >= MAX_SCHED_CPUS || processor->cpu_id == (int)pong_fast_cpu ||
++	    thread->sched_pri < (int)pong_fast_pri || thread->sched_pri >= BASEPRI_RTQUEUES ||
++	    thread->bound_processor != PROCESSOR_NULL || get_threadtask(thread) == kernel_task) {
++		return false;
++	}
++	processor_t fast = processor_array[pong_fast_cpu];
++	processor_set_t pset = processor->processor_set;
++	return fast != PROCESSOR_NULL && fast->processor_set == pset && fast->is_recommended &&
++	       bit_test(pset->recommended_bitmask & pset->cpu_state_map[PROCESSOR_IDLE], fast->cpu_id) &&
++	       !bit_test(pset->pending_AST_URGENT_cpu_mask, fast->cpu_id);
++}
++
+ static void
+ sched_edge_check_spill(processor_set_t pset, thread_t thread);
+ 
+@@ -4442,6 +4470,11 @@
+ 	if (thread->bound_processor == processor) {
+ 		/* Thread is bound here */
+ 		return false;
++	}
++
++	/* zizhan UX-07: a UI-priority thread running on an A710 moves to the idle Cortex-X2 */
++	if (pong_fast_misfit(processor, thread)) {
++		return true;
+ 	}
+ 
+ 	/*
+@@ -4501,11 +4534,27 @@
+ sched_edge_balance(__unused processor_t cprocessor, processor_set_t cpset)
+ {
+ 	assert(cprocessor == current_processor());
+-	pset_unlock(cpset);
+ 
+ 	uint64_t ast_processor_map = 0;
+ 	sched_ipi_type_t ipi_type[MAX_CPUS] = {SCHED_IPI_NONE};
+ 
++	/* zizhan UX-07: the fast core going idle calls over one UI-priority thread running on a sibling (pong_fast_misfit) */
++	if (pong_fast_move != 0 && pong_fast_pri != 0 && cprocessor->cpu_id == (int)pong_fast_cpu) {
++		uint64_t running_map = cpset->cpu_state_map[PROCESSOR_RUNNING] & cpset->recommended_bitmask;
++		for (int cpuid = lsb_first(running_map); cpuid >= 0; cpuid = lsb_next(running_map, cpuid)) {
++			processor_t sibling = processor_array[cpuid];
++			if (sibling == cprocessor || sibling->current_pri < (int)pong_fast_pri || sibling->current_pri >= BASEPRI_RTQUEUES) {
++				continue;
++			}
++			ipi_type[cpuid] = sched_ipi_action(sibling, NULL, SCHED_IPI_EVENT_REBALANCE);
++			if (ipi_type[cpuid] != SCHED_IPI_NONE) {
++				bit_set(ast_processor_map, cpuid);
++				break;
++			}
++		}
++	}
++	pset_unlock(cpset);
++
+ 	bitmap_t *foreign_pset_bitmap = cpset->foreign_psets;
+ 	for (int cluster = bitmap_first(foreign_pset_bitmap, sched_edge_max_clusters); cluster >= 0; cluster = bitmap_next(foreign_pset_bitmap, cluster)) {
+ 		/* Skip the pset if its not schedulable */

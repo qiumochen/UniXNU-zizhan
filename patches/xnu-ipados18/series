@@ -32,3 +32,5 @@
 0033-zizhan-bt-abort-trace.patch
 0034-zizhan-springboard-sample.patch
 0035-zizhan-chosen-boot-args.patch
+0036-zizhan-sample-ipi.patch
+0037-zizhan-fast-core-move.patch

@@ -39,7 +39,11 @@ struct Domain {
     unsigned khz[40]{},levels=0,down=0;
     bool live=false;
 };
-static Domain domains[]={{0,4,1804800},{4,3,2496000},{7,1,2995200}};
+/* Caps: the highest row of each domain's hardware LUT that Android's cpufreq lists as a normal (non-boost) frequency on this
+ * phone: 2016000 / 2745600 / 2995200 kHz (policy0/4/7 scaling_available_frequencies, 2026-11-23; 3187200 on the X2 is a boost
+ * row and stays unused). The earlier 1804800 / 2496000 were the Nothing Phone (2)'s lower clocks.
+ * boot-args pong_cpu_cap0 / pong_cpu_cap4 / pong_cpu_cap7=<kHz> override a domain's cap (e.g. the old values for an A/B). */
+static Domain domains[]={{0,4,2016000},{4,3,2745600},{7,1,2995200}};
 static Domain l3{0,0,0};
 static IOMemoryMap *pdmem_map;
 static unsigned thermalLevel()
@@ -189,6 +193,11 @@ static void worker(void *,wait_result_t)
     auto memory=IODeviceMemory::withRange(0x17d09000,4096);
     if(memory){pdmem_map=memory->map(kIOMapAnywhere|kIOMapInhibitCache);memory->release();}
     if(!pdmem_map){IOLog("Pong CPU: EPSS skipped: PDMEM unavailable\n");stop();}
+    {static const char *const names[3]={"pong_cpu_cap0","pong_cpu_cap4","pong_cpu_cap7"};
+     for(unsigned i=0;i<3;++i) {
+         unsigned khz=0;
+         if(PE_parse_boot_argn(names[i],&khz,sizeof khz) && khz>=300000 && khz<=domains[i].cap_khz){domains[i].cap_khz=khz;}
+     }}
     unsigned live=0;for(unsigned i=0;i<3;++i)live+=prepare(domains[i],i);
     if(!live){IOLog("Pong CPU: EPSS skipped: no valid native LUT\n");stop();}
     unsigned l3Mode=1;PE_parse_boot_argn("pong_l3",&l3Mode,sizeof l3Mode);

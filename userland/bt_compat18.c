@@ -153,7 +153,21 @@ static FILE *bt_fopen(const char *path, const char *mode)
 #define BT_TTY "/dev/cu.bluetooth"
 static int bt_tty_open(int flags)
 {
+    /*
+     * reg-1 (2026-11-23): launchd starts bluetoothd before the kernel probe (zizhan_bt_probe=4) has created the tty; the open
+     * failed with ENOENT, bluetoothd aborted with reason 1201 and was relaunched three times (~20 s) before one stayed up.
+     * Wait for the node instead, up to 90 s (reg-3: it appeared after 25.7 s).
+     */
     int fd = open(BT_TTY, flags | O_NOCTTY);
+    unsigned waited_ms = 0;
+    while (fd < 0 && errno == ENOENT && waited_ms < 90000) {
+        usleep(100000);
+        waited_ms += 100;
+        fd = open(BT_TTY, flags | O_NOCTTY);
+    }
+    if (waited_ms) {
+        fprintf(stderr, "Zizhan BT: waited %u ms for %s (fd=%d)\n", waited_ms, BT_TTY, fd);
+    }
     if (fd < 0) {
         fprintf(stderr, "Zizhan BT: open %s flags=0x%x failed errno=%d\n", BT_TTY, flags, errno);
         return -1;

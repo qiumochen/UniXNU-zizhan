@@ -22,6 +22,10 @@
 #include "QcomScm.h"
 #include "QcomSmem.h"
 #include "QcomSmp2p.h"
+#include "ZizhanSlpiStd.h"
+#include <IOKit/IORegistryEntry.h>
+#include <IOKit/IODeviceTreeSupport.h>
+#include <libkern/c++/OSData.h>
 
 extern "C" int pong_ufs_read_lun(uint8_t lun, uint64_t byte, void *dst, uint32_t length);
 extern "C" bool pong_ufs_ready(void);
@@ -357,6 +361,15 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
   memcpy(h, d, sizeof h);
   if (h[0] != 1) { IOLog("ZIZHAN_SLPI: qrtr version %u len=%u\n", h[0], n); return; }
   const uint32_t type = h[1];
+  /* Flow control (Linux net/qrtr/af_qrtr.c, protocol facts): a sender marks every fifth packet of a flow with confirm_rx and
+   * stops at ten unanswered ones until the receiver returns RESUME_TX (7) for that port. Without it the sensor service went
+   * silent after five lookups (two packets each), the "SSC stops answering after ~30 s" of SENS-01. */
+  if (h[4]) {
+    const uint32_t resume[5] = {7, h[6], h[7], 0, 0};
+    qrtrSend(7, h[2], h[3], h[7], reinterpret_cast<const uint8_t *>(resume), sizeof resume);
+    static unsigned resumes;
+    if (resumes++ < 8) IOLog("ZIZHAN_SLPI: qrtr resume_tx to %u:%x for port %x\n", h[2], h[3], h[7]);
+  }
   if (type == 1) {   // DATA (QMI)
     if (h[7] == kPdmPort && h[5] <= n - 32) { pdmHandle(h[2], h[3], d + 32, h[5]); return; }
     if (h[7] == kSnsClientPort && h[5] <= n - 32) { snsData(d + 32, h[5]); return; }
@@ -465,7 +478,12 @@ void faults(const char *when) {
 void put64(uint64_t at, uint64_t v) { wr(gBuf, at, uint32_t(v)); wr(gBuf, at + 4, uint32_t(v >> 32)); }
 struct Arg { void *p; uint32_t len; };
 /* One synchronous invocation; returns the remote retval, or a negative local error. */
-uint64_t gLastCtx;
+uint64_t gLastCtx, gLastAt[16];
+/* The DSP runs one worker per client thread id and queues that thread's calls: with every call sent as one thread, anything
+ * after the first next2 (which only returns with a reverse request) waited behind it forever (slpi-11: the remotectl open
+ * timed out). A daemon's listener is its own thread, so next2 goes out under gListenTid and everything else under kTgid. */
+int32_t gCallTid = int32_t(kTgid);
+void serviceListeners();
 int invokeAt(uint64_t base, uint32_t clientId, uint32_t handle, uint32_t sc, const Arg *in, unsigned nin, Arg *out, unsigned nout, uint32_t timeoutMs);
 int invoke(uint32_t clientId, uint32_t handle, uint32_t sc, const Arg *in, unsigned nin, Arg *out, unsigned nout, uint32_t timeoutMs) {
   return invokeAt(0, clientId, handle, sc, in, nin, out, nout, timeoutMs);
@@ -492,9 +510,10 @@ int invokeAt(uint64_t base, uint32_t clientId, uint32_t handle, uint32_t sc, con
     if (i < nin) { const uint8_t *src = static_cast<const uint8_t *>(in[i].p); for (uint32_t k = 0; k < len; ++k) gBuf.va[off + k] = src[k]; }
     off += len;
   }
+  for (unsigned i = 0; i < 16; ++i) gLastAt[i] = at[i];
   __asm__ volatile("dsb sy" ::: "memory");
   struct __attribute__((packed)) { int32_t client; int32_t tid; uint64_t ctx; uint32_t handle, sc; uint64_t addr, size; } msg = {
-      int32_t(clientId), int32_t(kTgid), (gCtxSeq++ << 8) | gPd, handle, sc, (uint64_t(gSidCb) << 32) | (kBufPa + base), (off - base + 0xfff) & ~0xfffull};
+      int32_t(clientId), gCallTid, (gCtxSeq++ << 8) | gPd, handle, sc, (uint64_t(gSidCb) << 32) | (kBufPa + base), (off - base + 0xfff) & ~0xfffull};
   gRsp = false;
   gLastCtx = msg.ctx;
   int rc = qcom_glink_send(&gGlink, gCh, &msg, sizeof msg);
@@ -508,7 +527,8 @@ int invokeAt(uint64_t base, uint32_t clientId, uint32_t handle, uint32_t sc, con
   auto mine = [&](int32_t *ret) { for (auto &e : gDoneTab) if (e.used && e.ctx == msg.ctx) { *ret = e.ret; e.used = false; return true; } return false; };
   int32_t ret = 0;
   bool got = false;
-  while (!(got = mine(&ret)) && nowMs() - t0 < timeoutMs) { glinkService(); IOSleep(1); }
+  // the DSP may call back (apps_std) before it answers, e.g. while it opens a module
+  while (!(got = mine(&ret)) && nowMs() - t0 < timeoutMs) { glinkService(); serviceListeners(); IOSleep(1); }
   if (!got) { IOLog("ZIZHAN_SLPI: fastrpc handle=%u sc=%x timeout (rsp=%u ctx=%llx)\n", handle, sc, gRsp ? 1u : 0u, gRspCtx); return -5; }
   for (unsigned i = nin; i < n; ++i) {
     if (!at[i]) continue;
@@ -522,17 +542,50 @@ bool takeDone(uint64_t ctx, int32_t *ret) {
   for (auto &e : gDoneTab) if (e.used && e.ctx == ctx) { *ret = e.ret; e.used = false; return true; }
   return false;
 }
-/* next2 primary/sequence buffers per listener (root = region 0x80000, sensors = 0x40000). */
-struct Listener { const char *name; uint64_t base; uint32_t client, pd; uint64_t ctx; bool armed; uint32_t prim[4], outPrim[4]; uint8_t outSeq[256]; };
-Listener gL[2] = {{"root", 0x80000, kTgid + 1, 0, 0, false, {}, {}, {}}, {"sensors", 0x40000, kTgid, 2, 0, false, {}, {}, {}}};
-bool arm(Listener &l) {
-  l.prim[0] = 0; l.prim[1] = 0xffffffffu; l.prim[2] = 0; l.prim[3] = 256;
-  Arg in[2] = {{l.prim, 16}, {nullptr, 0}}, out[2] = {{l.outPrim, 16}, {l.outSeq, 256}};
+/* next2 per listener (root = region 0x80000, sensors = 0x40000): in = {previous ctx, its result, its packed out buffers},
+ * out = {ctx, handle, scalars, bytes of packed in buffers} + those buffers. Packing (qualcomm/fastrpc inc/listener_buf.h,
+ * BSD-3-Clause; layout facts only): per in buffer a u32 length then, if non-zero, the data at the next 8-byte boundary; then
+ * one u32 length per out buffer. The reply packs every out buffer the same way as the in buffers. */
+constexpr uint32_t kSeqCap = 0x10000, kReplyCap = 0x20000;
+struct Listener { const char *name; uint64_t base; uint32_t client, pd; uint64_t ctx; bool armed, registered; uint32_t prim[4]; uint64_t at[4]; unsigned served; };
+Listener gL[2] = {{"root", 0x80000, kTgid + 1, 0, 0, false, false, {}, {}, 0}, {"sensors", 0x40000, kTgid, 2, 0, false, false, {}, {}, 0}};
+uint8_t gReply[kReplyCap];
+bool gServing;
+bool next2(Listener &l, uint32_t rctx, int32_t result, uint32_t replyLen) {
+  l.prim[0] = rctx; l.prim[1] = uint32_t(result); l.prim[2] = replyLen; l.prim[3] = kSeqCap;
+  uint32_t outPrim[4] = {};
+  Arg in[2] = {{l.prim, 16}, {gReply, replyLen}}, out[2] = {{outPrim, 16}, {gReply, kSeqCap}};   // outs are read from the region later
   gPd = l.pd;
+  gCallTid = int32_t(l.client + 0x100);   // the listener thread of this client
   const int r = invokeAt(l.base, l.client, 3, sc(4, 2, 2), in, 2, out, 2, 0);
+  gCallTid = int32_t(kTgid);
   l.ctx = gLastCtx; l.armed = r == 0;
-  IOLog("ZIZHAN_SLPI: fastrpc %s next2 armed=%u ctx=%llx\n", l.name, l.armed ? 1u : 0u, l.ctx);
+  for (unsigned i = 0; i < 4; ++i) l.at[i] = gLastAt[i];
   return l.armed;
+}
+bool arm(Listener &l) {
+  const bool ok = next2(l, 0, -1, 0);
+  IOLog("ZIZHAN_SLPI: fastrpc %s next2 armed=%u ctx=%llx\n", l.name, ok ? 1u : 0u, l.ctx);
+  return ok;
+}
+/* SENS-02: a daemon also registers as its PD's default listener: remotectl (handle 0) open of "adsp_default_listener", then
+ * method 0 on the handle it returns (qualcomm/fastrpc src/adsp_default_listener.c). SENS-01 skipped this and never saw a
+ * reverse request. */
+bool registerDefault(Listener &l) {
+  static const char name[] = "adsp_default_listener";
+  static uint8_t dlerr[256];
+  uint32_t prim[2] = {sizeof name, sizeof dlerr}, outPrim[2] = {0, 0xffffffffu};
+  Arg in[2] = {{prim, 8}, {const_cast<char *>(name), sizeof name}}, out[2] = {{outPrim, 8}, {dlerr, sizeof dlerr}};
+  gPd = l.pd;
+  int r = invoke(l.client, 0, sc(0, 2, 2), in, 2, out, 2, 5000);
+  dlerr[sizeof dlerr - 1] = 0;
+  IOLog("ZIZHAN_SLPI: fastrpc %s remotectl open %s -> %d handle=%x err=%d [%.80s]\n", l.name, name, r, outPrim[0], int32_t(outPrim[1]),
+        reinterpret_cast<const char *>(dlerr));
+  if (r || outPrim[1]) return false;
+  gPd = l.pd;
+  r = invoke(l.client, outPrim[0], sc(0, 0, 0), nullptr, 0, nullptr, 0, 5000);
+  IOLog("ZIZHAN_SLPI: fastrpc %s adsp_default_listener_register -> %d\n", l.name, r);
+  return !r;
 }
 bool attachAndListen(Listener &l) {
   int32_t id = int32_t(l.client);
@@ -542,12 +595,131 @@ bool attachAndListen(Listener &l) {
   if (r) return false;
   IOLog("ZIZHAN_SLPI: fastrpc %s pd attached at +%llums\n", l.name, nowMs() - gUpMs);
   gPd = l.pd;
+  gCallTid = int32_t(l.client + 0x100);   // init2 comes from the listener thread as well
   r = invoke(l.client, 3, sc(3, 0, 0), nullptr, 0, nullptr, 0, 3000);
+  gCallTid = int32_t(kTgid);
   IOLog("ZIZHAN_SLPI: fastrpc %s adsp_listener_init2 -> %d\n", l.name, r);
-  return !r && arm(l);
+  if (r || !arm(l)) return false;
+  l.registered = registerDefault(l);
+  return true;
+}
+/* One reverse request: the module open for apps_std, then apps_std itself from ZizhanSlpiStd.h (an in-memory file system
+ * seeded from the ADT /chosen zizhan-sensors-fs archive, tools/zizhan/mac/sensors-fs-pack.py). Without the archive every file
+ * is missing and the sensor PD stops at its registry assertion (slpi-12). */
+constexpr uint32_t kStdHandle = 0x5a01;
+zizhan_slpi_std::Fs gFs;
+unsigned gSeedFiles;
+bool gFsReady;
+void *fsAlloc(uint32_t n) { return IOMalloc(n); }
+void fsFree(void *p, uint32_t n) { IOFree(p, n); }
+void fsPrint(const char *text) { IOLog("ZIZHAN_SLPI: dsp says: %.200s\n", text); }
+void fsSetup() {
+  if (gFsReady) return;
+  gFsReady = true;
+  gFs.alloc = fsAlloc; gFs.release = fsFree; gFs.print = fsPrint; gFs.ramLimit = 16u << 20;
+  auto chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+  auto blob = chosen ? OSDynamicCast(OSData, chosen->getProperty("zizhan-sensors-fs")) : nullptr;
+  bool ok = false;
+  if (blob && blob->getLength() > 8) {
+    // the registry entry may go away; keep our own copy for the session
+    const uint32_t n = blob->getLength();
+    uint8_t *copy = static_cast<uint8_t *>(IOMalloc(n));
+    if (copy) {
+      memcpy(copy, blob->getBytesNoCopy(), n);
+      ok = zizhan_slpi_std::mountSeed(gFs, copy, n, &gSeedFiles);
+    }
+  }
+  if (chosen) chosen->release();
+  IOLog("ZIZHAN_SLPI: apps_std seed %s: %u files\n", ok ? "mounted" : blob ? "INVALID" : "absent (every file will be missing)", gSeedFiles);
+}
+void serve(Listener &l, int32_t ret) {
+  uint32_t req[4];
+  for (unsigned i = 0; i < 4; ++i) req[i] = rd(gBuf, l.at[2] + 4 * i);
+  const uint32_t rctx = req[0], handle = req[1], rsc = req[2], need = req[3];
+  const unsigned nin = (rsc >> 16) & 0xff, nout = (rsc >> 8) & 0xff;
+  uint32_t method = (rsc >> 24) & 0x1f;
+  const bool chatty = l.served++ < 400;
+  if (ret || need > kSeqCap || nin > 8 || nout > 8) {
+    IOLog("ZIZHAN_SLPI: fastrpc %s request ret=%d rctx=%x handle=%x sc=%x need=%u: not served\n", l.name, ret, rctx, handle, rsc, need);
+    if (!ret) next2(l, rctx, 0x14 /* AEE_EUNSUPPORTED */, 0);
+    return;
+  }
+  // unpack: in buffers, then the out lengths
+  const volatile uint8_t *seq = gBuf.va + l.at[3];
+  static uint8_t inCopy[kSeqCap];
+  for (uint32_t i = 0; i < need; ++i) inCopy[i] = seq[i];
+  const uint8_t *inP[8] = {};
+  uint32_t inLen[8] = {}, outLen[8] = {}, pos = 0;
+  bool bad = false;
+  auto u32at = [&](uint32_t at) { uint32_t v = 0; if (at + 4 <= need) memcpy(&v, inCopy + at, 4); else bad = true; return v; };
+  for (unsigned i = 0; i < nin; ++i) {
+    inLen[i] = u32at(pos); pos += 4;
+    if (!inLen[i]) continue;
+    pos = (pos + 7) & ~7u;
+    if (pos > need || inLen[i] > need - pos) { bad = true; break; }
+    inP[i] = inCopy + pos; pos += inLen[i];
+  }
+  for (unsigned i = 0; i < nout && !bad; ++i) { outLen[i] = u32at(pos); pos += 4; }
+  // lay the reply out: each out buffer zero filled
+  uint8_t *outP[8] = {};
+  uint32_t rlen = 0;
+  for (unsigned i = 0; i < nout && !bad; ++i) {
+    if (rlen + 4 > kReplyCap) { bad = true; break; }
+    memcpy(gReply + rlen, &outLen[i], 4); rlen += 4;
+    if (!outLen[i]) continue;
+    rlen = (rlen + 7) & ~7u;
+    if (rlen > kReplyCap || outLen[i] > kReplyCap - rlen) { bad = true; break; }
+    outP[i] = gReply + rlen; memset(outP[i], 0, outLen[i]); rlen += outLen[i];
+  }
+  if (bad) {
+    IOLog("ZIZHAN_SLPI: fastrpc %s request rctx=%x handle=%x sc=%x need=%u: malformed buffers\n", l.name, rctx, handle, rsc, need);
+    next2(l, rctx, 0xe /* AEE_EBADPARM */, 0);
+    return;
+  }
+  auto str = [&](unsigned i) -> const char * {   // in buffer i as a terminated string, or ""
+    if (i >= nin || !inP[i] || !inLen[i] || inP[i][inLen[i] - 1]) return "";
+    return reinterpret_cast<const char *>(inP[i]);
+  };
+  auto put32 = [&](unsigned o, unsigned word, uint32_t v) { if (o < nout && outP[o] && outLen[o] >= 4 * word + 4) memcpy(outP[o] + 4 * word, &v, 4); };
+  int32_t result = 0x14;   // AEE_EUNSUPPORTED
+  if (handle == 0 && method == 0) {          // apps_remotectl open(name) -> handle, dlerror, nErr
+    const bool std = !strcmp(str(1), "apps_std");
+    put32(0, 0, std ? kStdHandle : 0); put32(0, 1, std ? 0 : 0x3e /* AEE_ENOSUCHMOD */);
+    result = std ? 0 : 0x3e;
+    IOLog("ZIZHAN_SLPI: fastrpc %s reverse open module \"%s\" -> %d\n", l.name, str(1), result);
+  } else if (handle == 0 && method == 1) {   // apps_remotectl close
+    result = 0;
+  } else if (handle == kStdHandle) {
+    if (method == 31 && inP[0] && inLen[0] >= 4) memcpy(&method, inP[0], 4);   // methods 31+ carry their number in the primary buffer
+    fsSetup();
+    const zizhan_slpi_std::Call call{inP, inLen, nin, outP, outLen, nout};
+    result = zizhan_slpi_std::invoke(gFs, method, call);
+    // the log: every failure that is not a plain read/write, and the first calls of each kind
+    static unsigned shown[40];
+    const bool quiet = method == 4 || method == 5 || method == 28 || method == 3 || method == 10 || method == 12;
+    const unsigned slot = method < 40 ? method : 39;
+    if ((result && !quiet && shown[slot] < 60) || shown[slot] < (quiet ? 4u : 12u)) {
+      ++shown[slot];
+      const char *name = method == 19 ? str(3) : str(1);
+      IOLog("ZIZHAN_SLPI: fastrpc %s apps_std %s(%u) [%.110s] [%.12s] -> %d\n", l.name, zizhan_slpi_std::methodName(method), method, name,
+            method == 19 ? str(4) : method == 0 ? str(2) : "", result);
+    }
+  } else if (chatty) {
+    IOLog("ZIZHAN_SLPI: fastrpc %s reverse handle=%x method=%u in=%u out=%u [%.60s] -> unsupported\n", l.name, handle, method, nin, nout, str(1));
+  }
+  next2(l, rctx, result, result ? 0 : rlen);
+}
+void serviceListeners() {
+  if (gServing) return;
+  gServing = true;
+  for (auto &l : gL) {
+    int32_t ret;
+    if (l.armed && takeDone(l.ctx, &ret)) { l.armed = false; serve(l, ret); }
+  }
+  gServing = false;
 }
 /* Watch-loop step: root PD attach + listener (sdsprpcd's role), sensors PD attach retried every 500 ms from channel-up (sscrpcd's
- * role) + listener; then report whatever request either listener receives. Requests are only logged in this stage. */
+ * role) + listener, each registered as the default listener; then serve the reverse requests. */
 void run() {
   static uint64_t nextTry;
   static unsigned tries;
@@ -565,21 +737,14 @@ void run() {
     snsOk = attachAndListen(gL[1]);
     if (!snsOk && tries == 40) IOLog("ZIZHAN_SLPI: fastrpc sensors pd attach gave up\n");
   }
-  for (auto &l : gL) {
-    int32_t ret;
-    if (!l.armed || !takeDone(l.ctx, &ret)) continue;
-    l.armed = false;
-    // read the out primary and sequence straight from this call's region: rpra[2]/rpra[3] point there
-    const uint64_t n = 4, meta = (16 + 8 + 16) * n + 8 * 16 + 4 * 64 + 4;
-    uint64_t off = l.base + ((meta + 127) & ~127ull);
-    off = (off + 16 + 127) & ~127ull;               // after in prim (16 bytes); in seq is empty
-    for (unsigned i = 0; i < 4; ++i) l.outPrim[i] = rd(gBuf, off + 4 * i);
-    off = (off + 16 + 127) & ~127ull;
-    char hex[3 * 64 + 1] = "";
-    unsigned k = 0;
-    for (unsigned i = 0; i < 64 && i < l.outPrim[3] && i < 256; ++i) k += snprintf(hex + k, sizeof hex - k, "%02x ", gBuf.va[off + i]);
-    IOLog("ZIZHAN_SLPI: fastrpc %s request ret=%d rctx=%x handle=%u sc=%x inbufs=%u [%s]\n", l.name, ret, l.outPrim[0], l.outPrim[1],
-          l.outPrim[2], l.outPrim[3], hex);
+  serviceListeners();
+  static uint64_t nextStat;
+  if (now >= nextStat) {
+    nextStat = now + 15000;
+    IOLog("ZIZHAN_SLPI: fastrpc listeners root armed=%u reg=%u served=%u, sensors armed=%u reg=%u served=%u; apps_std calls %u opens %u "
+          "missing %u (last %.80s) read %u written %u bytes, ram %u KiB\n", gL[0].armed ? 1u : 0u, gL[0].registered ? 1u : 0u, gL[0].served,
+          gL[1].armed ? 1u : 0u, gL[1].registered ? 1u : 0u, gL[1].served, gFs.calls, gFs.opens, gFs.missing, gFs.lastMissing, gFs.readBytes,
+          gFs.writtenBytes, gFs.ramBytes >> 10);
   }
   if (!rootOk && snsOk == false && tries >= 40) gDone = true;
 }

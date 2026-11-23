@@ -12,7 +12,7 @@ def main():
                  "power-inject.py", "display-power-s23.py", "wait-android.py",
                  "bringup-policy.py",
                  "power-transaction.py",
-                 "power-query.py", "power-inventory.py", "adsp-event-wait.py",
+                 "power-query.py", "power-inventory.py", "adsp-event-wait.py", "slpi-std.py",
                  "panel-program.py", "panel-pool.py", "display-owner.py", "dsi-command.py", "dsi-domain.py", "userland-policy-audit.py",
                  "service-policy.py", "fat.py"):
         subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests" / name)],

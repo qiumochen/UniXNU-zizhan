@@ -1254,8 +1254,10 @@ static bool cached_boot_args_ok;
 static void read_boot_args(void *unused)
 {
     (void)unused;
+    /* kern.zizhan_bootargs (XNU patch 0035) adds the /chosen zizhan-boot-args a round could not fit on the command line */
     size_t size=sizeof(cached_boot_args)-1;
-    if(sysctlbyname("kern.bootargs",cached_boot_args,&size,NULL,0)) {
+    if(sysctlbyname("kern.zizhan_bootargs",cached_boot_args,&size,NULL,0) &&
+       (size=sizeof(cached_boot_args)-1,sysctlbyname("kern.bootargs",cached_boot_args,&size,NULL,0))) {
         cached_boot_args[0]='\0';
         return;
     }

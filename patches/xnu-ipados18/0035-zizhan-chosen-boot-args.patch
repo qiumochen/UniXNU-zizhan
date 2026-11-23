@@ -1,0 +1,118 @@
+zizhan: extra boot-args from /chosen zizhan-boot-args beyond DarwinBoot's 1024-byte command line (kernel parsing and kern.zizhan_bootargs; kern.bootargs unchanged).
+--- a/bsd/kern/kern_sysctl.c
++++ b/bsd/kern/kern_sysctl.c
+@@ -2217,6 +2217,8 @@
+     &macosversion[0], MACOS_VERS_LEN, "The currently running macOS build version");
+ #endif
+ 
++extern char *PE_boot_args_cmdline(void);   /* zizhan: pexpert/arm/pe_bootargs.c */
++
+ STATIC int
+ sysctl_sysctl_bootargs
+ (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+@@ -2224,7 +2226,10 @@
+ 	int error;
+ 	char buf[BOOT_LINE_LENGTH];
+ 
+-	strlcpy(buf, PE_boot_args(), BOOT_LINE_LENGTH);
++	/* zizhan: kern.bootargs stays the command line DarwinBoot passed (blob-1: with the /chosen extras appended here,
++	 * launchd_cache_loader no longer saw launchd_unsecure_cache=1 and failed its code signature check); the extras are
++	 * in kern.zizhan_bootargs below. */
++	strlcpy(buf, PE_boot_args_cmdline(), BOOT_LINE_LENGTH);
+ 	error = sysctl_io_string(req, buf, BOOT_LINE_LENGTH, 0, NULL);
+ 	return error;
+ }
+@@ -2234,6 +2239,17 @@
+     NULL, 0,
+     sysctl_sysctl_bootargs, "A", "bootargs");
+ 
++/* zizhan: the command line padded to 1024 bytes, then /chosen zizhan-boot-args (pexpert/arm/pe_bootargs.c); read only */
++STATIC int
++sysctl_zizhan_bootargs(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
++{
++	return sysctl_io_string(req, PE_boot_args(), 0, 0, NULL);
++}
++SYSCTL_PROC(_kern, OID_AUTO, zizhan_bootargs,
++    CTLFLAG_LOCKED | CTLFLAG_RD | CTLFLAG_KERN | CTLTYPE_STRING,
++    NULL, 0,
++    sysctl_zizhan_bootargs, "A", "zizhan boot-args including /chosen zizhan-boot-args");
++
+ STATIC int
+ sysctl_kernelcacheuuid(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+ {
+--- a/pexpert/arm/pe_bootargs.c
++++ b/pexpert/arm/pe_bootargs.c
+@@ -3,10 +3,60 @@
+  */
+ #include <pexpert/pexpert.h>
+ #include <pexpert/boot.h>
++#include <pexpert/device_tree.h>
++#include <string.h>
++
++/*
++ * zizhan (2026-11-23): DarwinBoot passes at most 1023 command-line bytes (BOOT_LINE_LENGTH), and the daily arguments plus a
++ * test round's switches no longer fit. Extra arguments may come as the /chosen property "zizhan-boot-args" (a string the
++ * boot image packs into the ADT). PE_init_platform calls zizhan_boot_args_extend() right after the device tree is set up;
++ * from then on PE_boot_args() (PE_parse_boot_argn, sysctl kern.zizhan_bootargs) is the command line padded with spaces to
++ * 1024 bytes, then the extra arguments; kern.bootargs stays the command line alone. Arguments parsed before PE_init_platform,
++ * DarwinBoot's own (pong_autoreset) and those userland reads from kern.bootargs must stay on the command line.
++ */
++static char zizhan_boot_args_all[2048];
++static int zizhan_boot_args_ready;
++
++void zizhan_boot_args_extend(void);
++void
++zizhan_boot_args_extend(void)
++{
++	DTEntry entry;
++	void const *prop = NULL;
++	unsigned int size = 0;
++	const char *base = (const char *)((boot_args *)PE_state.bootArgs)->CommandLine;
++	if (zizhan_boot_args_ready || SecureDTLookupEntry(NULL, "/chosen", &entry) != kSuccess ||
++	    SecureDTGetProperty(entry, "zizhan-boot-args", &prop, &size) != kSuccess || prop == NULL || size == 0) {
++		return;
++	}
++	const char *extra = (const char *)prop;
++	size_t n = strnlen(base, BOOT_LINE_LENGTH - 1);
++	memcpy(zizhan_boot_args_all, base, n);
++	while (n < BOOT_LINE_LENGTH) {
++		zizhan_boot_args_all[n++] = ' ';
++	}
++	for (unsigned int i = 0; i < size && extra[i] != '\0' && n < sizeof(zizhan_boot_args_all) - 1; i++) {
++		const char c = extra[i];
++		zizhan_boot_args_all[n++] = (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
++	}
++	zizhan_boot_args_all[n] = '\0';
++	zizhan_boot_args_ready = 1;
++}
++
++/* The command line alone, as DarwinBoot passed it (kern.bootargs). */
++char *PE_boot_args_cmdline(void);
++char *
++PE_boot_args_cmdline(void)
++{
++	return (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
++}
+ 
+ char *
+ PE_boot_args(
+ 	void)
+ {
++	if (zizhan_boot_args_ready) {
++		return zizhan_boot_args_all;
++	}
+ 	return (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
+ }
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -469,6 +469,10 @@
+ 		 * can be used..
+ 		 */
+ 		SecureDTInit(PE_state.deviceTreeHead, PE_state.deviceTreeSize);
++		{
++			extern void zizhan_boot_args_extend(void);
++			zizhan_boot_args_extend();   /* /chosen zizhan-boot-args, pexpert/arm/pe_bootargs.c */
++		}
+ 		pe_identify_machine(boot_args_ptr);
+ 	} else {
+ 		pe_arm_init_interrupts(args);

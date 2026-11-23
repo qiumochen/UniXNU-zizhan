@@ -157,7 +157,7 @@ def main():
     parser.add_argument('--bt-node',default=None,metavar='MAC',
                         help='opt-in experiment: /arm-io/bluetooth with this locally administered local-mac-address (aa:bb:..)')
     parser.add_argument('--chosen-blob',action='append',default=[],metavar='NAME=PATH',
-                        help='private RAM-only /chosen/NAME data (zizhan-bt-* only, <=256 KiB), e.g. BT firmware for a probe')
+                        help='private RAM-only /chosen/NAME data (zizhan-bt-* or zizhan-boot-args, <=256 KiB), e.g. BT firmware for a probe')
     parser.add_argument('--skip-image-verification', action='store_true',
                         help='emit the DT without an additional output audit')
     args = parser.parse_args()
@@ -278,7 +278,8 @@ def main():
             chosen.append(('zizhan-cs35l41-prot-'+prefix.lower(),data))
     for spec in args.chosen_blob:
         name,_,path=spec.partition('=')
-        if not name.startswith('zizhan-bt-') or not path:parser.error('--chosen-blob needs zizhan-bt-NAME=PATH')
+        # zizhan-boot-args: boot-args beyond DarwinBoot's 1024-byte command line (XNU patch 0035, pexpert/arm/pe_bootargs.c)
+        if not (name.startswith('zizhan-bt-') or name=='zizhan-boot-args') or not path:parser.error('--chosen-blob needs zizhan-bt-NAME=PATH or zizhan-boot-args=PATH')
         data=Path(path).read_bytes()
         if not data or len(data)>256*1024:parser.error('--chosen-blob size out of range: '+name)
         chosen.append((name,data))

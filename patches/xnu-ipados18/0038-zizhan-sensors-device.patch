@@ -1,0 +1,82 @@
+zizhan SENS-03: /dev/zizhan-sensors, a third input queue for the sensor DSP samples (zizhan_sensor_post, zizhan_sensors_device_ready).
+--- a/bsd/dev/pong_input.c
++++ b/bsd/dev/pong_input.c
+@@ -23,7 +23,8 @@
+     uint32_t head,tail;
+     bool opened,ready;
+ };
+-static struct input_queue queues[2];
++/* 0 touch, 1 buttons, 2 sensors (zizhan SENS-03: /dev/zizhan-sensors, samples of the sensor DSP for the HID bridge) */
++static struct input_queue queues[3];
+ static int input_major=-1;
+ 
+ void
+@@ -40,11 +41,23 @@
+     wakeup(q);
+ }
+ 
++/* One sensor sample: kind in type (ZIZHAN_SENSOR_*), three signed values in finger, x and y. A slow reader loses the oldest. */
++void
++zizhan_sensor_post(uint32_t kind,int32_t a,int32_t b,int32_t c)
++{
++    struct input_queue *q=&queues[2];
++    lck_mtx_lock(&touch_lock);
++    if (q->tail-q->head==QUEUE_SIZE) q->head++;
++    q->samples[q->tail++%QUEUE_SIZE]=(struct pong_touch){mach_absolute_time(),kind,(uint32_t)a,(uint32_t)b,(uint32_t)c};
++    lck_mtx_unlock(&touch_lock);
++    wakeup(q);
++}
++
+ static int
+ touch_open(dev_t dev,int flags,__unused int kind,__unused struct proc *p)
+ {
+     if (flags&FWRITE) return EACCES;
+-    if (minor(dev)>1) return ENXIO;
++    if (minor(dev)>2) return ENXIO;
+     struct input_queue *q=&queues[minor(dev)];
+     lck_mtx_lock(&touch_lock);
+     int error=q->opened?EBUSY:0;
+@@ -56,14 +69,14 @@
+ static int
+ touch_close(dev_t dev,__unused int flags,__unused int kind,__unused struct proc *p)
+ {
+-    if (minor(dev)>1) return ENXIO;
++    if (minor(dev)>2) return ENXIO;
+     lck_mtx_lock(&touch_lock);queues[minor(dev)].opened=false;lck_mtx_unlock(&touch_lock);return 0;
+ }
+ 
+ static int
+ touch_read(dev_t dev,struct uio *uio,int flags)
+ {
+-    if (minor(dev)>1) return ENXIO;
++    if (minor(dev)>2) return ENXIO;
+     struct input_queue *q=&queues[minor(dev)];
+     if (uio_resid(uio)<(user_ssize_t)sizeof(struct pong_touch)) return EINVAL;
+     int error=0;
+@@ -104,4 +117,5 @@
+ 
+ bool pong_touch_device_ready(void) {return input_ready(0,"pong-touch");}
+ bool pong_buttons_device_ready(void) {return input_ready(1,"pong-buttons");}
++bool zizhan_sensors_device_ready(void) {return input_ready(2,"zizhan-sensors");}
+ #endif
+--- a/bsd/sys/pong_input.h
++++ b/bsd/sys/pong_input.h
+@@ -10,6 +10,9 @@
+ #define PONG_BUTTON_POWER 0
+ #define PONG_BUTTON_VOLUME_UP 1
+ #define PONG_BUTTON_VOLUME_DOWN 2
++/* zizhan SENS-03, /dev/zizhan-sensors: type = kind, finger/x/y = three int32 values */
++#define ZIZHAN_SENSOR_ACCEL 16      /* mm/s2 on the sensor's x, y, z (Android convention: +z reads +g lying face up) */
++#define ZIZHAN_SENSOR_LIGHT 17      /* millilux, 0, 0 */
+ struct pong_touch {
+     uint64_t time;
+     uint32_t type, finger, x, y;
+@@ -18,6 +21,8 @@
+ void pong_touch_post(uint32_t, uint32_t, uint32_t, uint32_t);
+ bool pong_touch_device_ready(void);
+ bool pong_buttons_device_ready(void);
++void zizhan_sensor_post(uint32_t, int32_t, int32_t, int32_t);
++bool zizhan_sensors_device_ready(void);
+ void pong_goodix_init(void);
+ void pong_buttons_init(void);
+ #endif

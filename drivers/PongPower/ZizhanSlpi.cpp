@@ -5,7 +5,9 @@
  * items in 481 / out 430 with remote pid 3, IPCC client 4, crash reason SMEM item 424, rails lcx + lmx at NOM (384), AOSS
  * load_state "slpi". Firmware image/slpi.mdt + b00..b24 is read in place from modem_b on UFS LUN 4 (read-only). pd-mapper
  * domains follow Linux qcom_pd_mapper.c: msm/slpi/root_pd and msm/slpi/sensor_pd, instance 90. No sensor is configured and
- * no stream is requested. Needs pong_adsp=0 and zizhan_modem unset (shared AOSS mailbox, SMEM mutex, CVP metadata area). */
+ * no stream is requested. Needs zizhan_modem unset (CVP metadata area). Beside the audio DSP (pong_adsp=2) the AOSS mailbox and
+ * the SMEM mutex are the ADSP worker's and this worker asks it (SENS-03); with pong_adsp=0 it opens them itself.
+ * zizhan_slpi=4 is mode 3 without the end of the watch window: the DSP and the accelerometer stream stay on. */
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
@@ -23,6 +25,13 @@
 #include "QcomSmem.h"
 #include "QcomSmp2p.h"
 #include "ZizhanSlpiStd.h"
+extern "C" int pong_adsp_shared_ready(void);
+extern "C" int pong_adsp_smem_lock(void);
+extern "C" void pong_adsp_smem_unlock(void);
+extern "C" int pong_adsp_slpi_load_state(int on);
+/* SENS-03, bsd/dev/pong_input.c (XNU patch 0038): /dev/zizhan-sensors for the HID bridge in backboardd (userland/touch.c) */
+extern "C" void zizhan_sensor_post(uint32_t kind, int32_t a, int32_t b, int32_t c);
+extern "C" bool zizhan_sensors_device_ready(void);
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <libkern/c++/OSData.h>
@@ -112,6 +121,8 @@ void cleanToPoc(const void *start, size_t length) {
 void ring(uint32_t client, uint32_t signal);
 bool lockSmem();
 void unlockSmem();
+/* SENS-03: beside the audio DSP (pong_adsp=2) its worker owns the AOSS mailbox and the SMEM mutex (PongAdsp.cpp). */
+bool gShared;
 volatile uint8_t *smemItem(uint16_t id, uint32_t *size);
 QcomGlink gGlink;
 QcomGlinkChannel *gIpcrtr;
@@ -319,6 +330,21 @@ void snsEvent(const uint8_t *d, uint32_t n) {
           if (f3 == 1 && w3 == 5 && k < 3) gAccel[k++] = uint32_t(v3);
           if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 3; i += 4) memcpy(&gAccel[k++], p3 + i, 4); }
           if (f3 == 2 && w3 == 0) accuracy = int32_t(v3);
+        }
+        if (gSlpiMode == 4) {
+          // zizhan_accel_test=<s>: instead of the real reading, gravity along +y, +x, -y, -x in turn, <s> seconds each: the
+          // four ways of holding the phone, to see iPadOS rotate while it lies on a desk
+          static bool node;
+          static uint32_t testS = 0xffffffffu;
+          if (testS == 0xffffffffu) { testS = 0; (void)PE_parse_boot_argn("zizhan_accel_test", &testS, sizeof testS); }
+          if (!node) node = zizhan_sensors_device_ready();
+          int32_t v[3] = {milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2])};
+          if (testS) {
+            static const int32_t held[4][3] = {{0, 9807, 0}, {9807, 0, 0}, {0, -9807, 0}, {-9807, 0, 0}};
+            const unsigned phase = unsigned(nowMs() / 1000 / testS) % 4;
+            for (unsigned i = 0; i < 3; ++i) v[i] = held[phase][i];
+          }
+          zizhan_sensor_post(16, v[0], v[1], v[2]);
         }
         if (gAccelSamples++ < 20)
           IOLog("ZIZHAN_SLPI: accel #%u x=%d y=%d z=%d mm/s2 accuracy=%d\n", gAccelSamples, milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2]), accuracy);
@@ -765,7 +791,7 @@ void glinkStart() {
   static const QcomGlinkClient client = {ipcrtrState, ipcrtrReceive};
   gIpcrtr = qcom_glink_channel(&gGlink, "IPCRTR", 0x4400, 4, gIpcrtrStore, &client, nullptr, 1);
   gGlinkOn = gIpcrtr != nullptr;
-  if (gSlpiMode == 3) {
+  if (gSlpiMode >= 3) {
     zizhan_frpc::gCh = qcom_glink_channel(&gGlink, "fastrpcglink-apps-dsp", 0x400, 4, zizhan_frpc::gChStore, &zizhan_frpc::kClient, nullptr, 0);
     if (!mapWin(zizhan_frpc::gBuf, zizhan_frpc::kBufPa, zizhan_frpc::kBufSize, kIOMapInhibitCache)) IOLog("ZIZHAN_SLPI: fastrpc buffer map failed\n");
   }
@@ -782,6 +808,7 @@ void glinkService() {
 }
 
 bool lockSmem() {
+  if (gShared) return pong_adsp_smem_lock() != 0;
   for (unsigned i = 0; i < 1000; ++i) {
     wr(gMutex, 0, 1);
     if (rd(gMutex, 0) == 1) return true;
@@ -789,7 +816,10 @@ bool lockSmem() {
   }
   return false;
 }
-void unlockSmem() { wr(gMutex, 0, 0); }
+void unlockSmem() {
+  if (gShared) { pong_adsp_smem_unlock(); return; }
+  wr(gMutex, 0, 0);
+}
 volatile uint8_t *smemItem(uint16_t id, uint32_t *size) {
   uint32_t at = 0, bytes = 0;
   if (qcom_smem_find(&gSmem, &gPart, id, &at, &bytes)) return nullptr;
@@ -839,6 +869,11 @@ bool slaveBits(uint32_t *bits) {
 
 bool qmpLoadState(bool on) {
   const char *cmd = on ? "{class: image, res: load_state, name: slpi, val: on}" : "{class: image, res: load_state, name: slpi, val: off}";
+  if (gShared) {
+    const int rc = pong_adsp_slpi_load_state(on ? 1 : 0);
+    if (rc) IOLog("ZIZHAN_SLPI: shared load_state %s -> %d\n", on ? "on" : "off", rc);
+    return rc == 0;
+  }
   if (gQmp.state != QcomQmpOpen) return false;
   if (qcom_qmp_send(&gQmp, cmd) != QcomQmpSending) return false;
   for (unsigned i = 0; i < 1000; ++i) { if (qcom_qmp_step(&gQmp) == QcomQmpOpen) return true; IOSleep(1); }
@@ -854,6 +889,12 @@ void worker(void *, wait_result_t) {
   for (unsigned i = 0; i < 1200 && !(&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)); ++i) IOSleep(100);
   IOLog("ZIZHAN_SLPI: desktop frame seen=%u, starting in 10 s\n", (&pong_zc_flipped_tag && pong_zc_flipped_tag) ? 1u : 0u);
   IOSleep(10000);
+  if (gShared) {
+    unsigned waited = 0;
+    for (; waited < 600 && !pong_adsp_shared_ready(); ++waited) IOSleep(100);
+    IOLog("ZIZHAN_SLPI: shared with the ADSP worker: ready=%d after %u ms\n", pong_adsp_shared_ready(), waited * 100);
+    if (!pong_adsp_shared_ready()) { thread_terminate(current_thread()); thread_block(THREAD_CONTINUE_NULL); }
+  }
   uint64_t t0 = nowMs(), nextReport = 0;
   uint32_t watchS = 60;
   (void)PE_parse_boot_argn("zizhan_slpi_watch_s", &watchS, sizeof watchS);
@@ -905,9 +946,11 @@ void worker(void *, wait_result_t) {
     STEP(13, stopEntry >= 0);
     ring(kIpccMpss, QCOM_IPCC_SIGNAL_SMP2P);
   }
-  qcom_qmp_init(&gQmp, reinterpret_cast<volatile uint32_t *>(gAoss.va), 0x400, kickAop, nullptr);
-  for (unsigned i = 0; i < 2000 && gQmp.state != QcomQmpOpen && gQmp.state >= 0; ++i) { qcom_qmp_step(&gQmp); IOSleep(1); }
-  STEP(14, gQmp.state == QcomQmpOpen);
+  if (!gShared) {
+    qcom_qmp_init(&gQmp, reinterpret_cast<volatile uint32_t *>(gAoss.va), 0x400, kickAop, nullptr);
+    for (unsigned i = 0; i < 2000 && gQmp.state != QcomQmpOpen && gQmp.state >= 0; ++i) { qcom_qmp_step(&gQmp); IOSleep(1); }
+  }
+  STEP(14, gShared || gQmp.state == QcomQmpOpen);
   STEP(15, qmpLoadState(true));
   {
     Win db = {};
@@ -990,7 +1033,8 @@ again:
   }
   t0 = nowMs();
   nextReport = t0 + 10000;
-  for (uint64_t now = t0; now - t0 < uint64_t(cycle ? 30 : watchS) * 1000; now = nowMs()) {   // up to 10 s for ready, then watch
+  // up to 10 s for ready, then watch; zizhan_slpi=4 keeps the first cycle running for the session
+  for (uint64_t now = t0; (gSlpiMode == 4 && !cycle) || now - t0 < uint64_t(cycle ? 30 : watchS) * 1000; now = nowMs()) {
     if (kModemQueries && !cycle && gDmsPort && !gDmsAsked && gIpcrtr && gIpcrtr->up && now - t0 > 20000) {
       gDmsAsked = true;
       static const uint8_t rev[7] = {0, 1, 0, 0x23, 0, 0, 0}, opmode[7] = {0, 2, 0, 0x2d, 0, 0, 0};
@@ -1023,7 +1067,7 @@ again:
       if (!cycle && (bits & kReady) && !gGlinkOn) glinkStart();
     }
     if (!cycle) glinkService();
-    if (gSlpiMode == 3 && !cycle && zizhan_frpc::gUp && !zizhan_frpc::gDone) zizhan_frpc::run();
+    if (gSlpiMode >= 3 && !cycle && zizhan_frpc::gUp && !zizhan_frpc::gDone) zizhan_frpc::run();
     if (gSlpiMode >= 2 && !cycle && gSnsNode != 0xffffffffu && gIpcrtr && gIpcrtr->up && now >= gSnsNextMs) {
       switch (gSnsStage) {   // one step per slot: registry, accel, ambient_light lookups, then the accelerometer stream
       case 0: gSnsNextMs = now + 3000; break;
@@ -1036,7 +1080,7 @@ again:
         gSnsStage = 0xffffffffu; gSnsNextMs = now + 15000;   // ++ below wraps it to 0
         break;
       default:
-        gSnsNextMs = now + 10000;
+        gSnsNextMs = now + (gSlpiMode == 4 && now - t0 > 120000 ? 60000 : 10000);
         if (gAccelOn) IOLog("ZIZHAN_SLPI: accel samples=%u last x=%d y=%d z=%d mm/s2\n", gAccelSamples, milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2]));
       }
       if (gSnsStage < 5 || gSnsStage == 0xffffffffu) ++gSnsStage;
@@ -1085,7 +1129,7 @@ out:
       goto again;
     }
   }
-  if (gQmp.state == QcomQmpOpen) qmpLoadState(false);
+  if (gShared || gQmp.state == QcomQmpOpen) qmpLoadState(false);
   if (bounce) IOFreeData(bounce, 256 * 1024);
   unmapWin(region);
   if (meta) meta->release();
@@ -1098,9 +1142,13 @@ out:
 
 extern "C" void zizhan_slpi_start(void) {
   uint32_t mode = 0, adsp = 0, modem = 0;
-  if (!PE_parse_boot_argn("zizhan_slpi", &mode, sizeof mode) || mode < 1 || mode > 3) return;
+  if (!PE_parse_boot_argn("zizhan_slpi", &mode, sizeof mode) || mode < 1 || mode > 4) return;
   gSlpiMode = mode;
-  if (PE_parse_boot_argn("pong_adsp", &adsp, sizeof adsp) && adsp) { IOLog("ZIZHAN_SLPI: SKIP needs pong_adsp=0 (AOSS/SMEM owner)\n"); return; }
+  // pong_adsp=2 boots the audio DSP: its worker then owns the mailbox and the mutex and this one asks it. pong_adsp=1 only
+  // surveys and opens nothing, which leaves no owner to ask and no safe second opener.
+  (void)PE_parse_boot_argn("pong_adsp", &adsp, sizeof adsp);
+  if (adsp == 1) { IOLog("ZIZHAN_SLPI: SKIP pong_adsp=1 (survey) leaves the AOSS mailbox without an owner\n"); return; }
+  gShared = adsp >= 2;
   if (PE_parse_boot_argn("zizhan_modem", &modem, sizeof modem) && modem == 2) { IOLog("ZIZHAN_SLPI: SKIP zizhan_modem=2 owns the same resources\n"); return; }
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &t) != KERN_SUCCESS) { IOLog("ZIZHAN_SLPI: FAIL worker\n"); return; }

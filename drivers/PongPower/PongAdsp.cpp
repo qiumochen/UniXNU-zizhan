@@ -170,16 +170,28 @@ void kickGlink(void *) {ring(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_GLINK_QMP)
 void kickSmp2p() {ring(QCOM_IPCC_CLIENT_LPASS, QCOM_IPCC_SIGNAL_SMP2P);}
 
 // ---- SMEM helpers (allocation under the TCSR hardware mutex) ----
+// zizhan SENS-03: the sensor DSP worker (ZizhanSlpi.cpp) allocates in its own SMEM partition under the same hardware mutex. That
+// mutex only tells processors apart (this one writes 1), so two threads of this kernel also take gSmemLocal around it.
+IOLock *gSmemLocal;
 bool lockSmem() {
+    if (gSmemLocal) IOLockLock(gSmemLocal);
     // The mutex is held only for the few writes of one allocation by whichever processor has it; it is tried a bounded number of times.
     for (unsigned i = 0; i < 1000; ++i) {
         wr(gMutex, 0, 1);
         if (rd(gMutex, 0) == 1) return true;
         IODelay(10);
     }
+    if (gSmemLocal) IOLockUnlock(gSmemLocal);
     return false;
 }
-void unlockSmem() {wr(gMutex, 0, 0);}
+void unlockSmem() {
+    wr(gMutex, 0, 0);
+    if (gSmemLocal) IOLockUnlock(gSmemLocal);
+}
+// ... and its AOSS load_state goes through this worker, the mailbox's only user: 1 = on, 2 = off is posted in gSlpiLoad and the
+// event loop sends it (ZizhanDspResources.h LoadStateOwner); the result comes back in gSlpiLoadResult.
+volatile int gSlpiLoad, gSlpiLoadResult;
+volatile int gSharedReady;
 int allocItem(uint16_t item, uint32_t size) {
     return zizhan_dsp::allocate(gSmem, gPart, item, size, lockSmem, unlockSmem);
 }
@@ -652,7 +664,15 @@ void adspThread(void *, wait_result_t) {
           events ? "RUNNING" : "SKIP", events ? "event" : "poll-100ms",
           zizhan_adsp::timeout(events, true));
     unsigned observations = 0;
+    __atomic_store_n(&gSharedReady, 1, __ATOMIC_RELEASE);
     for (;;) {
+        if (const int want = __atomic_load_n(&gSlpiLoad, __ATOMIC_ACQUIRE)) {
+            const int rc = gLoadStateOwner.send(gQmp, zizhan_dsp::Processor::Slpi, want == 1,
+                [](uint32_t ms, auto done) { return waitUntil(ms, done); });
+            IOLog("PongAdsp: slpi load_state %s -> %d\n", want == 1 ? "on" : "off", rc);
+            __atomic_store_n(&gSlpiLoadResult, rc, __ATOMIC_RELEASE);
+            __atomic_store_n(&gSlpiLoad, 0, __ATOMIC_RELEASE);
+        }
         bool pending = false;
         IOLockLock(gClientLock);
         const unsigned count = __atomic_load_n(&gClientCount, __ATOMIC_ACQUIRE);
@@ -718,10 +738,27 @@ extern "C" int sheng_adsp_send(ShengAdspChannel *c, const void *data, uint32_t l
     return 0;
 }
 
+/* zizhan SENS-03: the sensor DSP beside the audio DSP. The ADSP worker owns the AOSS mailbox and the SMEM mutex; ZizhanSlpi.cpp
+ * asks it instead of opening them a second time. */
+extern "C" int pong_adsp_shared_ready(void) { return __atomic_load_n(&gSharedReady, __ATOMIC_ACQUIRE); }
+extern "C" int pong_adsp_smem_lock(void) { return lockSmem() ? 1 : 0; }
+extern "C" void pong_adsp_smem_unlock(void) { unlockSmem(); }
+extern "C" int pong_adsp_slpi_load_state(int on) {
+    if (!pong_adsp_shared_ready()) return zizhan_dsp::MailboxUnavailable;
+    for (unsigned i = 0; i < 300 && __atomic_load_n(&gSlpiLoad, __ATOMIC_ACQUIRE); ++i) IOSleep(10);   // one request at a time
+    if (__atomic_load_n(&gSlpiLoad, __ATOMIC_ACQUIRE)) return zizhan_dsp::AckTimeout;
+    __atomic_store_n(&gSlpiLoad, on ? 1 : 2, __ATOMIC_RELEASE);
+    wake(kEvSend);
+    for (unsigned i = 0; i < 400 && __atomic_load_n(&gSlpiLoad, __ATOMIC_ACQUIRE); ++i) IOSleep(10);
+    if (__atomic_load_n(&gSlpiLoad, __ATOMIC_ACQUIRE)) return zizhan_dsp::AckTimeout;
+    return __atomic_load_n(&gSlpiLoadResult, __ATOMIC_ACQUIRE);
+}
+
 extern "C" void sheng_adsp_probe(void) {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("pong_adsp", &mode, sizeof mode) || !mode || native_adsp_stats[0]) return;
     gClientLock = IOLockAlloc();
+    gSmemLocal = IOLockAlloc();
 
     thread_t thread = nullptr;
     if (!gClientLock || kernel_thread_start(adspThread, nullptr, &thread) != KERN_SUCCESS) {fail(StMapped, -7); return;}

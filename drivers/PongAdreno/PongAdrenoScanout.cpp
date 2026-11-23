@@ -57,6 +57,7 @@ extern "C" {extern volatile uint32_t pong_gtrace_on;}
  * 0% busy and metal2vulkan reporting DeviceLost, with nothing in the kernel log; this says which fence it waited for and
  * what the GPU had written by then. */
 extern "C" volatile uint32_t native_adreno_fence_wait[8];
+extern "C" volatile uint32_t native_adreno_fence_timeout_kind[4];
 extern "C" volatile uint32_t native_adreno_ring_poison[6];
 extern "C" volatile uint32_t native_adreno_submit_poison[2];
 extern "C" volatile uint32_t native_adreno_ib_log[4][4+28];
@@ -72,6 +73,9 @@ void fenceReport(const char *why,bool ibs=false)
     const volatile uint32_t *w=native_adreno_fence_wait,*r=native_adreno_ring_poison,*c=native_adreno_submit_poison;
     int n=snprintf(text,sizeof(text),"PONG FENCE %s: waits %u timeouts %u, last timed out on %u (GPU had written %u), "
         "wait snapshot submitted %u completed %u, unheld waits %u, last refused %u\n",why,w[0],w[1],w[2],w[3],w[4],w[5],w[6],w[7]);
+    if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
+    const volatile uint32_t *k=native_adreno_fence_timeout_kind;
+    n=snprintf(text,sizeof text,"PONG FENCE timeouts by requested wait %s: none %u, <=1 ms %u, <=20 ms %u, longer %u\n",why,k[0],k[1],k[2],k[3]);
     if(n>0){IOLog("%s",text);pong_ramoops_diagnostic_write(text,n);}
     uint32_t submitted=0,retired=0;
     const int observed=pong_gpu_fences(&submitted,&retired);

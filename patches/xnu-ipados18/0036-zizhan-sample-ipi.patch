@@ -1,0 +1,239 @@
+zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep user stacks (boot-args zizhan_sample_ipi=1, zizhan_sample_us=<n>; diagnostic, off by default).
+--- a/osfmk/arm64/pong_ui_exception.c
++++ b/osfmk/arm64/pong_ui_exception.c
+@@ -16,6 +16,9 @@
+ #include <vm/vm_kern_xnu.h>
+ #include <kern/sched_prim.h>
+ #include <kern/clock.h>
++#include <kern/backtrace.h>
++#include <arm/cpu_data_internal.h>
++#include <arm/cpu_internal.h>
+ 
+ extern char *proc_name_address(struct proc *p);
+ extern int proc_pid(struct proc *p);
+@@ -123,11 +126,73 @@
+  * Identical samples share a signature; the timeline prints one character per sample and each signature its share, for
+  * dscsym.py --addr/--slide. flags: 1 = start a new window, 2 = print the window. Only the synthetic-touch thread calls this.
+  */
++/*
++ * zizhan_sample_ipi=1 (UX-07): the saved user state of a running thread is only as fresh as its last kernel entry, so a
++ * thread back in user mode after a system call still shows the call's stub. With this boot-arg a running sample is taken
++ * on the thread's own CPU by a cross-call: the interrupted pc is the truth, in user mode (pc, lr, frame chain walked by the
++ * sampler right after) or in the kernel (kernel backtrace, plus the user pc of the trap that entered it).
++ */
++enum { kPongSampleDepth = 8, kPongSampleDeep = 96 };
++struct pong_sample_req {
++	thread_t target;
++	volatile uint32_t done;         /* 1 user, 2 kernel, 3 another thread was on the CPU, 4 no interrupted state */
++	uint32_t nkbt;
++	uint64_t pc, lr, fp, sp;
++	uintptr_t kbt[kPongSampleDepth];
++};
++
++static void
++pong_sample_xcall(void *param)
++{
++	struct pong_sample_req *req = param;
++	const arm_saved_state_t *state = getCpuDatap()->cpu_int_state;
++	uint32_t done;
++
++	if (current_thread() != req->target) {
++		done = 3;
++	} else if (state == NULL) {
++		done = 4;
++	} else {
++		req->pc = get_saved_state_pc(state);
++		req->lr = get_saved_state_lr(state);
++		req->fp = get_saved_state_fp(state);
++		req->sp = get_saved_state_sp(state);
++		if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
++			struct backtrace_control ctl = BTCTL_INIT;
++			ctl.btc_flags = BTF_KERN_INTERRUPTED;
++			req->nkbt = backtrace(req->kbt, kPongSampleDepth, &ctl, NULL);
++			done = 2;
++		} else {
++			done = 1;
++		}
++	}
++	os_atomic_store(&req->done, done, release);
++}
++
++static void
++pong_sample_walk(vm_map_t map, uint64_t fp, uint64_t sp, uint64_t *ra, unsigned depth)
++{
++	const uint64_t mask = 0x0000007fffffffffULL;
++
++	for (unsigned d = 0; d < depth; d++) {
++		uint64_t frame[2] = { 0, 0 };
++		if (fp < sp || fp - sp > 8 * 1024 * 1024 || (fp & 15) ||
++		    copyinmap(map, (vm_map_offset_t)fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++			break;
++		}
++		ra[d] = frame[1] & mask;
++		if (frame[0] <= fp) {
++			break;
++		}
++		fp = frame[0];
++	}
++}
++
+ void pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag);
+ void
+ pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag)
+ {
+-	enum { kSigs = 36, kDepth = 8, kSamples = 400 };
++	enum { kSigs = 36, kDepth = kPongSampleDepth, kSamples = 800 };
+ 	struct sig {
+ 		uint64_t key, event, pc, lr, ra[kDepth];
+ 		uint32_t count, first;
+@@ -141,10 +206,28 @@
+ 	 * trap, at most a timer tick old), printed for windows with tags 4..8, for an inclusive per-function profile */
+ 	static uint64_t stacks[kSamples][kDepth + 1];
+ 	static int stacks_mode = -1;
++	/* zizhan_sample_ipi=1: mode[] has one of U (user), K (kernel), x (the thread left the CPU first), q (runnable, queued),
++	 * w (waiting) per sample and kstacks[] the kernel backtrace of each K sample; zizhan_sample_us=<n> overrides the step */
++	static uint64_t kstacks[kSamples][kDepth];
++	/* ... and deep[] the rest of a U sample's frame chain (frames 8..95, towards the root), for attribution by phase */
++	static uint64_t deep[kSamples][kPongSampleDeep - kPongSampleDepth];
++	static uint8_t ndeep[kSamples];
++	static char mode[kSamples + 1];
++	static struct pong_sample_req req;
++	static unsigned ipi_mode, step_override, ipi_lost;
+ 	if (stacks_mode < 0) {
+ 		unsigned v = 0;
+ 		stacks_mode = PE_parse_boot_argn("zizhan_sample_stacks", &v, sizeof(v)) && v ? 1 : 0;
++		v = 0;
++		ipi_mode = PE_parse_boot_argn("zizhan_sample_ipi", &v, sizeof(v)) && v ? 1 : 0;
++		PE_parse_boot_argn("zizhan_sample_us", &step_override, sizeof(step_override));
++		if (ipi_mode) {
++			stacks_mode = 1;
++		}
+ 	}
++	if (step_override >= 250) {
++		step_us = step_override;
++	}
+ 	static uint64_t tid;
+ 	const uint64_t mask = 0x0000007fffffffffULL;
+ 	if (task == TASK_NULL || step_us == 0) {
+@@ -153,6 +236,7 @@
+ 	if (flags & 1) {
+ 		memset(sigs, 0, sizeof(sigs));
+ 		memset(line, 0, sizeof(line));
++		memset(mode, 0, sizeof(mode));
+ 		nsig = nline = overflow = 0;
+ 	}
+ 	thread_t thread = THREAD_NULL;
+@@ -190,19 +274,12 @@
+ 			fp = get_saved_state_fp(ss);
+ 			sp = get_saved_state_sp(ss);
+ 			sys = (int32_t)get_saved_state_reg(ss, 16);
+-			for (unsigned d = 0; d < kDepth; d++) {
+-				uint64_t frame[2] = { 0, 0 };
+-				if (fp < sp || fp - sp > 8 * 1024 * 1024 || (fp & 15) ||
+-				    copyinmap(map, (vm_map_offset_t)fp, frame, sizeof(frame)) != KERN_SUCCESS) {
+-					break;
+-				}
+-				ra[d] = frame[1] & mask;
+-				if (frame[0] <= fp) {
+-					break;
+-				}
+-				fp = frame[0];
+-			}
++			pong_sample_walk(map, fp, sp, ra, kDepth);
+ 		}
++		char how = wait ? 'w' : 'q';
++		uint64_t kst[kDepth] = { 0 };
++		static uint64_t far[kPongSampleDeep];   /* static: only the synthetic-touch thread runs this, and its stack is small */
++		memset(far, 0, sizeof(far));
+ 		if (!wait) {
+ 			/* running or runnable: which CPU it last ran on (an efficiency core does this work ~3x slower) */
+ 			const processor_t last = thread->last_processor;
+@@ -210,6 +287,38 @@
+ 			/* +100: runnable but not on that CPU (queued behind other threads) */
+ 			if (last == PROCESSOR_NULL || last->active_thread != thread) {
+ 				sys += 100;
++			} else if (ipi_mode && last->cpu_id != cpu_number()) {
++				how = 'x';
++				req.target = thread;
++				req.nkbt = 0;
++				os_atomic_store(&req.done, 0, release);
++				if (cpu_xcall(last->cpu_id, pong_sample_xcall, &req) == KERN_SUCCESS) {
++					uint64_t limit = 0;
++					nanoseconds_to_absolutetime(20 * NSEC_PER_MSEC, &limit);
++					limit += mach_absolute_time();
++					uint32_t done;
++					while ((done = os_atomic_load(&req.done, acquire)) == 0 && mach_absolute_time() < limit) {
++						__builtin_arm_yield();
++					}
++					if (done == 0) {
++						/* never seen in practice; the request block is static, so a late handler only spoils one sample */
++						ipi_lost++;
++					} else if (done == 1) {
++						how = 'U';
++						pc = req.pc & mask;
++						lr = req.lr & mask;
++						memset(ra, 0, sizeof(ra));
++						pong_sample_walk(map, req.fp, req.sp, far, kPongSampleDeep);
++						memcpy(ra, far, sizeof(ra));
++					} else if (done == 2) {
++						/* pc and ra stay the user state of the trap or fault that entered the kernel */
++						how = 'K';
++						kst[0] = req.pc;
++						for (unsigned d = 0; d + 1 < kDepth && d < req.nkbt; d++) {
++							kst[d + 1] = req.kbt[d];
++						}
++					}
++				}
+ 			}
+ 		}
+ 		uint64_t key = wait ? 0x9e3779b97f4a7c15ULL * (uint64_t)(int64_t)sys : 0x5151 + (uint64_t)(int64_t)sys * 0x10001ULL;
+@@ -237,6 +346,14 @@
+ 		if (stacks_mode && nline < kSamples) {
+ 			stacks[nline][0] = pc;
+ 			memcpy(&stacks[nline][1], ra, sizeof(ra));
++			memcpy(kstacks[nline], kst, sizeof(kst));
++			mode[nline] = how;
++			unsigned nd = 0;
++			while (nd < kPongSampleDeep - kPongSampleDepth && far[kPongSampleDepth + nd] != 0) {
++				nd++;
++			}
++			memcpy(deep[nline], &far[kPongSampleDepth], nd * sizeof(uint64_t));
++			ndeep[nline] = (uint8_t)nd;
+ 		}
+ 		if (i < nsig) {
+ 			sigs[i].count++;
+@@ -264,7 +381,33 @@
+ 	for (unsigned at = 0; at < nline; at += 100) {
+ 		printf("ZIZHAN_SAMPLE %u line %u: %.100s\n", tag, at, line + at);
+ 	}
+-	if (stacks_mode && tag >= 4 && tag <= 8) {
++	if (ipi_mode) {
++		/* every tap window (even tags): the per-sample kind, then the stacks of the samples taken on the CPU */
++		printf("ZIZHAN_SAMPLE %u ipi: kernel_slide=0x%llx lost=%u\n", tag, (uint64_t)vm_kernel_slide, ipi_lost);
++		for (unsigned at = 0; at < nline; at += 100) {
++			printf("ZIZHAN_SAMPLE %u mode %u: %.100s\n", tag, at, mode + at);
++		}
++		for (unsigned n = 0; n < nline && !(tag & 1) && tag <= 60; n++) {
++			const uint64_t *k = stacks[n], *ks = kstacks[n];
++			if (mode[n] != 'U' && mode[n] != 'K') {
++				continue;
++			}
++			printf("ZIZHAN_SAMPLE %u st %u %c: 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx\n", tag, n, mode[n],
++			    k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8]);
++			if (mode[n] == 'K') {
++				printf("ZIZHAN_SAMPLE %u kst %u: 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx\n", tag, n,
++				    ks[0], ks[1], ks[2], ks[3], ks[4], ks[5], ks[6], ks[7]);
++			}
++			/* the deep frames of taps 1..4 only (tags 2..8): about 1 KiB a sample in the console ring */
++			for (unsigned d = 0; tag >= 2 && tag <= 8 && d < ndeep[n]; d += 8) {
++				const uint64_t *f = &deep[n][d];
++				const unsigned left = ndeep[n] - d;
++				printf("ZIZHAN_SAMPLE %u dst %u %u: %llx %llx %llx %llx %llx %llx %llx %llx\n", tag, n, d,
++				    f[0], left > 1 ? f[1] : 0, left > 2 ? f[2] : 0, left > 3 ? f[3] : 0, left > 4 ? f[4] : 0, left > 5 ? f[5] : 0,
++				    left > 6 ? f[6] : 0, left > 7 ? f[7] : 0);
++			}
++		}
++	} else if (stacks_mode && tag >= 4 && tag <= 8) {
+ 		for (unsigned n = 0; n < nline; n++) {
+ 			const uint64_t *k = stacks[n];
+ 			printf("ZIZHAN_SAMPLE %u st %u %c: 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx\n", tag, n, line[n],

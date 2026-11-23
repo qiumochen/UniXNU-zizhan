@@ -23,6 +23,13 @@ extern "C" {volatile uint32_t native_adreno_wc_audit[6];}
 /* Fence waits: [0] calls, [1] timeouts, [2] the fence of the last timed-out wait, [3] the fence value the GPU had written then, [4] the newest fence handed out,
  * [5] the newest completed, [6] waits for a fence no job holds (observeFence path), [7] the last fence refused as never submitted. */
 extern "C" {volatile uint32_t native_adreno_fence_wait[8];}
+/* Timed-out waits by the timeout the caller asked for: [0] zero (a status poll), [1] up to 1 ms, [2] up to 20 ms, [3] longer. */
+extern "C" {volatile uint32_t native_adreno_fence_timeout_kind[4];}
+static void fenceTimeoutKind(uint32_t timeout_us)
+{
+    const unsigned kind=timeout_us==0?0:timeout_us<=1000?1:timeout_us<=20000?2:3;
+    native_adreno_fence_timeout_kind[kind]=native_adreno_fence_timeout_kind[kind]+1;
+}
 /* The IBs of the last submissions: [slot] fence, iova low/high, bytes, then the first 28 dwords of the first IB (read as the kernel maps it). */
 extern "C" {volatile uint32_t native_adreno_ib_log[4][4+28];volatile uint32_t native_adreno_ib_log_count;}
 extern "C" {volatile uint32_t native_adreno_last_submit_fence;volatile uint64_t native_adreno_last_submit_us;}
@@ -455,7 +462,7 @@ IOReturn NativeAdrenoSubmit::wait(uint32_t fence,const NativeAdrenoRingClock *cl
         if(passed==NativeAdrenoRingFencePoisoned)return poison();
         if(passed==NativeAdrenoRingFenceArgument) {native_adreno_fence_wait[7]=fence;return kIOReturnBadArgument;}
         if(passed==NativeAdrenoRingFenceTimeout) {
-            ++stats_.timeouts;
+            ++stats_.timeouts;fenceTimeoutKind(timeout_us);
             native_adreno_fence_wait[1]=native_adreno_fence_wait[1]+1;native_adreno_fence_wait[2]=fence;native_adreno_fence_wait[3]=observed;
             native_adreno_fence_wait[4]=ring_->lastSubmitted();native_adreno_fence_wait[5]=ring_->completedFence();
             return kIOReturnTimeout;
@@ -466,7 +473,7 @@ IOReturn NativeAdrenoSubmit::wait(uint32_t fence,const NativeAdrenoRingClock *cl
     if(result==NativeAdrenoRingFencePoisoned)return poison();
     if(result==NativeAdrenoRingFenceArgument) {native_adreno_fence_wait[7]=fence;return kIOReturnBadArgument;}
     if(result==NativeAdrenoRingFenceTimeout) {
-        ++stats_.timeouts;
+        ++stats_.timeouts;fenceTimeoutKind(timeout_us);
         native_adreno_fence_wait[1]=native_adreno_fence_wait[1]+1;native_adreno_fence_wait[2]=fence;native_adreno_fence_wait[3]=observed;
         native_adreno_fence_wait[4]=ring_->lastSubmitted();native_adreno_fence_wait[5]=ring_->completedFence();
         return kIOReturnTimeout;

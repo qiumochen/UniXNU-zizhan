@@ -411,6 +411,8 @@ extern "C" volatile uint32_t pong_touch_activity __attribute__((weak));
 /* zizhan THERM-01 (ZizhanThermalService.h): 0 = no cap, 12 = the lowest GPU
  * level. Weak so a reduced kernel without the service links. */
 extern "C" volatile uint32_t pong_gpu_thermal_level __attribute__((weak));
+/* zizhan POWER-08 (ZizhanDisplayPowerService.h): 0 = display off, 1 on, 2 changing, -1 no executor. Weak for reduced kernels. */
+extern "C" int zizhan_display_power_state(void) __attribute__((weak));
 /* submit/NativeAdrenoUserClient.cpp and NativeAdrenoMemory.cpp: per-method {calls, failures, last status, total us} and the slowest call
  * (reset at each report), and the BO pool's {MiB, BOs from it, fell back, MiB in use, peak MiB, scattered BOs, their spans, import spans}:
  * the 10 s report also prints "PONG GPU BO" when BOs were made, to see what a home-screen or app transition paid for its memory. */
@@ -434,6 +436,11 @@ static void dcvs(void *,wait_result_t)
      * to that fixed clock instead (1 = no wake boost); 0 (default) keeps the doubling. */
     unsigned wakeMhz=0;
     (void)PE_parse_boot_argn("pong_gpu_dcvs_wake_mhz",&wakeMhz,sizeof(wakeMhz));
+    /* POWER-08: with the display off the GPU still wakes ~24 times a second at 0 % busy (vs-a), and each wake boosts to
+     * >= 578 MHz (nominal voltage) for 50 ms, so it never rests at the floor. While the display is off the governor holds
+     * pong_gpu_off_level (default 1: 220 MHz, low SVS); 0 keeps the display-on policy. */
+    unsigned offLevel=1;
+    (void)PE_parse_boot_argn("pong_gpu_off_level",&offLevel,sizeof(offLevel));
     if(bootTop<1 || bootTop>13)bootTop=13;
     if(bootFloor<1)bootFloor=1;
     if(bootFloor>bootTop)bootFloor=bootTop;
@@ -460,6 +467,18 @@ static void dcvs(void *,wait_result_t)
         const unsigned thermalTop=thermal>12u?1u:13u-thermal;
         top=bootTop<thermalTop?bootTop:thermalTop;
         floor=bootFloor<top?bootFloor:top;
+        {
+            static bool wasOff;
+            const bool off=offLevel && &zizhan_display_power_state && zizhan_display_power_state()==0;
+            if(off) {
+                top=offLevel<top?offLevel:top;
+                floor=top;
+            }
+            if(off!=wasOff) {
+                wasOff=off;
+                IOLog("PONG GPU DCVS: display %s, levels %u..%u\n",off?"off":"on",floor,top);
+            }
+        }
         uint64_t busy=0,ns=0;
         if(PongAdrenoGmuBusyTicks(&gmu,&busy)) {record("STOP DCVS busy read",1);break;}
         const uint64_t t=mach_absolute_time();

@@ -1,0 +1,275 @@
+zizhan UX-06: sample SpringBoard's main thread after synthetic taps (boot-arg zizhan_sample=<ms>; diagnostic, off by default).
+--- a/bsd/dev/pong_fts.c
++++ b/bsd/dev/pong_fts.c
+@@ -1029,6 +1029,39 @@
+  * left and back (250 ms, a move every 8 ms), paging the home screen. It uses the last contact id, which the
+  * controller's own reports never reach while a single real finger is down.
+  */
++/* zizhan UX-06 diagnostic: osfmk/arm64/pong_ui_exception.c */
++extern void pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag);
++
++static int
++synth_springboard_pid(proc_t p, void *pid)
++{
++	char name[32] = {};
++
++	proc_name(proc_pid(p), name, sizeof(name));
++	if (strcmp(name, "SpringBoard") == 0) {
++		*(int *)pid = proc_pid(p);
++	}
++	return PROC_RETURNED;
++}
++
++/* boot-arg zizhan_sample=<ms>: sample SpringBoard's main thread for <ms> from a synthetic touch-down (2 ms steps). */
++static void
++synth_sample(uint32_t sample_ms, uint32_t hold_ms, unsigned flags, unsigned tag)
++{
++	int pid = -1;
++	proc_iterate(PROC_ALLPROCLIST, synth_springboard_pid, &pid, NULL, NULL);
++	proc_t p = pid > 0 ? proc_find(pid) : PROC_NULL;
++	if (p == PROC_NULL) {
++		sleep_ms(hold_ms);
++		return;
++	}
++	pong_sample_main_thread(proc_task(p), sample_ms ? hold_ms : 0, 2000, flags, tag);
++	proc_rele(p);
++	if (!sample_ms) {
++		sleep_ms(hold_ms);
++	}
++}
++
+ static int
+ synth_find_springboard(proc_t p, void *found)
+ {
+@@ -1089,11 +1122,24 @@
+ 	if (PE_parse_boot_argn("tsa", &app, sizeof(app)) && app) {
+ 		const uint32_t ax = (app / 100) % 100 * 65535 / 100, ay = app % 100 * 65535 / 100, home_steps = 12;
+ 		printf("zizhan touch: synthetic app open at %u%%,%u%% and home swipe every %u s\n", app / 100 % 100, app % 100, period);
+-		for (;;) {
++		uint32_t sample_ms = 0;
++		unsigned round = 0;
++		PE_parse_boot_argn("zizhan_sample", &sample_ms, sizeof(sample_ms));
++		if (sample_ms > 760) {
++			sample_ms = 760;
++		}
++		for (;; round++) {
+ 			pong_touch_activity++;
+ 			touch_post(PONG_TOUCH_DOWN, id, ax, ay);
+-			sleep_ms(60);
++			if (sample_ms) {
++				synth_sample(sample_ms, 60, 1, 2 * round);
++			} else {
++				sleep_ms(60);
++			}
+ 			touch_post(PONG_TOUCH_UP, id, ax, ay);
++			if (sample_ms > 60) {
++				synth_sample(sample_ms, sample_ms - 60, 2, 2 * round);
++			}
+ 			if (inner) {
+ 				const uint32_t bx = (inner / 100) % 100 * 65535 / 100, by = inner % 100 * 65535 / 100;
+ 				sleep_ms(2500);
+@@ -1112,6 +1158,9 @@
+ 				touch_post(PONG_TOUCH_MOVE, id, 32768, from - (from - to) * i / home_steps);
+ 			}
+ 			touch_post(PONG_TOUCH_UP, id, 32768, to);
++			if (sample_ms) {
++				synth_sample(sample_ms, sample_ms, 3, 2 * round + 1);
++			}
+ 			sleep_ms(period * 1000);
+ 		}
+ 	}
+--- a/osfmk/arm64/pong_ui_exception.c
++++ b/osfmk/arm64/pong_ui_exception.c
+@@ -13,6 +13,9 @@
+ #include <string.h>
+ #include <vm/vm_map.h>
+ #include <vm/vm_shared_region_xnu.h>
++#include <vm/vm_kern_xnu.h>
++#include <kern/sched_prim.h>
++#include <kern/clock.h>
+ 
+ extern char *proc_name_address(struct proc *p);
+ extern int proc_pid(struct proc *p);
+@@ -113,9 +116,182 @@
+ 		fp = frame[0];
+ 	}
+ }
++/*
++ * zizhan UX-06 diagnostic (boot-arg zizhan_sample=<ms>, driven by the synthetic taps in bsd/dev/pong_fts.c): the app-launch
++ * tap stalls the panel ~200 ms (ux-n1). Every step_us the first thread of the task (SpringBoard's main thread) is sampled:
++ * running, or waiting with its trap number (x16), wait event and user frame chain (read only while it is off the CPU).
++ * Identical samples share a signature; the timeline prints one character per sample and each signature its share, for
++ * dscsym.py --addr/--slide. flags: 1 = start a new window, 2 = print the window. Only the synthetic-touch thread calls this.
++ */
++void pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag);
++void
++pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag)
++{
++	enum { kSigs = 36, kDepth = 8, kSamples = 400 };
++	struct sig {
++		uint64_t key, event, pc, lr, ra[kDepth];
++		uint32_t count, first;
++		int32_t sys;
++		uint8_t wait;
++	};
++	static struct sig sigs[kSigs];
++	static char line[kSamples + 1];
++	static unsigned nsig, nline, overflow;
++	/* zizhan_sample_stacks=1: also every running sample's user pc + frame chain (the state saved at its last interrupt or
++	 * trap, at most a timer tick old), printed for windows with tags 4..8, for an inclusive per-function profile */
++	static uint64_t stacks[kSamples][kDepth + 1];
++	static int stacks_mode = -1;
++	if (stacks_mode < 0) {
++		unsigned v = 0;
++		stacks_mode = PE_parse_boot_argn("zizhan_sample_stacks", &v, sizeof(v)) && v ? 1 : 0;
++	}
++	static uint64_t tid;
++	const uint64_t mask = 0x0000007fffffffffULL;
++	if (task == TASK_NULL || step_us == 0) {
++		return;
++	}
++	if (flags & 1) {
++		memset(sigs, 0, sizeof(sigs));
++		memset(line, 0, sizeof(line));
++		nsig = nline = overflow = 0;
++	}
++	thread_t thread = THREAD_NULL;
++	task_lock(task);
++	if (!queue_empty(&task->threads)) {
++		thread = (thread_t)queue_first(&task->threads);
++		thread_reference(thread);
++	}
++	task_unlock(task);
++	vm_map_t map = get_task_map_reference(task);
++	if (thread == THREAD_NULL || map == VM_MAP_NULL) {
++		if (thread != THREAD_NULL) {
++			thread_deallocate(thread);
++		}
++		if (map != VM_MAP_NULL) {
++			vm_map_deallocate(map);
++		}
++		return;
++	}
++	tid = thread_tid(thread);
++	uint64_t step_abs = 0, deadline = mach_absolute_time();
++	nanoseconds_to_absolutetime((uint64_t)step_us * 1000ULL, &step_abs);
++	const unsigned total = duration_ms * 1000U / step_us;
++	for (unsigned n = 0; n < total && nline < kSamples; n++) {
++		const int state = thread->state;
++		const uint8_t wait = (state & TH_WAIT) ? 1 : 0;
++		const event64_t event = wait ? thread->wait_event : 0;
++		const arm_saved_state_t *ss = get_user_regs(thread);
++		uint64_t pc = 0, lr = 0, fp = 0, sp = 0, ra[kDepth] = { 0 };
++		int32_t sys = 0;
++		const bool want_stack = wait || stacks_mode;
++		if (want_stack && ss != NULL && is_saved_state64(ss)) {
++			pc = get_saved_state_pc(ss) & mask;
++			lr = get_saved_state_lr(ss) & mask;
++			fp = get_saved_state_fp(ss);
++			sp = get_saved_state_sp(ss);
++			sys = (int32_t)get_saved_state_reg(ss, 16);
++			for (unsigned d = 0; d < kDepth; d++) {
++				uint64_t frame[2] = { 0, 0 };
++				if (fp < sp || fp - sp > 8 * 1024 * 1024 || (fp & 15) ||
++				    copyinmap(map, (vm_map_offset_t)fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++					break;
++				}
++				ra[d] = frame[1] & mask;
++				if (frame[0] <= fp) {
++					break;
++				}
++				fp = frame[0];
++			}
++		}
++		if (!wait) {
++			/* running or runnable: which CPU it last ran on (an efficiency core does this work ~3x slower) */
++			const processor_t last = thread->last_processor;
++			sys = last != PROCESSOR_NULL ? last->cpu_id : -1;
++			/* +100: runnable but not on that CPU (queued behind other threads) */
++			if (last == PROCESSOR_NULL || last->active_thread != thread) {
++				sys += 100;
++			}
++		}
++		uint64_t key = wait ? 0x9e3779b97f4a7c15ULL * (uint64_t)(int64_t)sys : 0x5151 + (uint64_t)(int64_t)sys * 0x10001ULL;
++		if (wait) {
++			key = (key ^ pc) * 0x100000001b3ULL;
++			for (unsigned d = 0; d < kDepth; d++) {
++				key = (key ^ ra[d]) * 0x100000001b3ULL;
++			}
++		}
++		key |= 1;
++		unsigned i;
++		for (i = 0; i < nsig && sigs[i].key != key; i++) {
++		}
++		if (i == nsig && nsig < kSigs) {
++			sigs[i].key = key;
++			sigs[i].wait = wait;
++			sigs[i].sys = sys;
++			sigs[i].event = (uint64_t)event;
++			sigs[i].pc = pc;
++			sigs[i].lr = lr;
++			memcpy(sigs[i].ra, ra, sizeof(ra));
++			sigs[i].first = nline;
++			nsig++;
++		}
++		if (stacks_mode && nline < kSamples) {
++			stacks[nline][0] = pc;
++			memcpy(&stacks[nline][1], ra, sizeof(ra));
++		}
++		if (i < nsig) {
++			sigs[i].count++;
++			line[nline++] = (char)(i < 10 ? '0' + i : 'a' + (i - 10));
++		} else {
++			overflow++;
++			line[nline++] = '?';
++		}
++		deadline += step_abs;
++		assert_wait_deadline((event_t)&sigs, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++	thread_deallocate(thread);
++	vm_map_deallocate(map);
++	if (!(flags & 2)) {
++		return;
++	}
++	vm_shared_region_t region = vm_shared_region_get(task);
++	const uint32_t slide = region ? region->sr_slide : 0;
++	if (region) {
++		vm_shared_region_deallocate(region);
++	}
++	printf("ZIZHAN_SAMPLE %u: tid %llu step %u us, %u samples, %u signatures (+%u over), cache_slide=0x%x\n", tag, tid, step_us,
++	    nline, nsig, overflow, slide);
++	for (unsigned at = 0; at < nline; at += 100) {
++		printf("ZIZHAN_SAMPLE %u line %u: %.100s\n", tag, at, line + at);
++	}
++	if (stacks_mode && tag >= 4 && tag <= 8) {
++		for (unsigned n = 0; n < nline; n++) {
++			const uint64_t *k = stacks[n];
++			printf("ZIZHAN_SAMPLE %u st %u %c: 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx\n", tag, n, line[n],
++			    k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8]);
++		}
++	}
++	for (unsigned i = 0; i < nsig; i++) {
++		const struct sig *s = &sigs[i];
++		printf("ZIZHAN_SAMPLE %u sig %c: n=%u first=%u %s sys=%d ev=0x%llx pc=0x%llx lr=0x%llx ra=0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx\n",
++		    tag, i < 10 ? '0' + i : 'a' + (i - 10), s->count, s->first, s->wait ? "wait" : "run(sys=cpu)", s->sys, s->event, s->pc, s->lr,
++		    s->ra[0], s->ra[1], s->ra[2], s->ra[3], s->ra[4], s->ra[5], s->ra[6], s->ra[7]);
++	}
++}
+ #else
+ #include <stdint.h>
+ #include <mach/vm_types.h>
++#include <mach/mach_types.h>
++void pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag);
++void
++pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag)
++{
++	(void)task;
++	(void)duration_ms;
++	(void)step_us;
++	(void)flags;
++	(void)tag;
++}
+ void pong_ui_abort_trace(uint32_t reason_namespace, uint64_t reason_code, user_addr_t reason_string);
+ void
+ pong_ui_abort_trace(uint32_t reason_namespace, uint64_t reason_code, user_addr_t reason_string)

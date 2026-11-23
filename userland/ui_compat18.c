@@ -816,9 +816,14 @@ static void brightness18_image(const struct mach_header *header,intptr_t slide)
  * metal2vulkan maps the ASTC pixel formats. BUT with the answer true in SpringBoard and backboardd every app drew black (user v4,
  * screenshots g193/g194: Weather's sky with the native answer, black with it true), so it is opt-in: boot-arg pong_astc=1 answers
  * true in the UI processes and the render server, pong_astc=2 in SpringBoard/Preferences only (experiment); default native. */
+/* 1 = iPhone17,1, 2 = iPad7,12 (set by phone_gestalt_image). UX-06 (ux-s2, 2026-11-23): the hook used to install for
+ * iPhone17,1 only, so after the iPad7,12 identity became the default pong_astc=1 silently did nothing and SpringBoard was back to
+ * decoding ASTC icons and snapshots on its main thread during every app-open zoom (~140 ms CPU-bound, 200 ms without a frame).
+ * On the iPad identity only the ASTC and battery answers apply; the Dynamic Island one stays iPhone-only. */
+static int gestalt_identity;
 static bool phone_gestalt_bool(CFStringRef key)
 {
-    if(phone_ui_process && key && (CFEqual(key,CFSTR("YlEtTtHlNesRBMal1CqRaA")) ||
+    if(phone_ui_process && gestalt_identity==1 && key && (CFEqual(key,CFSTR("YlEtTtHlNesRBMal1CqRaA")) ||
                CFEqual(key,CFSTR("DeviceSupportsDynamicIsland"))))return true;
     /* Battery authentication (hashed D6/BMDrlb8V3WSiqL8gL+w; BatteryUsageUI +[BatteryUIResourceClass genuineBatteryStatus] asks it
      * first): this cell has no Apple authentication chip, so no AppleAuthCPRelay ever answers isTrustedForUI and Settings > Battery
@@ -845,7 +850,9 @@ static void phone_gestalt_image(const struct mach_header *header,intptr_t slide)
     }
     if(!matched)return;
     char product[64]={0};size_t size=sizeof(product);
-    if(sysctlbyname("hw.product",product,&size,NULL,0) || strcmp(product,"iPhone17,1"))return;
+    if(sysctlbyname("hw.product",product,&size,NULL,0))return;
+    gestalt_identity=!strcmp(product,"iPhone17,1")?1:(!strcmp(product,"iPad7,12")?2:0);
+    if(!gestalt_identity)return;
     const uintptr_t offset=0xf00,entry=(uintptr_t)header+offset;
     // Four position-independent prologue instructions from MGGetBoolAnswer.
     static const uint32_t expected[]={0xd100c3ff,0xa9014ff4,0xa9027bfd,0x910083fd};
@@ -1239,11 +1246,32 @@ static void stui_phone_image(const struct mach_header *header,intptr_t slide)
     if(method_abi(diagnostic,"Bc",2,"@@"))method_setImplementation(diagnostic,(IMP)phone_diagnostic_item_enabled);
 }
 
+/* UX-06 (ux-p1, 2026-11-23): the boot-args are fixed for the life of the process, but boot_option() asked the kernel for them
+ * (sysctlbyname, a name lookup plus a copy) on every call, and hooks on hot paths call it: zizhan_statusbar_screen() on every
+ * status bar size or provider lookup. SpringBoard's main thread spent ~19 ms of each app-open tap in __sysctl. Read them once. */
+static char cached_boot_args[2048];
+static bool cached_boot_args_ok;
+static void read_boot_args(void *unused)
+{
+    (void)unused;
+    size_t size=sizeof(cached_boot_args)-1;
+    if(sysctlbyname("kern.bootargs",cached_boot_args,&size,NULL,0)) {
+        cached_boot_args[0]='\0';
+        return;
+    }
+    cached_boot_args[size<sizeof(cached_boot_args)?size:sizeof(cached_boot_args)-1]='\0';
+    cached_boot_args_ok=true;
+}
+static const char *boot_args(void)
+{
+    static dispatch_once_t once;
+    dispatch_once_f(&once,NULL,read_boot_args);
+    return cached_boot_args_ok?cached_boot_args:NULL;
+}
 static bool boot_option(const char *key)
 {
-    char args[2048];size_t size=sizeof(args)-1;
-    if(sysctlbyname("kern.bootargs",args,&size,NULL,0))return false;
-    args[size<sizeof(args)?size:sizeof(args)-1]='\0';
+    const char *args=boot_args();
+    if(!args)return false;
     const size_t length=strlen(key);
     for(const char *p=args;(p=strstr(p,key));p+=length) {
         if((p==args || p[-1]==' ' || p[-1]=='\t') &&
@@ -1532,9 +1560,8 @@ static void wake_home(void *unused)
 /* Value of boot-arg KEY=<value> (KEY includes the '='), copied into out; false when absent. */
 static bool boot_value(const char *key,char *out,size_t size)
 {
-    char args[2048];size_t length=sizeof(args)-1;
-    if(sysctlbyname("kern.bootargs",args,&length,NULL,0))return false;
-    args[length<sizeof(args)?length:sizeof(args)-1]='\0';
+    const char *args=boot_args();
+    if(!args)return false;
     for(const char *p=args;(p=strstr(p,key));p++) {
         if(p!=args && p[-1]!=' ' && p[-1]!='\t')continue;
         p+=strlen(key);size_t n=strcspn(p," \t");

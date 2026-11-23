@@ -1,4 +1,4 @@
-zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep user stacks (boot-args zizhan_sample_ipi=1, zizhan_sample_us=<n>; diagnostic, off by default).
+zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep user stacks (boot-args zizhan_sample_ipi=1, =2 stops the thread for the stack walk, zizhan_sample_us=<n>; diagnostic, off by default).
 --- a/osfmk/arm64/pong_ui_exception.c
 +++ b/osfmk/arm64/pong_ui_exception.c
 @@ -16,6 +16,9 @@
@@ -11,7 +11,7 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
  
  extern char *proc_name_address(struct proc *p);
  extern int proc_pid(struct proc *p);
-@@ -123,11 +126,73 @@
+@@ -123,11 +126,76 @@
   * Identical samples share a signature; the timeline prints one character per sample and each signature its share, for
   * dscsym.py --addr/--slide. flags: 1 = start a new window, 2 = print the window. Only the synthetic-touch thread calls this.
   */
@@ -21,7 +21,10 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
 + * on the thread's own CPU by a cross-call: the interrupted pc is the truth, in user mode (pc, lr, frame chain walked by the
 + * sampler right after) or in the kernel (kernel backtrace, plus the user pc of the trap that entered it).
 + */
-+enum { kPongSampleDepth = 8, kPongSampleDeep = 96 };
++enum { kPongSampleDepth = 8, kPongSampleDeep = 160 };
++/* osfmk/kern/thread_act.c; the MIG header is not for this file */
++extern kern_return_t thread_suspend(thread_t thread);
++extern kern_return_t thread_resume(thread_t thread);
 +struct pong_sample_req {
 +	thread_t target;
 +	volatile uint32_t done;         /* 1 user, 2 kernel, 3 another thread was on the CPU, 4 no interrupted state */
@@ -82,11 +85,11 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
  pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag)
  {
 -	enum { kSigs = 36, kDepth = 8, kSamples = 400 };
-+	enum { kSigs = 36, kDepth = kPongSampleDepth, kSamples = 800 };
++	enum { kSigs = 36, kDepth = kPongSampleDepth, kSamples = 448 };
  	struct sig {
  		uint64_t key, event, pc, lr, ra[kDepth];
  		uint32_t count, first;
-@@ -141,10 +206,28 @@
+@@ -141,10 +209,28 @@
  	 * trap, at most a timer tick old), printed for windows with tags 4..8, for an inclusive per-function profile */
  	static uint64_t stacks[kSamples][kDepth + 1];
  	static int stacks_mode = -1;
@@ -103,7 +106,7 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
  		unsigned v = 0;
  		stacks_mode = PE_parse_boot_argn("zizhan_sample_stacks", &v, sizeof(v)) && v ? 1 : 0;
 +		v = 0;
-+		ipi_mode = PE_parse_boot_argn("zizhan_sample_ipi", &v, sizeof(v)) && v ? 1 : 0;
++		ipi_mode = PE_parse_boot_argn("zizhan_sample_ipi", &v, sizeof(v)) && v ? (v == 2 ? 2 : 1) : 0;
 +		PE_parse_boot_argn("zizhan_sample_us", &step_override, sizeof(step_override));
 +		if (ipi_mode) {
 +			stacks_mode = 1;
@@ -115,7 +118,7 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
  	static uint64_t tid;
  	const uint64_t mask = 0x0000007fffffffffULL;
  	if (task == TASK_NULL || step_us == 0) {
-@@ -153,6 +236,7 @@
+@@ -153,6 +239,7 @@
  	if (flags & 1) {
  		memset(sigs, 0, sizeof(sigs));
  		memset(line, 0, sizeof(line));
@@ -123,7 +126,7 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
  		nsig = nline = overflow = 0;
  	}
  	thread_t thread = THREAD_NULL;
-@@ -190,19 +274,12 @@
+@@ -190,19 +277,12 @@
  			fp = get_saved_state_fp(ss);
  			sp = get_saved_state_sp(ss);
  			sys = (int32_t)get_saved_state_reg(ss, 16);
@@ -148,7 +151,7 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
  		if (!wait) {
  			/* running or runnable: which CPU it last ran on (an efficiency core does this work ~3x slower) */
  			const processor_t last = thread->last_processor;
-@@ -210,6 +287,38 @@
+@@ -210,6 +290,55 @@
  			/* +100: runnable but not on that CPU (queued behind other threads) */
  			if (last == PROCESSOR_NULL || last->active_thread != thread) {
  				sys += 100;
@@ -172,9 +175,26 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
 +						how = 'U';
 +						pc = req.pc & mask;
 +						lr = req.lr & mask;
++						uint64_t walk_fp = req.fp, walk_sp = req.sp;
++						/* zizhan_sample_ipi=2: the walk above races the running thread (only 42 % of the user samples reached
++						 * start in ux-k2). Stop the thread for the walk: it halts at the user boundary within an interrupt, its
++						 * saved state is then exact and the frames cannot change. Costs the thread a stop and a start a sample. */
++						const bool held = ipi_mode == 2 && thread_suspend(thread) == KERN_SUCCESS;
++						if (held) {
++							const arm_saved_state_t *stopped = get_user_regs(thread);
++							if (stopped != NULL && is_saved_state64(stopped)) {
++								pc = get_saved_state_pc(stopped) & mask;
++								lr = get_saved_state_lr(stopped) & mask;
++								walk_fp = get_saved_state_fp(stopped);
++								walk_sp = get_saved_state_sp(stopped);
++							}
++						}
 +						memset(ra, 0, sizeof(ra));
-+						pong_sample_walk(map, req.fp, req.sp, far, kPongSampleDeep);
++						pong_sample_walk(map, walk_fp, walk_sp, far, kPongSampleDeep);
 +						memcpy(ra, far, sizeof(ra));
++						if (held) {
++							(void)thread_resume(thread);
++						}
 +					} else if (done == 2) {
 +						/* pc and ra stay the user state of the trap or fault that entered the kernel */
 +						how = 'K';
@@ -187,7 +207,7 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
  			}
  		}
  		uint64_t key = wait ? 0x9e3779b97f4a7c15ULL * (uint64_t)(int64_t)sys : 0x5151 + (uint64_t)(int64_t)sys * 0x10001ULL;
-@@ -237,6 +346,14 @@
+@@ -237,6 +366,14 @@
  		if (stacks_mode && nline < kSamples) {
  			stacks[nline][0] = pc;
  			memcpy(&stacks[nline][1], ra, sizeof(ra));
@@ -202,7 +222,7 @@ zizhan UX-07: sample a running thread on its own CPU by cross-call, with deep us
  		}
  		if (i < nsig) {
  			sigs[i].count++;
-@@ -264,7 +381,33 @@
+@@ -264,7 +401,33 @@
  	for (unsigned at = 0; at < nline; at += 100) {
  		printf("ZIZHAN_SAMPLE %u line %u: %.100s\n", tag, at, line + at);
  	}

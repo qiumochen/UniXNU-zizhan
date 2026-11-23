@@ -15,7 +15,10 @@
 #include <sys/sysctl.h>
 #include <mach/mach_time.h>
 #include <notify.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
 #include "touch.h"
+#include "zizhan-oslog18.h"
 #define say(...) fprintf(stderr,__VA_ARGS__)
 /* IOKit's HID event system, the part that has no public header on iOS (prototypes checked against 20F66) */
 typedef struct __IOHIDEvent *IOHIDEventRef;
@@ -49,6 +52,14 @@ static IOHIDEventRef (*IOHIDEventCreateKeyboardEvent)(CFAllocatorRef allocator, 
     uint32_t usage_page,uint32_t usage,Boolean down,uint32_t options);
 static void (*IOHIDEventAppendEvent)(IOHIDEventRef parent, IOHIDEventRef child, uint32_t options);
 static void (*IOHIDEventSetIntegerValue)(IOHIDEventRef event, uint32_t field, CFIndex value);
+/* zizhan SENS-03: x, y, z in g */
+static IOHIDEventRef (*IOHIDEventCreateAccelerometerEvent)(CFAllocatorRef allocator, uint64_t time, double x, double y, double z,
+    uint32_t options);
+/* an orientation event of the "CoreMotion usage" kind: usage says how the device is held */
+static IOHIDEventRef (*IOHIDEventCreateDeviceOrientationEventWithUsage)(CFAllocatorRef allocator, uint64_t time, uint32_t usage,
+    uint32_t options);
+static IOHIDEventRef (*IOHIDEventCreateVendorDefinedEvent)(CFAllocatorRef allocator, uint64_t time, uint32_t page, uint32_t usage,
+    uint32_t version, uint8_t *data, CFIndex length, uint32_t options);
 
 #define HID_CLIENT_SIMPLE               4       /* a client that only sends */
 #define HID_CLIENT_RATE_CONTROLLED      3       /* what IOHIDEventSystemClientCreate() makes */
@@ -58,6 +69,10 @@ static void (*IOHIDEventSetIntegerValue)(IOHIDEventRef event, uint32_t field, CF
 #define HID_USAGE_CONSUMER_CONTROL      0x01
 #define HID_USAGE_POWER                 0x30    /* the lock button */
 #define HID_USAGE_MENU                  0x40    /* the home button */
+#define HID_PAGE_APPLE_VENDOR           0xff00
+#define HID_USAGE_ACCELEROMETER         0x03    /* kHIDUsage_AppleVendor_Accelerometer */
+#define HID_PAGE_SENSOR                 0x20
+#define HID_USAGE_DEVICE_ORIENTATION    0x8a    /* kHIDUsage_Snsr_Orientation_DeviceOrientation */
 #define HID_USAGE_VOLUME_UP             0xe9
 #define HID_USAGE_VOLUME_DOWN           0xea
 #define DIGITIZER_HAND                  3       /* kIOHIDDigitizerTransducerTypeHand */
@@ -97,6 +112,8 @@ struct service {
 	CFMutableDictionaryRef properties;
 	bool opened;
 	bool display;
+	bool sensor;            /* zizhan SENS-03: say what the event server and its clients set on it */
+	unsigned told;
 };
 
 /* The properties of a service of ours; the event server asks for them one at a time. */
@@ -133,6 +150,17 @@ service_set_property(__attribute__((unused)) void *target, void *refcon, __attri
 	if (key != NULL && value != NULL && CFEqual(key, CFSTR("DeviceOpenedByEventSystem")) &&
 	    CFGetTypeID(value) == CFBooleanGetTypeID()) {
 		__atomic_store_n(&((struct service *)refcon)->opened,CFBooleanGetValue(value),__ATOMIC_RELEASE);
+	}
+	if (((struct service *)refcon)->sensor && key != NULL && ((struct service *)refcon)->told++ < 24) {
+		char name[64] = "?", text[96] = "?";
+		CFStringRef shown = value ? CFCopyDescription(value) : NULL;
+
+		CFStringGetCString(key, name, sizeof(name), kCFStringEncodingUTF8);
+		if (shown) {
+			CFStringGetCString(shown, text, sizeof(text), kCFStringEncodingUTF8);
+			CFRelease(shown);
+		}
+		say("Zizhan sensors HID: set %s = %s\n", name, text);
 	}
 	if (((struct service *)refcon)->display && key != NULL && value != NULL &&
         CFEqual(key, CFSTR("TouchDetectionMode")) && CFGetTypeID(value) == CFNumberGetTypeID()) {
@@ -204,6 +232,7 @@ make_service(IOHIDEventSystemClientRef client, const char *product, int page, in
 	/* the dictionary stays: it is what service_copy_property() answers from */
 	made->properties = properties;
 	made->display = display;
+	made->sensor = page == HID_PAGE_APPLE_VENDOR || page == HID_PAGE_SENSOR;
 	CFRelease(pair);CFRelease(pairs);CFRelease(name);
 	CFRelease(page_number);CFRelease(usage_number);CFRelease(zero);
 	for (int attempt = 1; attempt <= 20; attempt++) {
@@ -431,6 +460,141 @@ buttons_thread(void *unused)
     IOHIDVirtualServiceClientRemove(keys);CFRelease(keys);CFRelease(client);close(fd);return NULL;
 }
 
+/*
+ * zizhan SENS-03: how the device is held, from gravity in g (iOS axes: -y down when upright, -z down lying face up).
+ * 1 portrait, 2 upside down, 3 landscape with the top to the left, 4 with the top to the right, 5 face up, 6 face down;
+ * 0 while it cannot be told. A new answer must hold for 12 samples (about a quarter second at 52 Hz), and an edge-on reading
+ * has to pass 0.6 g on its axis and beat the other one clearly, so the picture does not flip near a diagonal.
+ */
+static int
+held_orientation(double x,double y,double z)
+{
+    static int current,candidate;static unsigned stable;
+    const double ax=x<0?-x:x,ay=y<0?-y:y,az=z<0?-z:z,norm2=x*x+y*y+z*z;
+    int now=0;
+    if (norm2<0.49 || norm2>2.25) return current;      /* shaken or falling: keep the answer */
+    if (az>0.85) now=z<0?5:6;
+    else if (ay>0.6 && ay>ax+0.25) now=y<0?1:2;
+    else if (ax>0.6 && ax>ay+0.25) now=x<0?3:4;
+    if (!now || now==current) {candidate=0;stable=0;return current;}
+    if (now!=candidate) {candidate=now;stable=0;}
+    if (++stable>=12) {current=now;candidate=0;stable=0;}
+    return current;
+}
+
+/*
+ * zizhan SENS-03: the accelerometer of the sensor DSP as a built-in HID accelerometer. /dev/zizhan-sensors (XNU patch 0038)
+ * appears once the DSP has listed the sensor, about a minute after the desktop, and only with boot-arg zizhan_slpi=4; samples
+ * are mm/s2 in the Android sense (+z reads +g lying face up). iOS reads -1 g on z there, so every axis changes sign.
+ */
+/* Diagnostic (boot-arg zizhan_accel_test): what CoreMotion's orientation detector, the one backboardd itself listens to, makes
+ * of the samples. 1 portrait, 2 upside down, 3 and 4 landscape, 5 face up, 6 face down. */
+static void
+orientation_probe(void)
+{
+    Class manager_class=objc_getClass("CMDeviceOrientationManager"),queue_class=objc_getClass("NSOperationQueue");
+    if (!manager_class || !queue_class) {say("Zizhan sensors HID: no CMDeviceOrientationManager in this process\n");return;}
+    id manager=((id(*)(id,SEL))objc_msgSend)(((id(*)(Class,SEL))objc_msgSend)(manager_class,sel_registerName("alloc")),sel_registerName("init"));
+    id queue=((id(*)(id,SEL))objc_msgSend)(((id(*)(Class,SEL))objc_msgSend)(queue_class,sel_registerName("alloc")),sel_registerName("init"));
+    SEL start=sel_registerName("startDeviceOrientationUpdatesToQueue:withHandler:");
+    if (!manager || !queue || !class_respondsToSelector(manager_class,start)) {say("Zizhan sensors HID: orientation manager unusable\n");return;}
+    void (^handler)(id,id)=^(id orientation,id error) {
+        static unsigned said;
+        SEL value=sel_registerName("orientation");
+        int now=orientation && class_respondsToSelector(object_getClass(orientation),value)?
+            ((int(*)(id,SEL))objc_msgSend)(orientation,value):-1;
+        if (said++<60) say("Zizhan sensors HID: CoreMotion orientation %d%s\n",now,error?" (error)":"");
+    };
+    ((void(*)(id,SEL,id,id))objc_msgSend)(manager,start,queue,(id)handler);
+    SEL available=sel_registerName("isDeviceOrientationAvailable"),active=sel_registerName("isDeviceOrientationActive");
+    say("Zizhan sensors HID: orientation probe started (available %d active %d)\n",
+        class_respondsToSelector(manager_class,available)?(int)((BOOL(*)(id,SEL))objc_msgSend)(manager,available):-1,
+        class_respondsToSelector(manager_class,active)?(int)((BOOL(*)(id,SEL))objc_msgSend)(manager,active):-1);
+}
+
+static void *
+sensors_thread(void *unused)
+{
+    (void)unused;pthread_setname_np("Zizhan sensors HID");
+    char args[2048]={0};size_t bytes=sizeof(args)-1;
+    if (sysctlbyname("kern.zizhan_bootargs",args,&bytes,NULL,0) && ((bytes=sizeof(args)-1),sysctlbyname("kern.bootargs",args,&bytes,NULL,0))) return NULL;
+    args[sizeof(args)-1]=0;
+    /* only with the sensor DSP kept running (boot-arg zizhan_slpi=4): without it there is nothing to report and no service */
+    const char *mode=strstr(args,"zizhan_slpi=4");
+    if (!mode || (mode!=args && mode[-1]!=' ')) return NULL;
+    /*
+     * Both services are made at once, the orientation device first, long before the first sample (the DSP lists its sensors
+     * about a minute after the desktop). CoreMotion on the iPad7,12 identity does not compute the orientation from the
+     * accelerometer: its orientation notifier waits for a HID device with usage pair {0x20, 0x8a} that reports it ("Service
+     * for device with usage pair {32, 138} is not ready", sens-4), as the motion coprocessor does there. When the
+     * accelerometer appeared first and late, after display off/on had left a configuration to send, the notifier sent it
+     * through its still missing orientation device and backboardd and SpringBoard died in CoreMotion (sens-9).
+     */
+    IOHIDEventSystemClientRef client=NULL;IOHIDServiceClientRef accel=NULL,held=NULL;
+    const int types[]={HID_CLIENT_SIMPLE,HID_CLIENT_RATE_CONTROLLED};
+    for (unsigned i=0;i<2 && !accel;i++) {
+        client=IOHIDEventSystemClientCreateWithType(NULL,types[i],NULL);
+        if (!client) continue;
+        IOHIDEventSystemClientScheduleWithDispatchQueue(client,dispatch_queue_create("zizhan.sensors.hid",NULL));
+        if (IOHIDEventCreateDeviceOrientationEventWithUsage && IOHIDEventCreateVendorDefinedEvent && !held)
+            held=make_service(client,"Zizhan device orientation",HID_PAGE_SENSOR,HID_USAGE_DEVICE_ORIENTATION,false);
+        accel=make_service(client,"Zizhan accelerometer",HID_PAGE_APPLE_VENDOR,HID_USAGE_ACCELEROMETER,false);
+        if (!accel) {
+            if (held) {IOHIDVirtualServiceClientRemove(held);CFRelease(held);held=NULL;}
+            CFRelease(client);
+        }
+    }
+    if (!accel) {say("Zizhan sensors HID: server did not open the accelerometer; SKIP\n");return NULL;}
+    say("Zizhan sensors HID: accelerometer service opened, device orientation service %s\n",held?"opened":"unavailable");
+    int device=-1;
+    for (unsigned i=0;i<300 && device<0;i++) {
+        device=open("/dev/zizhan-sensors",O_RDONLY);
+        if (device<0) sleep(2);
+    }
+    if (device<0) {say("Zizhan sensors HID: no /dev/zizhan-sensors after 10 minutes (%s); the services stay silent\n",strerror(errno));return NULL;}
+    say("Zizhan sensors HID: samples from /dev/zizhan-sensors\n");
+    if (strstr(args,"zizhan_accel_test=")) orientation_probe();
+    /* zizhan_orient_test=1: report the orientations 0..6 in turn, about 10 s each, whatever the accelerometer says */
+    const int orientation_test=strstr(args,"zizhan_orient_test=1")!=NULL;
+    int last_held=-1;
+    struct pong_touch sample;unsigned count=0,refused=0;ssize_t length;
+    while ((length=read(device,&sample,sizeof(sample)))>0 || (length<0 && errno==EINTR)) {
+        if (length!=(ssize_t)sizeof(sample) || sample.type!=ZIZHAN_SENSOR_ACCEL) continue;
+        const double g=9806.65;
+        const double x=-(int32_t)sample.finger/g,y=-(int32_t)sample.x/g,z=-(int32_t)sample.y/g;
+        IOHIDEventRef event=IOHIDEventCreateAccelerometerEvent(NULL,sample.time,x,y,z,0);
+        if (!event) continue;
+        IOHIDEventSetIntegerValue(event,FIELD_IS_BUILT_IN,1);
+        if (!IOHIDVirtualServiceClientDispatchEvent(accel,event)) refused++;
+        CFRelease(event);
+        const int now_held=orientation_test?(int)(count/500%7):held_orientation(x,y,z);
+        if (held && now_held!=last_held && (now_held || orientation_test)) {
+            /* CoreMotion's CLOrientationNotifier::onIohidEvent takes field 0xa0004 of an orientation event and accepts
+             * 100..106: 100 + the orientation (0 unknown, 1 portrait ... 6 face down); anything else is "invalid" */
+            IOHIDEventRef turned=IOHIDEventCreateDeviceOrientationEventWithUsage(NULL,sample.time,100u+(uint32_t)now_held,0);
+            if (turned) {
+                /* ... and takes the sample's time from a vendor-defined child (page 0xff15, usage 2, eight bytes), the motion
+                 * coprocessor's own clock; without it the time reads 0 and the event is "stale" (sens-6). It only has to grow. */
+                uint64_t stamp=sample.time;
+                IOHIDEventRef clock=IOHIDEventCreateVendorDefinedEvent(NULL,sample.time,0xff15,2,0,(uint8_t *)&stamp,sizeof(stamp),0);
+                if (clock) {IOHIDEventAppendEvent(turned,clock,0);CFRelease(clock);}
+                IOHIDEventSetIntegerValue(turned,FIELD_IS_BUILT_IN,1);
+                const Boolean sent=IOHIDVirtualServiceClientDispatchEvent(held,turned);
+                CFRelease(turned);
+                say("Zizhan sensors HID: orientation %d -> %d sent=%d\n",last_held,now_held,sent);
+            }
+            last_held=now_held;
+        }
+        if (count<4 || count%500==0) {
+            say("Zizhan sensors HID: accel #%u %.3f %.3f %.3f g (refused %u)\n",count,x,y,z,refused);
+        }
+        count++;
+    }
+    if (held) {IOHIDVirtualServiceClientRemove(held);CFRelease(held);}
+    close(device);IOHIDVirtualServiceClientRemove(accel);CFRelease(accel);CFRelease(client);
+    return NULL;
+}
+
 #include "zizhan-keyboard-test18.h"
 
 void
@@ -452,6 +616,11 @@ pong_touch_start(void)
     pthread_t thread;
     if (!pthread_create(&thread,NULL,input_thread,NULL)) pthread_detach(thread);
     if (IOHIDEventCreateKeyboardEvent && !pthread_create(&thread,NULL,buttons_thread,NULL)) pthread_detach(thread);
+    IOHIDEventCreateAccelerometerEvent=(__typeof__(IOHIDEventCreateAccelerometerEvent))dlsym(RTLD_DEFAULT,"IOHIDEventCreateAccelerometerEvent");
+    IOHIDEventCreateDeviceOrientationEventWithUsage=(__typeof__(IOHIDEventCreateDeviceOrientationEventWithUsage))
+        dlsym(RTLD_DEFAULT,"IOHIDEventCreateDeviceOrientationEventWithUsage");
+    IOHIDEventCreateVendorDefinedEvent=(__typeof__(IOHIDEventCreateVendorDefinedEvent))dlsym(RTLD_DEFAULT,"IOHIDEventCreateVendorDefinedEvent");
+    if (IOHIDEventCreateAccelerometerEvent && !pthread_create(&thread,NULL,sensors_thread,NULL)) pthread_detach(thread);
     char testargs[1024]={0},testurl[160]={0};size_t testbytes=sizeof testargs;
     if(IOHIDEventCreateKeyboardEvent && !sysctlbyname("kern.bootargs",testargs,&testbytes,NULL,0)) {
         testargs[sizeof testargs-1]=0;

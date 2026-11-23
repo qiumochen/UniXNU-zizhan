@@ -2644,6 +2644,26 @@ static void lockdate_install(void *context)
         dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,seconds*(int64_t)NSEC_PER_SEC),dispatch_get_main_queue(),NULL,lockdate_late);
     }
 }
+/* zizhan SENS-03 diagnostic (boot-arg zizhan_accel_test): every 2 s on the main queue, for five minutes. */
+static void
+orientation_watch(void *unused)
+{
+    static int last_device=-2,last_interface=-2;static unsigned rounds;
+    (void)unused;
+    Class device_class=objc_getClass("UIDevice"),app_class=objc_getClass("UIApplication");
+    id device=device_class?((id(*)(Class,SEL))objc_msgSend)(device_class,sel_registerName("currentDevice")):NULL;
+    id app=app_class?((id(*)(Class,SEL))objc_msgSend)(app_class,sel_registerName("sharedApplication")):NULL;
+    if(!rounds && device)((void(*)(id,SEL))objc_msgSend)(device,sel_registerName("beginGeneratingDeviceOrientationNotifications"));
+    int now_device=device?(int)((long(*)(id,SEL))objc_msgSend)(device,sel_registerName("orientation")):-1;
+    SEL active=sel_registerName("activeInterfaceOrientation");
+    int now_interface=app && class_respondsToSelector(object_getClass(app),active)?(int)((long(*)(id,SEL))objc_msgSend)(app,active):-1;
+    if(now_device!=last_device || now_interface!=last_interface) {
+        fprintf(stderr,"Zizhan orientation: SpringBoard device %d interface %d\n",now_device,now_interface);
+        last_device=now_device;last_interface=now_interface;
+    }
+    if(++rounds<150)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
+}
+
 
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
@@ -2735,6 +2755,9 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     if(strcmp(name,"SpringBoard")==0) {
         springboard_process=true;
         display_link_rates();
+        /* zizhan SENS-03 diagnostic: the device and interface orientation SpringBoard has, said when either changes */
+        if(boot_value("zizhan_accel_test=",(char[16]){0},16))
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,60*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
         // The consumer reports are accepted but physical volume remains
         // unresponsive on this imported iPad board. Route those transitions
         // to the existing 22H374 controller after checking its actual ABI.

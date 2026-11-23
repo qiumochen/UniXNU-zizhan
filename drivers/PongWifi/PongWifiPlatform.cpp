@@ -65,6 +65,7 @@ uint32_t psMode=2;   // zizhan_wifi_ps (POWER-06): daily default 2 = power save 
 extern "C" int zizhan_display_power_state(void);
 extern "C" int nw_wifi_set_ps(int on);
 extern "C" void nw_wifi_mhi_state(char *out,int n);
+extern "C" volatile int zizhan_wifi_chip_up;   /* ArmDTPlatform/ZizhanBtProbe.h: Bluetooth on the same chip starts after this */
 unsigned pcieCap,msiCap; volatile uint32_t stopped,wake; bool dmaOwned,hostMmioReady;
 uint64_t initDeadline;
 uint64_t now() {uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;}
@@ -661,6 +662,7 @@ void worker(void *,wait_result_t) {
   if(cfgWrite(4,2,6))goto done;
   initDeadline=now()+90000;int r=nw_wifi_start(&platform,&board);if(r){IOLog("PongWifi: ath11k start failed=%d\n",r);goto done;}
  }
+ __atomic_store_n(&zizhan_wifi_chip_up,1,__ATOMIC_RELEASE);
  if(PE_parse_boot_argn("zizhan_wifi_idle_ms",&idleMs,sizeof idleMs)&&(idleMs<1||idleMs>500))idleMs=5;
  IOLog("PongWifi: idle wait %u ms\n",idleMs);
  PE_parse_boot_argn("zizhan_wifi_aspm",&aspmMode,sizeof aspmMode);

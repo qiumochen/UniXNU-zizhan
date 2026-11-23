@@ -23,6 +23,9 @@ extern "C" struct vnode *rootvnode;
 extern "C" int zizhan_bt_uart_attach(int (*tx)(const uint8_t *, uint32_t)) __attribute__((weak));
 extern "C" void zizhan_bt_uart_input(const uint8_t *, uint32_t) __attribute__((weak));
 
+/* Set by PongWifiPlatform once the QCA6490's Wi-Fi firmware has started (the two radios share the chip's power). */
+extern "C" { volatile int zizhan_wifi_chip_up; }
+
 namespace zizhan_bt_probe {
 static uint32_t probe_mode;
 struct Window {
@@ -581,7 +584,21 @@ static void finish() {
 
 static void worker(void *, wait_result_t) {
   for (unsigned i = 0; i < 1200 && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE); ++i) IOSleep(100);
-  IOSleep(30000);  // after Wi-Fi bring-up, which shares the chip's power
+  // After Wi-Fi bring-up, which shares the chip's power: 2 s after its firmware started, or the old fixed 30 s when Wi-Fi is
+  // off or late (Bluetooth used to be ready ~26 s after launchd wanted it). zizhan_bt_wait_ms=<n> forces a fixed wait.
+  uint32_t fixed = 0;
+  if (PE_parse_boot_argn("zizhan_bt_wait_ms", &fixed, sizeof fixed) && fixed >= 1000 && fixed <= 120000) {
+    IOSleep(fixed);
+  } else {
+    unsigned waited = 0;
+    for (; waited < 30000 && !__atomic_load_n(&zizhan_wifi_chip_up, __ATOMIC_ACQUIRE); waited += 100) {
+      IOSleep(100);
+    }
+    if (waited < 28000) {
+      IOSleep(2000);
+    }
+    IOLog("ZIZHAN_BT_PROBE: start %u ms after the root mount (wifi up=%d)\n", waited, zizhan_wifi_chip_up);
+  }
   if (probe_mode >= 2) { active(); finish(); return; }
   {
     Window vote, wrap, core;

@@ -11,8 +11,15 @@
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
 #include "ZizhanDailyProfile.h"
+#include "ZizhanOuterTouchPlan.h"
 #include <kern/clock.h>
 #include "../PongPower/GeniI2c.h"
+
+extern "C" struct vnode *rootvnode;
+extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
+extern "C" volatile int32_t native_battery_stats[16];
+extern "C" uint32_t pong_scanout_cover_snapshot(const uint8_t **va_out, uint64_t *phys_out,
+                                                uint32_t *w_out, uint32_t *h_out, uint32_t *stride_out);
 
 namespace zizhan_outer_probe {
 struct Ro {
@@ -325,28 +332,43 @@ pads_back:
   IOLog("ZIZHAN_OUTER_SPI: DONE pads_restored=1 (clock votes kept)\n");
 }
 
-/* zizhan_outer_fold=1 (FOLD-01 step 2): the outer panel follows the lid. The loader keeps CTL1/INTF_2 scanning VIG2 from
- * 0xb8fc9900 (1080x2520, stride 4320, no-map splash tail); closed draws a big HH:MM (UTC+8) in white seven-segment digits on
- * black and refreshes it every 30 s, open clears to black. The INTF_2 MISR after each draw is logged as the closed-loop check. */
+/* zizhan_outer_fold=1 (daily default): closed draws MM-DD + battery % + HH:MM (UTC+8) on 0xb8fc9900 (1080x2520, stride 4320),
+ * open clears to black. zizhan_outer_fold=2: live interactive 2:1 iPadOS desktop (2160x1916 -> 1080x958 centered at y=781..1738)
+ * with top status bar while the inner 8.02" OLED is cover-muted. INTF_2 MISR signs every output frame as closed-loop proof. */
 namespace fold {
 /* Kept for the life of the system (no function-local statics: the kernel has no guard variables). */
 static IOMemoryMap *fb_map, *intf_map;
 static volatile uint8_t *fb_va, *intf_va;
 static bool ready, misr_on;
+static uint32_t mode_val;
+static uint8_t mode_parsed;
+static volatile uint32_t lid_closed, hud_dirty;
+
+static uint32_t current_mode() {
+  if (!mode_parsed) {
+    uint32_t v = 0;
+    if (!zizhan_daily::arg("zizhan_outer_fold", &v, zizhan_daily::kOuterFold)) {
+      v = 0;
+    }
+    mode_val = v;
+    mode_parsed = 1;
+  }
+  return mode_val;
+}
 static volatile uint8_t *map_once(uint64_t base, uint64_t bytes, IOOptionBits cache, IOMemoryMap **out) {
   auto m = IODeviceMemory::withRange(base, bytes);
   *out = m ? m->map(kIOMapAnywhere | cache) : nullptr;
-  if (m) m->release();
+  if (m) { m->release(); }
   return *out ? reinterpret_cast<volatile uint8_t *>((*out)->getVirtualAddress()) : nullptr;
 }
 static uint32_t ir(uint32_t at) { const uint32_t v = *reinterpret_cast<volatile uint32_t *>(intf_va + at); __asm__ volatile("dmb oshld" ::: "memory"); return v; }
 static void iw(uint32_t at, uint32_t v) { *reinterpret_cast<volatile uint32_t *>(intf_va + at) = v; __asm__ volatile("dsb sy" ::: "memory"); }
 static bool init() {
-  if (ready) return true;
+  if (ready) { return true; }
   const uint64_t base = 0xb8fc9900ull, page = base & ~0xfffull, skew = base - page;
   {
     Rw mdss;
-    if (!mdss.open(0xae00000, 0x84000, kIOMapInhibitCache)) return false;
+    if (!mdss.open(0xae00000, 0x84000, kIOMapInhibitCache)) { return false; }
     if (mdss.r(0x9000 + 0x14) != uint32_t(base)) { IOLog("ZIZHAN_OUTER_FOLD: SKIP vig2 not on the outer buffer\n"); return false; }
   }
   fb_va = map_once(page, ((skew + 2520ull * 4320) + 0xfff) & ~0xfffull, kIOMapWriteCombineCache, &fb_map);
@@ -356,52 +378,511 @@ static bool init() {
 }
 static inline volatile uint32_t *row(unsigned y) { return reinterpret_cast<volatile uint32_t *>(fb_va + (0xb8fc9900ull & 0xfffull) + uint64_t(y) * 4320); }
 static void rect(unsigned x0, unsigned y0, unsigned w, unsigned h, uint32_t c) {
-  for (unsigned y = y0; y < y0 + h && y < 2520; ++y) { volatile uint32_t *r = row(y); for (unsigned x = x0; x < x0 + w && x < 1080; ++x) r[x] = c; }
+  for (unsigned y = y0; y < y0 + h && y < 2520; ++y) {
+    volatile uint32_t *r = row(y);
+    for (unsigned x = x0; x < x0 + w && x < 1080; ++x) { r[x] = c; }
+  }
 }
 /* seven segments a..g of a W x H digit at (x, y), stroke t */
 static void digit(unsigned d, unsigned x, unsigned y, unsigned W, unsigned H, unsigned t, uint32_t c) {
   static const uint8_t seg[10] = {0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f};
-  const uint8_t m = seg[d % 10]; const unsigned h2 = H / 2;
-  if (m & 0x01) rect(x, y, W, t, c);                       // a
-  if (m & 0x02) rect(x + W - t, y, t, h2, c);              // b
-  if (m & 0x04) rect(x + W - t, y + h2, t, H - h2, c);     // c
-  if (m & 0x08) rect(x, y + H - t, W, t, c);               // d
-  if (m & 0x10) rect(x, y + h2, t, H - h2, c);             // e
-  if (m & 0x20) rect(x, y, t, h2, c);                      // f
-  if (m & 0x40) rect(x, y + h2 - t / 2, W, t, c);          // g
+  const uint8_t m = seg[d % 10];
+  const unsigned h2 = H / 2;
+  if (m & 0x01) { rect(x, y, W, t, c); }
+  if (m & 0x02) { rect(x + W - t, y, t, h2, c); }
+  if (m & 0x04) { rect(x + W - t, y + h2, t, H - h2, c); }
+  if (m & 0x08) { rect(x, y + H - t, W, t, c); }
+  if (m & 0x10) { rect(x, y + h2, t, H - h2, c); }
+  if (m & 0x20) { rect(x, y, t, h2, c); }
+  if (m & 0x40) { rect(x, y + h2 - t / 2, W, t, c); }
+}
+static void ensure_misr() {
+  if (!misr_on) {
+    iw(0x180, 1u << 10);
+    iw(0x180, 0x1u | (1u << 8) | (1u << 31) | (1u << 24));
+    misr_on = true;
+  }
+}
+static uint32_t misr_peek() {
+  ensure_misr();
+  return (ir(0x180) & (1u << 9)) ? ir(0x184) : 0;
 }
 static uint32_t misr() {
-  if (!misr_on) { iw(0x180, 1u << 10); iw(0x180, 0x1u | (1u << 8) | (1u << 31) | (1u << 24)); misr_on = true; }
+  ensure_misr();
   IOSleep(60);
   return (ir(0x180) & (1u << 9)) ? ir(0x184) : 0;
 }
+static void draw_battery_pill(unsigned x, unsigned y, int pct, bool charging) {
+  const unsigned bw = 96, bh = 44, bt = 5;
+  rect(x, y, bw, bt, 0xffd0d4dcu);
+  rect(x, y + bh - bt, bw, bt, 0xffd0d4dcu);
+  rect(x, y, bt, bh, 0xffd0d4dcu);
+  rect(x + bw - bt, y, bt, bh, 0xffd0d4dcu);
+  rect(x + bw, y + bh / 4, 7, bh / 2, 0xffd0d4dcu);
+  if (pct >= 0) {
+    const unsigned clamped = pct > 100 ? 100u : unsigned(pct);
+    const unsigned inner_max = bw - 2 * (bt + 4);
+    const unsigned fill = (inner_max * clamped + 50u) / 100u;
+    const uint32_t fc = charging ? 0xff34c759u : (clamped < 20u ? 0xffff9f0au : 0xffffffffu);
+    if (fill > 0) {
+      rect(x + bt + 4, y + bt + 4, fill, bh - 2 * (bt + 4), fc);
+    }
+    const unsigned dw = 24, dh = 44, dt = 6, dg = 7;
+    unsigned dx = x + bw + 20;
+    if (clamped >= 100u) {
+      digit(1, dx, y, dw, dh, dt, fc);
+      dx += dw + dg;
+      digit(0, dx, y, dw, dh, dt, fc);
+      dx += dw + dg;
+      digit(0, dx, y, dw, dh, dt, fc);
+    } else {
+      if (clamped >= 10u) {
+        digit(clamped / 10u, dx, y, dw, dh, dt, fc);
+        dx += dw + dg;
+      }
+      digit(clamped % 10u, dx, y, dw, dh, dt, fc);
+    }
+  }
+}
+static void draw_status_strip(unsigned y, bool include_time, zizhan_outer_touch::CalendarLocal *cal_out,
+                              int *pct_out, bool *chg_out) {
+  clock_sec_t sec = 0;
+  clock_usec_t usec = 0;
+  clock_get_calendar_microtime(&sec, &usec);
+  const auto cal = zizhan_outer_touch::calendar_utc8(uint64_t(sec));
+  const bool batt_ok = native_battery_stats[0] == 4;
+  const int pct = batt_ok ? int(native_battery_stats[1]) : -1;
+  const bool chg = batt_ok && ((native_battery_stats[5] & 4) != 0);
+  if (cal_out) { *cal_out = cal; }
+  if (pct_out) { *pct_out = pct; }
+  if (chg_out) { *chg_out = chg; }
+  rect(0, y > 8 ? (y - 8) : 0, 1080, 64, 0xff000000u);
+  const unsigned dw = 26, dh = 46, dt = 6, dg = 8;
+  unsigned cx = 64;
+  digit(cal.month / 10u, cx, y, dw, dh, dt, 0xffb8c0ccu); cx += dw + dg;
+  digit(cal.month % 10u, cx, y, dw, dh, dt, 0xffb8c0ccu); cx += dw + dg;
+  rect(cx, y + dh / 2 - dt / 2, 16, dt, 0xffb8c0ccu); cx += 16 + dg;
+  digit(cal.day / 10u, cx, y, dw, dh, dt, 0xffb8c0ccu); cx += dw + dg;
+  digit(cal.day % 10u, cx, y, dw, dh, dt, 0xffb8c0ccu); cx += dw + 28;
+  if (include_time) {
+    digit(cal.hour / 10u, cx, y, dw, dh, dt, 0xffffffffu); cx += dw + dg;
+    digit(cal.hour % 10u, cx, y, dw, dh, dt, 0xffffffffu); cx += dw + dg;
+    rect(cx, y + dh / 3 - dt / 2, dt, dt, 0xffffffffu);
+    rect(cx, y + (2 * dh) / 3 - dt / 2, dt, dt, 0xffffffffu);
+    cx += dt + dg;
+    digit(cal.minute / 10u, cx, y, dw, dh, dt, 0xffffffffu); cx += dw + dg;
+    digit(cal.minute % 10u, cx, y, dw, dh, dt, 0xffffffffu);
+  }
+  draw_battery_pill(800, y + 1, pct, chg);
+}
 static void draw(bool closed) {
-  if (!init()) return;
+  if (!init()) { return; }
   rect(0, 0, 1080, 2520, 0xff000000u);
   if (closed) {
-    clock_sec_t sec = 0; clock_usec_t usec = 0;
-    clock_get_calendar_microtime(&sec, &usec);
-    const unsigned local = unsigned((sec + 8 * 3600) % 86400), hh = local / 3600, mm = (local / 60) % 60;
+    zizhan_outer_touch::CalendarLocal cal{};
+    int pct = -1;
+    bool chg = false;
+    draw_status_strip(680, false, &cal, &pct, &chg);
     const unsigned W = 190, H = 360, t = 40, y = 980, gap = 40;
-    digit(hh / 10, 60, y, W, H, t, 0xffffffffu);
-    digit(hh % 10, 60 + W + gap, y, W, H, t, 0xffffffffu);
+    digit(cal.hour / 10u, 60, y, W, H, t, 0xffffffffu);
+    digit(cal.hour % 10u, 60 + W + gap, y, W, H, t, 0xffffffffu);
     rect(540 - t / 2, y + H / 3 - t / 2, t, t, 0xffffffffu);
     rect(540 - t / 2, y + 2 * H / 3 - t / 2, t, t, 0xffffffffu);
-    digit(mm / 10, 1080 - 60 - 2 * W - gap, y, W, H, t, 0xffffffffu);
-    digit(mm % 10, 1080 - 60 - W, y, W, H, t, 0xffffffffu);
+    digit(cal.minute / 10u, 1080 - 60 - 2 * W - gap, y, W, H, t, 0xffffffffu);
+    digit(cal.minute % 10u, 1080 - 60 - W, y, W, H, t, 0xffffffffu);
     __asm__ volatile("dsb sy" ::: "memory");
-    IOLog("ZIZHAN_OUTER_FOLD: closed clock %02u:%02u misr=%x\n", hh, mm, misr());
+    IOLog("ZIZHAN_OUTER_FOLD: closed clock %02u-%02u %02u:%02u batt=%d chg=%u misr=%x\n",
+          cal.month, cal.day, cal.hour, cal.minute, pct, chg ? 1u : 0u, misr());
   } else {
     __asm__ volatile("dsb sy" ::: "memory");
     IOLog("ZIZHAN_OUTER_FOLD: open black misr=%x\n", misr());
   }
 }
-}  // namespace fold
-extern "C" void zizhan_outer_fold_show(int closed) {
-  uint32_t on = 0;
-  if (!zizhan_daily::arg("zizhan_outer_fold", &on, zizhan_daily::kOuterFold) || on != 1) return;
-  fold::draw(closed != 0);
+
+static uint64_t mono_ms() {
+  uint64_t ns = 0;
+  absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+  return ns / 1000000ull;
 }
+
+static void cover_desktop_worker(void *, wait_result_t) {
+  thread_set_thread_name(current_thread(), "zizhan_outer_desk");
+  for (unsigned i = 0; i < 1200 && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE); ++i) {
+    IOSleep(100);
+  }
+  bool was_closed = false;
+  uint32_t last_seq = 0, seq_first = 0, seq_last = 0, blits = 0;
+  uint32_t first_misr = 0, last_misr = 0, prev_misr = 0, distinct_misrs = 0;
+  uint64_t last_hud_ms = 0, last_misr_ms = 0;
+  for (;;) {
+    const bool closed = __atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) != 0;
+    if (!closed) {
+      if (was_closed) {
+        was_closed = false;
+        uint32_t open_sig = 0;
+        if (init()) {
+          rect(0, 0, 1080, 2520, 0xff000000u);
+          __asm__ volatile("dsb sy" ::: "memory");
+          open_sig = misr();
+        }
+        IOLog("ZIZHAN_OUTER_DESKTOP: SUMMARY blits=%u seq_first=%u seq_last=%u first_misr=%x last_misr=%x distinct_misrs=%u open_misr=%x\n",
+              blits, seq_first, seq_last, first_misr, last_misr, distinct_misrs, open_sig);
+      }
+      IOSleep(60);
+      continue;
+    }
+    if (!init()) {
+      IOSleep(200);
+      continue;
+    }
+    const uint64_t now = mono_ms();
+    if (!was_closed) {
+      was_closed = true;
+      last_seq = 0; seq_first = 0; seq_last = 0; blits = 0;
+      first_misr = 0; last_misr = 0; prev_misr = 0; distinct_misrs = 0;
+      rect(0, 0, 1080, 2520, 0xff000000u);
+      rect(0, 777, 1080, 2, 0xff2c2c2eu);
+      rect(0, 1741, 1080, 2, 0xff2c2c2eu);
+      draw_status_strip(704, true, nullptr, nullptr, nullptr);
+      __asm__ volatile("dsb sy" ::: "memory");
+      ensure_misr();
+      last_hud_ms = now;
+      last_misr_ms = 0;
+      IOLog("ZIZHAN_OUTER_DESKTOP: ACTIVE viewport=1080x958@y781\n");
+    } else if (__atomic_exchange_n(&hud_dirty, 0u, __ATOMIC_ACQ_REL) || now - last_hud_ms >= 15000ull) {
+      draw_status_strip(704, true, nullptr, nullptr, nullptr);
+      __asm__ volatile("dsb sy" ::: "memory");
+      last_hud_ms = now;
+    }
+    const uint8_t *src_va = nullptr;
+    uint64_t src_phys = 0;
+    uint32_t src_w = 0, src_h = 0, src_stride = 0;
+    const uint32_t seq = pong_scanout_cover_snapshot(&src_va, &src_phys, &src_w, &src_h, &src_stride);
+    if (seq != 0 && src_va && (seq != last_seq || blits == 0)) {
+      const unsigned rows = zizhan_outer_touch::blit_2to1_bgra(
+          src_va, src_stride, src_w, src_h,
+          fb_va + (0xb8fc9900ull & 0xfffull), 4320u, zizhan_outer_touch::kDesktopY0);
+      if (rows > 0) {
+        __asm__ volatile("dsb sy" ::: "memory");
+        last_seq = seq;
+        if (!seq_first) { seq_first = seq; }
+        seq_last = seq;
+        ++blits;
+        if (blits == 1) {
+          IOSleep(30);
+        }
+        if (blits <= 3 || now - last_misr_ms >= 350ull) {
+          const uint32_t sig = misr_peek();
+          if (sig != 0) {
+            if (!first_misr) { first_misr = sig; }
+            last_misr = sig;
+            if (sig != prev_misr) {
+              ++distinct_misrs;
+              prev_misr = sig;
+            }
+          }
+          last_misr_ms = now;
+        }
+      }
+    }
+    IOSleep(30);
+  }
+}
+}  // namespace fold
+
+extern "C" uint32_t zizhan_outer_fold_mode(void) {
+  return fold::current_mode();
+}
+
+extern "C" void zizhan_outer_fold_show(int closed) {
+  const uint32_t m = fold::current_mode();
+  __atomic_store_n(&fold::lid_closed, closed ? 1u : 0u, __ATOMIC_RELEASE);
+  if (m == 1u) {
+    fold::draw(closed != 0);
+  }
+}
+
+#if XNU_PONG_WIFI || XNU_PONG_POWER
+static uint32_t outer_touch_synth;
+static void outer_touch_worker(void *, wait_result_t) {
+  thread_set_thread_name(current_thread(), "zizhan_outer_touch");
+  for (unsigned i = 0; i < 1200 && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE); ++i) {
+    IOSleep(100);
+  }
+  for (;;) {
+    if (!__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) {
+      IOSleep(50);
+      continue;
+    }
+    Rw vote, w0, w2, se1, se19, rst, irq, pads[4];
+    if (!vote.open(0x162000, 0x1000, kIOMapInhibitCache) ||
+        !w0.open(0x127000, 0x1000, kIOMapInhibitCache) ||
+        !w2.open(0x12e000, 0x1000, kIOMapInhibitCache) ||
+        !se1.open(0x984000, 0x4000, kIOMapInhibitCache) ||
+        !rst.open(0xf100000ull + 52ull * 0x1000, 0x1000, kIOMapInhibitCache) ||
+        !irq.open(0xf100000ull + 119ull * 0x1000, 0x1000, kIOMapInhibitCache)) {
+      IOLog("ZIZHAN_OUTER_TOUCH_LIVE: FAIL map\n");
+      while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) { IOSleep(200); }
+      continue;
+    }
+    bool pad_ok = true;
+    uint32_t saved_pads[4] = {};
+    for (unsigned i = 0; i < 4; ++i) {
+      if (!pads[i].open(0xf100000ull + uint64_t(72 + i) * 0x1000, 0x1000, kIOMapInhibitCache)) {
+        pad_ok = false;
+        break;
+      }
+      saved_pads[i] = pads[i].r(0);
+    }
+    if (!pad_ok || (w0.r(0x140) & 0x80000000u)) {
+      IOLog("ZIZHAN_OUTER_TOUCH_LIVE: SKIP se1-or-pads-unavailable\n");
+      while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) { IOSleep(200); }
+      continue;
+    }
+    if ((se1.r(0x48) & 1u) && !se1.r(0x278)) {
+      se1.w(0x278, (10u << 20) | (11u << 10) | 26u);
+    }
+    GeniI2c i2c;
+    const GeniIo i2c_io = {se_rd, se_wr, &se1};
+    uint32_t i2c_cfg = 0;
+    if (geni_i2c_prepare_poll(&i2c, &i2c_io, 0x28, &i2c_cfg)) {
+      IOLog("ZIZHAN_OUTER_TOUCH_LIVE: SKIP wl2866d-i2c-busy cfg=%x\n", i2c_cfg);
+      while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) { IOSleep(200); }
+      continue;
+    }
+    auto wr8 = [&](uint8_t reg, uint8_t v) -> bool {
+      const uint8_t b[2] = {reg, v};
+      if (geni_i2c_start_write_bytes(&i2c, b, 2)) { return false; }
+      int st = GeniPending;
+      for (unsigned i = 0; i < 2000 && st == GeniPending; ++i) { st = geni_i2c_poll(&i2c); if (st == GeniPending) { IODelay(50); } }
+      for (unsigned k = 0; k < 3 && st == GeniPending; ++k) { st = geni_i2c_timeout(&i2c); IODelay(1000); }
+      return st == GeniDone;
+    };
+    auto rd8 = [&](uint8_t reg, uint8_t *v) -> bool {
+      if (geni_i2c_start_read(&i2c, reg)) { return false; }
+      int st = GeniPending;
+      for (unsigned i = 0; i < 2000 && st == GeniPending; ++i) { st = geni_i2c_poll(&i2c); if (st == GeniPending) { IODelay(50); } }
+      for (unsigned k = 0; k < 3 && st == GeniPending; ++k) { st = geni_i2c_timeout(&i2c); IODelay(1000); }
+      if (st != GeniDone) { return false; }
+      *v = i2c.data;
+      return true;
+    };
+    uint8_t en0 = 0, dv0 = 0, av0 = 0;
+    if (!rd8(0x0e, &en0) || !rd8(0x04, &dv0) || !rd8(0x06, &av0)) {
+      IOLog("ZIZHAN_OUTER_TOUCH_LIVE: FAIL wl2866d-read\n");
+      while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) { IOSleep(200); }
+      continue;
+    }
+    const uint32_t s_rst = rst.r(0), s_rst_io = rst.r(4), s_irq = irq.r(0);
+    const uint32_t vote10_0 = vote.r(0x10);
+    rst.w(0, (s_rst & ~0x3ffu) | (1u << 9));
+    rst.w(4, 0);
+    irq.w(0, (s_irq & ~0x3ffu) | 3u);
+    const bool rails_ok = wr8(0x04, 0xc8) && wr8(0x06, 0x90) && wr8(0x0e, uint8_t((en0 | 0x0a) & 0x0f));
+    if (!rails_ok) {
+      rst.w(0, s_rst); rst.w(4, s_rst_io); irq.w(0, s_irq);
+      IOLog("ZIZHAN_OUTER_TOUCH_LIVE: FAIL wl2866d-rails\n");
+      while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) { IOSleep(200); }
+      continue;
+    }
+    IOSleep(10);
+    rst.w(4, 2);
+    for (unsigned ms = 0; ms < 250 && (irq.r(4) & 1u); ++ms) {
+      IOSleep(1);
+    }
+    vote.w(0x10, vote.r(0x10) | 0xfu);
+    uint32_t src_hz = 19200000, sel = 0;
+    if (w2.r(0x4f8) & 1u) {
+      static const uint32_t parent[8] = {19200000, 600000000, 0, 0, 0, 0, 300000000, 0};
+      src_hz = 0;
+      for (uint32_t l = 0; l < 8; ++l) {
+        const uint32_t cfg = w2.r(0x500 + 4 * l), m = w2.r(0x540 + 4 * l), nn = w2.r(0x580 + 4 * l);
+        uint64_t hz = parent[(cfg >> 8) & 7];
+        const uint32_t div = cfg & 0x1f, md = (cfg >> 12) & 3;
+        if (div) { hz = hz * 2 / (div + 1); }
+        if (md) { const uint32_t n = (~nn & 0xffff) + (m & 0xffff); if (n) { hz = hz * (m & 0xffff) / n; } }
+        if (hz >= 4000000 && (!src_hz || hz < src_hz)) { src_hz = uint32_t(hz); sel = l; }
+      }
+    } else {
+      w2.w(0x4e8, (w2.r(0x4e8) & ~0x371fu) | 1u);
+      w2.w(0x4e4, w2.r(0x4e4) | 1u);
+      for (unsigned i = 0; i < 500 && (w2.r(0x4e4) & 1u); ++i) { IODelay(10); }
+    }
+    vote.w(0x10, vote.r(0x10) | (1u << 8));
+    bool clk_on = false;
+    auto cbcr_off = [](uint32_t cbcr) { return (cbcr & 2u) ? 0u : (cbcr & 0x80000000u); };
+    for (unsigned i = 0; i < 1000 && !clk_on; ++i) {
+      clk_on = !(cbcr_off(w2.r(0x004)) | cbcr_off(w2.r(0x008)) | cbcr_off(w2.r(0x4dc)));
+      if (!clk_on) { IODelay(10); }
+    }
+    for (unsigned i = 0; i < 4; ++i) {
+      pads[i].w(0, (saved_pads[i] & ~0x3ffu) | (1u << 2) | (2u << 6));
+    }
+    bool spi_ready = clk_on && src_hz != 0 && se19.open(0x890000, 0x4000, kIOMapInhibitCache);
+    uint32_t depth = 0;
+    if (spi_ready) {
+      const uint32_t fw = se19.r(0x68);
+      depth = (se19.r(0xe24) >> 16) & 0x3f;
+      if (((fw >> 8) & 255u) != 1u || (se19.r(0x64) & 1u) || depth < 4u) {
+        spi_ready = false;
+      } else {
+        se19.w(0xe18, 0); se19.w(0x618, ~0u); se19.w(0x648, ~0u); se19.w(0xc44, ~0u); se19.w(0xd44, ~0u);
+        se19.w(0x28, se19.r(0x28) | 0x7f); se19.w(0xe30, se19.r(0xe30) | 0xf); se19.w(0x24, 0x7f); se19.w(0x20, 1);
+        se19.w(0x258, se19.r(0x258) & ~1u); se19.w(0x810, depth - 3); se19.w(0x814, depth - 2); se19.w(0x80c, 0);
+        se19.w(0xe1c, se19.r(0xe1c) | 0xf); se19.w(0x614, se19.r(0x614) | 0x7fc0007fu);
+        se19.w(0x22c, 0); se19.w(0x250, 0); se19.w(0x224, 0); se19.w(0x230, 0); se19.w(0x24c, 0);
+        se19.w(0x25c, se19.r(0x25c) & ~2u); se19.w(0x278, 0);
+        se19.w(0x260, 0x0007f8fe); se19.w(0x264, 0x000ffefe); se19.w(0x284, 0x0007f8fe); se19.w(0x288, 0x000ffefe);
+        se19.w(0x254, 0); se19.w(0x268, 8 - 4);
+        const uint32_t div = (src_hz + 1000000 - 1) / 1000000;
+        se19.w(0x7c, sel & 7); se19.w(0x48, ((div ? div : 1) << 4) | 1u);
+      }
+    }
+    auto xfer = [&](const uint8_t *tx, uint8_t *rx, uint32_t len) -> bool {
+      uint32_t sent = 0, got = 0;
+      for (unsigned i = 0; (se19.r(0x40) & 1u) && i < 2000; ++i) { IODelay(100); }
+      se19.w(0x618, ~0u); se19.w(0x26c, len); se19.w(0x270, len); se19.w(0x600, 3u << 27);
+      for (unsigned spin = 0; spin < 20000; ++spin) {
+        while (sent < len && (se19.r(0x800) & 0x0fffffffu) + 1 < depth) {
+          uint32_t w = 0;
+          for (unsigned j = 0; j < 4 && sent < len; ++j, ++sent) { w |= uint32_t(tx ? tx[sent] : 0) << (8 * j); }
+          se19.w(0x700, w);
+        }
+        const uint32_t st = se19.r(0x610);
+        const uint32_t rs = se19.r(0x804), words = rs & 0x1ffffff;
+        uint32_t bytes = words * 4;
+        if ((rs & 0x80000000u) && ((rs >> 28) & 7)) { bytes -= 4 - ((rs >> 28) & 7); }
+        for (uint32_t i = 0; i < words && words <= depth; ++i) {
+          const uint32_t v = se19.r(0x780);
+          for (unsigned j = 0; j < 4 && bytes; ++j, --bytes) {
+            if (got < len) {
+              if (rx) { rx[got] = uint8_t(v >> (8 * j)); }
+              ++got;
+            }
+          }
+        }
+        if (st & ((1u << 1) | (1u << 2) | (1u << 3) | (1u << 24) | (1u << 25) | (1u << 28) | (1u << 29))) { break; }
+        if (st & 1u) { se19.w(0x618, st); return got == len; }
+        IODelay(10);
+      }
+      se19.w(0x604, 1u << 2); IODelay(1000); se19.w(0x618, ~0u);
+      return false;
+    };
+    zizhan_outer_touch::Tracker tracker{};
+    uint16_t chip_id = 0, scr_x = 0, scr_y = 0;
+    uint8_t sys_hdr[2] = {};
+    if (spi_ready) {
+      auto hw_w8 = [&](uint32_t a, uint8_t v) {
+        const uint8_t b[6] = {0xfa, uint8_t(a >> 24), uint8_t(a >> 16), uint8_t(a >> 8), uint8_t(a), v};
+        return xfer(b, nullptr, 6);
+      };
+      (void)hw_w8(0x20000034u, 0x02);
+      (void)hw_w8(0x2000003eu, 0x07);
+      (void)hw_w8(0x2000002du, 0x02);
+      uint8_t id_tx[8] = {0xfb, 0x20, 0, 0, 0}, id_rx[8] = {};
+      if (xfer(id_tx, id_rx, 8)) {
+        chip_id = uint16_t((uint16_t(id_rx[6]) << 8) | id_rx[7]);
+      }
+      for (unsigned d = 0; d < 16 && !(irq.r(4) & 1u); ++d) {
+        uint8_t t2[10] = {0x87}, r2[10] = {};
+        if (!xfer(t2, r2, 10) || r2[2] == 0x00) { break; }
+      }
+      uint8_t stx[32] = {0xa7, 0x00, 0x00}, srx[32] = {};
+      if (xfer(stx, srx, 32)) {
+        sys_hdr[0] = srx[4];
+        sys_hdr[1] = srx[5];
+        if (sys_hdr[0] == 0xa5 && sys_hdr[1] == 0x01) {
+          scr_x = uint16_t(srx[4 + 0x14]) | (uint16_t(srx[4 + 0x15]) << 8);
+          scr_y = uint16_t(srx[4 + 0x16]) | (uint16_t(srx[4 + 0x17]) << 8);
+          zizhan_outer_touch::configure_sysinfo(tracker, scr_x, scr_y);
+        }
+      }
+      const uint8_t scan[3] = {0xa0, 0x00, 0x01};
+      (void)xfer(scan, nullptr, 3);
+      IOSleep(50);
+      for (unsigned d = 0; d < 16 && !(irq.r(4) & 1u); ++d) {
+        uint8_t t2[10] = {0x87}, r2[10] = {};
+        if (!xfer(t2, r2, 10) || r2[2] == 0x00) { break; }
+      }
+    }
+    const auto map_mode = (fold::current_mode() == 2u)
+        ? zizhan_outer_touch::MapMode::DesktopViewport
+        : zizhan_outer_touch::MapMode::ClockWakeOnly;
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: UP ok=%u id=%04x sysinfo=%02x%02x/%ux%u super_res=%u max=%ux%u irq=%u map_mode=%u\n",
+          (spi_ready && chip_id == 0x3640u) ? 1u : 0u, chip_id, sys_hdr[0], sys_hdr[1], scr_x, scr_y,
+          tracker.super_res ? 1u : 0u, tracker.max_x, tracker.max_y, irq.r(4) & 1u, unsigned(map_mode));
+    auto dispatch_step = [&](const zizhan_outer_touch::StepResult &sr) {
+      if (sr.refresh_hud) {
+        __atomic_store_n(&fold::hud_dirty, 1u, __ATOMIC_RELEASE);
+        if (fold::current_mode() == 1u) {
+          fold::draw(true);
+        }
+      }
+      for (uint8_t k = 0; k < sr.count; ++k) {
+        const auto &op = sr.ops[k];
+        pong_touch_post(op.type, op.finger, op.x, op.y);
+      }
+      if (sr.rearm_scan && spi_ready) {
+        const uint8_t scan[3] = {0xa0, 0x00, 0x01};
+        (void)xfer(scan, nullptr, 3);
+      }
+    };
+    const uint64_t up_ms = fold::mono_ms();
+    bool synth_done = false;
+    while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) {
+      if (spi_ready && !(irq.r(4) & 1u)) {
+        for (unsigned n = 0; n < 16 && !(irq.r(4) & 1u); ++n) {
+          uint8_t t2[10] = {0x87}, r2[10] = {};
+          if (!xfer(t2, r2, 10) || r2[2] == 0x00) { break; }
+          const auto sr = zizhan_outer_touch::step(tracker, &r2[2], map_mode);
+          dispatch_step(sr);
+        }
+      }
+      if (outer_touch_synth == 1u && !synth_done && fold::mono_ms() - up_ms >= 2000ull) {
+        synth_done = true;
+        const uint32_t sx = tracker.max_x / 5u;
+        const uint32_t sy = (uint64_t(zizhan_outer_touch::kDesktopY0 + 180u) * tracker.max_y) / zizhan_outer_touch::kPanelH;
+        uint8_t e1[8] = {0x13, 0x01, 0, 0, 0, 0, 0x20, 0};
+        uint8_t e2[8] = {0x23, 0x01, 0, 0, 0, 0, 0x20, 0};
+        uint8_t e3[8] = {0x33, 0x01, 0, 0, 0, 0, 0x00, 0};
+        if (tracker.super_res) {
+          e1[2] = uint8_t(sx); e1[3] = uint8_t(sx >> 8); e1[4] = uint8_t(sy); e1[5] = uint8_t(sy >> 8);
+          const uint32_t sy2 = sy + tracker.max_y / 40u;
+          e2[2] = uint8_t(sx); e2[3] = uint8_t(sx >> 8); e2[4] = uint8_t(sy2); e2[5] = uint8_t(sy2 >> 8);
+        } else {
+          e1[2] = uint8_t(sx); e1[3] = uint8_t(((sx >> 8) & 0xfu) | ((sy & 0xfu) << 4)); e1[4] = uint8_t(sy >> 4);
+          const uint32_t sy2 = sy + 20u;
+          e2[2] = uint8_t(sx); e2[3] = uint8_t(((sx >> 8) & 0xfu) | ((sy2 & 0xfu) << 4)); e2[4] = uint8_t(sy2 >> 4);
+        }
+        dispatch_step(zizhan_outer_touch::step(tracker, e1, map_mode));
+        IOSleep(40);
+        dispatch_step(zizhan_outer_touch::step(tracker, e2, map_mode));
+        IOSleep(40);
+        dispatch_step(zizhan_outer_touch::step(tracker, e3, map_mode));
+        IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth injected mode=%u events=%u posted=%u hud_taps=%u\n",
+              unsigned(map_mode), tracker.events, tracker.posted, tracker.hud_taps);
+      }
+      IOSleep(8);
+    }
+    zizhan_outer_touch::StepResult rel{};
+    zizhan_outer_touch::release_all(tracker, rel);
+    for (uint8_t k = 0; k < rel.count; ++k) {
+      pong_touch_post(rel.ops[k].type, rel.ops[k].finger, rel.ops[k].x, rel.ops[k].y);
+    }
+    rst.w(4, 0);
+    IOSleep(2);
+    const bool r1 = wr8(0x0e, en0), r2 = wr8(0x04, dv0), r3 = wr8(0x06, av0);
+    for (unsigned i = 0; i < 4; ++i) { pads[i].w(0, saved_pads[i]); }
+    if (!(vote10_0 & (1u << 8))) {
+      vote.w(0x10, vote.r(0x10) & ~(1u << 8));
+    }
+    const unsigned end_irq = irq.r(4) & 1u;
+    rst.w(0, s_rst); rst.w(4, s_rst_io); irq.w(0, s_irq);
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u restored=%u irq_end=%u\n",
+          tracker.events, tracker.posted, tracker.hud_taps, (r1 && r2 && r3) ? 1u : 0u, end_irq);
+  }
+}
+#endif
 
 static uint32_t probe_mode;
 static void worker(void *, wait_result_t) {
@@ -447,11 +928,31 @@ static void worker(void *, wait_result_t) {
 
 static void start() {
   uint32_t mode = 0;
-  if (!PE_parse_boot_argn("zizhan_outer_probe", &mode, sizeof mode) || !mode) return;
+  const bool have_probe = PE_parse_boot_argn("zizhan_outer_probe", &mode, sizeof mode) && mode != 0;
+  if (fold::current_mode() == 2u) {
+    thread_t td = THREAD_NULL;
+    if (kernel_thread_start(fold::cover_desktop_worker, nullptr, &td) == KERN_SUCCESS) {
+      thread_deallocate(td);
+    }
+    IOLog("ZIZHAN_OUTER_DESKTOP: READY mode=2\n");
+  }
+#if XNU_PONG_WIFI || XNU_PONG_POWER
+  uint32_t touch_on = 0;
+  if ((!have_probe || mode < 4u) &&
+      zizhan_daily::arg("zizhan_outer_touch", &touch_on, zizhan_daily::kOuterTouch) && touch_on == 1u) {
+    (void)PE_parse_boot_argn("zizhan_outer_touch_synth", &outer_touch_synth, sizeof outer_touch_synth);
+    thread_t tt = THREAD_NULL;
+    if (kernel_thread_start(outer_touch_worker, nullptr, &tt) == KERN_SUCCESS) {
+      thread_deallocate(tt);
+    }
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: READY lid-gated=1 synth=%u\n", outer_touch_synth);
+  }
+#endif
+  if (!have_probe) { return; }
   if (mode < 1 || mode > 5) { IOLog("ZIZHAN_OUTER_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
   probe_mode = mode;
   thread_t t = THREAD_NULL;
-  if (kernel_thread_start(worker, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t);
+  if (kernel_thread_start(worker, nullptr, &t) == KERN_SUCCESS) { thread_deallocate(t); }
   IOLog("ZIZHAN_OUTER_PROBE: RUNNING mode=%u readonly=%u\n", mode, (mode == 1 || mode == 3) ? 1u : 0u);
 }
 } // namespace zizhan_outer_probe

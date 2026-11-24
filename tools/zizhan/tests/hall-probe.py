@@ -17,9 +17,12 @@ probe = probe.replace('__asm__ volatile("dmb oshld" ::: "memory");', '')
 # FOLD-01 follow mode (zizhan_hall_observe=2) collaborators; mode 1 never calls them.
 LID_STUBS = r"""
 extern "C" int zizhan_display_power_state(void) { return 1; }
+extern "C" int zizhan_inner_panel_cover_mute(int) { return 0; }
+extern "C" void pong_scanout_set_cover_redirect(int) {}
 extern "C" { volatile uint32_t pong_zc_flipped_tag = 1; }
 extern "C" void pong_touch_post(uint32_t, uint32_t, uint32_t, uint32_t) {}
 extern "C" void zizhan_outer_fold_show(int) {}
+extern "C" uint32_t zizhan_outer_fold_mode(void) { return 1u; }
 """
 harness = r'''
 #include <assert.h>
@@ -64,7 +67,7 @@ static int kernel_thread_start(void(*worker)(void*,int),void *arg,int *thread) {
 }
 static bool daily_absent;
 static bool PE_parse_boot_argn(const char *key, void *out, size_t n) {
-  if(!strcmp(key,"zizhan_hall_simulate")){return false;}
+  if(!strcmp(key,"zizhan_hall_simulate") || !strcmp(key,"zizhan_hall_simulate_dur")){return false;}
   if(!strcmp(key,"zizhan_daily")){unsigned off=0;assert(n==sizeof off);if(daily_absent){return false;}memcpy(out,&off,n);return true;}
   assert(!strcmp(key,"zizhan_hall_observe") && n==sizeof(mode));
   memcpy(out,&mode,n);return mode!=0;

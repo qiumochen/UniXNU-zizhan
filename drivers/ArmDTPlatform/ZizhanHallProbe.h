@@ -15,9 +15,12 @@
 extern "C" struct vnode *rootvnode;
 /* zizhan_hall_observe=2 (FOLD-01): the inner display follows the lid through one power-key press. */
 extern "C" int zizhan_display_power_state(void) __attribute__((weak));
+extern "C" int zizhan_inner_panel_cover_mute(int muted) __attribute__((weak));
+extern "C" void pong_scanout_set_cover_redirect(int active) __attribute__((weak));
 extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 extern "C" void zizhan_outer_fold_show(int closed) __attribute__((weak));
+extern "C" uint32_t zizhan_outer_fold_mode(void) __attribute__((weak));
 
 namespace zizhan_hall {
 struct Inputs {
@@ -29,6 +32,7 @@ struct Inputs {
   uint32_t debounce_ms;
   uint32_t follow;
   uint32_t simulate_s;
+  uint32_t simulate_dur_s;
 };
 
 static bool read32(IORegistryEntry *entry, const char *key, uint32_t &value) {
@@ -131,10 +135,11 @@ static void worker(void *arg, wait_result_t) {
     const bool high = (raw & 1u) != 0;
     bool asserted = config.active_low ? !high : high;
     const uint64_t when = nowNs();
-    // zizhan_hall_simulate=<s> (follow mode self-test): closed from s to s+15 seconds after the observer started.
+    // zizhan_hall_simulate=<s> (follow mode self-test): closed from s to s+dur seconds after the observer started.
     if (config.simulate_s) {
+      const uint64_t dur = config.simulate_dur_s ? config.simulate_dur_s : 15u;
       const uint64_t t = (when - begin) / 1000000000ULL;
-      const bool sim = t >= config.simulate_s && t < config.simulate_s + 15;
+      const bool sim = t >= config.simulate_s && t < config.simulate_s + dur;
       asserted = sim;
     }
     const auto update = sample(state, asserted, when, debounce_ns);
@@ -149,21 +154,62 @@ static void worker(void *arg, wait_result_t) {
       if (config.follow && update.event == Event::Transition) {
         const int display = zizhan_display_power_state ? zizhan_display_power_state() : -1;
         const bool desktop = &pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE);
+        const uint32_t outer_mode = zizhan_outer_fold_mode ? zizhan_outer_fold_mode() : 1u;
         const uint64_t now_ms = when / 1000000ULL;
-        const auto action = desktop ? zizhan_lid::decide(true, update.stable, display, now_ms, pressed, last_press_ms)
-                                    : zizhan_lid::Action::None;
-        IOLog("ZIZHAN_LID: %s lid=%s display=%d desktop=%u presses=%u skips=%u\n", zizhan_lid::name(action),
-              update.stable ? "closed" : "open", display, desktop ? 1u : 0u, presses, skips);
-        if (zizhan_outer_fold_show) { zizhan_outer_fold_show(update.stable ? 1 : 0); outer_refresh_ns = when; }
-        if (action == zizhan_lid::Action::PressSleep || action == zizhan_lid::Action::PressWake) {
-          pong_touch_post(4u, 0u, 0, 0);   // PongButtonDown, power
-          IOSleep(120);
-          pong_touch_post(5u, 0u, 0, 0);   // PongButtonUp
-          pressed = true;
-          last_press_ms = now_ms;
-          ++presses;
-        } else if (action != zizhan_lid::Action::None) {
-          ++skips;
+        if (desktop && outer_mode == 2u) {
+          if (update.stable) {
+            if (pong_scanout_set_cover_redirect) {
+              pong_scanout_set_cover_redirect(1);
+            }
+            if (zizhan_inner_panel_cover_mute) {
+              (void)zizhan_inner_panel_cover_mute(1);
+            }
+            if (zizhan_outer_fold_show) {
+              zizhan_outer_fold_show(1);
+              outer_refresh_ns = when;
+            }
+            IOLog("ZIZHAN_LID: cover-desktop lid=closed display=%d desktop=1 presses=%u skips=%u\n",
+                  display, presses, skips);
+          } else {
+            if (zizhan_outer_fold_show) {
+              zizhan_outer_fold_show(0);
+              outer_refresh_ns = when;
+            }
+            if (zizhan_inner_panel_cover_mute) {
+              (void)zizhan_inner_panel_cover_mute(0);
+            }
+            if (pong_scanout_set_cover_redirect) {
+              pong_scanout_set_cover_redirect(0);
+            }
+            const int disp_after = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+            const auto action = zizhan_lid::decide(true, false, disp_after, now_ms, pressed, last_press_ms);
+            IOLog("ZIZHAN_LID: cover-desktop lid=open action=%s display=%d presses=%u skips=%u\n",
+                  zizhan_lid::name(action), disp_after, presses, skips);
+            if (action == zizhan_lid::Action::PressWake) {
+              pong_touch_post(4u, 0u, 0, 0);
+              IOSleep(120);
+              pong_touch_post(5u, 0u, 0, 0);
+              pressed = true;
+              last_press_ms = now_ms;
+              ++presses;
+            }
+          }
+        } else {
+          const auto action = desktop ? zizhan_lid::decide(true, update.stable, display, now_ms, pressed, last_press_ms)
+                                      : zizhan_lid::Action::None;
+          IOLog("ZIZHAN_LID: %s lid=%s display=%d desktop=%u presses=%u skips=%u\n", zizhan_lid::name(action),
+                update.stable ? "closed" : "open", display, desktop ? 1u : 0u, presses, skips);
+          if (zizhan_outer_fold_show) { zizhan_outer_fold_show(update.stable ? 1 : 0); outer_refresh_ns = when; }
+          if (action == zizhan_lid::Action::PressSleep || action == zizhan_lid::Action::PressWake) {
+            pong_touch_post(4u, 0u, 0, 0);   // PongButtonDown, power
+            IOSleep(120);
+            pong_touch_post(5u, 0u, 0, 0);   // PongButtonUp
+            pressed = true;
+            last_press_ms = now_ms;
+            ++presses;
+          } else if (action != zizhan_lid::Action::None) {
+            ++skips;
+          }
         }
       }
     }
@@ -205,7 +251,12 @@ static void start(IOService *platform) {
   uint32_t simulate = 0;
   if (config.follow && PE_parse_boot_argn("zizhan_hall_simulate", &simulate, sizeof(simulate)) && simulate >= 30 && simulate <= 600) {
     config.simulate_s = simulate;
-    IOLog("ZIZHAN_HALL: SIMULATE closed at %u s for 15 s (sensor ignored)\n", simulate);
+    uint32_t dur = 15;
+    if (!PE_parse_boot_argn("zizhan_hall_simulate_dur", &dur, sizeof(dur)) || dur < 10 || dur > 120) {
+      dur = 15;
+    }
+    config.simulate_dur_s = dur;
+    IOLog("ZIZHAN_HALL: SIMULATE closed at %u s for %u s (sensor ignored)\n", simulate, dur);
   }
   *copy = config;
   if (kernel_thread_start(worker, copy, &thread) != KERN_SUCCESS) {

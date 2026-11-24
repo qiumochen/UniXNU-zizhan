@@ -8,7 +8,7 @@
 namespace zizhan_daily {
 // Values used when the profile is on and the feature's own boot arg is absent.
 constexpr uint32_t kThermalMode = 2, kThermalCpuC = 90, kThermalGpuC = 85;
-constexpr uint32_t kDisplayPower = 1, kPowerObserve = 1, kHallObserve = 2, kOuterFold = 1;
+constexpr uint32_t kDisplayPower = 1, kPowerObserve = 1, kHallObserve = 2, kOuterFold = 1, kOuterTouch = 1;
 // POWER-04 (power-6/7): CPU 2..7 offline while the display is off; needs processor_exit (on by default with patch 0028).
 constexpr uint32_t kCpuOffline = 1;
 

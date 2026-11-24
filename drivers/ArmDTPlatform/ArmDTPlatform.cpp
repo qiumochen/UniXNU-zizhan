@@ -42,12 +42,15 @@ extern "C" bool pong_cpu_start(IOService *platform);
 extern "C" {
 volatile uint32_t pong_zc_flipped_tag = 0;
 int zizhan_dsi_power_sequence(const uint8_t *, const uint16_t *, uint32_t, int) { return -1; }
+void pong_scanout_set_cover_redirect(int) {}
+uint32_t pong_scanout_cover_snapshot(const uint8_t **, uint64_t *, uint32_t *, uint32_t *, uint32_t *) { return 0; }
 }
 #endif
 #if !(XNU_PONG_WIFI || XNU_PONG_POWER)
 extern "C" {
 int pong_backlight_level(uint32_t *) { return -1; }
 int pong_backlight_set(uint32_t, uint32_t) { return -1; }
+volatile int32_t native_battery_stats[16] = {};
 }
 #endif
 #if XNU_PONG_WIFI
@@ -258,7 +261,8 @@ bool ArmDTPlatform::configure (IOService *provider)
     return false;
   }
   armdt_platform_configured = 1;
-  IOLog("ZIZHAN_DAILY: profile=%u (thermal=2 cpu90 gpu85, display_power=1, power_observe=1, hall_observe=2, outer_fold=1, cpu_offline=1 unless set; zizhan_daily=0 disables)\n",
+  zizhan_display_power_service::init();
+  IOLog("ZIZHAN_DAILY: profile=%u (thermal=2 cpu90 gpu85, display_power=1, power_observe=1, hall_observe=2, outer_fold=1, outer_touch=1, cpu_offline=1 unless set; zizhan_daily=0 disables)\n",
         zizhan_daily::profile_on() ? 1u : 0u);
   zizhan_tsens::start(provider);
   zizhan_thermal::start(provider);

@@ -5,6 +5,7 @@
  */
 #include "PongAdrenoScanout.h"
 #include "ZizhanShotTiming.h"
+#include "ZizhanZcFence.h"
 #include "../PongPower/PongDsiLease.h"
 #include "../PongPower/ZizhanPanelPool.h"
 #include "../PongPower/ZizhanPanelProgram.h"
@@ -328,7 +329,9 @@ uint32_t dsiOwner;
 constexpr uint64_t SlotStride=0x1100000;   /* 17 MiB: 2160 x 1916 at up to 8704 bytes per row (CoreAnimation's 256-aligned rows, g152l) */
 uint32_t dbCurStride;   /* SSPP_YSTRIDE0 as last written by dbFlip (0 = the firmware's) */
 /* step 3.2 (pong_zc=2): frames shown straight from a canvas slot, no presenter copy */
-uint64_t zcFrames,zcInPlace,zcFenceUs,zcFenceMaxUs,zcFenceTimeouts,zcLatchUs,zcLatchMaxUs,zcLatchTimeouts;
+uint64_t zcFrames,zcInPlace,zcFenceUs,zcFenceMaxUs,zcFenceTimeouts,zcLatchUs,zcLatchMaxUs,zcLatchTimeouts,zcChasedSaved;
+uint32_t zcFenceMode = zizhan_zc_fence::SwapCompositor;
+bool zcArgsParsed;
 struct {uint32_t pipes[8];unsigned count;uint32_t ctl,flush;} dbPipes;
 uint64_t dbFlips,dbWaits,dbWaitMaxUs,dbLatchMaxUs,dbInPlace,dbCpuFlips,dbTaken;unsigned dbLogged;
 /* g152 (2026-10-31 18:42, pong_dpu_flip=2): the phone hung hard - no fastboot, no adb, no watchdog return in 7 minutes, a power-key reset
@@ -461,7 +464,16 @@ int dbTarget(void)
 void dbInit(uint64_t physical,size_t rounded,uint32_t stride,uint32_t height)
 {
     char text[300];
-    unsigned want=2;(void)PE_parse_boot_argn("pong_dpu_bufs",&want,sizeof want);   /* 2 own buffers + 3 canvas slots (g152w) */if(want<2)want=2;if(want>DbMax-1)want=DbMax-1;
+    zc = 2;
+    (void)PE_parse_boot_argn("pong_zc", &zc, sizeof(zc));
+    unsigned want = (zc >= 2) ? 1 : 2;   /* zero-copy uses 1 pool copy buffer (+ db[0]) so 128 MiB holds 6 canvas slots (uxz-3) */
+    (void)PE_parse_boot_argn("pong_dpu_bufs", &want, sizeof(want));
+    if (want < 1) {
+        want = 1;
+    }
+    if (want > DbMax - 1) {
+        want = DbMax - 1;
+    }
     (void)PE_parse_boot_argn("pong_dpu_flip_test",&dbTest,sizeof dbTest);(void)PE_parse_boot_argn("pong_dpu_flip_klog",&dbKlog,sizeof dbKlog);
     /* g152c (2026-10-31) hung with no MDSS write at all; mode 3 isolates the other half: the presenter gets the mode-2 two-range mapping
      * (panel memory + the splash tail) and copies into the panel memory, but no display clock is touched, no MDSS register read or
@@ -501,7 +513,6 @@ void dbInit(uint64_t physical,size_t rounded,uint32_t stride,uint32_t height)
                 shotMapPool(lease[0],lease[1]);
                 for(unsigned i=0;i<n;++i){db[dbN]={lease[0]+uint64_t(i)*stride,uint64_t(i)*stride};++dbN;}
                 dbPoolBytes=uint64_t(n)*stride;
-                zc=2;(void)PE_parse_boot_argn("pong_zc",&zc,sizeof zc);   /* default: canvases in slots and flipped directly (g152t/w) */
                 const unsigned total=poolLayout.total_strides;
                 if(!slotLock)slotLock=IOSimpleLockAlloc();
                 (void)PE_parse_boot_argn("pong_slot_premap",&slotPreMap,sizeof slotPreMap);
@@ -634,8 +645,9 @@ void dbStats(const char *when)
     if(!dbN)return;
     if(zcFrames) {
         char text[260];
-        dpuLine(text,snprintf(text,sizeof text,"PONG ZC %s: frames %llu in-place %llu, fence wait avg %llu max %llu us (timeouts %llu), latch wait avg %llu max %llu us (timeouts %llu)\n",when,
+        dpuLine(text,snprintf(text,sizeof text,"PONG ZC %s: frames %llu in-place %llu, fence wait avg %llu max %llu us (timeouts %llu, mode %u saved %llu), latch wait avg %llu max %llu us (timeouts %llu)\n",when,
             (unsigned long long)zcFrames,(unsigned long long)zcInPlace,(unsigned long long)(zcFenceUs/zcFrames),(unsigned long long)zcFenceMaxUs,(unsigned long long)zcFenceTimeouts,
+            zcFenceMode,(unsigned long long)zcChasedSaved,
             (unsigned long long)(zcLatchUs/zcFrames),(unsigned long long)zcLatchMaxUs,(unsigned long long)zcLatchTimeouts));
     }
     char text[240];
@@ -1320,8 +1332,10 @@ static int finish();static int zcFlip(int zi,uint32_t stride);
  * the halves of two frames). Return value 3 = flipped, latch pending. iOSPlus10 0234 (fZCShown/fZCNext, zeroCopyRetire) is the same
  * idea driven by a vsync tick. */
 extern "C" {volatile uint32_t pong_zc_flipped_tag,pong_zc_latched_tag;}
-uint32_t zcTag;unsigned zcAsync;
-extern "C" void pong_scanout_set_tag(uint32_t tag){zcTag=tag;}
+uint32_t zcTag, zcFence;
+unsigned zcAsync;
+extern "C" void pong_scanout_set_tag(uint32_t tag) { zcTag = tag; }
+extern "C" void pong_scanout_set_fence(uint32_t fence) { zcFence = fence; }
 static void zcLatchedTo(uint32_t t){for(;;){const uint32_t o=pong_zc_latched_tag;if(int32_t(t-o)<=0)return;if(OSCompareAndSwap(o,t,&pong_zc_latched_tag))return;}}
 extern "C" uint32_t pong_scanout_latch_poll(void)
 {
@@ -1390,14 +1404,38 @@ extern "C" int pong_scanout_frame(IOMemoryDescriptor *source,size_t offset,uint3
 static int zcFlip(int zi,uint32_t stride)
 {
     const uint64_t z0=mach_absolute_time();
-    if(!zcFrames)(void)PE_parse_boot_argn("pong_zc_async",&zcAsync,sizeof zcAsync);
-    ++zcFrames;dbSettle();
-    if(zi==dbShown)++zcInPlace;   /* CoreAnimation drew into the canvas on screen: that frame tore */
-    uint32_t submitted=0,retired=0;const uint64_t f0=mach_absolute_time();
-    if(pong_gpu_fences(&submitted,&retired)) {
-        unsigned k=0;
-        while(int32_t(submitted-retired)>0 && k<500){IODelay(100);++k;if(!pong_gpu_fences(&submitted,&retired))break;}   /* <= 50 ms */
-        if(int32_t(submitted-retired)>0)++zcFenceTimeouts;
+    if (!zcArgsParsed) {
+        (void)PE_parse_boot_argn("pong_zc_async", &zcAsync, sizeof(zcAsync));
+        (void)PE_parse_boot_argn("pong_zc_fence_mode", &zcFenceMode, sizeof(zcFenceMode));
+        zcArgsParsed = true;
+    }
+    const uint32_t swapFence = zcFence;
+    zcFence = 0;
+    ++zcFrames;
+    dbSettle();
+    if (zi == dbShown) {
+        ++zcInPlace;   /* CoreAnimation drew into the canvas on screen: that frame tore */
+    }
+    uint32_t submitted = 0, retired = 0, target = 0;
+    const uint64_t f0 = mach_absolute_time();
+    if (pong_gpu_fences(&submitted, &retired)) {
+        target = zizhan_zc_fence::initial_target(zcFenceMode, swapFence, submitted);
+        unsigned k = 0;
+        uint32_t latest = submitted;
+        while (zizhan_zc_fence::needs_wait(target, retired) && k < 500) {
+            IODelay(100);
+            ++k;
+            if (!pong_gpu_fences(&latest, &retired)) {
+                break;
+            }
+            target = zizhan_zc_fence::poll_target(zcFenceMode, target, latest);
+        }
+        if (int32_t(latest - target) > 0) {
+            ++zcChasedSaved;
+        }
+        if (zizhan_zc_fence::needs_wait(target, retired)) {
+            ++zcFenceTimeouts;
+        }
     }
     const uint64_t fw=us(mach_absolute_time()-f0);zcFenceUs+=fw;if(fw>zcFenceMaxUs)zcFenceMaxUs=fw;
     uint64_t lw=0;
@@ -1422,7 +1460,7 @@ static int zcFlip(int zi,uint32_t stride)
     if(zcFrames<=4) {
         char text[220];
         dpuLine(text,snprintf(text,sizeof text,"PONG ZC: frame %llu: buffer %d at 0x%llx stride %u, fence %u/%u after %llu us, %s after %llu us\n",
-            (unsigned long long)zcFrames,zi,(unsigned long long)db[zi].phys,stride,submitted,retired,(unsigned long long)fw,dbShown==zi?"shown":zcAsync?"flipped (async)":"NOT latched",(unsigned long long)lw));
+            (unsigned long long)zcFrames,zi,(unsigned long long)db[zi].phys,stride,target,retired,(unsigned long long)fw,dbShown==zi?"shown":zcAsync?"flipped (async)":"NOT latched",(unsigned long long)lw));
     }
     pending={true,true,true,++sequence,0,nullptr,nullptr,stride,z0,-1};pending.target=zi;
     const int r=finish();

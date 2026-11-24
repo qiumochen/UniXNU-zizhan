@@ -17,7 +17,7 @@ inline bool plan(uint64_t pool_bytes, uint64_t stride, unsigned requested_buffer
     if (!layout || !stride || db_capacity < 4 || !slot_capacity) return false;
     const uint64_t total64 = pool_bytes / stride;
     if (total64 < 2 || total64 > UINT32_MAX) return false;
-    unsigned buffers = requested_buffers < 2 ? 2 : requested_buffers;
+    unsigned buffers = requested_buffers == 0 ? 2 : requested_buffers;
     if (buffers > db_capacity - 1) buffers = db_capacity - 1;
     if (buffers > 3) buffers = 3;
     if (buffers > total64) buffers = static_cast<unsigned>(total64);

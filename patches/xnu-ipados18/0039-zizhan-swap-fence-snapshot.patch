@@ -1,0 +1,61 @@
+zizhan: snapshot compositor GPU fence at SwapEnd (0039) so zero-copy scanout waits only on each swap's own render
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -51,6 +51,8 @@
+ extern "C" void pong_scanout_cpu_frame(void);
+ extern "C" void pong_scanout_set_tag(uint32_t);         /* zizhan 0013: the swap id of the next pong_scanout_frame */
+ extern "C" uint32_t pong_scanout_latch_poll(void);      /* zizhan 0013: the newest swap id whose flip has latched */
++extern "C" uint32_t pong_gpu_present_fence(void);       /* zizhan 0039: compositor GPU fence at SwapEnd */
++extern "C" void pong_scanout_set_fence(uint32_t);       /* zizhan 0039: target GPU fence for pong_scanout_frame */
+ #endif
+ #if XNU_PONG_BACKLIGHT
+ extern "C" void pong_backlight_start(IOService *display);
+@@ -242,6 +244,10 @@
+ 	IOLock *        fSwapLock;              /* around the next five */
+ 	uint8_t         fSwap[SWAP_QUEUE][SWAP_SIZE];   /* the swaps on their way to the panel (fb_queue), from fSwapFirst on */
+ 	MiniIOSurface * fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS]; /* ... their surfaces, held from SwapEnd on: their maker may let go of them */
++#if XNU_PONG_ADRENO_PLATFORM
++	uint32_t        fSwapFence[SWAP_QUEUE]; /* zizhan 0039: GPU fence snapshotted at SwapEnd */
++	uint32_t        fActiveSwapFence;
++#endif
+ 	unsigned        fSwapFirst, fSwapsWaiting;
+ 	// zizhan POWER-02: serialized by fSwapLock; software drain only.
+ 	zizhan_display::Owner fDisplayOwner;
+@@ -897,6 +903,9 @@
+ 	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz() * 5 / 4, &period);
+ 	nanoseconds_to_absolutetime(FRAME_PAUSE * NSEC_PER_MSEC, &pause);
+ 	clock_interval_to_deadline(SWAP_HELD_MS, kMillisecondScale, &deadline);
++#if XNU_PONG_ADRENO_PLATFORM
++	const uint32_t presentFence = pong_gpu_present_fence();
++#endif
+ 	if (gTouchLat) {
+ 		IOLog("tl: s %u at %llu\n", swapWord(swap, SWAP_ID), micros(now));
+ 	}
+@@ -917,6 +926,9 @@
+ 	unsigned slot = (fSwapFirst + fSwapsWaiting) % SWAP_QUEUE;
+ 
+ 	memcpy(fSwap[slot], swap, SWAP_SIZE);
++#if XNU_PONG_ADRENO_PLATFORM
++	fSwapFence[slot] = presentFence;
++#endif
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
+ 
+@@ -950,6 +962,9 @@
+ 		}
+ 		memcpy(swap, fSwap[fSwapFirst], SWAP_SIZE);
+ 		memcpy(surfaces, fSwapSurfaces[fSwapFirst], sizeof(surfaces));
++#if XNU_PONG_ADRENO_PLATFORM
++		fActiveSwapFence = fSwapFence[fSwapFirst];
++#endif
+ 		if (fDisplayOwnerEnabled && fDisplayOwner.take_present() != zizhan_display::Result::Ok) {
+ 			fDisplayOwner.fail();
+ 			IOLog("ZIZHAN_DISPLAY_OWNER: FAIL take-accounting; hardware unchanged\n");
+@@ -1087,6 +1102,7 @@
+ 		size_t offset=(size_t)(base->pixels()-(base->client?base->kpixels:base->kbase));
+ 		beginGraphics();
+ 		pong_scanout_set_tag(swapID);   /* zizhan 0013 */
++		pong_scanout_set_fence(fActiveSwapFence);       /* zizhan 0039 */
+ 		const int scanned=pong_scanout_frame(memory,offset,base->info.bytesPerRow,fPanelWidth,fPanelHeight);
+ 		gpuFrame=scanned==1 || scanned==3;
+ 		fLatchAsync=scanned==3;         /* flipped, the latch still to come: SwapWait asks pong_scanout_latch_poll */

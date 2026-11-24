@@ -2,6 +2,7 @@
 #include "NativeAdrenoSubmit.h"
 #include "NativeAdrenoABI.h"
 #include "AdrenoPM4.h"
+#include "../ZizhanZcFence.h"
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
 #include <kern/thread.h>
@@ -33,6 +34,7 @@ static void fenceTimeoutKind(uint32_t timeout_us)
 /* The IBs of the last submissions: [slot] fence, iova low/high, bytes, then the first 28 dwords of the first IB (read as the kernel maps it). */
 extern "C" {volatile uint32_t native_adreno_ib_log[4][4+28];volatile uint32_t native_adreno_ib_log_count;}
 extern "C" {volatile uint32_t native_adreno_last_submit_fence;volatile uint64_t native_adreno_last_submit_us;}
+extern "C" {volatile uint32_t native_adreno_compositor_fence;}
 /* ... and the submitting process of each slot (zizhan: which client's job a stuck ring is on, PongAdrenoScanout.cpp fenceReport). */
 extern "C" {char native_adreno_ib_log_who[4][16];}
 extern "C" void proc_selfname(char *buf, int size);
@@ -53,9 +55,30 @@ NativeAdrenoRing *gGtRing;
 /* zizhan zero-copy scanout (PongAdrenoScanout.cpp zcFlip): the newest fence handed out and the newest the GPU has retired. */
 extern "C" int pong_gpu_fences(uint32_t *submitted,uint32_t *retired)
 {
-    if(!gGtRing)return 0;
-    uint32_t v=0;if(!gGtRing->peekFence(&v))return 0;
-    *submitted=gGtRing->lastSubmitted();*retired=v;return 1;
+    if(!gGtRing){return 0;}
+    uint32_t v=0;
+    if(!gGtRing->peekFence(&v)){return 0;}
+    *submitted=gGtRing->lastSubmitted();
+    *retired=v;
+    return 1;
+}
+extern "C" uint32_t pong_gpu_present_fence(void)
+{
+    static int inited;
+    static uint32_t mode = zizhan_zc_fence::SwapCompositor;
+    if (!inited) {
+        (void)PE_parse_boot_argn("pong_zc_fence_mode", &mode, sizeof(mode));
+        inited = 1;
+    }
+    if (!gGtRing) {
+        return 0;
+    }
+    const uint32_t global = gGtRing->lastSubmitted();
+    char caller[16] = {};
+    proc_selfname(caller, sizeof(caller));
+    const bool isCompositor = strncmp(caller, "backboardd", 10) == 0;
+    const uint32_t comp = __atomic_load_n(&native_adreno_compositor_fence, __ATOMIC_ACQUIRE);
+    return zizhan_zc_fence::select_present_fence(mode, isCompositor, comp, global);
 }
 /* Per-IB GPU time (pong_gtrace_ib, default on with pong_gtrace): the ring words of a traced submission get, after the prologue and
  * after each of the first 32 IBs and after the last one, CP_THREAD_CONTROL(BR) + CP_EVENT_WRITE7(RB_DONE_TS, WRITE_ALWAYSON, RAM)
@@ -414,6 +437,13 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
     }
     native_adreno_last_submit_us=gtNow();
     native_adreno_last_submit_fence=value;
+    {
+        char submitter[16] = {};
+        proc_selfname(submitter, sizeof(submitter));
+        if (strncmp(submitter, "backboardd", 10) == 0) {
+            __atomic_store_n(&native_adreno_compositor_fence, value, __ATOMIC_RELEASE);
+        }
+    }
     for(size_t i=0;i<handle_count;++i)job->handles[i]=handles[i];
     job->count=handle_count;job->fence=value;job->queue=queue;job->active=true;
     job->window_start=window_start;job->window_bytes=window_bytes;

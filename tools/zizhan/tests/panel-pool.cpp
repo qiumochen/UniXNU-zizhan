@@ -9,6 +9,8 @@ int main()
     zizhan_panel_pool::Layout layout{};
     assert(zizhan_panel_pool::plan(96 * MiB, stride, 2, 8, 8, &layout));
     assert(layout.total_strides == 5 && layout.buffers == 2 && layout.slots == 3);
+    assert(zizhan_panel_pool::plan(128 * MiB, stride, 1, 8, 8, &layout));
+    assert(layout.total_strides == 7 && layout.buffers == 1 && layout.slots == 6);
     assert(zizhan_panel_pool::plan(128 * MiB, stride, 2, 8, 8, &layout));
     assert(layout.total_strides == 7 && layout.buffers == 2 && layout.slots == 5);
     assert(zizhan_panel_pool::plan(128 * MiB, stride, 3, 8, 8, &layout));

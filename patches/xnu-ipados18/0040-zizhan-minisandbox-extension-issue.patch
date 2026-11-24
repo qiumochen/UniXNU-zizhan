@@ -1,0 +1,85 @@
+bsd: answer minisandbox extension_issue with canonical stand-in token
+--- a/bsd/kern/kern_minimac.c
++++ b/bsd/kern/kern_minimac.c
+@@ -331,6 +331,64 @@
+ 	}
+ 	kmem_free(kernel_map, strings, strings_size);
+ 	return error;
++}
++
++/*
++ * Request 5, "issue sandbox extension": __sandbox_extension_issue() of
++ * libsystem_sandbox (sandbox_extension_issue_file*, _mach*, _generic).
++ * User space allocates its 2048-byte destination buffer with malloc_type_malloc
++ * (uninitialized) and passes { ext_class, ext_type, data, flags, dest, pid,
++ * pidversion }. Returning 0 without writing dest leaves recycled heap bytes in
++ * the returned C string; in 22H374 Foundation's LocalizedStringResource.encode
++ * wraps that buffer with -[NSString initWithCString:encoding:NSUTF8StringEncoding],
++ * gets nil on non-UTF-8 heap bytes, and aborts AppIntents clients (MobileNotes)
++ * with NSInvalidUnarchiveOperationException.
++ *
++ * Write "invalid", the same stand-in token __sandbox_extension_issue() itself
++ * emits for SANDBOX_EXTENSION_CANONICAL (flags & 1) and _sandbox_extension_consume()
++ * accepts in user space without a syscall. Boot-arg pong_sbext=0 restores the
++ * previous no-op return for A/B comparison.
++ */
++#define SANDBOX_SYSCALL_EXTENSION_ISSUE   5
++#define SANDBOX_EXTENSION_STANDIN_TOKEN   "invalid"
++static TUNABLE(uint32_t, minisandbox_ext_issue, "pong_sbext", 1);
++
++static int
++minisandbox_extension_issue(user_addr_t arg)
++{
++	struct {
++		user_addr_t ext_class;
++		uint64_t    ext_type;
++		user_addr_t data;
++		uint64_t    flags;
++		user_addr_t dest;
++		int64_t     pid;
++		uint64_t    pidversion;
++	} args;
++	_Static_assert(sizeof(args) == 0x38, "22H374 sandbox_extension_issue args");
++	char class_buf[256];
++	size_t done = 0;
++	int error;
++
++	if (!minisandbox_ext_issue) {
++		return 0;
++	}
++	error = copyin(arg, &args, sizeof(args));
++	if (error) {
++		return error;
++	}
++	if (args.ext_class == USER_ADDR_NULL || args.dest == USER_ADDR_NULL) {
++		return EINVAL;
++	}
++	error = copyinstr(args.ext_class, class_buf, sizeof(class_buf), &done);
++	if (error) {
++		return error;
++	}
++	if (done <= 1) {
++		return EINVAL;
++	}
++	return copyout(SANDBOX_EXTENSION_STANDIN_TOKEN, args.dest,
++	    sizeof(SANDBOX_EXTENSION_STANDIN_TOKEN));
+ }
+ 
+ /* Which request numbers have been seen: one log line each, to learn what user space asks for. */
+@@ -342,11 +400,15 @@
+ 	if (call >= 0 && call < 64 && (minisandbox_seen & (1ULL << call)) == 0) {
+ 		minisandbox_seen |= 1ULL << call;
+ 		printf("minisandbox: request %d (first seen from %s[%d]): %s\n", call, p->p_comm, proc_getpid(p),
+-		    call == SANDBOX_SYSCALL_CONTAINER_PATH ? "answered" : "allowed");
++		    (call == SANDBOX_SYSCALL_CONTAINER_PATH ||
++		    (call == SANDBOX_SYSCALL_EXTENSION_ISSUE && minisandbox_ext_issue)) ? "answered" : "allowed");
+ 	}
+ 	if (call == SANDBOX_SYSCALL_CONTAINER_PATH) {
+ 		return minisandbox_container_path(arg);
+ 	}
++	if (call == SANDBOX_SYSCALL_EXTENSION_ISSUE) {
++		return minisandbox_extension_issue(arg);
++	}
+ 	return 0;
+ }
+ 

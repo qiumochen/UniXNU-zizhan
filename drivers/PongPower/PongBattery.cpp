@@ -70,7 +70,7 @@ class AppleSmartBattery : public IOPMPowerSource {
     struct {uint32_t length; uint8_t data[kMessage];} ring[kRing];
     uint32_t ringHead = 0, ringCount = 0;
     volatile uint32_t channelUp = 0, channelChanged = 0;
-    bool wasUp = false, published = false;
+    bool wasUp = false, published = false, healthDiagLogged = false;
     uint32_t refreshes = 0;
     ShengBattmgr bm;
     uint32_t sdpLimit = 0;
@@ -205,6 +205,49 @@ class AppleSmartBattery : public IOPMPowerSource {
             native_battery_stats[0] = 4;IOLog("PongBattery: physical battery power source published %d%% %dmV\n",s.percent,s.voltage_mv);
         }
         updateStatus();
+        uint32_t healthDiag = 0;
+        if (!healthDiagLogged && PE_parse_boot_argn("zizhan_batt_health_diag", &healthDiag, sizeof healthDiag) && healthDiag) {
+            healthDiagLogged = true;
+            char keysBuf[180] = {};
+            size_t koff = 0;
+            unsigned kpart = 0;
+            OSObject *psObj = copyProperty("PSProperties");
+            OSDictionary *psDict = OSDynamicCast(OSDictionary, psObj);
+            if (!psDict) {
+                OSSafeReleaseNULL(psObj);
+                psObj = getPropertyTable() ? (OSObject *)getPropertyTable() : nullptr;
+                if (psObj) { psObj->retain(); }
+                psDict = OSDynamicCast(OSDictionary, psObj);
+            }
+            if (psDict) {
+                OSCollectionIterator *it = OSCollectionIterator::withCollection(psDict);
+                if (it) {
+                    while (const OSSymbol *sym = OSDynamicCast(OSSymbol, it->getNextObject())) {
+                        const char *k = sym->getCStringNoCopy();
+                        if (!k) { continue; }
+                        if (koff && koff + strlen(k) + 2 >= sizeof(keysBuf)) {
+                            IOLog("ZIZHAN_BATT_HEALTH_KEYS[%u]: %s\n", kpart++, keysBuf);
+                            keysBuf[0] = 0;
+                            koff = 0;
+                        }
+                        if (koff + strlen(k) + 2 < sizeof(keysBuf)) {
+                            int n = snprintf(keysBuf + koff, sizeof(keysBuf) - koff, "%s%s", koff ? "," : "", k);
+                            if (n > 0) { koff += (size_t)n; }
+                        }
+                    }
+                    if (koff) {
+                        IOLog("ZIZHAN_BATT_HEALTH_KEYS[%u]: %s\n", kpart, keysBuf);
+                    }
+                    it->release();
+                }
+            }
+            OSSafeReleaseNULL(psObj);
+            const int32_t auth = native_charger_stats[13];
+            IOLog("ZIZHAN_BATT_HEALTH_DATA: Design=%d Nominal=%d Cycle=%d SoC=%d Volt=%d auth=0x%x(c1=%d/%d,c2=%d/%d,pd=%d/%d,susp=%d/%d)\n",
+                  s.design_mah, s.full_mah, s.cycles, s.percent, s.voltage_mv, (unsigned)auth,
+                  (auth >> 8) & 1, auth & 1, (auth >> 9) & 1, (auth >> 1) & 1,
+                  (auth >> 10) & 1, (auth >> 2) & 1, (auth >> 11) & 1, (auth >> 3) & 1);
+        }
         // "in" is the charger input as the firmware reports it (-1: no reading): system power = input + battery discharge, whatever
         // the USB state (tools/zizhan/mac/zlog.py).
         IOLog("PongBattery: %d%% %dmV %dmA temp %d flags 0x%x usb %d full %d design %d mAh cycles %d in %dmV %dmA\n",native_battery_stats[1],

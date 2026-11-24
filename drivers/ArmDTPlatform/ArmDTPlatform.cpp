@@ -27,6 +27,7 @@
 #include "ZizhanCpuOffline.h"
 #include "ZizhanOuterProbe.h"
 #include "ZizhanPowerInject.h"
+#include "ZizhanVolumeInject.h"
 #include "ZizhanTsensProbe.h"
 #include "ZizhanThermalService.h"
 #include "ZizhanPowerAudit.h"
@@ -264,6 +265,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   zizhan_hall::start(provider);
   zizhan_power_audit::start(provider);
   zizhan_power_inject::start();
+  zizhan_vol_inject::start();
   zizhan_bt_probe::start();
   zizhan_top::start();          // default off; zizhan_top=1 logs the busiest processes every 30 s (POWER-03)
   zizhan_cpu_offline::start();  // daily default: CPU 2..7 offline while the display is off (zizhan_cpu_offline=0 disables)

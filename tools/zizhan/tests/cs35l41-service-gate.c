@@ -17,8 +17,9 @@ int main(void){
  assert(zizhan_service_gate(1,1,0,0,1,0)==ZizhanGateStart);
  assert(zizhan_service_gate(1,1,0,0,1,40)==ZizhanGateStart);
  assert(zizhan_service_gate(1,1,0,0,1,38)==ZizhanGateConflictPrm&&zizhan_service_gate(1,1,0,0,1,39)==ZizhanGateConflictPrm);
- assert(zizhan_service_gate(1,1,0,0,1,41)==ZizhanGateStart&&zizhan_service_gate(1,1,0,0,1,42)==ZizhanGateConflictPrm);
- assert(zizhan_service_owner_mode(40)&&zizhan_service_owner_mode(41)&&!zizhan_service_owner_mode(39)&&!zizhan_service_owner_mode(34));
+ assert(zizhan_service_gate(1,1,0,0,1,41)==ZizhanGateStart&&zizhan_service_gate(1,1,0,0,1,42)==ZizhanGateStart);
+ assert(zizhan_service_gate(1,1,0,0,1,43)==ZizhanGateConflictPrm);
+ assert(zizhan_service_owner_mode(40)&&zizhan_service_owner_mode(41)&&zizhan_service_owner_mode(42)&&!zizhan_service_owner_mode(39)&&!zizhan_service_owner_mode(34)&&!zizhan_service_owner_mode(43));
  assert(zizhan_service_gate(1,1,1,1,1,34)==ZizhanGateConflictPong);
  /* Control page: valid v2 header at the real 19.2 MHz counter, idle state, no Ready. */
  static uint8_t page[ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES];memset(page,0xa5,sizeof page);
@@ -58,7 +59,17 @@ int main(void){
  assert(zizhan_handoff_take(&h)&&h.phase==ZizhanHandoffRunning&&!zizhan_handoff_take(&h));
  assert(!zizhan_handoff_request_start(&h));
  zizhan_handoff_finish(&h,1);assert(h.phase==ZizhanHandoffDone&&!zizhan_handoff_request_start(&h)&&!zizhan_handoff_take(&h));
- zizhan_handoff_finish(&h,0);assert(h.phase==ZizhanHandoffFailed);
+ zizhan_handoff_finish(&h,0);assert(h.phase==ZizhanHandoffFailed&&!zizhan_handoff_reset(&h));
+ /* Mode-42 multi-session reset: Running -> Idle clears stop and accepts a second session; Idle Stop is ignored. */
+ memset(&h,0,sizeof h);assert(zizhan_handoff_register(&h));
+ zizhan_handoff_request_stop(&h);assert(!zizhan_handoff_stopping(&h));
+ for(unsigned s=1;s<=3;++s){
+  assert(zizhan_handoff_request_start(&h)&&h.starts==s&&!zizhan_handoff_stopping(&h));
+  assert(zizhan_handoff_take(&h)&&h.phase==ZizhanHandoffRunning);
+  zizhan_handoff_request_stop(&h);assert(zizhan_handoff_stopping(&h));
+  assert(zizhan_handoff_reset(&h)&&h.phase==ZizhanHandoffIdle&&!zizhan_handoff_stopping(&h)&&h.sessions==s);
+ }
+ assert(!zizhan_handoff_reset(NULL));
  assert(!zizhan_handoff_request_start(NULL)&&!zizhan_handoff_take(NULL)&&!zizhan_handoff_stopping(NULL)&&!zizhan_handoff_register(NULL));
  /* Start frame: first whole period at or after the observed watermark. */
  assert(zizhan_service_start_frame(0)==0&&zizhan_service_start_frame(1)==480&&zizhan_service_start_frame(479)==480&&zizhan_service_start_frame(480)==480);

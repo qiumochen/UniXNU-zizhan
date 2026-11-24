@@ -4,6 +4,7 @@
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include <AudioToolbox/AudioQueue.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -1445,8 +1446,16 @@ static id volume18_control(void)
 
 static struct { uint64_t presses; bool held; } volume18_keys[2];
 static bool volume18_ready;
+static bool volume18_has_cancel;
 static int volume18_ready_token=-1;
 static const char *volume18_names[]={"dev.unixnu.pong.volume18.increase","dev.unixnu.pong.volume18.decrease"};
+static void volume18_cancel(void)
+{
+    id control=volume18_control();
+    SEL cancel=sel_registerName("cancelVolumeEvent");
+    if(!control || !method_abi(class_getInstanceMethod(object_getClass(control),cancel),"v",0,""))return;
+    ((void(*)(id,SEL))objc_msgSend)(control,cancel);
+}
 static bool volume18_step(unsigned index)
 {
     id control=volume18_control();
@@ -1476,18 +1485,25 @@ static void volume18_prepare(void *context)
         else fprintf(stderr,"Pong volume18: matching SBVolumeControl ABI unavailable; keep consumer HID\n");
         return;
     }
+    volume18_has_cancel=method_abi(class_getInstanceMethod(cls,sel_registerName("cancelVolumeEvent")),"v",0,"");
     for(unsigned i=0;i<2;i++) {
         int token=-1;
         if(notify_register_dispatch(volume18_names[i],&token,dispatch_get_main_queue(),^(int changed){
             uint64_t state=0;if(notify_get_state(changed,&state))return;
             uint64_t count=state>>1,old=volume18_keys[i].presses;
+            bool was_held=volume18_keys[i].held;
             volume18_keys[i].held=(state&1)!=0;volume18_keys[i].presses=count;
             // A restarted backboardd begins a new counter. Consume the new
             // click, never replay an old queue or synthesize a device report.
+            // 22H374 SBVolumeControl increaseVolume/decreaseVolume arm an
+            // NSRunLoop performSelector repeat until cancelVolumeEvent runs.
             uint64_t steps=count>=old?count-old:count;
             if(steps>8)steps=8;
+            if(steps && volume18_has_cancel && !volume18_keys[1u-i].held)volume18_cancel();
             for(uint64_t n=0;n<steps;n++)(void)volume18_step(i);
-            if(steps && volume18_keys[i].held)dispatch_after_f(
+            if(!volume18_keys[i].held && (steps || was_held) && !volume18_keys[1u-i].held)
+                volume18_cancel();
+            if(steps && volume18_keys[i].held && !volume18_has_cancel)dispatch_after_f(
                 dispatch_time(DISPATCH_TIME_NOW,400*NSEC_PER_MSEC),dispatch_get_main_queue(),
                 (void *)(uintptr_t)((count<<1)|i),volume18_repeat);
             fprintf(stderr,"Pong volume18: native %s presses=%llu held=%u\n",i?"decrease":"increase",
@@ -1497,6 +1513,89 @@ static void volume18_prepare(void *context)
     if(notify_register_check("dev.unixnu.pong.volume18.ready",&volume18_ready_token)!=NOTIFY_STATUS_OK)return;
     volume18_ready=true;(void)notify_set_state(volume18_ready_token,1);
     fprintf(stderr,"Pong volume18: physical volume keys routed to 22H374 SBVolumeControl; power uses HID\n");
+}
+
+struct audio18_aq_ctx {
+    OSStatus (*enqueue)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    double phase;
+    double step;
+    unsigned callbacks;
+    unsigned max_callbacks;
+};
+
+static void audio18_aq_fill(struct audio18_aq_ctx *ctx, AudioQueueBufferRef buf)
+{
+    const unsigned frames = 4800u;
+    float *dst = (float *)buf->mAudioData;
+    for (unsigned i = 0; i < frames; ++i) {
+        float s = 0.5f * sinf((float)ctx->phase);
+        dst[2 * i] = s;
+        dst[2 * i + 1] = s;
+        ctx->phase += ctx->step;
+        if (ctx->phase > 6.283185307179586) ctx->phase -= 6.283185307179586;
+    }
+    buf->mAudioDataByteSize = frames * 2u * (UInt32)sizeof(float);
+}
+
+static void audio18_aq_cb(void *user, AudioQueueRef q, AudioQueueBufferRef buf)
+{
+    struct audio18_aq_ctx *ctx = (struct audio18_aq_ctx *)user;
+    if (!ctx || ctx->callbacks >= ctx->max_callbacks) return;
+    ctx->callbacks++;
+    audio18_aq_fill(ctx, buf);
+    (void)ctx->enqueue(q, buf, 0, NULL);
+}
+
+static void audio18_test_session(void *context)
+{
+    unsigned session = (unsigned)(uintptr_t)context;
+    void *atb = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
+    typedef OSStatus (*aq_new_fn)(const AudioStreamBasicDescription *, AudioQueueOutputCallback, void *, CFRunLoopRef, CFStringRef, UInt32, AudioQueueRef *);
+    typedef OSStatus (*aq_alloc_fn)(AudioQueueRef, UInt32, AudioQueueBufferRef *);
+    typedef OSStatus (*aq_enq_fn)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    typedef OSStatus (*aq_start_fn)(AudioQueueRef, const AudioTimeStamp *);
+    typedef OSStatus (*aq_stop_fn)(AudioQueueRef, Boolean);
+    typedef OSStatus (*aq_disp_fn)(AudioQueueRef, Boolean);
+    aq_new_fn fn_new = atb ? (aq_new_fn)dlsym(atb, "AudioQueueNewOutput") : NULL;
+    aq_alloc_fn fn_alloc = atb ? (aq_alloc_fn)dlsym(atb, "AudioQueueAllocateBuffer") : NULL;
+    aq_enq_fn fn_enq = atb ? (aq_enq_fn)dlsym(atb, "AudioQueueEnqueueBuffer") : NULL;
+    aq_start_fn fn_start = atb ? (aq_start_fn)dlsym(atb, "AudioQueueStart") : NULL;
+    aq_stop_fn fn_stop = atb ? (aq_stop_fn)dlsym(atb, "AudioQueueStop") : NULL;
+    aq_disp_fn fn_disp = atb ? (aq_disp_fn)dlsym(atb, "AudioQueueDispose") : NULL;
+    if (!fn_new || !fn_alloc || !fn_enq || !fn_start || !fn_stop || !fn_disp) {
+        fprintf(stderr, "Pong audio18: session=%u AudioToolbox symbols unavailable\n", session);
+        return;
+    }
+    const double hz = (session == 1u) ? 440.0 : 660.0;
+    AudioStreamBasicDescription fmt = {0};
+    fmt.mSampleRate = 48000.0;
+    fmt.mFormatID = kAudioFormatLinearPCM;
+    fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    fmt.mBytesPerPacket = 8;
+    fmt.mFramesPerPacket = 1;
+    fmt.mBytesPerFrame = 8;
+    fmt.mChannelsPerFrame = 2;
+    fmt.mBitsPerChannel = 32;
+    struct audio18_aq_ctx ctx = { .enqueue = fn_enq, .phase = 0.0, .step = 6.283185307179586 * hz / 48000.0, .callbacks = 0, .max_callbacks = 16 };
+    AudioQueueRef q = NULL;
+    OSStatus st_new = fn_new(&fmt, audio18_aq_cb, &ctx, NULL, NULL, 0, &q);
+    OSStatus st_start = -1, st_stop = -1;
+    if (st_new == 0 && q) {
+        for (unsigned i = 0; i < 3; ++i) {
+            AudioQueueBufferRef b = NULL;
+            if (fn_alloc(q, 4800u * 8u, &b) == 0 && b) {
+                audio18_aq_fill(&ctx, b);
+                (void)fn_enq(q, b, 0, NULL);
+            }
+        }
+        st_start = fn_start(q, NULL);
+        usleep(1500000);
+        ctx.max_callbacks = 0;
+        st_stop = fn_stop(q, true);
+        (void)fn_disp(q, true);
+    }
+    fprintf(stderr, "Pong audio18: test session=%u hz=%.0f new=%d start=%d callbacks=%u stop=%d\n",
+            session, hz, (int)st_new, (int)st_start, ctx.callbacks, (int)st_stop);
 }
 
 static bool zizhan_bringup_preferences(void)
@@ -2764,6 +2863,12 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         // Power stays on HID; backboardd sends each volume transition once.
         if(!boot_option("pong_volume_direct=0"))
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,volume18_prepare);
+        if(boot_option("zizhan_audio_test=1")) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,12*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)1u,audio18_test_session);
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,34*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)2u,audio18_test_session);
+        }
         skip_setup=boot_option("pong_skip_setup=1");
         /* zizhan: setup adaptation does not authorize forcing an unlock or
          * disabling automatic display sleep. Bring-up actions are opt-in. */

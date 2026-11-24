@@ -12,7 +12,7 @@
  * invent channels, and it never turns missing HAL data into silence. */
 enum {ZizhanRingFrames=65536u,ZizhanRingRate=48000u,ZizhanRingChannels=2u,
       ZizhanRingPcmFrames=480u,ZizhanRingPcmBytes=2880u};
-typedef struct {unsigned packed,underruns,reason;uint64_t frame;} ZizhanRingReceipt;
+typedef struct {unsigned packed,underruns,reason,nonzero,max_abs;uint64_t frame;} ZizhanRingReceipt;
 static inline void zizhan_ring_put24(uint8_t *p,int32_t value){
  p[0]=(uint8_t)value;p[1]=(uint8_t)(value>>8);p[2]=(uint8_t)(value>>16);
 }
@@ -36,8 +36,13 @@ static inline int zizhan_ring_pack(const int16_t *ring,unsigned ring_frames,uint
  }
  for(unsigned i=0;i<ZizhanRingPcmFrames;++i){
   const unsigned at=(unsigned)((frame+i)%ZizhanRingFrames);
-  zizhan_ring_put24(out+6*i,(int32_t)ring[2*at]*256);
-  zizhan_ring_put24(out+6*i+3,(int32_t)ring[2*at+1]*256);
+  const int32_t l=ring[2*at],rr=ring[2*at+1];
+  const unsigned al=(unsigned)(l<0?-l:l),ar=(unsigned)(rr<0?-rr:rr);
+  if(l||rr){++r->nonzero;}
+  if(al>r->max_abs){r->max_abs=al;}
+  if(ar>r->max_abs){r->max_abs=ar;}
+  zizhan_ring_put24(out+6*i,l*256);
+  zizhan_ring_put24(out+6*i+3,rr*256);
  }
  r->packed=ZizhanRingPcmBytes;return 1;
 }

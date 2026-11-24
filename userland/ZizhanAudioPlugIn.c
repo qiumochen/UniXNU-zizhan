@@ -179,20 +179,34 @@ static OSStatus IsPropertySettable(AudioServerPlugInDriverRef d, AudioObjectID o
     return HasProperty(d, o, pid, a) ? 0 : kAudioHardwareUnknownPropertyError;
 }
 
-static Float32 toDb(Float32 scalar) {return scalar <= 0.0001f ? -96.0f : 20.0f * log10f(scalar);}
+static const Float32 kMinVolumeDb = -48.0f;
+static Float32 toDb(Float32 scalar) {
+    if (scalar <= 0.0f) { return kMinVolumeDb; }
+    Float32 db = 20.0f * log10f(scalar);
+    return db < kMinVolumeDb ? kMinVolumeDb : (db > 0.0f ? 0.0f : db);
+}
+static Float32 fromDb(Float32 db) {
+    if (db <= kMinVolumeDb) { return 0.0f; }
+    if (db >= 0.0f) { return 1.0f; }
+    return powf(10.0f, db / 20.0f);
+}
 
 static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a, UInt32 qs,
                                 const void *q, UInt32 size, const void *data) {
     (void)d; (void)pid; (void)qs; (void)q;
     if (o == kVolume && size >= sizeof(Float32)) {
         Float32 v = *(const Float32 *)data;
-        if (a->mSelector == kAudioLevelControlPropertyDecibelValue) v = v <= -96.0f ? 0.0f : powf(10.0f, v / 20.0f);
-        else if (a->mSelector != kAudioLevelControlPropertyScalarValue) return kAudioHardwareUnknownPropertyError;
         if(!isfinite(v))return kAudioHardwareIllegalOperationError;
-        gVolume = v < 0 ? 0 : v > 1 ? 1 : v;
-        AudioObjectPropertyAddress changed[2] = {{kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
-                                                 {kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}};
-        gHost->PropertiesChanged(gHost, kVolume, 2, changed);
+        if (a->mSelector == kAudioLevelControlPropertyDecibelValue) v = fromDb(v);
+        else if (a->mSelector != kAudioLevelControlPropertyScalarValue) return kAudioHardwareUnknownPropertyError;
+        Float32 clamped = v < 0 ? 0 : v > 1 ? 1 : v;
+        Float32 prev = atomic_exchange(&gVolume, clamped);
+        if (fabsf(clamped - prev) >= 1e-5f) {
+            syslog(LOG_NOTICE, "ZizhanAudio HAL: volume set scalar=%.4f db=%.2f", (double)clamped, (double)toDb(clamped));
+            AudioObjectPropertyAddress changed[2] = {{kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+                                                     {kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}};
+            if (gHost) gHost->PropertiesChanged(gHost, kVolume, 2, changed);
+        }
         return 0;
     }
     if(o==kOutStream && a->mSelector==kAudioStreamPropertyIsActive) {
@@ -380,13 +394,13 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
         case kAudioControlPropertyElement: REPLY(AudioObjectPropertyElement, kAudioObjectPropertyElementMain);
         case kAudioLevelControlPropertyScalarValue: REPLY(Float32, gVolume);
         case kAudioLevelControlPropertyDecibelValue: REPLY(Float32, toDb(gVolume));
-        case kAudioLevelControlPropertyDecibelRange: REPLY(AudioValueRange, ((AudioValueRange){-96.0, 0.0}));
+        case kAudioLevelControlPropertyDecibelRange: REPLY(AudioValueRange, ((AudioValueRange){kMinVolumeDb, 0.0}));
         case kAudioLevelControlPropertyConvertScalarToDecibels:
             if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
             *(Float32 *)outData = toDb(*(Float32 *)outData); *outDataSize = sizeof(Float32); return 0;
         case kAudioLevelControlPropertyConvertDecibelsToScalar:
             if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
-            *(Float32 *)outData = *(Float32 *)outData <= -96.0f ? 0.0f : powf(10.0f, *(Float32 *)outData / 20.0f); *outDataSize = sizeof(Float32); return 0;
+            *(Float32 *)outData = fromDb(*(Float32 *)outData); *outDataSize = sizeof(Float32); return 0;
         default: return kAudioHardwareUnknownPropertyError;
         }
     default:
@@ -428,18 +442,26 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
     OSStatus r = 0;
     if (gIoUsers == 0) {
         if (connectService()) r = kAudioHardwareNotRunningError;
-        else if (call(ZizhanAudioStartOutput) != KERN_SUCCESS) r = kAudioHardwareNotRunningError;
         else {
-            setHostClock();
-            unsigned i;
-            // The kernel builds and starts the graph after accepting Start; Running means the anchor is published.
-            for(i=0;i<300 && ready() && !running();i++)usleep(10000);
-            if(!running()) {
-                call(ZizhanAudioStopOutput);r=kAudioHardwareNotRunningError;
-            } else {
-                uint64_t host=mach_absolute_time(),anchor=gControl->out_anchor_host;
-                gZeroOrigin=host>anchor?(uint64_t)((Float64)(host-anchor)/gHostTicksPerFrame):0;
-                gZeroSeed++;
+            kern_return_t kr = KERN_FAILURE;
+            for (unsigned attempt = 0; attempt < 25; ++attempt) {
+                kr = call(ZizhanAudioStartOutput);
+                if (kr == KERN_SUCCESS || kr != kIOReturnNotReady) break;
+                usleep(5000);
+            }
+            if (kr != KERN_SUCCESS) r = kAudioHardwareNotRunningError;
+            else {
+                setHostClock();
+                unsigned i;
+                // The kernel builds and starts the graph after accepting Start; Running means the anchor is published.
+                for(i=0;i<300 && ready() && !running();i++)usleep(10000);
+                if(!running()) {
+                    call(ZizhanAudioStopOutput);r=kAudioHardwareNotRunningError;
+                } else {
+                    uint64_t host=mach_absolute_time(),anchor=gControl->out_anchor_host;
+                    gZeroOrigin=host>anchor?(uint64_t)((Float64)(host-anchor)/gHostTicksPerFrame):0;
+                    gZeroSeed++;
+                }
             }
         }
 
@@ -453,8 +475,12 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
     (void)d; (void)client;
     if (o != kDevice) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
-    if (gIoUsers && --gIoUsers == 0) {call(ZizhanAudioStopOutput);}
+    if (gIoUsers && --gIoUsers == 0) {
+        call(ZizhanAudioStopOutput);
+        for (unsigned i = 0; i < 25 && running(); ++i) usleep(5000);
+    }
     pthread_mutex_unlock(&gLock);
+    syslog(LOG_NOTICE, "ZizhanAudio HAL: StopIO users=%u", atomic_load(&gIoUsers));
     return 0;
 }
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client, Float64 *sampleTime, UInt64 *hostTime, UInt64 *seed) {

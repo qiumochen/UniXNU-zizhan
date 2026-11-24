@@ -32,6 +32,12 @@ static inline int zizhan_flow_init(ZizhanAudioFlow *f,uint64_t base,uint32_t han
  f->magic=0x5a464c57u;f->handle=handle;f->max_inflight=max_inflight;f->bytes=bytes;f->frames=frames;
  f->base=base;f->began_us=now;f->limit_us=limit_us;f->next_frame=start_frame;f->phase=ZizhanFlowRunning;return 1;
 }
+/* Unbounded session flow for mode 42: per-WRITE 100 ms timeout remains enforced; stopped explicitly via zizhan_flow_stop. */
+static inline int zizhan_flow_init_unbounded(ZizhanAudioFlow *f,uint64_t base,uint32_t handle,unsigned max_inflight,
+                                             unsigned bytes,unsigned frames,uint64_t start_frame,uint64_t now){
+ if(!zizhan_flow_init(f,base,handle,max_inflight,bytes,frames,start_frame,30000000ull,now)){return 0;}
+ f->limit_us=UINT64_MAX;return 1;
+}
 static inline int zizhan_flow_valid(const ZizhanAudioFlow *f){return f&&f->magic==0x5a464c57u;}
 static inline void zizhan_flow_fail(ZizhanAudioFlow *f,unsigned reason){
  if(!zizhan_flow_valid(f)){return;}f->reason=reason;f->phase=ZizhanFlowFailed;
@@ -80,10 +86,12 @@ static inline int zizhan_flow_receive(ZizhanAudioFlow *f,const uint8_t *data,uns
  return 0;
 }
 static inline void zizhan_flow_tick(ZizhanAudioFlow *f,uint64_t now){
- if(!zizhan_flow_valid(f)||f->phase==ZizhanFlowDone||f->phase==ZizhanFlowFailed)return;
+ if(!zizhan_flow_valid(f)||f->phase==ZizhanFlowDone||f->phase==ZizhanFlowFailed){return;}
  for(unsigned i=0;i<ZizhanFlowSlots;++i){const ZizhanFlowSlot *s=&f->slot[i];
   if(s->busy&&(now<s->write.began_us||now-s->write.began_us>=100000)){zizhan_flow_fail(f,ZizhanFlowTimeout);return;}}
- if(f->phase==ZizhanFlowRunning&&(now<f->began_us||now-f->began_us>=f->limit_us)){f->phase=ZizhanFlowDraining;zizhan_flow_finish_if_drained(f);}
+ if(f->phase==ZizhanFlowRunning&&f->limit_us!=UINT64_MAX&&(now<f->began_us||now-f->began_us>=f->limit_us)){
+  f->phase=ZizhanFlowDraining;zizhan_flow_finish_if_drained(f);
+ }
 }
 /* Stop submitting; the flow is Done once every outstanding WRITE returned. */
 static inline void zizhan_flow_stop(ZizhanAudioFlow *f){

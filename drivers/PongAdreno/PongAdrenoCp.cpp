@@ -2,6 +2,7 @@
 #include "PongAdrenoCp.h"
 #include "PongAdrenoCpProfile.h"
 #include "PongAdrenoZap.h"
+#include "ZizhanSpanCollect.h"
 #include "submit/NativeAdrenoSmmuContext.h"
 #include "submit/NativeAdrenoCpInit.h"
 #include "submit/NativeAdrenoIrq.h"
@@ -107,7 +108,30 @@ static bool faulted()
     }
     return gpu->poisoned;
 }
-static bool client_healthy() {return gpu && gpu->started && !faulted();}
+static bool client_healthy()
+{
+    if(!gpu || !gpu->started) {
+        return false;
+    }
+    static int health_init = 0;
+    static uint32_t health_us = 500;
+    static uint64_t last_poll_us = 0;
+    if (!health_init) {
+        PE_parse_boot_argn("pong_gpu_health_us", &health_us, sizeof(health_us));
+        if (health_us > 5000u) {
+            health_us = 5000u;
+        }
+        health_init = 1;
+    }
+    const uint64_t cur_us = now(nullptr);
+    const uint64_t prev_us = __atomic_load_n(&last_poll_us, __ATOMIC_RELAXED);
+    const uint32_t irq_fat = __atomic_load_n(&gpu->irq_fatal, __ATOMIC_ACQUIRE);
+    if (!zizhan_adreno_perf::should_poll_hw_health(gpu->poisoned, irq_fat, cur_us, prev_us, health_us)) {
+        return true;
+    }
+    __atomic_store_n(&last_poll_us, cur_us, __ATOMIC_RELAXED);
+    return !faulted();
+}
 extern "C" void pong_gpu_stall_snapshot(void)
 {
     if(!gpu || !gpu->started)return;

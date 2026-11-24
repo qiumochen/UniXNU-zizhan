@@ -13,6 +13,7 @@
 extern "C" struct vnode *rootvnode;
 extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
+extern "C" unsigned pong_volume_key_sample(uint32_t code, int down, uint32_t dt_ms);
 
 namespace zizhan_vol_inject {
 enum : uint32_t { VolButtonDown = 4u, VolButtonUp = 5u };
@@ -64,6 +65,33 @@ static void worker(void *, wait_result_t) {
     return;
   }
   IOSleep(g_delay_s * 1000u);
+  if (g_mode == ZizhanVolInjectPaced) {
+    struct StepSpec { uint32_t key; uint32_t hold_ms; uint32_t gap_ms; };
+    const StepSpec specs[3] = {
+      { ZizhanVolKeyDown, ZizhanVolHumanClickMs, ZizhanVolClickGapMs },
+      { ZizhanVolKeyDown, ZizhanVolHumanClickMs, ZizhanVolDirGapMs },
+      { ZizhanVolKeyUp, ZizhanVolLongHoldMs, 0u }
+    };
+    unsigned pulses_total = 0;
+    for (unsigned s = 0; s < 3u; ++s) {
+      const char *name = (specs[s].key == ZizhanVolKeyUp) ? "up" : "down";
+      unsigned pulses = pong_volume_key_sample(specs[s].key, 1, 0u);
+      for (uint32_t elapsed = 0; elapsed < specs[s].hold_ms; elapsed += 16u) {
+        IOSleep(16);
+        pulses += pong_volume_key_sample(specs[s].key, 1, 16u);
+      }
+      (void)pong_volume_key_sample(specs[s].key, 0, 0u);
+      pulses_total += pulses;
+      IOLog("ZIZHAN_VOL_INJECT: paced=%u key=%s hold_ms=%u pulses=%u t_ms=%llu\n",
+            s + 1u, name, specs[s].hold_ms, pulses, (unsigned long long)uptime_ms());
+      if (specs[s].gap_ms) {
+        IOSleep(specs[s].gap_ms);
+      }
+    }
+    IOLog("ZIZHAN_VOL_INJECT: DONE mode=3 pulses=%u\n", pulses_total);
+    finish();
+    return;
+  }
   const unsigned total = zizhan_vol_total_clicks(g_mode);
   for (unsigned i = 0; i < total; ++i) {
     const uint32_t key = zizhan_vol_click_key(g_mode, i);

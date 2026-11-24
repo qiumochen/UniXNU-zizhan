@@ -28,6 +28,29 @@ static int transfer_play(void *p,unsigned ms,int (*poll)(void *),void *poll_cont
   ++c->polls;if(poll(poll_context)){return c->test==4?1:0;}}
  return c->test==5?0:1;
 }
+typedef struct {Fake *f;unsigned calls,polls,test,dry;} DaemonContext;
+static int transfer_daemon(void *p,const ZizhanAudioAmpSession *s){
+ DaemonContext *c=p;++c->calls;
+ for(unsigned chip=0;chip<2;++chip){assert(c->f->state[chip][2]==1&&c->f->state[chip][0]==1&&c->f->state[chip][1]==0x3300u);}
+ if(c->test==1){c->f->time+=30000000;return 1;} /* zero-session idle daemon beyond 8s bring-up budget */
+ for(unsigned sess=0;sess<3;++sess){
+  assert(s->arm(s->context)==1);
+  for(unsigned chip=0;chip<2;++chip){assert(c->f->state[chip][1]==(c->dry?0x3300u:0x3321u));}
+  for(unsigned k=0;k<6;++k){
+   c->f->time+=5000000; /* multi-second sessions across >8s total */
+   if(c->test==2&&sess==1&&k==3){c->f->play_fault=1;}
+   if(c->test==3&&sess==2&&k==2){c->f->run_halo_state=1;}
+   ++c->polls;
+   if(s->poll(s->context)){
+    (void)s->disarm(s->context,0);
+    return 0;
+   }
+  }
+  assert(s->disarm(s->context,1)==1);
+  for(unsigned chip=0;chip<2;++chip){assert(c->f->state[chip][1]==0x3300u&&c->f->pulse_volume[chip]==0x267c);}
+ }
+ return 1;
+}
 typedef struct {Fake *f;unsigned calls,test;} PulseContext;
 static int transfer_pulse(void *p,unsigned chip){PulseContext *c=p;const unsigned order[]={2,0,3,1};assert(c->calls<4&&chip==order[c->calls]);
  const unsigned real=chip%2;assert(c->f->state[real][2]==1&&c->f->state[real][0]==1);
@@ -385,5 +408,32 @@ int main(int argc,char **argv){
   assert(rc&&out.status==ZizhanAmpFail&&out.transport.controller_uncertain&&f.commands==f.fail_command);
   f.fail_command=0;
  }
+ /* Profile 20 persistent CoreAudio HAL daemon: multi-session arm/poll/disarm, 0-session idle, dry, fault/HALO abort. */
+ for(unsigned test=0;test<6;++test){
+  ZizhanAmpSnapshot snapshot;ZizhanAmpTrim trim;ZizhanAmpRam ram;prepare(&f,&snapshot,&trim);f.native_core_init=1;
+  assert(!zizhan_cs35l41_ram_native_init(1,flags,&f.bus,&clock,&snapshot,&trim,firmware,sizeof firmware,fw_hash,&ram));
+  f.coeff_mode=1;coeff_bad_hash=0;assert(!zizhan_cs35l41_coefficients(1,flags,&f.bus,&clock,&ram,top_coeff,sizeof top_coeff,bottom_coeff,sizeof bottom_coeff,coeff_hash,&coeff));
+  f.run_mode=1;f.run_pll[0]=f.run_pll[1]=0x10;
+  f.run_allow_global=f.run_lock=f.run_native_frame=f.run_calibration=f.run_native_rates=f.run_rx_profile=f.run_format_profile=f.run_observed=1;
+  f.run_format_value[0]=f.run_format_value[1]=0x181802a2;f.mailbox_test=1;f.mailbox_mask[0]=f.mailbox_mask[1]=0xffffffff;
+  f.pulse_test=1;f.pulse_volume[0]=f.pulse_volume[1]=0x267c;f.play_fault=0;f.run_halo_state=0;
+  zizhan_amp_pulse_flags=(test==4?1u:0u);
+  ZizhanAmpSpeakerCalibration cal={1,sizeof cal,{12001,13001}};
+  DaemonContext context={&f,0,0,test==4?0u:test,test==4?1u:0u};
+  const unsigned before=f.commands;
+  int rc=zizhan_cs35l41_native_daemon_transfer(1,flags,&f.bus,&clock,&coeff,&cal,test==5?0:transfer_daemon,&context,&out);
+  if(test==5){assert(!rc&&out.reason==ZizhanAmpPrerequisite&&f.commands==before&&!context.calls);continue;}
+  assert(context.calls==1&&out.daemon_profile&&out.play_ready[0]&&out.play_ready[1]);
+  for(unsigned c=0;c<2;++c){assert(out.pulse[c].disabled&&out.stopped[c]&&out.play_torn[c]&&f.state[c][1]==0x3300&&f.state[c][2]==out.core_before[c]&&f.pulse_volume[c]==0x267c&&!out.asp_rx_active[c]&&!out.global_active[c]);}
+  if(test==0||test==1||test==4){
+   assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.play_streamed);
+   assert(out.daemon_sessions==(test==1?0u:3u)&&out.daemon_arms==(test==1?0u:3u)&&out.daemon_disarms==(test==1?0u:3u));
+   for(unsigned c=0;c<2;++c){assert(out.pulse[c].complete&&out.pulse[c].patch_off);}
+  }else{
+   assert(rc==(test==2?ZizhanAmpProtocol:ZizhanAmpStateChanged)&&out.status==ZizhanAmpFail);
+   for(unsigned c=0;c<2;++c){assert(!out.pulse[c].complete&&!out.pulse[c].patch_off);}
+  }
+ }
+ zizhan_amp_pulse_flags=0;
  puts("PASS native protection-fw9+playwindow(both amps held,dry,fault/HALO abort,stream fail,refuse,late bus failures) volatilecachedR/checksum/status/topbypass,strict input/reads/ordering/no ambient ormeasurement,HALOguards/native rateblock low5zero/highbitspreserved/all16badreadbacks/HBfailure;no hardware");return 0;
 }

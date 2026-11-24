@@ -1462,6 +1462,7 @@ static bool volume18_step(unsigned index)
     SEL action=sel_registerName(index?"decreaseVolume":"increaseVolume");
     if(!control || !method_abi(class_getInstanceMethod(object_getClass(control),action),"v",0,""))return false;
     ((void(*)(id,SEL))objc_msgSend)(control,action);
+    if(volume18_has_cancel)volume18_cancel();
     return true;
 }
 static void volume18_repeat(void *context)
@@ -1503,7 +1504,7 @@ static void volume18_prepare(void *context)
             for(uint64_t n=0;n<steps;n++)(void)volume18_step(i);
             if(!volume18_keys[i].held && (steps || was_held) && !volume18_keys[1u-i].held)
                 volume18_cancel();
-            if(steps && volume18_keys[i].held && !volume18_has_cancel)dispatch_after_f(
+            if(steps && volume18_keys[i].held)dispatch_after_f(
                 dispatch_time(DISPATCH_TIME_NOW,400*NSEC_PER_MSEC),dispatch_get_main_queue(),
                 (void *)(uintptr_t)((count<<1)|i),volume18_repeat);
             fprintf(stderr,"Pong volume18: native %s presses=%llu held=%u\n",i?"decrease":"increase",

@@ -7,12 +7,15 @@
  * Mode 1: 3x Vol+ then 2x Vol- (net +1 step), starting delay_s (default 24 s)
  * after the first zero-copy desktop frame so SpringBoard's volume18 bridge is
  * ready and pong_shot=23..28 can capture the native iPadOS Volume HUD.
- * Mode 2: 4x Vol+ only. */
+ * Mode 2: 4x Vol+ only.
+ * Mode 3: exercises pong_buttons single-step click pacer (2x 192 ms human-duration
+ * Vol- clicks -> 1 step each, then 1x 560 ms Vol+ hold -> 3 steps: press + 2 repeats). */
 enum {
  ZizhanVolInjectOff = 0,
  ZizhanVolInjectUpDown = 1,
  ZizhanVolInjectUpOnly = 2,
- ZizhanVolInjectSkipMode = 3
+ ZizhanVolInjectPaced = 3,
+ ZizhanVolInjectSkipMode = 4
 };
 
 enum {
@@ -20,9 +23,43 @@ enum {
  ZizhanVolDelayMinS = 5u,
  ZizhanVolDelayMaxS = 120u,
  ZizhanVolHoldMs = 80u,
+ ZizhanVolHumanClickMs = 192u,
+ ZizhanVolLongHoldMs = 560u,
+ ZizhanVolPaceDelayMs = 400u,
+ ZizhanVolPaceRepeatMs = 112u,
  ZizhanVolClickGapMs = 600u,
  ZizhanVolDirGapMs = 1500u
 };
+
+typedef struct {
+ uint32_t held_ms;
+ uint8_t down;
+} ZizhanVolPace;
+
+/* Returns 1 when an atomic DOWN+UP volume step should be emitted, 0 otherwise.
+ * Short presses (<400 ms, including 150-250 ms human clicks) emit strictly 1 step
+ * on press; holding >=400 ms emits 1 repeat step at 400 ms and every 112 ms after. */
+static inline unsigned zizhan_vol_pace_step(ZizhanVolPace *p, int down, uint32_t dt_ms) {
+ if (!p) { return 0u; }
+ if (!down) {
+  p->down = 0u;
+  p->held_ms = 0u;
+  return 0u;
+ }
+ if (!p->down) {
+  p->down = 1u;
+  p->held_ms = 0u;
+  return 1u;
+ }
+ const uint32_t prev = p->held_ms;
+ const uint32_t next = (dt_ms > 0xffffu - prev) ? 0xffffu : (prev + dt_ms);
+ p->held_ms = next;
+ if (next < ZizhanVolPaceDelayMs) { return 0u; }
+ if (prev < ZizhanVolPaceDelayMs) { return 1u; }
+ const uint32_t prev_slot = (prev - ZizhanVolPaceDelayMs) / ZizhanVolPaceRepeatMs;
+ const uint32_t next_slot = (next - ZizhanVolPaceDelayMs) / ZizhanVolPaceRepeatMs;
+ return next_slot > prev_slot ? 1u : 0u;
+}
 
 enum {
  ZizhanVolKeyUp = 1u,
@@ -33,6 +70,7 @@ static inline int zizhan_vol_inject_mode(uint32_t inject) {
  if (!inject) { return ZizhanVolInjectOff; }
  if (inject == 1u) { return ZizhanVolInjectUpDown; }
  if (inject == 2u) { return ZizhanVolInjectUpOnly; }
+ if (inject == 3u) { return ZizhanVolInjectPaced; }
  return ZizhanVolInjectSkipMode;
 }
 

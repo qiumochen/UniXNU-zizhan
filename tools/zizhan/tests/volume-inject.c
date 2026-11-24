@@ -12,7 +12,8 @@ int main(void) {
  CHECK(zizhan_vol_inject_mode(0) == ZizhanVolInjectOff, "default off");
  CHECK(zizhan_vol_inject_mode(1) == ZizhanVolInjectUpDown, "mode 1 up+down");
  CHECK(zizhan_vol_inject_mode(2) == ZizhanVolInjectUpOnly, "mode 2 up-only");
- CHECK(zizhan_vol_inject_mode(3) == ZizhanVolInjectSkipMode, "mode 3 skipped");
+ CHECK(zizhan_vol_inject_mode(3) == ZizhanVolInjectPaced, "mode 3 paced");
+ CHECK(zizhan_vol_inject_mode(4) == ZizhanVolInjectSkipMode, "mode 4 skipped");
  CHECK(zizhan_vol_inject_mode(0xffffffffu) == ZizhanVolInjectSkipMode, "max uint skipped");
 
  CHECK(zizhan_vol_delay_s(0) == 24u, "default delay 24 s");
@@ -34,6 +35,30 @@ int main(void) {
  CHECK(zizhan_vol_up_clicks(2) == 4u && zizhan_vol_down_clicks(2) == 0u && zizhan_vol_total_clicks(2) == 4u,
        "mode 2: 4 up + 0 down");
  CHECK(ZizhanVolHoldMs <= 200u, "short click avoids key repeat");
+
+ {
+  ZizhanVolPace p = { 0u, 0u };
+  unsigned steps = zizhan_vol_pace_step(&p, 1, 0u);
+  for (unsigned ms = 0u; ms < 192u; ms += 16u) {
+   steps += zizhan_vol_pace_step(&p, 1, 16u);
+  }
+  steps += zizhan_vol_pace_step(&p, 0, 0u);
+  CHECK(steps == 1u && p.down == 0u && p.held_ms == 0u, "192 ms human click emits strictly 1 step");
+
+  steps = zizhan_vol_pace_step(&p, 1, 0u);
+  for (unsigned ms = 0u; ms < 384u; ms += 16u) {
+   steps += zizhan_vol_pace_step(&p, 1, 16u);
+  }
+  steps += zizhan_vol_pace_step(&p, 0, 0u);
+  CHECK(steps == 1u, "384 ms slow click still emits 1 step");
+
+  steps = zizhan_vol_pace_step(&p, 1, 0u);
+  for (unsigned ms = 0u; ms < 560u; ms += 16u) {
+   steps += zizhan_vol_pace_step(&p, 1, 16u);
+  }
+  steps += zizhan_vol_pace_step(&p, 0, 0u);
+  CHECK(steps == 3u, "560 ms hold emits press + 400 ms + 512 ms = 3 steps");
+ }
 
  printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
  return failures ? 1 : 0;

@@ -28,7 +28,7 @@ typedef struct {
     unsigned native_core_init,native_core_bad,native_core_writes[2];
     unsigned allow_ram,ram_mismatch,ram_value_writes,ram_sparse,read_index,short_fifo;
     unsigned coeff_mode,identity_bad;uint32_t coeff_unpacked[2][2];
-    unsigned pulse_test,pulse_writes,pulse_commands[48];uint32_t pulse_volume[2],pulse_patch[2],pulse_pcm[2];
+    unsigned pulse_test,pulse_writes,pulse_commands[128];uint32_t pulse_volume[2],pulse_patch[2],pulse_pcm[2];
     unsigned play_fault; /* profile 19 test: 0x10010 reports a protection fault (bit 15) */
     unsigned iv_bad,iv_reads;
     unsigned mailbox_test,mailbox_fault,mailbox_count[2],mailbox_commands[2][12];uint32_t mailbox_mask[2],mailbox_irq[2],mailbox_state[2];
@@ -231,7 +231,7 @@ static void wr(void *ctx, uint32_t reg, uint32_t value) {
             if(f->run_mode){
                 uint32_t v=swap(value);int rate=rate_slot(f->reg),mpu=mpu_slot(f->reg);
                 if(f->pulse_test&&(f->reg==0x6000||f->reg==0x2084||f->reg==0x40||f->reg==0x2018||f->reg==0x4c00)){
-                    assert(f->pulse_writes<48);f->pulse_commands[f->pulse_writes++]=f->commands;
+                    assert(f->pulse_writes<128);f->pulse_commands[f->pulse_writes++]=f->commands;
                     if(f->reg==0x6000){assert(v==0x267c||v==0x3f44);f->pulse_volume[chip]=v;}
                     else if(f->reg==0x2084){assert(v==0x2f1aa0||v==0x2f1aa3);f->pulse_patch[chip]=v;}
                     else if(f->reg==0x40)assert(v==0x55||v==0xaa||v==0xcc||v==0x33);

@@ -230,6 +230,7 @@ typedef struct {
  unsigned pulse_profile;ZizhanPulseReceipt pulse[2];
  /* profile 19 playback window (docs/plan/2026-11-18-m1-playback-amp.md) */
  unsigned play_profile,play_ms,play_ready[2],play_torn[2],play_streamed,play_polls,play_reason,play_stage,play_chip;
+ unsigned daemon_profile,daemon_sessions,daemon_arms,daemon_disarms;
  /* Read-only register snapshot at poll 5 of the play window (zizhan_play_snap_regs order). */
  uint32_t play_snap[2][16];unsigned play_snap_reads[2];
  /* zizhan_audio_echo: top chip ASP TX1 source/enables before, after setup, after restore; 4810. */
@@ -298,6 +299,8 @@ extern uint32_t zizhan_amp_dump_values[2][228]; /* 1: dry play window echoes ASP
 extern unsigned zizhan_amp_play_ms; /* 0 unless the kernel sets zizhan_audio_play_ms=<100..2000> */
 int zizhan_cs35l41_native_play_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);
+int zizhan_cs35l41_native_daemon_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
+ const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,ZizhanAudioAmpDaemonFn,void *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_pulse_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_iv_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,

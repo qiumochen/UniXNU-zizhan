@@ -70,10 +70,12 @@ int main() {
   static Fs other; other.alloc = take; other.release = give;
   assert(!mountSeed(other, bad.data(), uint32_t(bad.size()), nullptr));
 
+  uint64_t vendorMtime = 0;
   { Req r; r.words({31, 35}).text("/vendor/etc/sensors/sns_reg_config").reply({96});      // stat, extended form resolved by the caller
     assert(r.call(31) == 0);
     uint64_t st[12]; memcpy(st, r.out[0].data(), 96);
-    assert(st[0] == 96 && uint32_t(st[3]) == 0100644u && st[5] == config.size()); }
+    vendorMtime = st[8];
+    assert(st[0] == 96 && uint32_t(st[3]) == 0100644u && st[5] == config.size() && vendorMtime > 0); }
   { Req r; r.words({31, 20}).text("/vendor/etc/sensors").reply({96}); assert(r.call(31) == 0);
     uint64_t st[12]; memcpy(st, r.out[0].data(), 96); assert(uint32_t(st[3]) == 040755u); }
   { Req r; r.words({31, 6}).text("/nope").reply({96}); assert(r.call(31) == kNoEnt && fs.missing == 1 && !strcmp(fs.lastMissing, "/nope")); }
@@ -119,6 +121,8 @@ int main() {
     const uint32_t f = openFile("/mnt/vendor/persist/sensors/registry/registry/accel", "r"); assert(readAll(f, 4096).size() == 9000);
     Req close; close.words({f}); assert(close.call(3) == 0);
     Req ex; ex.words({52}).text("/mnt/vendor/persist/sensors/registry/registry/accel").reply({1}); assert(ex.call(22) == 0 && ex.out[0][0] == 1);
+    Req stPersist; stPersist.words({31, 52}).text("/mnt/vendor/persist/sensors/registry/registry/accel").reply({96}); assert(stPersist.call(31) == 0);
+    uint64_t stp[12]; memcpy(stp, stPersist.out[0].data(), 96); assert(stp[8] > vendorMtime);
     Req rm; rm.words({46}).text("/mnt/vendor/persist/sensors/registry/registry"); assert(rm.call(30) == kNotEmpty);
     Req del; del.words({52}).text("/mnt/vendor/persist/sensors/registry/registry/accel"); assert(del.call(24) == 0 && del.call(24) == kNoEnt);
     assert(rm.call(30) == 0 && gLive == 0 && fs.ramBytes == 0); }

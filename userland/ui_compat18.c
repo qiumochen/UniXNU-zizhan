@@ -2745,11 +2745,49 @@ static void lockdate_install(void *context)
 }
 /* zizhan SENS-03 diagnostic (boot-arg zizhan_accel_test): every 2 s on the main queue, for five minutes. */
 static void
+orientation_log_window(const char *proc_name, id win)
+{
+    if(!win)return;
+    Class wcls=object_getClass(win);
+    SEL s_hidden=sel_registerName("isHidden"),s_bounds=sel_registerName("bounds");
+    SEL s_wori=sel_registerName("_windowInterfaceOrientation"),s_layer=sel_registerName("layer");
+    SEL s_ctx=sel_registerName("_contextId");
+    int hidden=method_abi(class_getInstanceMethod(wcls,s_hidden),"Bc",0,"")?
+        (int)((BOOL(*)(id,SEL))objc_msgSend)(win,s_hidden):-1;
+    long wori=method_abi(class_getInstanceMethod(wcls,s_wori),"qQ",0,"")?
+        ((long(*)(id,SEL))objc_msgSend)(win,s_wori):-1;
+    unsigned ctx=method_abi(class_getInstanceMethod(wcls,s_ctx),"I",0,"")?
+        ((unsigned(*)(id,SEL))objc_msgSend)(win,s_ctx):0;
+    CGRect b=method_abi(class_getInstanceMethod(wcls,s_bounds),"{",0,"")?
+        ((CGRect(*)(id,SEL))objc_msgSend)(win,s_bounds):CGRectZero;
+    CGAffineTransform af=CGAffineTransformIdentity,saf=CGAffineTransformIdentity,ssaf=CGAffineTransformIdentity;
+    SEL s_af=sel_registerName("affineTransform"),s_sup=sel_registerName("superlayer");
+    id layer=method_abi(class_getInstanceMethod(wcls,s_layer),"@",0,"")?
+        ((id(*)(id,SEL))objc_msgSend)(win,s_layer):nil;
+    if(layer && method_abi(class_getInstanceMethod(object_getClass(layer),s_af),"{",0,"")) {
+        af=((CGAffineTransform(*)(id,SEL))objc_msgSend)(layer,s_af);
+    }
+    id sup=(layer && method_abi(class_getInstanceMethod(object_getClass(layer),s_sup),"@",0,""))?
+        ((id(*)(id,SEL))objc_msgSend)(layer,s_sup):nil;
+    if(sup && method_abi(class_getInstanceMethod(object_getClass(sup),s_af),"{",0,"")) {
+        saf=((CGAffineTransform(*)(id,SEL))objc_msgSend)(sup,s_af);
+    }
+    id ssup=(sup && method_abi(class_getInstanceMethod(object_getClass(sup),s_sup),"@",0,""))?
+        ((id(*)(id,SEL))objc_msgSend)(sup,s_sup):nil;
+    if(ssup && method_abi(class_getInstanceMethod(object_getClass(ssup),s_af),"{",0,"")) {
+        ssaf=((CGAffineTransform(*)(id,SEL))objc_msgSend)(ssup,s_af);
+    }
+    fprintf(stderr,"Zizhan orientation win[%s]: %s ctx=0x%x hidden=%d wori=%ld bounds=%.0fx%.0f af=[%.2f %.2f %.2f %.2f] saf=[%.2f %.2f %.2f %.2f] ssaf=[%.2f %.2f %.2f %.2f]\n",
+        proc_name,object_getClassName(win),ctx,hidden,wori,b.size.width,b.size.height,
+        af.a,af.b,af.c,af.d,saf.a,saf.b,saf.c,saf.d,ssaf.a,ssaf.b,ssaf.c,ssaf.d);
+}
+static void
 orientation_watch(void *unused)
 {
     static int last_device=-2,last_interface=-2;static unsigned rounds;
     (void)unused;
-    Class device_class=objc_getClass("UIDevice"),app_class=objc_getClass("UIApplication");
+    const char *proc_name=getprogname();if(!proc_name)proc_name="?";
+    Class device_class=objc_getClass("UIDevice"),app_class=objc_getClass("UIApplication"),win_class=objc_getClass("UIWindow"),scr_class=objc_getClass("UIScreen");
     id device=device_class?((id(*)(Class,SEL))objc_msgSend)(device_class,sel_registerName("currentDevice")):NULL;
     id app=app_class?((id(*)(Class,SEL))objc_msgSend)(app_class,sel_registerName("sharedApplication")):NULL;
     if(!rounds && device)((void(*)(id,SEL))objc_msgSend)(device,sel_registerName("beginGeneratingDeviceOrientationNotifications"));
@@ -2757,7 +2795,27 @@ orientation_watch(void *unused)
     SEL active=sel_registerName("activeInterfaceOrientation");
     int now_interface=app && class_respondsToSelector(object_getClass(app),active)?(int)((long(*)(id,SEL))objc_msgSend)(app,active):-1;
     if(now_device!=last_device || now_interface!=last_interface) {
-        fprintf(stderr,"Zizhan orientation: SpringBoard device %d interface %d\n",now_device,now_interface);
+        int tl_rot=-1;double scr_rot=-99.0;
+        SEL s_tlr=sel_registerName("_transformLayerRotationsAreEnabled"),s_main=sel_registerName("mainScreen"),s_srot=sel_registerName("_rotation");
+        if(win_class && method_abi(class_getClassMethod(win_class,s_tlr),"Bc",0,"")) {
+            tl_rot=(int)((BOOL(*)(Class,SEL))objc_msgSend)(win_class,s_tlr);
+        }
+        id scr=(scr_class && method_abi(class_getClassMethod(scr_class,s_main),"@",0,""))?
+            ((id(*)(Class,SEL))objc_msgSend)(scr_class,s_main):nil;
+        if(scr && method_abi(class_getInstanceMethod(object_getClass(scr),s_srot),"d",0,"")) {
+            scr_rot=((double(*)(id,SEL))objc_msgSend)(scr,s_srot);
+        }
+        fprintf(stderr,"Zizhan orientation: %s device %d interface %d tl_rot=%d scr_rot=%.2f\n",proc_name,now_device,now_interface,tl_rot,scr_rot);
+        SEL s_allw=sel_registerName("allWindowsIncludingInternalWindows:onlyVisibleWindows:");
+        id wins=(win_class && method_abi(class_getClassMethod(win_class,s_allw),"@",2,"BB") )?
+            ((id(*)(Class,SEL,BOOL,BOOL))objc_msgSend)(win_class,s_allw,YES,NO):nil;
+        if(!wins && win_class && method_abi(class_getClassMethod(win_class,s_allw),"@",2,"cc")) {
+            wins=((id(*)(Class,SEL,BOOL,BOOL))objc_msgSend)(win_class,s_allw,YES,NO);
+        }
+        CFIndex nw=wins?CFArrayGetCount((CFArrayRef)wins):0;
+        for(CFIndex wi=0;wi<nw && wi<24;++wi) {
+            orientation_log_window(proc_name,(id)CFArrayGetValueAtIndex((CFArrayRef)wins,wi));
+        }
         last_device=now_device;last_interface=now_interface;
     }
     if(++rounds<150)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
@@ -2817,7 +2875,11 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     wallpaper_process=boot_option("pong_wallpaper_catalog_override=1") && wallpaper_paths_process;
     (void)dup2(2,1);setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);
     fprintf(stderr,"Pong iPadOS18 adapter: %s (22H374)\n",name);
-    if(strcmp(name,"Preferences")==0)pong_settings18_start();
+    if(strcmp(name,"Preferences")==0) {
+        pong_settings18_start();
+        if(boot_value("zizhan_accel_test=",(char[16]){0},16))
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
+    }
     if(strcmp(name,"Preferences")==0 && boot_option("pong_pane=DISPLAY")) {
         brightness_test_restore_only=boot_option("pong_brightness_restore_only=1");
         if(brightness_test_restore_only || boot_option("pong_brightness_ui_test=1"))
@@ -2856,7 +2918,7 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         display_link_rates();
         /* zizhan SENS-03 diagnostic: the device and interface orientation SpringBoard has, said when either changes */
         if(boot_value("zizhan_accel_test=",(char[16]){0},16))
-            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,60*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
         // The consumer reports are accepted but physical volume remains
         // unresponsive on this imported iPad board. Route those transitions
         // to the existing 22H374 controller after checking its actual ABI.

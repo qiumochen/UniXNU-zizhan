@@ -287,7 +287,7 @@ void snsSend(uint64_t lo, uint64_t hi, uint32_t msgId, const uint8_t *msg, uint3
 void snsSuid(const char *type) {
   Pb m = {};
   pbBytes(m, 1, reinterpret_cast<const uint8_t *>(type), uint32_t(strlen(type)));
-  pbVarField(m, 2, 0); pbVarField(m, 3, 1);                   // no updates, default sensor only
+  pbVarField(m, 2, 1); pbVarField(m, 3, 1);                   // register_updates=1, default sensor only
   snsSend(kSuid, kSuid, 512, m.b, m.n, type);
 }
 void snsAccelEnable(bool on) {
@@ -886,9 +886,18 @@ void worker(void *, wait_result_t) {
   for (unsigned i = 0; i < 1200 && !pong_ufs_ready(); ++i) IOSleep(100);
   // modem-6: loading 108 MB while the first desktop frame releases the boot console (a one-time full-panel clear with
   // preemption off) pushed that clear past the 6 ms preemption limit and panicked. Start only after the first frame.
-  for (unsigned i = 0; i < 1200 && !(&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)); ++i) IOSleep(100);
-  IOLog("ZIZHAN_SLPI: desktop frame seen=%u, starting in 10 s\n", (&pong_zc_flipped_tag && pong_zc_flipped_tag) ? 1u : 0u);
-  IOSleep(10000);
+  for (unsigned i = 0; i < 1200 && !(&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)); ++i) {
+    IOSleep(100);
+  }
+  uint32_t delayMs = 1500;
+  (void)PE_parse_boot_argn("zizhan_slpi_delay_ms", &delayMs, sizeof delayMs);
+  if (delayMs > 60000) {
+    delayMs = 60000;
+  }
+  IOLog("ZIZHAN_SLPI: desktop frame seen=%u, starting in %u ms\n", (&pong_zc_flipped_tag && pong_zc_flipped_tag) ? 1u : 0u, delayMs);
+  if (delayMs) {
+    IOSleep(delayMs);
+  }
   if (gShared) {
     unsigned waited = 0;
     for (; waited < 600 && !pong_adsp_shared_ready(); ++waited) IOSleep(100);
@@ -1064,20 +1073,48 @@ again:
       lastBits = bits;
       if (bits & kFatal) { readCrash(); break; }
       if (bits & kReady) readySeen = true;
-      if (!cycle && (bits & kReady) && !gGlinkOn) glinkStart();
+      if (!cycle && (bits & kReady) && !gGlinkOn) {
+        glinkStart();
+      }
     }
-    if (!cycle) glinkService();
-    if (gSlpiMode >= 3 && !cycle && zizhan_frpc::gUp && !zizhan_frpc::gDone) zizhan_frpc::run();
+    if (!cycle) {
+      for (unsigned burst = 0; burst < 64; ++burst) {
+        const uint32_t rx0 = gGlink.rx_messages;
+        const uint32_t calls0 = zizhan_frpc::gFs.calls;
+        glinkService();
+        if (gSlpiMode >= 3 && zizhan_frpc::gUp && !zizhan_frpc::gDone) {
+          zizhan_frpc::run();
+        }
+        if (gAccelOn) {
+          break;
+        }
+        if (gGlink.rx_messages == rx0 && zizhan_frpc::gFs.calls == calls0) {
+          IODelay(80);
+          glinkService();
+          if (gSlpiMode >= 3 && zizhan_frpc::gUp && !zizhan_frpc::gDone) {
+            zizhan_frpc::run();
+          }
+          if (gGlink.rx_messages == rx0 && zizhan_frpc::gFs.calls == calls0) {
+            break;
+          }
+        }
+      }
+    }
+    if (gSlpiMode >= 2 && !cycle && gAccelFound && !gAccelOn && gIpcrtr && gIpcrtr->up) {
+      snsAccelEnable(true);
+      gSnsStage = 5;
+      gSnsNextMs = now + 10000;
+    }
     if (gSlpiMode >= 2 && !cycle && gSnsNode != 0xffffffffu && gIpcrtr && gIpcrtr->up && now >= gSnsNextMs) {
       switch (gSnsStage) {   // one step per slot: registry, accel, ambient_light lookups, then the accelerometer stream
-      case 0: gSnsNextMs = now + 3000; break;
-      case 1: snsSuid("registry"); gSnsNextMs = now + 1500; break;
-      case 2: snsSuid("accel"); gSnsNextMs = now + 1500; break;
-      case 3: snsSuid("ambient_light"); gSnsNextMs = now + 2000; break;
+      case 0: gSnsNextMs = now + 200; break;
+      case 1: snsSuid("registry"); gSnsNextMs = now + 150; break;
+      case 2: snsSuid("accel"); gSnsNextMs = now + 150; break;
+      case 3: snsSuid("ambient_light"); gSnsNextMs = now + 200; break;
       case 4:
         if (gAccelFound) { snsAccelEnable(true); gSnsNextMs = now + 10000; break; }
-        IOLog("ZIZHAN_SLPI: sns no accel sensor yet (t=%llus), retry in 15 s\n", (now - t0) / 1000);
-        gSnsStage = 0xffffffffu; gSnsNextMs = now + 15000;   // ++ below wraps it to 0
+        IOLog("ZIZHAN_SLPI: sns no accel sensor yet (t=%llus), retry in 2 s\n", (now - t0) / 1000);
+        gSnsStage = 0xffffffffu; gSnsNextMs = now + 2000;   // ++ below wraps it to 0
         break;
       default:
         gSnsNextMs = now + (gSlpiMode == 4 && now - t0 > 120000 ? 60000 : 10000);
@@ -1085,8 +1122,10 @@ again:
       }
       if (gSnsStage < 5 || gSnsStage == 0xffffffffu) ++gSnsStage;
     }
-    if (now - t0 > 10000 && !(lastBits != 0xffffffffu && (lastBits & kReady))) break;
-    IOSleep(10);
+    if (now - t0 > 10000 && !(lastBits != 0xffffffffu && (lastBits & kReady))) {
+      break;
+    }
+    IOSleep((!cycle && !gAccelOn && now - t0 < 15000) ? 1 : 10);
   }
   stage = 27;
 out:

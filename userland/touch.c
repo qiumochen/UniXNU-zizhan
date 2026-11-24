@@ -547,9 +547,9 @@ sensors_thread(void *unused)
     if (!accel) {say("Zizhan sensors HID: server did not open the accelerometer; SKIP\n");return NULL;}
     say("Zizhan sensors HID: accelerometer service opened, device orientation service %s\n",held?"opened":"unavailable");
     int device=-1;
-    for (unsigned i=0;i<300 && device<0;i++) {
+    for (unsigned i=0;i<2400 && device<0;i++) {
         device=open("/dev/zizhan-sensors",O_RDONLY);
-        if (device<0) sleep(2);
+        if (device<0) usleep(250000);
     }
     if (device<0) {say("Zizhan sensors HID: no /dev/zizhan-sensors after 10 minutes (%s); the services stay silent\n",strerror(errno));return NULL;}
     say("Zizhan sensors HID: samples from /dev/zizhan-sensors\n");

@@ -50,13 +50,20 @@ until in_fastboot; do
   if [ $el -ge $nextkick ]; then bash $S/usbkick.sh kick; nextkick=$(( el + 45 )); fi
   sleep 3
 done
-echo "$(ts) fastboot is back after $(( $(date +%s) - start + 20 ))s; saving the ramoops to logfs"
-bash "$S/fastboot-boot.sh" "$S/out/ramoops-dump.img" 2>&1 | tail -1 || exit 7
-start=$(date +%s); nextkick=240   # M3 boot_b: RamoopsDump reset -> menu (10 s) -> magic reset -> Android ~65 s; 11-23 lock-2 took 4.5 min (5 ABL boots) and kicks may have disturbed it
+if [ "$KLOG" = 1 ] && [ -n "${ZIZHAN_ANDROID_RETURN_IMG:-}" ] && [ -f "$ZIZHAN_ANDROID_RETURN_IMG" ]; then
+  echo "$(ts) fastboot is back after $(( $(date +%s) - start + 20 ))s; RAM-booting Android ($ZIZHAN_ANDROID_RETURN_IMG)"
+  bash "$S/fastboot-boot.sh" "$ZIZHAN_ANDROID_RETURN_IMG" 2>&1 | tail -1 || exit 7
+  SKIP_RAMOOPS_LOGFS=1
+else
+  echo "$(ts) fastboot is back after $(( $(date +%s) - start + 20 ))s; saving the ramoops to logfs"
+  bash "$S/fastboot-boot.sh" "$S/out/ramoops-dump.img" 2>&1 | tail -1 || exit 7
+  SKIP_RAMOOPS_LOGFS=0
+fi
+start=$(date +%s); nextkick=300; kicks=0   # M3 boot_b: ~65 s normal, up to 4.5 min on ABL retries; cap at 2 spaced kicks so repeated 60 s VBUS cycles do not disturb ABL or enter off-mode charging
 until in_adb; do
   el=$(( $(date +%s) - start ))
   [ $el -ge 900 ] && { echo "$(ts) Android did not come back"; exit 5; }
-  if [ $el -ge $nextkick ]; then bash $S/usbkick.sh kick; nextkick=$(( el + 60 )); fi
+  if [ "$kicks" -lt 2 ] && [ $el -ge $nextkick ]; then bash $S/usbkick.sh kick; kicks=$(( kicks + 1 )); nextkick=$(( el + 300 )); fi
   sleep 3
 done
 sleep 5
@@ -68,10 +75,15 @@ if mtype -i "$LOGFS" ::BOOTFAIL.TXT > $L/$RUN.bootfail.txt 2>/dev/null; then
   echo "$(ts) DarwinBoot24 refused the boot (logs/$RUN.bootfail.txt):"; sed 's/^/  /' $L/$RUN.bootfail.txt
   adb shell -T "su -c 'rm -f /dev/logfs/BOOTFAIL.TXT /dev/logfs/bootfail.txt; sync'"   # Android mounts logfs at /dev/logfs
 else rm -f $L/$RUN.bootfail.txt; fi
-mtype -i "$LOGFS" ::XNULOG.TXT > $L/$RUN.txt 2>/dev/null || { echo "$(ts) no XNULOG.TXT in logfs"; mdir -i "$LOGFS" ::; exit 6; }
-# The kernel's UFS copy of the ramoops zones has no reset bit flips: when it was written this round it becomes RUN.txt.
-if [ $KLOG = 1 ] && python3 $S/klog.py read $L/$RUN.klog.txt; then
-  mv $L/$RUN.txt $L/$RUN.ramoops.txt; cp $L/$RUN.klog.txt $L/$RUN.txt; echo "$(ts) using the klog copy (DRAM copy: $RUN.ramoops.txt)"
+if [ "${SKIP_RAMOOPS_LOGFS:-0}" = 1 ]; then
+  python3 $S/klog.py read $L/$RUN.klog.txt || { echo "$(ts) no fresh UFS klog after direct Android return"; exit 6; }
+  cp $L/$RUN.klog.txt $L/$RUN.txt; echo "$(ts) using the klog copy (direct Android RAM return)"
+else
+  mtype -i "$LOGFS" ::XNULOG.TXT > $L/$RUN.txt 2>/dev/null || { echo "$(ts) no XNULOG.TXT in logfs"; mdir -i "$LOGFS" ::; exit 6; }
+  # The kernel's UFS copy of the ramoops zones has no reset bit flips: when it was written this round it becomes RUN.txt.
+  if [ $KLOG = 1 ] && python3 $S/klog.py read $L/$RUN.klog.txt; then
+    mv $L/$RUN.txt $L/$RUN.ramoops.txt; cp $L/$RUN.klog.txt $L/$RUN.txt; echo "$(ts) using the klog copy (DRAM copy: $RUN.ramoops.txt)"
+  fi
 fi
 rm -f "$KLOG_MARKER"
 bash "$S/UniXNU-zizhan/tools/zizhan/mac/decode-shots.sh" "$RUN" || echo "$(ts) screenshot decoding failed; inspect $L/$RUN.txt"

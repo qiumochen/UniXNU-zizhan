@@ -1,6 +1,6 @@
 # 当前进度与接续入口
 
-更新：2026-11-19（UTC+8）。本页只保留**当前**状态，限一页。11-17 之前的完整台账原文在 [2026-11-17-status-archive.md](2026-11-17-status-archive.md)；规划依据见 [接手梳理与重新规划](../plan/2026-11-17-takeover-replan.md)。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机操作细节在仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
+更新：2026-11-24（UTC+8）。本页只保留**当前**状态，限一页。11-17 之前的完整台账原文在 [2026-11-17-status-archive.md](2026-11-17-status-archive.md)；规划依据见 [接手梳理与重新规划](../plan/2026-11-17-takeover-replan.md)。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机操作细节在仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
 
 ## 推进规则（11-17 起）
 
@@ -179,3 +179,18 @@ M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 
 - **传感器进 iPadOS SENS-03**（当晚补充）：传感器协处理器已能和 ADSP 同时运行（`zizhan_slpi=4`）；加速度计经 `/dev/zizhan-sensors` 和 backboardd 里的两个虚拟 HID 服务进入系统，CoreMotion、backboardd、SpringBoard 都跟着上报的方向变化，倒置时画面确实转了 180°。横屏时截图里画面不变，原因未明，方向与屏幕是否对应也要真机转动确认，所以仍默认关闭，见[待人工清单](HUMAN_CHECKLIST.md)。新诊断 `zizhan_oslog=<关键词>` 可把系统日志打到控制台。
 - **M3 回安卓绕圈**再次出现（至少 14 分钟，丢了一轮），双份标记镜像仍待在场写入。
 - 详情：[第六轮记录](2026-11-23-round6.md)。
+
+## 2026-11-24 下午：开应用与退出缩放动画卡顿、MobileNotes 崩溃与零拷贝槽位修复
+
+- **根因定位（`zoom-cadence.py` 四阶段拆分）**：原单一最大帧间隔指标掩盖了缩放动画期的三项独立问题：
+  1. `PongAdrenoScanout.cpp::zcFlip()` 在 100 µs 轮询循环内反复重读全局 `gGtRing->lastSubmitted()`，追逐下一帧或前台应用新提交的 GPU 栅栏（单次最长达 42.7 ms），导致打开/退出缩放动画出现 `[42～50 ms, 8.3 ms]` 成对卡顿（`>33 ms` 帧占 21～25%）。
+  2. `minisandbox` 请求 5（`__sandbox_extension_issue`）返回 0 却未写入用户态 `malloc_type_malloc(2048)` 未初始化缓冲区，22H374 `Foundation`（`LocalizedStringResource.encode(to:)`）因非 UTF-8 脏字节抛异常，导致 `MobileNotes` 每次启动约 6.3 s 后 `SIGABRT`（每轮崩 11～12 次），下一次点开被迫走冷启动。
+  3. 128 MiB 面板池默认 `2` 拷贝缓冲 + `5` 零拷贝槽位，双应用切换时槽位耗尽（`NONE FREE` 每轮 8～11 次）。
+- **修复与实机单变量验证（`uxz-1..uxz-5`，`play158..160`，对比 `ux-p4/ux-p5/uxt-2`）**：
+  - 补丁 `0039` + `ZizhanZcFence.h` 按帧快照 `backboardd` 合成栅栏并固定轮询目标（每轮拦截 665～1371 次跨帧追逐，栅栏等待峰值 42.7 → **20.8～22.4 ms**）；
+  - 补丁 `0040` 为 `minisandbox` 请求 5 写入 `libsystem_sandbox` 标准占位令牌 `"invalid"`（`MobileNotes` `SIGABRT` 11～12 → **0**，`open_blank` 中位数降至 **141.5～149.7 ms** / 抬手后约 **82～90 ms**，p90 从 208～216 ms 降至 **158～166 ms**）；
+  - 零拷贝模式默认 `pong_dpu_bufs=1`（`1` 拷贝缓冲 + **`6` 零拷贝槽位**，`NONE FREE` 8～11 → **0**）；
+  - 对照轮 `uxz-4`（`pong_zc_async=1`）因脱离 TE 垂直同步节拍导致相位漂移（`>25 ms` 升至 31～33%），予以排除并保持默认关闭；
+  - 默认出厂配置轮 `uxz-5`（`play160`）：`open_zoom` **58.6 fps**（`>33 ms` 22% → **5%**），`exit_zoom` **54.3 fps**（`>33 ms` 22% → **11%**），`home_settle` **95.7 fps**（`>25 ms` **0%**），`NONE FREE = 0`，`SIGABRT = 0`。
+- **工具**：新增 `zoom-cadence.py`、`zc-fence-target` 双平台单测；`cycle.sh` 限制回安卓阶段 USB 重置次数并支持 `ZIZHAN_ANDROID_RETURN_IMG` 内存直启回安卓。
+- 详情：[11-24 记录](2026-11-24-zoom-cadence-and-sandbox.md)。

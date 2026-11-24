@@ -67,7 +67,7 @@ static int kernel_thread_start(void(*worker)(void*,int),void *arg,int *thread) {
 }
 static bool daily_absent;
 static bool PE_parse_boot_argn(const char *key, void *out, size_t n) {
-  if(!strcmp(key,"zizhan_hall_simulate") || !strcmp(key,"zizhan_hall_simulate_dur")){return false;}
+  if(!strcmp(key,"zizhan_hall_simulate") || !strcmp(key,"zizhan_hall_simulate_dur") || !strcmp(key,"zizhan_hall_simulate_cycles")){return false;}
   if(!strcmp(key,"zizhan_daily")){unsigned off=0;assert(n==sizeof off);if(daily_absent){return false;}memcpy(out,&off,n);return true;}
   assert(!strcmp(key,"zizhan_hall_observe") && n==sizeof(mode));
   memcpy(out,&mode,n);return mode!=0;

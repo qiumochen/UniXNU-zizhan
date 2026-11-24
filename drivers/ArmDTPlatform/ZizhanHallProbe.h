@@ -33,6 +33,7 @@ struct Inputs {
   uint32_t follow;
   uint32_t simulate_s;
   uint32_t simulate_dur_s;
+  uint32_t simulate_cycles;
 };
 
 static bool read32(IORegistryEntry *entry, const char *key, uint32_t &value) {
@@ -135,11 +136,17 @@ static void worker(void *arg, wait_result_t) {
     const bool high = (raw & 1u) != 0;
     bool asserted = config.active_low ? !high : high;
     const uint64_t when = nowNs();
-    // zizhan_hall_simulate=<s> (follow mode self-test): closed from s to s+dur seconds after the observer started.
+    // zizhan_hall_simulate=<s> (follow mode self-test): closed from s for dur seconds, repeated cycles times.
     if (config.simulate_s) {
       const uint64_t dur = config.simulate_dur_s ? config.simulate_dur_s : 15u;
+      const uint64_t cyc = config.simulate_cycles ? config.simulate_cycles : 1u;
+      const uint64_t period = dur + 15u;
       const uint64_t t = (when - begin) / 1000000000ULL;
-      const bool sim = t >= config.simulate_s && t < config.simulate_s + dur;
+      bool sim = false;
+      if (t >= config.simulate_s) {
+        const uint64_t rel = t - config.simulate_s;
+        sim = (rel / period) < cyc && (rel % period) < dur;
+      }
       asserted = sim;
     }
     const auto update = sample(state, asserted, when, debounce_ns);
@@ -256,7 +263,12 @@ static void start(IOService *platform) {
       dur = 15;
     }
     config.simulate_dur_s = dur;
-    IOLog("ZIZHAN_HALL: SIMULATE closed at %u s for %u s (sensor ignored)\n", simulate, dur);
+    uint32_t cyc = 1;
+    if (!PE_parse_boot_argn("zizhan_hall_simulate_cycles", &cyc, sizeof(cyc)) || cyc < 1 || cyc > 6) {
+      cyc = 1;
+    }
+    config.simulate_cycles = cyc;
+    IOLog("ZIZHAN_HALL: SIMULATE closed at %u s for %u s x %u cycle(s) (sensor ignored)\n", simulate, dur, cyc);
   }
   *copy = config;
   if (kernel_thread_start(worker, copy, &thread) != KERN_SUCCESS) {

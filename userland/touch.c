@@ -52,8 +52,10 @@ static IOHIDEventRef (*IOHIDEventCreateKeyboardEvent)(CFAllocatorRef allocator, 
     uint32_t usage_page,uint32_t usage,Boolean down,uint32_t options);
 static void (*IOHIDEventAppendEvent)(IOHIDEventRef parent, IOHIDEventRef child, uint32_t options);
 static void (*IOHIDEventSetIntegerValue)(IOHIDEventRef event, uint32_t field, CFIndex value);
-/* zizhan SENS-03: x, y, z in g */
+/* zizhan SENS-03/04: x, y, z in g; ambient light in lux */
 static IOHIDEventRef (*IOHIDEventCreateAccelerometerEvent)(CFAllocatorRef allocator, uint64_t time, double x, double y, double z,
+    uint32_t options);
+static IOHIDEventRef (*IOHIDEventCreateAmbientLightSensorEvent)(CFAllocatorRef allocator, uint64_t time, uint32_t value,
     uint32_t options);
 /* an orientation event of the "CoreMotion usage" kind: usage says how the device is held */
 static IOHIDEventRef (*IOHIDEventCreateDeviceOrientationEventWithUsage)(CFAllocatorRef allocator, uint64_t time, uint32_t usage,
@@ -71,6 +73,7 @@ static IOHIDEventRef (*IOHIDEventCreateVendorDefinedEvent)(CFAllocatorRef alloca
 #define HID_USAGE_MENU                  0x40    /* the home button */
 #define HID_PAGE_APPLE_VENDOR           0xff00
 #define HID_USAGE_ACCELEROMETER         0x03    /* kHIDUsage_AppleVendor_Accelerometer */
+#define HID_USAGE_AMBIENT_LIGHT         0x04    /* kHIDUsage_AppleVendor_AmbientLightSensor */
 #define HID_PAGE_SENSOR                 0x20
 #define HID_USAGE_DEVICE_ORIENTATION    0x8a    /* kHIDUsage_Snsr_Orientation_DeviceOrientation */
 #define HID_USAGE_VOLUME_UP             0xe9
@@ -530,7 +533,7 @@ sensors_thread(void *unused)
      * accelerometer appeared first and late, after display off/on had left a configuration to send, the notifier sent it
      * through its still missing orientation device and backboardd and SpringBoard died in CoreMotion (sens-9).
      */
-    IOHIDEventSystemClientRef client=NULL;IOHIDServiceClientRef accel=NULL,held=NULL;
+    IOHIDEventSystemClientRef client=NULL;IOHIDServiceClientRef accel=NULL,held=NULL,als=NULL;
     const int types[]={HID_CLIENT_SIMPLE,HID_CLIENT_RATE_CONTROLLED};
     for (unsigned i=0;i<2 && !accel;i++) {
         client=IOHIDEventSystemClientCreateWithType(NULL,types[i],NULL);
@@ -538,14 +541,18 @@ sensors_thread(void *unused)
         IOHIDEventSystemClientScheduleWithDispatchQueue(client,dispatch_queue_create("zizhan.sensors.hid",NULL));
         if (IOHIDEventCreateDeviceOrientationEventWithUsage && IOHIDEventCreateVendorDefinedEvent && !held)
             held=make_service(client,"Zizhan device orientation",HID_PAGE_SENSOR,HID_USAGE_DEVICE_ORIENTATION,false);
+        if (IOHIDEventCreateAmbientLightSensorEvent && !als)
+            als=make_service(client,"Zizhan ambient light",HID_PAGE_APPLE_VENDOR,HID_USAGE_AMBIENT_LIGHT,false);
         accel=make_service(client,"Zizhan accelerometer",HID_PAGE_APPLE_VENDOR,HID_USAGE_ACCELEROMETER,false);
         if (!accel) {
+            if (als) {IOHIDVirtualServiceClientRemove(als);CFRelease(als);als=NULL;}
             if (held) {IOHIDVirtualServiceClientRemove(held);CFRelease(held);held=NULL;}
             CFRelease(client);
         }
     }
     if (!accel) {say("Zizhan sensors HID: server did not open the accelerometer; SKIP\n");return NULL;}
-    say("Zizhan sensors HID: accelerometer service opened, device orientation service %s\n",held?"opened":"unavailable");
+    say("Zizhan sensors HID: accelerometer opened, orientation %s, ambient light %s\n",
+        held?"opened":"unavailable",als?"opened":"unavailable");
     int device=-1;
     for (unsigned i=0;i<2400 && device<0;i++) {
         device=open("/dev/zizhan-sensors",O_RDONLY);
@@ -557,9 +564,24 @@ sensors_thread(void *unused)
     /* zizhan_orient_test=1: report the orientations 0..6 in turn, about 10 s each, whatever the accelerometer says */
     const int orientation_test=strstr(args,"zizhan_orient_test=1")!=NULL;
     int last_held=-1;
-    struct pong_touch sample;unsigned count=0,refused=0;ssize_t length;
+    struct pong_touch sample;unsigned count=0,als_count=0,refused=0;ssize_t length;
     while ((length=read(device,&sample,sizeof(sample)))>0 || (length<0 && errno==EINTR)) {
-        if (length!=(ssize_t)sizeof(sample) || sample.type!=ZIZHAN_SENSOR_ACCEL) continue;
+        if (length!=(ssize_t)sizeof(sample)) continue;
+        if (sample.type==ZIZHAN_SENSOR_LIGHT) {
+            if (als && IOHIDEventCreateAmbientLightSensorEvent) {
+                int32_t ml=(int32_t)sample.finger;
+                uint32_t lux=ml>0?(uint32_t)((ml+500)/1000):0;
+                IOHIDEventRef lev=IOHIDEventCreateAmbientLightSensorEvent(NULL,sample.time,lux,0);
+                if (lev) {
+                    IOHIDEventSetIntegerValue(lev,FIELD_IS_BUILT_IN,1);
+                    (void)IOHIDVirtualServiceClientDispatchEvent(als,lev);
+                    CFRelease(lev);
+                }
+            }
+            if (als_count++<8) say("Zizhan sensors HID: als #%u %.3f lux\n",als_count,(int32_t)sample.finger/1000.0);
+            continue;
+        }
+        if (sample.type!=ZIZHAN_SENSOR_ACCEL) continue;
         const double g=9806.65;
         const double x=-(int32_t)sample.finger/g,y=-(int32_t)sample.x/g,z=-(int32_t)sample.y/g;
         IOHIDEventRef event=IOHIDEventCreateAccelerometerEvent(NULL,sample.time,x,y,z,0);
@@ -590,6 +612,7 @@ sensors_thread(void *unused)
         }
         count++;
     }
+    if (als) {IOHIDVirtualServiceClientRemove(als);CFRelease(als);}
     if (held) {IOHIDVirtualServiceClientRemove(held);CFRelease(held);}
     close(device);IOHIDVirtualServiceClientRemove(accel);CFRelease(accel);CFRelease(client);
     return NULL;
@@ -617,6 +640,8 @@ pong_touch_start(void)
     if (!pthread_create(&thread,NULL,input_thread,NULL)) pthread_detach(thread);
     if (IOHIDEventCreateKeyboardEvent && !pthread_create(&thread,NULL,buttons_thread,NULL)) pthread_detach(thread);
     IOHIDEventCreateAccelerometerEvent=(__typeof__(IOHIDEventCreateAccelerometerEvent))dlsym(RTLD_DEFAULT,"IOHIDEventCreateAccelerometerEvent");
+    IOHIDEventCreateAmbientLightSensorEvent=(__typeof__(IOHIDEventCreateAmbientLightSensorEvent))
+        dlsym(RTLD_DEFAULT,"IOHIDEventCreateAmbientLightSensorEvent");
     IOHIDEventCreateDeviceOrientationEventWithUsage=(__typeof__(IOHIDEventCreateDeviceOrientationEventWithUsage))
         dlsym(RTLD_DEFAULT,"IOHIDEventCreateDeviceOrientationEventWithUsage");
     IOHIDEventCreateVendorDefinedEvent=(__typeof__(IOHIDEventCreateVendorDefinedEvent))dlsym(RTLD_DEFAULT,"IOHIDEventCreateVendorDefinedEvent");

@@ -578,11 +578,19 @@ static const uint8_t ram_sha256[32]={
 static const uint32_t ram_spans[6][3]={
  {104,72,0x02000000},{184,528,0x0200009c},{720,1596,0x020003cc},
  {2324,1260,0x02000a14},{3592,6000,0x02c00000},{9600,20420,0x03800000}};
+static unsigned ram_step_bytes(unsigned burst,unsigned segment,unsigned rem,unsigned pass){
+ if(burst==2u){
+  if(segment==5u){return rem>=40u?40u:20u;}
+  return rem>=48u?48u:(rem>=36u?36u:(rem>=24u?24u:12u));
+ }
+ if(burst==1u){return pass?(segment==5u?20u:12u):4u;}
+ return 4u;
+}
 static int ram_load(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpSnapshot *snapshot,const ZizhanAmpTrim *trim,const uint8_t *bytes,unsigned length,
  ZizhanAmpHash hash,ZizhanAmpRam *out,unsigned header_only,unsigned burst,unsigned native_init){
  if(!out)return ZizhanAmpArgument;
- memset(out,0,sizeof *out);out->reason=ZizhanAmpOff;out->header_only=header_only;out->native_core_init=native_init;if(enabled!=1)return 0;
+ memset(out,0,sizeof *out);out->reason=ZizhanAmpOff;out->header_only=header_only;out->native_core_init=native_init;out->fast_burst=burst==2u?1u:0u;if(enabled!=1)return 0;
  const unsigned flags=ZizhanAmpExclusiveSe15|ZizhanAmpPinsVerified|ZizhanAmpResetReleased|ZizhanAmpUnmanagedSupplyTopology;
  if(verified!=flags||!snapshot||snapshot->status!=ZizhanAmpPass||snapshot->completed!=2||snapshot->identity.controller_uncertain||
     !trim||trim->status!=ZizhanAmpPass||trim->completed!=2||trim->transport.controller_uncertain||
@@ -626,23 +634,24 @@ static int ram_load(unsigned enabled,unsigned verified,GeniI2c *bus,const Zizhan
     reason=read_identity(bus,clock,state_regs[i],&out->after_state[chip][i],&out->transport);if(reason)goto fail;
     ++out->state_count[chip];if(out->after_state[chip][i]!=expected_state[i]){reason=ZizhanAmpStateChanged;goto fail;}
    }
-   const unsigned chunk=burst?(segment==5?20u:12u):4u;
-   for(unsigned at=0;at<ram_spans[segment][1];at+=pass?chunk:4u){
+   for(unsigned at=0,step=0;at<ram_spans[segment][1];at+=step){
+    step=ram_step_bytes(burst,segment,ram_spans[segment][1]-at,pass);
     out->failed_offset=at;
     if(clock->now_us(clock->context)-begin>=45000000){reason=ZizhanAmpTimeout;goto fail;}
     const uint32_t reg=ram_spans[segment][2]+at;
     const uint8_t *expected=bytes+ram_spans[segment][0]+at;
-    uint8_t wire[8]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg,0,0,0,0};
+    uint8_t wire[52]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg};
     if(!pass){
-     memcpy(wire+4,expected,4);++out->attempted_writes;
-     if(geni_i2c_start_write_bytes(bus,wire,8)){reason=ZizhanAmpBusy;goto fail;}
+     memcpy(wire+4,expected,step);out->attempted_writes+=step/4u;
+     if(burst==2u){++out->burst_writes;if(geni_i2c_start_write_burst(bus,wire,4u+step)){reason=ZizhanAmpBusy;goto fail;}}
+     else if(geni_i2c_start_write_bytes(bus,wire,8)){reason=ZizhanAmpBusy;goto fail;}
      reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;
-     ++out->acknowledged_writes;
+     out->acknowledged_writes+=step/4u;
     }else{
-     if(burst?geni_i2c_start_read_block(bus,wire,4,chunk):geni_i2c_start_read_bytes(bus,wire,4,4)){reason=ZizhanAmpBusy;goto fail;}
+     if(burst==2u?geni_i2c_start_read_burst(bus,wire,4,step):(burst?geni_i2c_start_read_block(bus,wire,4,step):geni_i2c_start_read_bytes(bus,wire,4,4))){reason=ZizhanAmpBusy;goto fail;}
      reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;
      if(burst)++out->burst_reads;
-     for(unsigned word=0;word<chunk/4;++word){
+     for(unsigned word=0;word<step/4u;++word){
       ++out->readbacks[chip];const uint8_t *p=expected+word*4;
       const uint32_t value=(uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];
       const uint32_t observed=wire_be32(burst?bus->rx_block[word]:bus->rx);
@@ -675,6 +684,9 @@ fail:
 int zizhan_cs35l41_ram_native_init(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpSnapshot *snapshot,const ZizhanAmpTrim *trim,const uint8_t *bytes,unsigned length,ZizhanAmpHash hash,ZizhanAmpRam *out){
  return ram_load(enabled,verified,bus,clock,snapshot,trim,bytes,length,hash,out,0,1,1);}
+int zizhan_cs35l41_ram_fast(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpSnapshot *snapshot,const ZizhanAmpTrim *trim,const uint8_t *bytes,unsigned length,ZizhanAmpHash hash,ZizhanAmpRam *out){
+ return ram_load(enabled,verified,bus,clock,snapshot,trim,bytes,length,hash,out,0,2,1);}
 int zizhan_cs35l41_ram(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpSnapshot *snapshot,const ZizhanAmpTrim *trim,const uint8_t *bytes,unsigned length,ZizhanAmpHash hash,ZizhanAmpRam *out){
  return ram_load(enabled,verified,bus,clock,snapshot,trim,bytes,length,hash,out,0,0,0);
@@ -755,13 +767,14 @@ static const uint8_t coeff_sha[2][32]={
 };
 static const uint32_t coeff_identity[22]={0x40000,0x30000,2,0x400a4,0x2b01,0x1f4,0xe,0,0,2,
  0xcd,0x1d3f01,0x94,0x50,0xe,0x7bc,0xf20b,0x100,0x176,0x4c,0,0};
-int zizhan_cs35l41_coefficients(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+static int coefficients_load(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpRam *ram,const uint8_t *top,unsigned top_size,const uint8_t *bottom,unsigned bottom_size,
- ZizhanAmpHash hash,ZizhanAmpCoefficients *out){
- if(!out){return ZizhanAmpArgument;}memset(out,0,sizeof *out);out->reason=ZizhanAmpOff;if(enabled!=1)return 0;
+ ZizhanAmpHash hash,ZizhanAmpCoefficients *out,unsigned fast_burst){
+ if(!out){return ZizhanAmpArgument;}memset(out,0,sizeof *out);out->reason=ZizhanAmpOff;out->fast_burst=fast_burst?1u:0u;if(enabled!=1)return 0;
  const unsigned flags=ZizhanAmpExclusiveSe15|ZizhanAmpPinsVerified|ZizhanAmpResetReleased|ZizhanAmpUnmanagedSupplyTopology;
+ const int burst_ok=ram&&((!ram->fast_burst&&ram->burst_reads==3618u)||(ram->fast_burst==1u&&ram->burst_writes==1420u&&ram->burst_reads==1420u));
  if(verified!=flags||!ram||ram->status!=ZizhanAmpPass||ram->completed!=2||!ram->source_verified||ram->transport.controller_uncertain||
-    ram->attempted_writes!=14938||ram->acknowledged_writes!=14938||ram->burst_reads!=3618||ram->mismatches){out->reason=ZizhanAmpPrerequisite;return 0;}
+    ram->attempted_writes!=14938||ram->acknowledged_writes!=14938||!burst_ok||ram->mismatches){out->reason=ZizhanAmpPrerequisite;return 0;}
  for(unsigned c=0;c<2;++c)if(ram->readbacks[c]!=7469||ram->segments_verified[c]!=6||ram->state_count[c]!=39||
     (ram->after_state[c][0]&1)||(ram->after_state[c][1]&0x31)||(ram->after_state[c][2]&1)){out->reason=ZizhanAmpPrerequisite;return 0;}
  if(ram->native_core_init){
@@ -803,19 +816,22 @@ int zizhan_cs35l41_coefficients(unsigned enabled,unsigned verified,GeniI2c *bus,
     if(!owned_config(&config,1)){reason=ZizhanAmpStateChanged;goto fail;}
     for(unsigned i=0;i<3;++i){reason=read_identity(bus,clock,state_regs[i],&out->after_state[chip][i],&out->transport);if(reason)goto fail;
      ++out->state_count[chip];if(out->after_state[chip][i]!=ram->after_state[chip][i]){reason=ZizhanAmpStateChanged;goto fail;}}
-    const unsigned step=pass&&!segment?12:4;
-    for(unsigned at=0;at<size;at+=step){
+    for(unsigned at=0,step=0;at<size;at+=step){
+     if(fast_burst&&!segment){const unsigned rem=size-at;step=rem>=48u?48u:(rem>=36u?36u:(rem>=24u?24u:12u));}
+     else{step=pass&&!segment?12u:4u;}
      out->failed_offset=at;if(clock->now_us(clock->context)-begin>=10000000){reason=ZizhanAmpTimeout;goto fail;}
      const uint32_t reg=base+at;const uint8_t *expected=files[chip]+start+at;
-     uint8_t wire[8]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg,0,0,0,0};
+     uint8_t wire[52]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg};
      if(!pass){
-      memcpy(wire+4,expected,4);++out->attempted_writes;
-      if(geni_i2c_start_write_bytes(bus,wire,8)){reason=ZizhanAmpBusy;goto fail;}
-      reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;++out->acknowledged_writes;
+      memcpy(wire+4,expected,step);out->attempted_writes+=step/4u;
+      if(fast_burst&&!segment){++out->burst_writes;if(geni_i2c_start_write_burst(bus,wire,4u+step)){reason=ZizhanAmpBusy;goto fail;}}
+      else if(geni_i2c_start_write_bytes(bus,wire,8)){reason=ZizhanAmpBusy;goto fail;}
+      reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;out->acknowledged_writes+=step/4u;
      }else{
-      if(segment?geni_i2c_start_read_bytes(bus,wire,4,4):geni_i2c_start_read_block(bus,wire,4,12)){reason=ZizhanAmpBusy;goto fail;}
+      if(segment?geni_i2c_start_read_bytes(bus,wire,4,4):(fast_burst?geni_i2c_start_read_burst(bus,wire,4,step):geni_i2c_start_read_block(bus,wire,4,12))){reason=ZizhanAmpBusy;goto fail;}
       reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;
-      for(unsigned word=0;word<step/4;++word){const uint8_t *p=expected+word*4;
+      if(!segment){++out->burst_reads;}
+      for(unsigned word=0;word<step/4u;++word){const uint8_t *p=expected+word*4;
        const uint32_t wanted=(uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];
        ++out->readbacks[chip];if(wire_be32(segment?bus->rx:bus->rx_block[word])!=wanted){out->failed_offset=at+word*4;reason=ZizhanAmpReadback;goto fail;}}
      }
@@ -832,6 +848,16 @@ int zizhan_cs35l41_coefficients(unsigned enabled,unsigned verified,GeniI2c *bus,
 fail:
  out->elapsed_us=clock->now_us(clock->context)-begin;if(!out->transport.controller_uncertain)bus->address=original;
  out->status=ZizhanAmpFail;out->reason=reason;return reason;
+}
+int zizhan_cs35l41_coefficients(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpRam *ram,const uint8_t *top,unsigned top_size,const uint8_t *bottom,unsigned bottom_size,
+ ZizhanAmpHash hash,ZizhanAmpCoefficients *out){
+ return coefficients_load(enabled,verified,bus,clock,ram,top,top_size,bottom,bottom_size,hash,out,0);
+}
+int zizhan_cs35l41_coefficients_fast(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpRam *ram,const uint8_t *top,unsigned top_size,const uint8_t *bottom,unsigned bottom_size,
+ ZizhanAmpHash hash,ZizhanAmpCoefficients *out){
+ return coefficients_load(enabled,verified,bus,clock,ram,top,top_size,bottom,bottom_size,hash,out,1);
 }
 
 /* Actual module probe16 rates and wm_halo_configure_mpu23;fixedregisterfacts.

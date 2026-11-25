@@ -108,6 +108,27 @@ int main(int argc,char **argv){
   assert(geni_i2c_start_read_block(&f.bus,request,4,size));assert(f.commands==count);
  }
  assert(geni_i2c_start_read_bytes(&f.bus,request,4,12));assert(f.commands==count);
+ /* Fast-burst native init (M1-FASTBOOT): 48-byte XM/YM + 40-byte PM write/read bursts, full 7469-word readback. */
+ for(unsigned test=0;test<4;++test){
+  const unsigned before=prepare(&f,&snap,&trim);f.native_core_init=1;f.allow_fast_burst=1;f.ram_sparse=1;
+  if(test==1){f.ram_mismatch=1;}
+  if(test==2){f.short_fifo=1;}
+  if(test==3){f.fail_command=before+25;}
+  int rc=zizhan_cs35l41_ram_fast(1,flags,&f.bus,&clock,&snap,&trim,firmware,sizeof firmware,hash,&out);
+  if(!test){
+   assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.fast_burst==1);
+   assert(out.burst_writes==1420&&out.burst_reads==1420&&out.attempted_writes==14938&&out.acknowledged_writes==14938);
+   assert(out.readbacks[0]==7469&&out.readbacks[1]==7469&&out.core_init_acknowledged==2);
+  }else if(test==1){assert(rc==ZizhanAmpReadback);}
+  else{assert(rc==ZizhanAmpBus&&out.transport.controller_uncertain);}
+ }
+ prepare(&f,&snap,&trim);count=f.commands;
+ {uint8_t wb[56]={2,0,0,0};
+  for(unsigned sz=0;sz<=56;++sz){
+   if(sz!=16&&sz!=24&&sz!=28&&sz!=40&&sz!=44&&sz!=52){assert(geni_i2c_start_write_burst(&f.bus,wb,sz));assert(f.commands==count);}
+   if(sz!=12&&sz!=20&&sz!=24&&sz!=36&&sz!=40&&sz!=48){assert(geni_i2c_start_read_burst(&f.bus,request,4,sz));assert(f.commands==count);}
+  }
+ }
  puts("PASS production RAM full initialization chain,exact payload/readback,guards,bounded failures/header-only mismatch capture;no hardware");return 0;
 }
 #endif

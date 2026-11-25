@@ -35,27 +35,31 @@ Result select(Root &gcc, Receipt &r) {
     r.level = 0; r.selected = r.current; r.clock_valid = true; return Ok;
 }
 template <typename Engine>
-Result prepare(Engine &se, Receipt &r) {
+Result prepare(Engine &se, Receipt &r, bool fast_400k = false) {
     if (!r.clock_valid || r.level >= 8 || !xo(r.selected)) return NoXo;
     if (((se.read(GENI_FW_REVISION) >> 8) & 255) != GENI_PROTO_I2C || (se.read(GENI_IF_DISABLE) & 1)) return Protocol;
     if ((se.read(0x40) & 0x1001) || se.read(GENI_M_IRQ_STATUS) || (se.read(GENI_RX_FIFO_STATUS) & 0x1ffffff)) return Busy;
     r.tx_parameter = se.read(0xe24); r.rx_parameter = se.read(0xe28);
     const uint32_t parameters[] = {r.tx_parameter, r.rx_parameter};
     for (uint32_t p : parameters) {
-        if (((p >> 24) & 63) != 32 || ((p >> 16) & 63) < 2) return Fifo;
+        const uint32_t depth = (p >> 16) & 63;
+        if (((p >> 24) & 63) != 32 || (fast_400k ? depth != 16 : depth < 2)) { return Fifo; }
     }
-    // Fixed BSP nominal100kHz timing (divider7/high10/low11/cycle26).
-    // This is configured timing, not a measured electrical bus frequency.
+    // Fixed BSP i2c-msm-geni.c 19.2 MHz XO entries:
+    //  - 100 kHz nominal: divider 7 (0x71), high 10, low 11, cycle 26
+    //  - 400 kHz Fast-mode: divider 2 (0x21), high 5, low 12, cycle 24
+    const uint32_t target_clk = fast_400k ? 0x21u : 0x71u;
+    const uint32_t target_scl = fast_400k ? ((5u << 20) | (12u << 10) | 24u) : ((10u << 20) | (11u << 10) | 26u);
     r.retained = true;
-    se.write(0x7c, r.level); se.write(GENI_CLK_CFG, 0x71);
-    se.write(GENI_SCL_COUNTERS, (10u << 20) | (11u << 10) | 26);
+    se.write(0x7c, r.level); se.write(GENI_CLK_CFG, target_clk);
+    se.write(GENI_SCL_COUNTERS, target_scl);
     GeniI2c bus = {};
     GeniIo io = {
         [](void *p, uint32_t at) { return static_cast<Engine *>(p)->read(at); },
         [](void *p, uint32_t at, uint32_t value) { static_cast<Engine *>(p)->write(at, value); }, &se};
     if (geni_i2c_prepare_poll(&bus, &io, 0x40, &r.config)) return PrepareFailed;
-    if (se.read(0x7c) != r.level || se.read(GENI_CLK_CFG) != 0x71 ||
-        se.read(GENI_SCL_COUNTERS) != ((10u << 20) | (11u << 10) | 26) ||
+    if (se.read(0x7c) != r.level || se.read(GENI_CLK_CFG) != target_clk ||
+        se.read(GENI_SCL_COUNTERS) != target_scl ||
         se.read(GENI_DMA_MODE) || se.read(GENI_BYTE_GRAN) ||
         se.read(GENI_TX_PACK0) != 0x7f8fe || se.read(GENI_TX_PACK1) != 0xffefe ||
         se.read(GENI_RX_PACK0) != 0x7f8fe || se.read(GENI_RX_PACK1) != 0xffefe ||

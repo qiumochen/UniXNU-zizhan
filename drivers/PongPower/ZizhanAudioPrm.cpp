@@ -617,7 +617,7 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
    amp_armed=true;
   }
   __atomic_or_fetch(&ctl->state,(uint32_t)ZizhanAudioOutputReady,__ATOMIC_RELEASE);
-  uint64_t sess_nonzero=0,polled=now_us();unsigned sess_max=0,sess_starved=0,sess_verified=0,sess_polls=0;
+  uint64_t sess_nonzero=0,polled=now_us();unsigned sess_max=0,sess_max_l=0,sess_max_r=0,sess_starved=0,sess_verified=0,sess_polls=0;
   bool idle=false,sess_poll_stop=false;
   for(;;){
    if(amp&&now_us()-polled>=50000){
@@ -655,6 +655,8 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
     if(memcmp(dst,staged,sizeof staged)){ok=false;break;}
     ++sess_verified;sess_nonzero+=receipt.nonzero;
     if(receipt.max_abs>sess_max){sess_max=receipt.max_abs;}
+    if(receipt.max_abs_l>sess_max_l){sess_max_l=receipt.max_abs_l;}
+    if(receipt.max_abs_r>sess_max_r){sess_max_r=receipt.max_abs_r;}
     uint8_t tx[512];const unsigned n=zizhan_flow_submit(&flow,unsigned(slot),now_us(),tx);
     if(!n||sheng_adsp_send(o.channel,tx,n)){zizhan_flow_send_failed(&flow);ok=false;break;}
    }
@@ -675,9 +677,9 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
   if(amp_armed){disarm_ok=amp->disarm(amp->context,data_ok?1:0)==1;amp_armed=false;}
   __atomic_and_fetch(&ctl->state,~(uint32_t)(ZizhanAudioOutputReady|ZizhanAudioOutputRunning),__ATOMIC_RELEASE);
   const bool sess_ok=data_ok&&disarm_ok;
-  IOLog("ZIZHAN_AUDIO_DAEMON: session=%u %s submitted=%llu completed=%llu frames=%llu nonzero=%llu max_abs=%u starved=%u polls=%u poll_stop=%u peak_inflight=%u peak_us=%llu audio_output=%u\n",
+  IOLog("ZIZHAN_AUDIO_DAEMON: session=%u %s submitted=%llu completed=%llu frames=%llu nonzero=%llu max_abs=%u max_lr=%u/%u starved=%u polls=%u poll_stop=%u peak_inflight=%u peak_us=%llu audio_output=%u\n",
    session,sess_ok?"PASS":"FAIL",(unsigned long long)flow.submitted,(unsigned long long)flow.completed,
-   (unsigned long long)flow.confirmed_frames,(unsigned long long)sess_nonzero,sess_max,sess_starved,
+   (unsigned long long)flow.confirmed_frames,(unsigned long long)sess_nonzero,sess_max,sess_max_l,sess_max_r,sess_starved,
    sess_polls,sess_poll_stop?1u:0u,flow.peak_inflight,(unsigned long long)flow.peak_us,audio_out);
   if(!sess_ok){ok=false;break;}
   ++d.sessions;d.submitted+=flow.submitted;d.completed+=flow.completed;d.frames+=flow.confirmed_frames;

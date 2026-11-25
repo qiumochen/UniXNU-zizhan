@@ -12,7 +12,7 @@
  * invent channels, and it never turns missing HAL data into silence. */
 enum {ZizhanRingFrames=65536u,ZizhanRingRate=48000u,ZizhanRingChannels=2u,
       ZizhanRingPcmFrames=480u,ZizhanRingPcmBytes=2880u};
-typedef struct {unsigned packed,underruns,reason,nonzero,max_abs;uint64_t frame;} ZizhanRingReceipt;
+typedef struct {unsigned packed,underruns,reason,nonzero,max_abs,max_abs_l,max_abs_r;uint64_t frame;} ZizhanRingReceipt;
 static inline void zizhan_ring_put24(uint8_t *p,int32_t value){
  p[0]=(uint8_t)value;p[1]=(uint8_t)(value>>8);p[2]=(uint8_t)(value>>16);
 }
@@ -41,6 +41,8 @@ static inline int zizhan_ring_pack(const int16_t *ring,unsigned ring_frames,uint
   if(l||rr){++r->nonzero;}
   if(al>r->max_abs){r->max_abs=al;}
   if(ar>r->max_abs){r->max_abs=ar;}
+  if(al>r->max_abs_l){r->max_abs_l=al;}
+  if(ar>r->max_abs_r){r->max_abs_r=ar;}
   zizhan_ring_put24(out+6*i,l*256);
   zizhan_ring_put24(out+6*i+3,rr*256);
  }

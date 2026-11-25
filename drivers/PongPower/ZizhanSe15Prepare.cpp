@@ -138,6 +138,9 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
         IOLog("ZIZHAN_SE15_PREP: FAIL map writes=0 finished=1\n"); return;
     }
     State s;
+    const uint64_t prep_begin_us = nowUs();
+    unsigned amp_fast = (mode == 40) ? 1u : 0u;
+    if (mode == 40) { (void)PE_parse_boot_argn("zizhan_amp_fast", &amp_fast, sizeof amp_fast); }
     const uint32_t reset_config = reset.read(0), reset_io = reset.read(4);
     // Prior device evidence: GPIO1 input low. Do not set up a bus against a
     // newly changed/released shared amplifier reset or an unknown pin owner.
@@ -170,7 +173,7 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
           result == Ok && unchanged ? "PASS" : "FAIL", unsigned(result), sda.read(0), scl.read(0),
           s.writes, unsigned(s.retained), unsigned(unchanged), timing ? 0u : 1u);
     if (timing && result == Ok && unchanged) {
-        const auto prepared = zizhan_geni::prepare(se, receipt);
+        const auto prepared = zizhan_geni::prepare(se, receipt, amp_fast != 0u);
         const bool reset_unchanged = reset.read(0) == reset_config && reset.read(4) == reset_io;
         IOLog("ZIZHAN_GENI: %s timing-fifo result=%u tx=%x rx=%x clk=%x scl=%x route=%x retained=%u reset_unchanged=%u i2c_commands=0 amp_identity=UNTESTED finished=%u\n",
               prepared == zizhan_geni::Ok && reset_unchanged ? "PASS" : "FAIL", unsigned(prepared),
@@ -239,13 +242,16 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                     if (trim && patched.status == ZizhanAmpPass)
                         zizhan_cs35l41_trim(1, flags, &bus, &clock, &captured, &patched, &calibrated);
                     if (ram && calibrated.status == ZizhanAmpPass) {
-                        if(mode>=33&&mode<=40)zizhan_cs35l41_ram_native_init(1,flags,&bus,&clock,&captured,&calibrated,input.bytes,ZizhanAmpRamFileBytes,ampHash,&loaded);
+                        if(mode==40&&amp_fast)zizhan_cs35l41_ram_fast(1,flags,&bus,&clock,&captured,&calibrated,input.bytes,ZizhanAmpRamFileBytes,ampHash,&loaded);
+                        else if(mode>=33&&mode<=40)zizhan_cs35l41_ram_native_init(1,flags,&bus,&clock,&captured,&calibrated,input.bytes,ZizhanAmpRamFileBytes,ampHash,&loaded);
                         else if(header)zizhan_cs35l41_ram_header(1,flags,&bus,&clock,&captured,&calibrated,input.bytes,ZizhanAmpRamFileBytes,ampHash,&loaded);
                         else if(burst)zizhan_cs35l41_ram_burst(1,flags,&bus,&clock,&captured,&calibrated,input.bytes,ZizhanAmpRamFileBytes,ampHash,&loaded);
                         else zizhan_cs35l41_ram(1,flags,&bus,&clock,&captured,&calibrated,input.bytes,ZizhanAmpRamFileBytes,ampHash,&loaded);
                     }
-                    if(coefficients&&loaded.status==ZizhanAmpPass)
-                        zizhan_cs35l41_coefficients(1,flags,&bus,&clock,&loaded,top.bytes,top.size,bottom.bytes,bottom.size,ampHash,&configured);
+                    if(coefficients&&loaded.status==ZizhanAmpPass){
+                        if(mode==40&&amp_fast)zizhan_cs35l41_coefficients_fast(1,flags,&bus,&clock,&loaded,top.bytes,top.size,bottom.bytes,bottom.size,ampHash,&configured);
+                        else zizhan_cs35l41_coefficients(1,flags,&bus,&clock,&loaded,top.bytes,top.size,bottom.bytes,bottom.size,ampHash,&configured);
+                    }
                     if(mode>=36&&configured.status==ZizhanAmpPass){
                         zizhan_cs35l41_output_setup(1,flags,&bus,&clock,&configured,&output_setup);
                         if(combined)combined->output_configured=output_setup.status==ZizhanAmpPass?1u:0u;
@@ -269,6 +275,10 @@ void prepare(unsigned mode,ZizhanAudioSilentReceipt *combined=nullptr,const Zizh
                                                 if((mode==39||mode==40)&&zizhan_amp_checkpoint)zizhan_amp_checkpoint(0,0);
                                                 if(mode==40){zizhan_pin_sample::pads[0]=&sck;zizhan_pin_sample::pads[1]=&ws;zizhan_pin_sample::pads[2]=&data_pin;zizhan_pin_sample::pads[3]=zizhan_amp_echo?&din_pin:nullptr;}
                                                 if(mode==40&&daemon_fn){
+                                                    IOLog("ZIZHAN_SE15_PREP: bringup_ms=%llu fast=%u ram_us=%llu ram_bursts=%u/%u coeff_us=%llu coeff_bursts=%u/%u\n",
+                                                          (unsigned long long)((nowUs()-prep_begin_us)/1000ull),amp_fast,
+                                                          (unsigned long long)loaded.elapsed_us,loaded.burst_writes,loaded.burst_reads,
+                                                          (unsigned long long)configured.elapsed_us,configured.burst_writes,configured.burst_reads);
                                                     IOLog("ZIZHAN_AUDIO_DAEMON_AMP: call flags=%x run_size=%u/%u\n",zizhan_amp_pulse_flags,(unsigned)sizeof(ZizhanAmpRun),zizhan_cs35l41_run_size());
                                                     zizhan_cs35l41_native_daemon_transfer(1,flags,&bus,&clock,&configured,&speaker_cal,daemon_fn,daemon_ctx,&executed);
                                                 }

@@ -26,7 +26,7 @@ typedef struct {
     unsigned allow_trim,trim_key_stage[2],trim_reads[2],trim_writes,trim_mismatch;
     uint32_t trim_values[2][100];ZizhanAmpTrimUpdate trim_updates[2][98];
     unsigned native_core_init,native_core_bad,native_core_writes[2];
-    unsigned allow_ram,ram_mismatch,ram_value_writes,ram_sparse,read_index,short_fifo;
+    unsigned allow_ram,ram_mismatch,ram_value_writes,ram_sparse,read_index,short_fifo,allow_fast_burst;
     unsigned coeff_mode,identity_bad;uint32_t coeff_unpacked[2][2];
     unsigned pulse_test,pulse_writes,pulse_commands[128];uint32_t pulse_volume[2],pulse_patch[2],pulse_pcm[2];
     unsigned play_fault; /* profile 19 test: 0x10010 reports a protection fault (bit 15) */
@@ -210,8 +210,8 @@ static void wr(void *ctx, uint32_t reg, uint32_t value) {
         assert(value && !(value & ~0x04000080u) && value == f->hand_irq);
         ++f->hand_clear; f->hand_mask = value;
     }
-    if (reg == GENI_RX_LEN){assert(value==4||(f->allow_ram&&(value==12||value==20)));f->read_index=0;}
-    if (reg == GENI_TX_LEN) assert(value == 4 || (f->allow_value_writes && value == 8));
+    if (reg == GENI_RX_LEN){assert(value==4||(f->allow_ram&&(value==12||value==20))||(f->allow_fast_burst&&(value==12||value==20||value==24||value==36||value==40||value==48)));f->read_index=0;}
+    if (reg == GENI_TX_LEN) assert(value == 4 || (f->allow_value_writes && value == 8) || (f->allow_fast_burst && (value == 16 || value == 24 || value == 28 || value == 40 || value == 44 || value == 52)));
     if (reg == GENI_M_CMD0) {
         unsigned opcode = value >> 27, address = (value >> 9) & 127;
         assert(address == 0x40 || address == 0x42);
@@ -224,8 +224,17 @@ static void wr(void *ctx, uint32_t reg, uint32_t value) {
         f->command = value;
     }
     if (reg == GENI_TX_FIFO) {
-        if (f->tx_index++ == 1) {
-            assert(f->allow_value_writes && !f->bus.reading && f->bus.length == 8);
+        const unsigned idx = f->tx_index++;
+        if (idx >= 2) {
+            assert(f->allow_fast_burst && f->allow_ram && !f->bus.reading && f->bus.length >= 16 && idx < f->bus.length / 4);
+            const unsigned chip = f->bus.address == 0x40 ? 0 : 1;
+            const uint32_t target_reg = f->reg + (idx - 1u) * 4u;
+            assert(ram_slot(target_reg) >= 0);
+            f->ram_values[chip][ram_slot(target_reg)] = value;
+            ++f->ram_value_writes; ++f->fifo_writes; return;
+        }
+        if (idx == 1) {
+            assert(f->allow_value_writes && !f->bus.reading && (f->bus.length == 8 || (f->allow_fast_burst && f->bus.length >= 16)));
             const unsigned chip = f->bus.address == 0x40 ? 0 : 1;
             if(f->output_setup&&output_slot(f->reg)>=0){assert(f->output_writes<28&&!(f->state[chip][0]&1)&&!(f->state[chip][1]&0x31)&&f->state[chip][2]==0);f->output_commands[f->output_writes++]=f->commands;f->output_values[chip][output_slot(f->reg)]=swap(value);++f->fifo_writes;return;}
             if(f->run_mode){

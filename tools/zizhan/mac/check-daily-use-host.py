@@ -12,7 +12,7 @@ def main():
                  "power-inject.py", "volume-inject.py", "outer-touch.py", "display-power-s23.py", "wait-android.py", "usb-attach.py",
                  "bringup-policy.py",
                  "power-transaction.py",
-                 "power-query.py", "power-inventory.py", "adsp-event-wait.py", "slpi-std.py", "slpi-sensors.py", "cs35l41-capture.py",
+                 "power-query.py", "power-inventory.py", "adsp-event-wait.py", "slpi-std.py", "slpi-sensors.py", "cs35l41-capture.py", "zizhan-mic-codec.py",
                  "sheng-battmgr.py", "m3-standalone-preflight.py",
                  "panel-program.py", "panel-pool.py", "zc-fence-target.py", "adreno-span-collect.py", "display-owner.py", "dsi-command.py", "dsi-domain.py", "userland-policy-audit.py",
                  "service-policy.py", "fat.py"):

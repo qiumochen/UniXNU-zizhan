@@ -108,6 +108,8 @@ static void test_adsp_tx_graph_packets(void) {
   assert(n_mic > 0u && gpr_decode(pkt, n_mic, &g) == GprOk && g.opcode == AR_OP_GRAPH_OPEN);
   const uint32_t n_mic_cfg = ar_config_mic_device(pkt, sizeof(pkt), 0x2005u, 0x22u, &fmt, 1u);
   assert(n_mic_cfg > 0u && gpr_decode(pkt, n_mic_cfg, &g) == GprOk && g.opcode == AR_OP_SET_CFG);
+  const uint32_t n_cap_str = ar_config_capture_stream(pkt, sizeof(pkt), 0x2005u, 0x23u, &fmt);
+  assert(n_cap_str > 0u && gpr_decode(pkt, n_cap_str, &g) == GprOk && g.opcode == AR_OP_SET_CFG);
 }
 
 int main(void) {

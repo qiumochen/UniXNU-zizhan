@@ -27,6 +27,7 @@
 #include "ZizhanAudioZero.h"
 #include "ZizhanAudioTone.h"
 #include "ZizhanAudioTone48.h"
+#include "ZizhanMicCodec.h"
 extern "C" bool pong_smmu_lease_lock(void);
 extern "C" void pong_smmu_lease_unlock(void);
 extern "C" boolean_t pmap_valid_page(ppnum_t);
@@ -55,7 +56,7 @@ struct ServiceRun {
 struct DaemonRun {
  unsigned sessions,idle_stops,starved,max_abs,ok,bound_s,amp_used,polls,poll_stops;
  unsigned cap_sessions,cap_reads,cap_dones,cap_status,cap_max_abs;
- uint64_t frames,nonzero_frames,submitted,completed,peak_us,cap_frames;
+ uint64_t frames,nonzero_frames,submitted,completed,peak_us,cap_frames,cap_nonzero;
 };
 struct Owner {
  IOLock *lock;ShengAdspChannel *channel;Packet queue[16];
@@ -599,11 +600,12 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
  IOLog("ZIZHAN_AUDIO_DAEMON: READY inflight=%u bound_s=%u amp=%u capture=%u audio_output=%u\n",inflight,d.bound_s,amp?1u:0u,cap?1u:0u,audio_out);
  static ZizhanAudioFlow flow;static uint8_t staged[ZizhanRingPcmBytes];
  static int16_t cap_stage[ZIZHAN_AUDIO_CAP_96K_STEREO_FRAMES*2];
- unsigned cap_src_arg=1;(void)PE_parse_boot_argn("zizhan_audio_cap_src",&cap_src_arg,sizeof cap_src_arg);
+ unsigned cap_src_arg=2;(void)PE_parse_boot_argn("zizhan_audio_cap_src",&cap_src_arg,sizeof cap_src_arg);
  const bool use_codec_dma=(cap_src_arg==2u);
  const uint32_t cap_period_bytes=use_codec_dma?(ZIZHAN_AUDIO_PERIOD_FRAMES*2u):ZIZHAN_AUDIO_CAP_96K_PERIOD_BYTES;
  uint32_t cap_tok[2]={0,0};bool cap_busy[2]={false,false};unsigned cap_seq=0,cap_inflight=0;
- unsigned sess_cap_reads=0,sess_cap_dones=0,sess_cap_status=0,sess_cap_max=0;uint64_t sess_cap_frames=0;
+ unsigned sess_cap_reads=0,sess_cap_dones=0,sess_cap_status=0,sess_cap_max=0;
+ int sess_cap_min_s=0,sess_cap_max_s=0;int64_t sess_cap_sum=0;uint64_t sess_cap_frames=0,sess_cap_nonzero=0;
  auto cap_queue=[&](unsigned k)->bool{
   if(!cap||k>=2||cap_busy[k]){return false;}
   const uint32_t off=0xC000u+k*0x2000u;
@@ -641,9 +643,18 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
    else if(use_codec_dma&&size>=2u&&size<=0x2000u){
     uint32_t m_frames=size/2u;if(m_frames>ZIZHAN_AUDIO_CAP_96K_STEREO_FRAMES*2u){m_frames=ZIZHAN_AUDIO_CAP_96K_STEREO_FRAMES*2u;}
     const volatile uint8_t *src=dma+0xC000u+k*0x2000u;
+    const uint64_t prev_nz=d.cap_nonzero;
     for(uint32_t i=0;i<m_frames;++i){
      const int16_t v=int16_t(src[2u*i]|(src[2u*i+1u]<<8));cap_stage[i]=v;
+     if(v!=0){++sess_cap_nonzero;++d.cap_nonzero;}
+     if(int(v)<sess_cap_min_s){sess_cap_min_s=int(v);}
+     if(int(v)>sess_cap_max_s){sess_cap_max_s=int(v);}
+     sess_cap_sum+=int(v);
      const unsigned a=unsigned(v<0?-int(v):int(v));if(a>sess_cap_max){sess_cap_max=a;}if(a>d.cap_max_abs){d.cap_max_abs=a;}
+    }
+    if(prev_nz==0&&d.cap_nonzero>0&&m_frames>=4u){
+     IOLog("ZIZHAN_AUDIO_CAPTURE: first_nonzero done=%u frames=%u s=%d,%d,%d,%d audio_output=0\n",
+           d.cap_dones,m_frames,int(cap_stage[0]),int(cap_stage[1]),int(cap_stage[2]),int(cap_stage[3]));
     }
     const uint32_t pushed=zizhan_audio_capture_push_48k_mono(cap,cap_ring,cap_stage,m_frames);
     sess_cap_frames+=pushed;d.cap_frames+=pushed;
@@ -652,6 +663,10 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
     const volatile uint8_t *src=dma+0xC000u+k*0x2000u;
     for(uint32_t i=0;i<st_frames*2u;++i){
      const int16_t v=int16_t(src[2u*i]|(src[2u*i+1u]<<8));cap_stage[i]=v;
+     if(v!=0){++sess_cap_nonzero;++d.cap_nonzero;}
+     if(int(v)<sess_cap_min_s){sess_cap_min_s=int(v);}
+     if(int(v)>sess_cap_max_s){sess_cap_max_s=int(v);}
+     sess_cap_sum+=int(v);
      const unsigned a=unsigned(v<0?-int(v):int(v));if(a>sess_cap_max){sess_cap_max=a;}if(a>d.cap_max_abs){d.cap_max_abs=a;}
     }
     const uint32_t pushed=zizhan_audio_capture_push_96k_stereo(cap,cap_ring,cap_stage,st_frames,1);
@@ -685,7 +700,8 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
   const uint64_t sess_anchor=mach_absolute_time();
   ctl->out_seq=ctl->out_seq+1;__atomic_thread_fence(__ATOMIC_RELEASE);ctl->out_anchor_host=sess_anchor;
   __atomic_thread_fence(__ATOMIC_RELEASE);ctl->out_seq=ctl->out_seq+1;
-  sess_cap_reads=0;sess_cap_dones=0;sess_cap_status=0;sess_cap_max=0;sess_cap_frames=0;
+  sess_cap_reads=0;sess_cap_dones=0;sess_cap_status=0;sess_cap_max=0;
+  sess_cap_min_s=0;sess_cap_max_s=0;sess_cap_sum=0;sess_cap_frames=0;sess_cap_nonzero=0;
   cap_busy[0]=false;cap_busy[1]=false;cap_inflight=0;
   uint32_t cap_req0=0;
   if(cap){
@@ -833,9 +849,11 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
    cap_drain();
    __atomic_store_n(&cap->state,0u,__ATOMIC_RELEASE);
    if(in_active||sess_cap_dones>0){++d.cap_sessions;}
-   IOLog("ZIZHAN_AUDIO_CAPTURE: session=%u %s in_active=%u reads=%u read_dones=%u status=%u frames_48k=%llu max_abs=%u requests=%u overflows=%u underruns=%u audio_output=0\n",
+   const int mean_dc=sess_cap_frames?int(sess_cap_sum/int64_t(use_codec_dma?sess_cap_frames:(sess_cap_frames*4ull))):0;
+   IOLog("ZIZHAN_AUDIO_CAPTURE: session=%u %s in_active=%u reads=%u read_dones=%u status=%u frames_48k=%llu nonzero=%llu min=%d max=%d max_abs=%u mean_dc=%d requests=%u overflows=%u underruns=%u audio_output=0\n",
     session,(ok&&sess_cap_status==0&&sess_cap_dones>0)?"PASS":"FAIL",in_active?1u:0u,sess_cap_reads,sess_cap_dones,sess_cap_status,
-    (unsigned long long)sess_cap_frames,sess_cap_max,cap->cap_requests,cap->overflows,cap->underruns);
+    (unsigned long long)sess_cap_frames,(unsigned long long)sess_cap_nonzero,sess_cap_min_s,sess_cap_max_s,sess_cap_max,mean_dc,
+    cap->cap_requests,cap->overflows,cap->underruns);
   }
   const bool out_ok=!has_out||(zizhan_flow_returned(&flow)&&sess_verified==flow.submitted);
   const bool cap_ok=!cap||(sess_cap_status==0&&(!in_active||sess_cap_dones>0));
@@ -861,9 +879,9 @@ __attribute__((noinline)) bool daemon_round(const ZizhanAudioAmpSession *amp=nul
  zizhan_handoff_finish(h,ok?1:0);
  map->release();
  d.ok=ok?1u:0u;
- IOLog("ZIZHAN_AUDIO_DAEMON: SUMMARY %s sessions=%u idle_stops=%u frames=%llu nonzero=%llu max_abs=%u starved=%u cap_sessions=%u cap_dones=%u cap_frames=%llu polls=%u poll_stops=%u peak_us=%llu audio_output=%u\n",
+ IOLog("ZIZHAN_AUDIO_DAEMON: SUMMARY %s sessions=%u idle_stops=%u frames=%llu nonzero=%llu max_abs=%u starved=%u cap_sessions=%u cap_dones=%u cap_frames=%llu cap_nonzero=%llu cap_max_abs=%u polls=%u poll_stops=%u peak_us=%llu audio_output=%u\n",
   d.ok?"PASS":"FAIL",d.sessions,d.idle_stops,(unsigned long long)d.frames,(unsigned long long)d.nonzero_frames,
-  d.max_abs,d.starved,d.cap_sessions,d.cap_dones,(unsigned long long)d.cap_frames,d.polls,d.poll_stops,(unsigned long long)d.peak_us,audio_out);
+  d.max_abs,d.starved,d.cap_sessions,d.cap_dones,(unsigned long long)d.cap_frames,(unsigned long long)d.cap_nonzero,d.cap_max_abs,d.polls,d.poll_stops,(unsigned long long)d.peak_us,audio_out);
  return ok;
 }
 int daemon_amp_entry(void *,const ZizhanAudioAmpSession *amp){return daemon_round(amp)?1:0;}
@@ -979,51 +997,76 @@ __attribute__((noinline)) bool graph_round(){
  IOLog("ZIZHAN_AUDIO_GRAPH: stream decoder=%u dec=%x cnv=%x\n",dec,dec?(unsigned)ZizhanPcmDecIid:0u,dec?(unsigned)ZizhanPcmCnvIid:0u);
  unsigned echo=0;if(o.mode!=41||!PE_parse_boot_argn("zizhan_audio_echo",&echo,sizeof echo)||echo!=1){echo=0;}
  {unsigned dry=0;if(!PE_parse_boot_argn("zizhan_pulse_dry",&dry,sizeof dry)||dry!=1){echo=0;}}
- unsigned cap_src=1;(void)PE_parse_boot_argn("zizhan_audio_cap_src",&cap_src,sizeof cap_src);
+ unsigned cap_src=2;(void)PE_parse_boot_argn("zizhan_audio_cap_src",&cap_src,sizeof cap_src);
  const bool cap_want=(o.mode==ZIZHAN_AUDIO_PRM_DAEMON_MODE&&zizhan_audio_service_capture_control()!=nullptr);
  const bool cap_codec=(cap_want&&cap_src==2u);
  if(cap_want&&!cap_codec){echo=1;}
- bool cap_macro_held=false,cap_clk_held=false;
+ bool cap_macro_held=false,cap_clk_held=false,cap_va_clk_held=false,cap_hw_started=false;
+ auto cap_hw_cleanup=[&](){
+  if(cap_hw_started){zizhan_mic_codec_stop();cap_hw_started=false;}
+  if(cap_va_clk_held){
+   const unsigned cn=ar_prm_clock(b,sizeof b,ZizhanCapPort,0x7a300026u,AR_CLK_VA_CORE_MCLK,0u);
+   (void)cap_prm_send(b,cn,AR_OP_PRM_RELEASE,0x7a300026u,ZizhanCapPort);
+   cap_va_clk_held=false;
+  }
+  if(cap_clk_held){
+   const unsigned cn=ar_prm_clock(b,sizeof b,ZizhanCapPort,0x7a300023u,AR_CLK_TX_CORE_MCLK,0u);
+   (void)cap_prm_send(b,cn,AR_OP_PRM_RELEASE,0x7a300023u,ZizhanCapPort);
+   cap_clk_held=false;
+  }
+  if(cap_macro_held){
+   const unsigned cn=ar_prm_vote(b,sizeof b,ZizhanCapPort,0x7a300024u,AR_HW_MACRO,0);
+   (void)cap_prm_send(b,cn,AR_OP_PRM_RELEASE,0x7a300024u,ZizhanCapPort);
+   cap_macro_held=false;
+  }
+ };
  o.graph_echo=0;
  if(cap_codec){
   n=ar_prm_vote(b,sizeof b,ZizhanCapPort,0x7a300021u,AR_HW_MACRO,1);
   cap_macro_held=cap_prm_send(b,n,AR_OP_PRM_REQUEST,0x7a300021u,ZizhanCapPort);
   n=ar_prm_clock(b,sizeof b,ZizhanCapPort,0x7a300022u,AR_CLK_TX_CORE_MCLK,19200000u);
   cap_clk_held=cap_prm_send(b,n,AR_OP_PRM_REQUEST,0x7a300022u,ZizhanCapPort);
-  IOLog("ZIZHAN_AUDIO_CAPTURE: codec_dma prm macro=%u tx_mclk=%u\n",cap_macro_held?1u:0u,cap_clk_held?1u:0u);
+  n=ar_prm_clock(b,sizeof b,ZizhanCapPort,0x7a300025u,AR_CLK_VA_CORE_MCLK,19200000u);
+  cap_va_clk_held=cap_prm_send(b,n,AR_OP_PRM_REQUEST,0x7a300025u,ZizhanCapPort);
+  uint32_t mic_ch_mask=0u;
+  cap_hw_started=cap_macro_held&&cap_clk_held&&zizhan_mic_codec_start(&mic_ch_mask);
+  IOLog("ZIZHAN_AUDIO_CAPTURE: codec_dma prm macro=%u tx_mclk=%u va_mclk=%u codec_hw=%u ch_mask=%x\n",
+   cap_macro_held?1u:0u,cap_clk_held?1u:0u,cap_va_clk_held?1u:0u,cap_hw_started?1u:0u,mic_ch_mask);
+  if(!cap_hw_started||!mic_ch_mask){cap_hw_cleanup();return false;}
   const ArFormat cap_fmt={48000u,16u,1u};
   n=ar_open_mic_device(b,sizeof b,ZizhanCapPort,0x7a300011u);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300011u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
-  n=ar_config_mic_device(b,sizeof b,ZizhanCapPort,0x7a300012u,&cap_fmt,1u);
-  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300012u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300011u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
+  n=ar_config_mic_device(b,sizeof b,ZizhanCapPort,0x7a300012u,&cap_fmt,mic_ch_mask);
+  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300012u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
   n=ar_open_capture_stream(b,sizeof b,ZizhanCapPort,0x7a300013u);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300013u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300013u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
   n=ar_config_capture_stream(b,sizeof b,ZizhanCapPort,0x7a300014u,&cap_fmt);
-  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300014u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300014u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
  } else if(echo){n=zizhan_cap_open(b,sizeof b,0x7a300011u);
   if(!n||!graph_send(b,n,AR_OP_GRAPH_OPEN,0x7a300011u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
   n=zizhan_cap_config(b,sizeof b,0x7a300012u);
   if(!n||!graph_send(b,n,AR_OP_SET_CFG,0x7a300012u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;}
  o.dma_mapped=zizhan_audio_dma_map_begin()?1u:0u;
- if(!o.dma_mapped||!memory_commands(false))return false;
- if(o.mode==37){o.tone48_prepared=zizhan_audio_tone48_prepare()?1u:0u;if(!o.tone48_prepared)return false;}
+ if(!o.dma_mapped||!memory_commands(false)){cap_hw_cleanup();return false;}
+ if(o.mode==37){o.tone48_prepared=zizhan_audio_tone48_prepare()?1u:0u;if(!o.tone48_prepared){cap_hw_cleanup();return false;}}
  n=zizhan_graph_command(b,sizeof b,ZizhanMfcPort,0x7a300005u,AR_OP_GRAPH_PREPARE,ZizhanMfcSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300005u,ZizhanMfcPort)){return false;}++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300005u,ZizhanMfcPort)){cap_hw_cleanup();return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanMfcPort,0x7a300006u,AR_OP_GRAPH_START,ZizhanMfcSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300006u,ZizhanMfcPort)){return false;}++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300006u,ZizhanMfcPort)){cap_hw_cleanup();return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a300007u,AR_OP_GRAPH_PREPARE,ZizhanPcmSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300007u,ZizhanPcmPort)){return false;}++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300007u,ZizhanPcmPort)){cap_hw_cleanup();return false;}++o.graph_acks;
  n=zizhan_graph_command(b,sizeof b,ZizhanPcmPort,0x7a300008u,AR_OP_GRAPH_START,ZizhanPcmSg);
- if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300008u,ZizhanPcmPort)){return false;}++o.graph_acks;
+ if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300008u,ZizhanPcmPort)){cap_hw_cleanup();return false;}++o.graph_acks;
  if(cap_codec){
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300015u,AR_OP_GRAPH_PREPARE,AR_SG_MIC);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300015u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300015u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300016u,AR_OP_GRAPH_PREPARE,AR_SG_CAPTURE);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300016u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300016u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300017u,AR_OP_GRAPH_START,AR_SG_MIC);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300017u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300017u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300018u,AR_OP_GRAPH_START,AR_SG_CAPTURE);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300018u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300018u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
+  zizhan_mic_codec_unmute();
  } else if(o.graph_echo){
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300013u,AR_OP_GRAPH_PREPARE,ZizhanCapSg);
   if(!n||!graph_send(b,n,AR_OP_GRAPH_PREPARE,0x7a300013u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
@@ -1031,29 +1074,24 @@ __attribute__((noinline)) bool graph_round(){
   if(!n||!graph_send(b,n,AR_OP_GRAPH_START,0x7a300014u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;}
  IOLog("ZIZHAN_AUDIO_GRAPH: RUNNING device_sg=%x stream_sg=%x mfc=%x tdm=%x data=0 audio_output=0\n",
   ZizhanMfcSg,ZizhanPcmSg,ZizhanMfcIid,ZizhanTdmIid);
- if(o.mode==36||o.mode==37){if(!batch_round(o.mode==36))return false;}
- else if(o.mode==38&&o.loopback){if(!loopback_round())return false;}
- else if(o.mode==38){if(!runtime_round())return false;}
- else if(o.mode==40||o.mode==41){if(!service_round())return false;}
- else if(o.mode==ZIZHAN_AUDIO_PRM_DAEMON_MODE){if(!daemon_mode_round())return false;}
+ bool round_ok=true;
+ if(o.mode==36||o.mode==37){round_ok=batch_round(o.mode==36);}
+ else if(o.mode==38&&o.loopback){round_ok=loopback_round();}
+ else if(o.mode==38){round_ok=runtime_round();}
+ else if(o.mode==40||o.mode==41){round_ok=service_round();}
+ else if(o.mode==ZIZHAN_AUDIO_PRM_DAEMON_MODE){round_ok=daemon_mode_round();}
  else IOSleep(1000);
+ if(!round_ok){cap_hw_cleanup();return false;}
  if(cap_codec){
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300019u,AR_OP_GRAPH_STOP,AR_SG_CAPTURE);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a300019u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a300019u,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a30001au,AR_OP_GRAPH_STOP,AR_SG_MIC);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a30001au,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a30001au,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a30001bu,AR_OP_GRAPH_CLOSE,AR_SG_CAPTURE);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a30001bu,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a30001bu,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a30001cu,AR_OP_GRAPH_CLOSE,AR_SG_MIC);
-  if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a30001cu,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;
-  if(cap_clk_held){
-   n=ar_prm_clock(b,sizeof b,ZizhanCapPort,0x7a300023u,AR_CLK_TX_CORE_MCLK,0u);
-   (void)cap_prm_send(b,n,AR_OP_PRM_RELEASE,0x7a300023u,ZizhanCapPort);
-  }
-  if(cap_macro_held){
-   n=ar_prm_vote(b,sizeof b,ZizhanCapPort,0x7a300024u,AR_HW_MACRO,0);
-   (void)cap_prm_send(b,n,AR_OP_PRM_RELEASE,0x7a300024u,ZizhanCapPort);
-  }
+  if(!n||!graph_send(b,n,AR_OP_GRAPH_CLOSE,0x7a30001cu,ZizhanCapPort)){cap_hw_cleanup();return false;}++o.graph_acks;++o.graph_echo;
+  cap_hw_cleanup();
  } else if(o.graph_echo){
   n=zizhan_graph_command(b,sizeof b,ZizhanCapPort,0x7a300015u,AR_OP_GRAPH_STOP,ZizhanCapSg);
   if(!n||!graph_send(b,n,AR_OP_GRAPH_STOP,0x7a300015u,ZizhanCapPort)){return false;}++o.graph_acks;++o.graph_echo;

@@ -33,6 +33,7 @@ harness=r'''
 #include "ZizhanAudioGraph.h"
 #include "ZizhanAudioBatch.h"
 #include "ZizhanAudioTone48.h"
+#include "ZizhanMicCodec.h"
 static unsigned mode=1,audio,prepare_mode,adsp=2,threads,registrations,sends,allocations;
 static bool board=true,lock_fail,channel_fail,thread_fail,down,drop,frozen,send_fail;
 static unsigned reject_stage;static bool not_ready;
@@ -96,6 +97,9 @@ extern "C" ZizhanAudioHandoff *zizhan_audio_service_handoff(void){return &handof
 extern "C" unsigned zizhan_amp_pulse_flags;unsigned zizhan_amp_pulse_flags;
 extern "C" void zizhan_amp_native_play_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,const ZizhanAudioTransfer *){abort();}
 extern "C" void zizhan_amp_native_daemon_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,ZizhanAudioAmpDaemonFn,void *){abort();}
+extern "C" int zizhan_mic_codec_start(uint32_t *){abort();}
+extern "C" void zizhan_mic_codec_unmute(void){abort();}
+extern "C" void zizhan_mic_codec_stop(void){abort();}
 static bool PE_parse_boot_argn(const char *key,void *out,size_t size){assert(size==4);unsigned value;
  if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat")||!strcmp(key,"zizhan_pulse_dry")||!strcmp(key,"zizhan_write_ms")||!strcmp(key,"zizhan_write_flush")||!strcmp(key,"zizhan_write_probe")||!strcmp(key,"zizhan_audio_stream_ms")||!strcmp(key,"zizhan_audio_inflight")||!strcmp(key,"zizhan_audio_daemon_s")||!strcmp(key,"zizhan_audio_capture")||!strcmp(key,"zizhan_audio_cap_src"))return false;
  if(!strcmp(key,"zizhan_audio_service"))value=service_arg;else if(!strcmp(key,"zizhan_audio_attended"))value=attended;else if(!strcmp(key,"zizhan_audio_prm"))value=mode;else if(!strcmp(key,"pong_audio"))value=audio;

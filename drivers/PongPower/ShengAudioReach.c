@@ -456,6 +456,9 @@ uint32_t ar_config_capture_stream(uint8_t *out, uint32_t capacity, uint32_t port
     const uint32_t cmd = cmd_payload_start(&w);
     pcm_output(&w, AR_IID_CAP_CNV, f, INTERLEAVED);
     pcm_output(&w, AR_IID_CAP_ENC, f, INTERLEAVED);
+    const uint32_t at = param_begin(&w, AR_IID_CAP_SHMEM, 0x08001007u);
+    put32(&w, 0); put32(&w, 0);
+    param_end(&w, at);
     cmd_payload_end(&w, cmd);
     return finish(&w);
 }

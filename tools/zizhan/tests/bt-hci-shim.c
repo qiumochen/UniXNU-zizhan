@@ -173,6 +173,71 @@ int main(void) {
   const uint8_t expect_ev[7] = {0x04u, 0x0eu, 0x04u, 0xfdu, 0xfeu, 0xfcu, 0x00u};
   assert(k == 7u && memcmp(clean, expect_ev, 7u) == 0);
 
+  /* 7. Stage 6 pairing readiness: Classic SSP, BLE LESC, LE Privacy Resolving List, and L2CAP SMP ACL
+   *    frames (including 0xfc/0xfd/0xfe key material bytes) must forward 100% intact without shimming. */
+  memset(&mb, 0, sizeof(mb));
+  memset(&h4, 0, sizeof(h4));
+  /* Classic SSP: Link Key Request Reply (0x040b, 22B), Set Connection Encryption (0x0413, 3B),
+   * IO Capability Request Reply (0x042b, 9B), User Confirmation Request Reply (0x042c, 6B). */
+  uint8_t ssp_lk_reply[4 + 22] = {0x01u, 0x0bu, 0x04u, 22u, 0x11u, 0x22u, 0x33u, 0x44u, 0x55u, 0x66u, 0xfcu, 0xfdu, 0xfeu};
+  const uint8_t ssp_enc[4 + 3] = {0x01u, 0x13u, 0x04u, 0x03u, 0x40u, 0x00u, 0x01u};
+  const uint8_t ssp_iocap[4 + 9] = {0x01u, 0x2bu, 0x04u, 0x09u, 0x11u, 0x22u, 0x33u, 0x44u, 0x55u, 0x66u, 0x01u, 0x00u, 0x03u};
+  const uint8_t ssp_conf[4 + 6] = {0x01u, 0x2cu, 0x04u, 0x06u, 0x11u, 0x22u, 0x33u, 0x44u, 0x55u, 0x66u};
+  /* BLE LESC & Privacy Resolving List: LE Enable Encryption (0x2019, 28B), LE LTK Reply (0x201a, 18B),
+   * LE Read Local P-256 PubKey (0x2025, 0B), LE Generate DHKey (0x2026, 64B),
+   * LE Add Device To Resolving List (0x2027, 39B), LE Set Address Resolution Enable (0x202d, 1B),
+   * LE Set Privacy Mode (0x204e, 8B). */
+  uint8_t le_enc[4 + 28] = {0x01u, 0x19u, 0x20u, 28u, 0x40u, 0x00u};
+  le_enc[16] = 0xfdu;
+  le_enc[17] = 0xfeu;
+  uint8_t le_ltk[4 + 18] = {0x01u, 0x1au, 0x20u, 18u, 0x40u, 0x00u, 0xfcu};
+  const uint8_t le_p256[4] = {0x01u, 0x25u, 0x20u, 0x00u};
+  uint8_t le_dhkey[4 + 64] = {0x01u, 0x26u, 0x20u, 64u, 0xfdu, 0xfeu, 0xfcu};
+  uint8_t le_rlist_add[4 + 39] = {0x01u, 0x27u, 0x20u, 39u, 0x01u, 0xaau, 0xbbu, 0xccu, 0xddu, 0xeeu, 0xffu, 0xfdu, 0xfeu};
+  const uint8_t le_rlist_en[4 + 1] = {0x01u, 0x2du, 0x20u, 0x01u, 0x01u};
+  const uint8_t le_priv_mode[4 + 8] = {0x01u, 0x4eu, 0x20u, 0x08u, 0x01u, 0xaau, 0xbbu, 0xccu, 0xddu, 0xeeu, 0xffu, 0x01u};
+  /* L2CAP SMP Pairing Public Key ACL packet (type 0x02, 5B header + 69B L2CAP/SMP body containing 0xfc/0xfd/0xfe). */
+  uint8_t smp_acl[5 + 69];
+  memset(smp_acl, 0x5au, sizeof(smp_acl));
+  smp_acl[0] = 0x02u;
+  smp_acl[1] = 0x40u;
+  smp_acl[2] = 0x20u;
+  smp_acl[3] = 69u;
+  smp_acl[4] = 0x00u;
+  smp_acl[10] = 0xfcu;
+  smp_acl[20] = 0xfdu;
+  smp_acl[30] = 0xfeu;
+
+  zizhan_bt_h4_feed(&h4, &ops, ssp_lk_reply, sizeof(ssp_lk_reply));
+  zizhan_bt_h4_feed(&h4, &ops, ssp_enc, sizeof(ssp_enc));
+  zizhan_bt_h4_feed(&h4, &ops, ssp_iocap, sizeof(ssp_iocap));
+  zizhan_bt_h4_feed(&h4, &ops, ssp_conf, sizeof(ssp_conf));
+  zizhan_bt_h4_feed(&h4, &ops, le_enc, sizeof(le_enc));
+  zizhan_bt_h4_feed(&h4, &ops, le_ltk, sizeof(le_ltk));
+  zizhan_bt_h4_feed(&h4, &ops, le_p256, sizeof(le_p256));
+  zizhan_bt_h4_feed(&h4, &ops, le_dhkey, sizeof(le_dhkey));
+  zizhan_bt_h4_feed(&h4, &ops, le_rlist_add, sizeof(le_rlist_add));
+  zizhan_bt_h4_feed(&h4, &ops, le_rlist_en, sizeof(le_rlist_en));
+  zizhan_bt_h4_feed(&h4, &ops, le_priv_mode, sizeof(le_priv_mode));
+  zizhan_bt_h4_feed(&h4, &ops, smp_acl, sizeof(smp_acl));
+
+  const unsigned expect_pair_len =
+      (unsigned)(sizeof(ssp_lk_reply) + sizeof(ssp_enc) + sizeof(ssp_iocap) + sizeof(ssp_conf) +
+                 sizeof(le_enc) + sizeof(le_ltk) + sizeof(le_p256) + sizeof(le_dhkey) +
+                 sizeof(le_rlist_add) + sizeof(le_rlist_en) + sizeof(le_priv_mode) + sizeof(smp_acl));
+  assert(h4.shimmed == 0u && h4.forwarded == 12u && mb.host_len == 0u);
+  assert(mb.uart_len == expect_pair_len);
+  assert(memcmp(mb.uart_out + expect_pair_len - sizeof(smp_acl), smp_acl, sizeof(smp_acl)) == 0);
+
+  /* Inbound SMP ACL frame over IBS with 0xfc/0xfd/0xfe key bytes must not trigger spurious WAKE_ACK or byte loss. */
+  memset(&mb, 0, sizeof(mb));
+  memset(&ibs, 0, sizeof(ibs));
+  uint8_t smp_rx_clean[128] = {0};
+  const unsigned smp_rx_n = zizhan_bt_ibs_rx(&ibs, mock_uart_tx, &mb, smp_acl, sizeof(smp_acl), smp_rx_clean);
+  assert(smp_rx_n == sizeof(smp_acl));
+  assert(memcmp(smp_rx_clean, smp_acl, sizeof(smp_acl)) == 0);
+  assert(ibs.wake_ind == 0u && ibs.sleep_ind == 0u && ibs.wake_ack == 0u && mb.uart_len == 0u);
+
   printf("PASS bt-hci-shim\n");
   return 0;
 }

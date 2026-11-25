@@ -36,6 +36,7 @@
 #include "zizhan-network-observer18.h"
 #include "zizhan-weather-observer18.h"
 #include "zizhan-statusbar18.h"
+#include "zizhan-scene-orient18.h"
 
 static bool software_composition;
 static bool scanout_format;
@@ -1372,6 +1373,7 @@ static void photos_context_image(const struct mach_header *header,intptr_t slide
  * This selects a real software backend; no Metal device is fabricated.
  * Match this image's UUID and entry instructions, never a 20G81 address.
  */
+static void springboard_scene_orientation_policy(void);
 static void compositor_image(const struct mach_header *header,intptr_t slide)
 {
     brightness18_image(header,slide);
@@ -1383,6 +1385,7 @@ static void compositor_image(const struct mach_header *header,intptr_t slide)
     container_persona_policy();
     springboard_platform_policy();
     springboard_setup_policy();
+    springboard_scene_orientation_policy();
     launchservices_directories();
     installd_directory();
     pluginkit_directory();
@@ -2900,6 +2903,193 @@ orientation_watch(void *unused)
     if(++rounds<150)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
 }
 
+/* Stage 4: Seed cold-launched SBDeviceApplicationSceneHandle initial settings with the locked or active
+ * SpringBoard interface orientation when [self sceneIfExists] == nil (before SBTraitsSceneParticipantManager
+ * registers the new scene's participant), preventing a 1-frame portrait (1080x958 sideways) flash.
+ * Disable with boot-arg zizhan_scene_orient=0. */
+static void (*scene_orient_original)(id,SEL,id,id,id);
+static unsigned long (*scene_supp_mask_original)(id,SEL);
+static bool scene_orient_installed;
+static unsigned scene_orient_logs;
+static char scene_pad_mask_key;
+static unsigned long parse_orient_array_mask(CFTypeRef arr)
+{
+    if(!arr || CFGetTypeID(arr)!=CFArrayGetTypeID())return 0;
+    unsigned long mask=0;
+    CFIndex n=CFArrayGetCount((CFArrayRef)arr);
+    for(CFIndex i=0;i<n && i<8;i++) {
+        CFTypeRef item=CFArrayGetValueAtIndex((CFArrayRef)arr,i);
+        if(!item || CFGetTypeID(item)!=CFStringGetTypeID())continue;
+        char buf[64]={0};
+        if(CFStringGetCString((CFStringRef)item,buf,sizeof(buf),kCFStringEncodingUTF8))
+            mask|=zizhan_orient_mask_from_name(buf);
+    }
+    return mask;
+}
+static unsigned long zizhan_main_scene_supported_orientations(id self,SEL selector)
+{
+    unsigned long orig=scene_supp_mask_original?scene_supp_mask_original(self,selector):0;
+    if((orig&0x1eUL)==0x1eUL)return orig;
+    Class dev_cls=objc_lookUpClass("UIDevice");
+    SEL s_cur=sel_registerName("currentDevice"),s_idiom=sel_registerName("userInterfaceIdiom");
+    id dev=(dev_cls && method_abi(class_getClassMethod(dev_cls,s_cur),"@",0,""))?
+        ((id(*)(Class,SEL))objc_msgSend)(dev_cls,s_cur):nil;
+    long idiom=(dev && method_abi(class_getInstanceMethod(object_getClass(dev),s_idiom),"qQ",0,""))?
+        ((long(*)(id,SEL))objc_msgSend)(dev,s_idiom):0;
+    if(idiom!=1)return orig;
+    Class hcls=object_getClass(self);
+    SEL s_exists=sel_registerName("sceneIfExists"),s_uics=sel_registerName("uiClientSettings");
+    SEL s_supp=sel_registerName("supportedInterfaceOrientations");
+    id scene=(hcls && method_abi(class_getInstanceMethod(hcls,s_exists),"@",0,""))?
+        ((id(*)(id,SEL))objc_msgSend)(self,s_exists):nil;
+    int has_client=0;
+    if(scene && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(scene,sel_registerName("respondsToSelector:"),s_uics)) {
+        id uics=((id(*)(id,SEL))objc_msgSend)(scene,s_uics);
+        if(uics && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(uics,sel_registerName("respondsToSelector:"),s_supp)) {
+            unsigned long cm=((unsigned long(*)(id,SEL))objc_msgSend)(uics,s_supp);
+            if(cm!=0)has_client=1;
+        }
+    }
+    if(has_client)return orig;
+    SEL s_app=sel_registerName("application"),s_classic=sel_registerName("isClassic");
+    id app=(hcls && method_abi(class_getInstanceMethod(hcls,s_app),"@",0,""))?
+        ((id(*)(id,SEL))objc_msgSend)(self,s_app):nil;
+    if(!app)return orig;
+    int is_classic=method_abi(class_getInstanceMethod(object_getClass(app),s_classic),"Bc",0,"")?
+        (int)((BOOL(*)(id,SEL))objc_msgSend)(app,s_classic):0;
+    if(is_classic)return orig;
+    unsigned long ipad_mask=0;int has_any=1;
+    id cached=objc_getAssociatedObject(app,&scene_pad_mask_key);
+    if(cached && CFGetTypeID((CFTypeRef)cached)==CFNumberGetTypeID()) {
+        long long packed=0;
+        if(CFNumberGetValue((CFNumberRef)cached,kCFNumberLongLongType,&packed)) {
+            ipad_mask=(unsigned long)(packed&0xff);
+            has_any=(int)((packed>>8)&1);
+        }
+    } else {
+        SEL s_info=sel_registerName("info"),s_burl=sel_registerName("bundleURL");
+        id info=method_abi(class_getInstanceMethod(object_getClass(app),s_info),"@",0,"")?
+            ((id(*)(id,SEL))objc_msgSend)(app,s_info):nil;
+        id burl=(info && method_abi(class_getInstanceMethod(object_getClass(info),s_burl),"@",0,""))?
+            ((id(*)(id,SEL))objc_msgSend)(info,s_burl):nil;
+        Class bcls=objc_lookUpClass("NSBundle");
+        SEL s_bwith=sel_registerName("bundleWithURL:"),s_idict=sel_registerName("infoDictionary");
+        id bundle=(burl && bcls && method_abi(class_getClassMethod(bcls,s_bwith),"@",1,"@"))?
+            ((id(*)(Class,SEL,id))objc_msgSend)(bcls,s_bwith,burl):nil;
+        CFDictionaryRef idict=(bundle && method_abi(class_getInstanceMethod(object_getClass(bundle),s_idict),"@",0,""))?
+            (CFDictionaryRef)((id(*)(id,SEL))objc_msgSend)(bundle,s_idict):NULL;
+        if(idict && CFGetTypeID((CFTypeRef)idict)==CFDictionaryGetTypeID()) {
+            CFTypeRef pad_arr=CFDictionaryGetValue(idict,CFSTR("UISupportedInterfaceOrientations~ipad"));
+            CFTypeRef base_arr=CFDictionaryGetValue(idict,CFSTR("UISupportedInterfaceOrientations"));
+            CFTypeRef ph_arr=CFDictionaryGetValue(idict,CFSTR("UISupportedInterfaceOrientations~iphone"));
+            ipad_mask=parse_orient_array_mask(pad_arr);
+            has_any=(pad_arr!=NULL || base_arr!=NULL || ph_arr!=NULL)?1:0;
+            long long packed=(long long)(ipad_mask&0xff)|((long long)has_any<<8);
+            CFNumberRef num=CFNumberCreate(NULL,kCFNumberLongLongType,&packed);
+            if(num){objc_setAssociatedObject(app,&scene_pad_mask_key,(id)num,OBJC_ASSOCIATION_RETAIN_NONATOMIC);CFRelease(num);}
+        }
+    }
+    return zizhan_effective_pad_orient_mask(1,0,0,orig,ipad_mask,has_any);
+}
+static void zizhan_modify_scene_settings(id self,SEL selector,id settings,id ctx,id entity)
+{
+    SEL s_exists=sel_registerName("sceneIfExists");
+    SEL s_resp=sel_registerName("respondsToSelector:");
+    SEL s_get_ori=sel_registerName("interfaceOrientation");
+    SEL s_set_ori=sel_registerName("setInterfaceOrientation:");
+    SEL s_supports=sel_registerName("_mainSceneSupportsInterfaceOrientation:");
+    Class hcls=object_getClass(self);
+    int exists=1;
+    if(hcls && method_abi(class_getInstanceMethod(hcls,s_exists),"@",0,"")) {
+        exists=((id(*)(id,SEL))objc_msgSend)(self,s_exists)!=nil;
+    }
+    long chosen=0,before=-1,lock_ori=0,active_ori=0;
+    int locked=0,sup=-1;
+    if(!exists && settings &&
+       ((BOOL(*)(id,SEL,SEL))objc_msgSend)(settings,s_resp,s_get_ori) &&
+       ((BOOL(*)(id,SEL,SEL))objc_msgSend)(settings,s_resp,s_set_ori)) {
+        before=((long(*)(id,SEL))objc_msgSend)(settings,s_get_ori);
+        id lm=singleton("SBOrientationLockManager");
+        if(lm) {
+            Class lcls=object_getClass(lm);
+            SEL s_locked=sel_registerName("isUserLocked"),s_lori=sel_registerName("userLockOrientation");
+            if(method_abi(class_getInstanceMethod(lcls,s_locked),"Bc",0,""))
+                locked=(int)((BOOL(*)(id,SEL))objc_msgSend)(lm,s_locked);
+            if(method_abi(class_getInstanceMethod(lcls,s_lori),"qQ",0,""))
+                lock_ori=((long(*)(id,SEL))objc_msgSend)(lm,s_lori);
+        }
+        Class acls=objc_lookUpClass("UIApplication");
+        id app=(acls && method_abi(class_getClassMethod(acls,sel_registerName("sharedApplication")),"@",0,""))?
+            ((id(*)(Class,SEL))objc_msgSend)(acls,sel_registerName("sharedApplication")):nil;
+        if(app) {
+            SEL s_active=sel_registerName("activeInterfaceOrientation");
+            if(method_abi(class_getInstanceMethod(object_getClass(app),s_active),"qQ",0,""))
+                active_ori=((long(*)(id,SEL))objc_msgSend)(app,s_active);
+        }
+        long cand=zizhan_scene_orient_candidate(1,exists,locked,lock_ori,active_ori);
+        sup=0;
+        if(cand>=1 && cand<=4 && method_abi(class_getInstanceMethod(hcls,s_supports),"Bc",1,"q")) {
+            sup=(int)((BOOL(*)(id,SEL,long))objc_msgSend)(self,s_supports,cand);
+        }
+        chosen=zizhan_scene_orient_apply(cand,before,sup);
+        if(chosen) {
+            ((void(*)(id,SEL,long))objc_msgSend)(settings,s_set_ori,chosen);
+        }
+    }
+    scene_orient_original(self,selector,settings,ctx,entity);
+    if(chosen && settings) {
+        long after=((long(*)(id,SEL))objc_msgSend)(settings,s_get_ori);
+        if(after!=chosen) {
+            ((void(*)(id,SEL,long))objc_msgSend)(settings,s_set_ori,chosen);
+            after=((long(*)(id,SEL))objc_msgSend)(settings,s_get_ori);
+        }
+        if(__atomic_fetch_add(&scene_orient_logs,1,__ATOMIC_RELAXED)<16) {
+            fprintf(stderr,"Zizhan scene18: cold launch initial orientation %ld -> %ld (after=%ld locked=%d lock_ori=%ld active=%ld)\n",
+                before,chosen,after,locked,lock_ori,active_ori);
+        }
+    } else if(!exists && __atomic_fetch_add(&scene_orient_logs,1,__ATOMIC_RELAXED)<8) {
+        fprintf(stderr,"Zizhan scene18: cold launch kept orientation before=%ld locked=%d lock_ori=%ld active=%ld sup=%d\n",
+            before,locked,lock_ori,active_ori,sup);
+    }
+}
+static void springboard_scene_orientation_policy(void)
+{
+    if(!springboard_process || scene_orient_installed || boot_option("zizhan_scene_orient=0"))return;
+    Class cls=objc_lookUpClass("SBDeviceApplicationSceneHandle");
+    Class core=objc_lookUpClass("FBSSceneSettingsCore");
+    if(!cls || !core)return;
+    SEL sel=sel_registerName("_modifyApplicationSceneSettings:fromRequestContext:entity:");
+    SEL sel_mask=sel_registerName("_mainSceneSupportedInterfaceOrientations");
+    Method own=class_getInstanceMethod(cls,sel);
+    Method sup=class_getInstanceMethod(class_getSuperclass(cls),sel);
+    Method mask_own=class_getInstanceMethod(cls,sel_mask);
+    Method mask_sup=class_getInstanceMethod(class_getSuperclass(cls),sel_mask);
+    Method core_get=class_getInstanceMethod(core,sel_registerName("interfaceOrientation"));
+    Method core_set=class_getInstanceMethod(core,sel_registerName("setInterfaceOrientation:"));
+    if(!own || own==sup || !method_abi(own,"v",3,"@@@") ||
+       !mask_own || mask_own==mask_sup || !method_abi(mask_own,"qQ",0,"") ||
+       !method_abi(core_get,"qQ",0,"") ||
+       !(method_abi(core_set,"v",1,"q") || method_abi(core_set,"v",1,"Q")) ||
+       !method_abi(class_getInstanceMethod(cls,sel_registerName("sceneIfExists")),"@",0,"") ||
+       !method_abi(class_getInstanceMethod(cls,sel_registerName("_mainSceneSupportsInterfaceOrientation:")),"Bc",1,"q"))return;
+    scene_supp_mask_original=(unsigned long(*)(id,SEL))method_setImplementation(mask_own,(IMP)zizhan_main_scene_supported_orientations);
+    scene_orient_original=(void(*)(id,SEL,id,id,id))method_setImplementation(own,(IMP)zizhan_modify_scene_settings);
+    scene_orient_installed=scene_orient_original!=NULL && scene_supp_mask_original!=NULL;
+    fprintf(stderr,"Zizhan scene18: SBDeviceApplicationSceneHandle cold-launch orientation hook=%d\n",(int)scene_orient_installed);
+}
+static void apply_boot_orientation_lock(void *context)
+{
+    long target=(long)(intptr_t)context;
+    id lm=singleton("SBOrientationLockManager");
+    SEL s_lock=sel_registerName("lock:");
+    if(!lm || target<1 || target>4 || !method_abi(class_getInstanceMethod(object_getClass(lm),s_lock),"v",1,"q")) {
+        fprintf(stderr,"Zizhan scene18: boot orientation lock=%ld SKIP manager=%d\n",target,lm!=nil);
+        return;
+    }
+    ((void(*)(id,SEL,long))objc_msgSend)(lm,s_lock,target);
+    fprintf(stderr,"Zizhan scene18: applied boot orientation lock=%ld\n",target);
+}
+
 
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
@@ -2998,6 +3188,12 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         /* zizhan SENS-03 diagnostic: the device and interface orientation SpringBoard has, said when either changes */
         if(boot_value("zizhan_accel_test=",(char[16]){0},16))
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
+        char lock_buf[16];
+        if(boot_value("zizhan_lock_orient=",lock_buf,sizeof(lock_buf))) {
+            long lval=atol(lock_buf);
+            if(lval>=1 && lval<=4)
+                dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,12*NSEC_PER_SEC),dispatch_get_main_queue(),(void *)(intptr_t)lval,apply_boot_orientation_lock);
+        }
         // The consumer reports are accepted but physical volume remains
         // unresponsive on this imported iPad board. Route those transitions
         // to the existing 22H374 controller after checking its actual ABI.

@@ -69,6 +69,8 @@ EXTRA = [
     ('mobile/Containers', 0o755, 501, 501), ('mobile/Containers/Data', 0o755, 501, 501),
     ('mobile/Containers/Shared', 0o755, 501, 501),
     ('mobile/Library/Caches', 0o755, 501, 501), ('mobile/Library/Preferences', 0o755, 501, 501),
+    ('mobile/Library/Preferences/Bluetooth', 0o755, 501, 501), ('MobileBluetooth', 0o755, 501, 501),
+    ('mobile/Library/BatteryLife', 0o755, 501, 501), ('mobile/Library/BatteryLife/Archives', 0o755, 501, 501),
     ('mobile/Library/Logs', 0o755, 501, 501), ('root/Library', 0o700, 0, 0),
     ('mobile/Library/Logs/CrashReporter', 0o755, 501, 501),
     ('mobile/Library/Pong', 0o700, 501, 501),
@@ -79,6 +81,7 @@ EXTRA = [
     ('mobile/Library/CoreDuet/Knowledge', 0o700, 501, 501),
     ('mobile/Library/IdentityServices/PDS', 0o700, 501, 501),
     ('root/Library/Caches', 0o700, 0, 0), ('root/Library/Preferences', 0o700, 0, 0),
+    ('root/Library/Preferences/Bluetooth', 0o700, 0, 0),
     ('root/Library/Logs', 0o700, 0, 0), ('db/timezone', 0o755, 0, 0),
     ('cores', 0o1775, 0, 0),
 ]

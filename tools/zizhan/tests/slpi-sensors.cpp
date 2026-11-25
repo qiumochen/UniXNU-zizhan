@@ -69,10 +69,32 @@ static void test_quiesce_state() {
   assert(poll_sleep_ms(q, false) == 10u);
 }
 
+static void test_mag_pressure_and_hinge_helpers() {
+  /* 30 uT, 40 uT, 0 uT -> 50 uT (50,000 milli-uT) */
+  assert(mag_norm_milli_ut(30000, -40000, 0) == 50000u);
+  assert(mag_plausible(30000, -40000, 12000));
+  assert(!mag_plausible(0, 0, 0));
+
+  /* Barometer: 1013.25 hPa (1,013,250 milli-hPa) -> 101,325 Pa */
+  assert(pressure_to_pa(1013250) == 101325u);
+  assert(pressure_plausible_pa(101325u));
+  /* Also accepts sensors reporting directly in Pa (101,325,000 milli-Pa) */
+  assert(pressure_to_pa(101325000) == 101325u);
+  assert(pressure_to_pa(-100) == 0u);
+  assert(!pressure_plausible_pa(0u));
+
+  /* Hinge angle: 0 deg folded, 90 deg tent, 179.5 deg flat */
+  assert(hinge_angle_plausible(0) && hinge_posture(0) == 0);
+  assert(hinge_angle_plausible(90000) && hinge_posture(90000) == 1);
+  assert(hinge_angle_plausible(179500) && hinge_posture(179500) == 2);
+  assert(!hinge_angle_plausible(250000));
+}
+
 int main() {
   test_milli_f32();
   test_autobright_hysteresis_and_override();
   test_quiesce_state();
+  test_mag_pressure_and_hinge_helpers();
   printf("slpi-sensors: PASS\n");
   return 0;
 }

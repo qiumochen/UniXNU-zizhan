@@ -187,4 +187,71 @@ inline uint32_t poll_sleep_ms(const QuiesceState &q, bool fast_bringup) {
   return q.quiesced ? 250u : 10u;
 }
 
+inline uint32_t isqrt64(uint64_t x) {
+  if (x == 0ull) {
+    return 0u;
+  }
+  uint64_t op = x, res = 0ull, one = 1ull << 62;
+  while (one > op) {
+    one >>= 2;
+  }
+  while (one != 0ull) {
+    if (op >= res + one) {
+      op -= res + one;
+      res = (res >> 1) + one;
+    } else {
+      res >>= 1;
+    }
+    one >>= 2;
+  }
+  return uint32_t(res);
+}
+
+/* 3-axis magnetic field magnitude in milli-uT from milli-uT components. */
+inline uint32_t mag_norm_milli_ut(int32_t mx_m, int32_t my_m, int32_t mz_m) {
+  const int64_t x = mx_m, y = my_m, z = mz_m;
+  const uint64_t sum2 = uint64_t(x * x) + uint64_t(y * y) + uint64_t(z * z);
+  return isqrt64(sum2);
+}
+
+inline bool mag_plausible(int32_t mx_m, int32_t my_m, int32_t mz_m) {
+  const uint32_t norm = mag_norm_milli_ut(mx_m, my_m, mz_m);
+  return norm >= 5000u && norm <= 2000000u;  /* 5 .. 2000 uT (includes foldable clasp magnet bias) */
+}
+
+/* Convert SSC pressure reading (milli-hPa ~1,013,250 or milli-Pa ~101,325,000) to Pascals (Pa). */
+inline uint32_t pressure_to_pa(int32_t raw_milli) {
+  if (raw_milli <= 0) {
+    return 0u;
+  }
+  const uint64_t v = uint64_t(uint32_t(raw_milli));
+  if (v >= 300000ull && v <= 1250000ull) {
+    return uint32_t((v + 5ull) / 10ull);       /* hPa * 1000 -> Pa (hPa * 100) */
+  }
+  if (v >= 30000000ull && v <= 125000000ull) {
+    return uint32_t((v + 500ull) / 1000ull);   /* Pa * 1000 -> Pa */
+  }
+  return 0u;
+}
+
+inline bool pressure_plausible_pa(uint32_t pa) {
+  return pa >= 30000u && pa <= 125000u;        /* 300 .. 1250 hPa */
+}
+
+/* Continuous hinge angle posture classification from milli-degrees (0..180000).
+ * Returns: 0 = folded (< 30 deg), 1 = half-open/tent (30..150 deg), 2 = flat/open (> 150 deg). */
+inline int32_t hinge_posture(int32_t deg_milli) {
+  if (deg_milli < 30000) {
+    return 0;
+  }
+  if (deg_milli <= 150000) {
+    return 1;
+  }
+  return 2;
+}
+
+inline bool hinge_angle_plausible(int32_t deg_milli) {
+  return deg_milli >= -5000 && deg_milli <= 190000;
+}
+
 }  // namespace zizhan_slpi_sensors

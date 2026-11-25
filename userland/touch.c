@@ -564,7 +564,7 @@ sensors_thread(void *unused)
     /* zizhan_orient_test=1: report the orientations 0..6 in turn, about 10 s each, whatever the accelerometer says */
     const int orientation_test=strstr(args,"zizhan_orient_test=1")!=NULL;
     int last_held=-1;
-    struct pong_touch sample;unsigned count=0,als_count=0,refused=0;ssize_t length;
+    struct pong_touch sample;unsigned count=0,als_count=0,aux_count=0,refused=0;ssize_t length;
     while ((length=read(device,&sample,sizeof(sample)))>0 || (length<0 && errno==EINTR)) {
         if (length!=(ssize_t)sizeof(sample)) continue;
         if (sample.type==ZIZHAN_SENSOR_LIGHT) {
@@ -579,6 +579,13 @@ sensors_thread(void *unused)
                 }
             }
             if (als_count++<8) say("Zizhan sensors HID: als #%u %.3f lux\n",als_count,(int32_t)sample.finger/1000.0);
+            continue;
+        }
+        if (sample.type>=ZIZHAN_SENSOR_GYRO && sample.type<=ZIZHAN_SENSOR_HINGE) {
+            if (aux_count++<16) {
+                say("Zizhan sensors HID: aux type=%u a=%d b=%d c=%d\n",
+                    sample.type,(int32_t)sample.finger,(int32_t)sample.x,(int32_t)sample.y);
+            }
             continue;
         }
         if (sample.type!=ZIZHAN_SENSOR_ACCEL) continue;

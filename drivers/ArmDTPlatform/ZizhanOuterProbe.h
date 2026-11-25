@@ -625,6 +625,9 @@ static void cover_desktop_worker(void *, wait_result_t) {
   for (unsigned i = 0; i < 1200 && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE); ++i) {
     IOSleep(100);
   }
+  if (current_mode() != 0u && !__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
+    draw(false);
+  }
   bool was_active = false;
   uint32_t last_seq = 0, seq_first = 0, seq_last = 0, blits = 0, idle_skips = 0, idle_streak = 0;
   uint32_t first_misr = 0, last_misr = 0, prev_misr = 0, distinct_misrs = 0;
@@ -758,7 +761,7 @@ extern "C" void zizhan_outer_fold_show(int closed) {
   } else {
     __atomic_store_n(&fold::lid_closed, 0u, __ATOMIC_RELEASE);
     const uint32_t prev = __atomic_exchange_n(&fold::active_view, 0u, __ATOMIC_ACQ_REL);
-    if (prev == 1u) {
+    if (prev != 0u) {
       fold::draw(false);
     }
   }

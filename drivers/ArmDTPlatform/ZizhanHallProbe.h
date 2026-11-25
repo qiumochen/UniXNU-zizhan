@@ -21,6 +21,7 @@ extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 extern "C" void zizhan_outer_fold_show(int closed) __attribute__((weak));
 extern "C" uint32_t zizhan_outer_fold_mode(void) __attribute__((weak));
+extern "C" int zizhan_slpi_hinge_closed(void);
 
 namespace zizhan_hall {
 struct Inputs {
@@ -134,7 +135,9 @@ static void worker(void *arg, wait_result_t) {
     const uint32_t raw = *input;
     __asm__ volatile("dmb oshld" ::: "memory");
     const bool high = (raw & 1u) != 0;
-    bool asserted = config.active_low ? !high : high;
+    const bool gpio_asserted = config.active_low ? !high : high;
+    const int slpi_closed = zizhan_slpi_hinge_closed();
+    bool asserted = gpio_asserted || (slpi_closed == 1);
     const uint64_t when = nowNs();
     // zizhan_hall_simulate=<s> (follow mode self-test): closed from s for dur seconds, repeated cycles times.
     if (config.simulate_s) {

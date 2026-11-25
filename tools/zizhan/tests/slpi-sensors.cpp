@@ -105,11 +105,65 @@ static void test_mag_pressure_and_hinge_helpers() {
   assert(outer_cover_scale_q8(1200) == 144u);
 }
 
+static void test_hinge_fold_hysteresis() {
+  HingeFoldState hs{};
+  assert(hs.closed == -1);
+  assert(!step_hinge_fold(hs, 250000));
+  assert(hs.closed == -1);
+
+  /* Boot flat on desk (video-1 #1: 177.0 deg = 177000 mdeg) -> open (0) */
+  assert(step_hinge_fold(hs, 177000));
+  assert(hs.closed == 0 && hs.transitions == 0);
+
+  /* Half-open 45 deg while folding -> stays open (0) due to 35..55 deg hysteresis */
+  assert(!step_hinge_fold(hs, 45000));
+  assert(hs.closed == 0 && hs.transitions == 0);
+
+  /* Folded <= 35 deg (e.g. 5 deg) -> closed (1), transition #1 */
+  assert(step_hinge_fold(hs, 5000));
+  assert(hs.closed == 1 && hs.transitions == 1);
+
+  /* Slight clasp flex at 42 deg while folded -> stays closed (1) */
+  assert(!step_hinge_fold(hs, 42000));
+  assert(hs.closed == 1 && hs.transitions == 1);
+
+  /* Unfolded >= 55 deg (e.g. 80 deg, then 176 deg) -> open (0), transition #2 */
+  assert(step_hinge_fold(hs, 80000));
+  assert(hs.closed == 0 && hs.transitions == 2);
+  assert(!step_hinge_fold(hs, 176000));
+  assert(hs.closed == 0 && hs.transitions == 2);
+}
+
+static void test_imu_rotation_alignment() {
+  int32_t out[3] = {};
+  /* video-1 #1040: phone held normally upright (USB-C down, camera bar +Y_slpi up) */
+  rotate_imu_axes(-1061, 9358, 3439, kDefaultImuRot, out);
+  assert(out[0] == -9358 && out[1] == -1061 && out[2] == 3439);
+
+  /* video-1 #3: flat face-up on desk (camera bump raises +Y_slpi by ~6 deg) */
+  rotate_imu_axes(-391, 1079, 9818, kDefaultImuRot, out);
+  assert(out[0] == -1079 && out[1] == -391 && out[2] == 9818);
+
+  /* 4-quadrant group check + INT32_MIN saturation safety */
+  rotate_imu_axes(0, 9807, 0, 0u, out);
+  assert(out[0] == 0 && out[1] == 9807 && out[2] == 0);
+  rotate_imu_axes(9807, 0, 0, 1u, out);
+  assert(out[0] == 0 && out[1] == 9807 && out[2] == 0);
+  rotate_imu_axes(0, 9807, 0, 2u, out);
+  assert(out[0] == 0 && out[1] == -9807 && out[2] == 0);
+  rotate_imu_axes(0, 9807, 0, 3u, out);
+  assert(out[0] == 9807 && out[1] == 0 && out[2] == 0);
+  rotate_imu_axes(10, INT32_MIN, -5, 1u, out);
+  assert(out[0] == INT32_MAX && out[1] == 10 && out[2] == -5);
+}
+
 int main() {
   test_milli_f32();
   test_autobright_hysteresis_and_override();
   test_quiesce_state();
   test_mag_pressure_and_hinge_helpers();
+  test_hinge_fold_hysteresis();
+  test_imu_rotation_alignment();
   printf("slpi-sensors: PASS\n");
   return 0;
 }

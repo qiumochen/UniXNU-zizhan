@@ -3,6 +3,7 @@
  * hysteresis-guarded ambient-light auto-brightness curve (L18 primary OLED DBV 4..2047),
  * and screen-off SLPI sensor stream quiesce state machine. No kernel dependencies. */
 #pragma once
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -252,6 +253,76 @@ inline int32_t hinge_posture(int32_t deg_milli) {
 
 inline bool hinge_angle_plausible(int32_t deg_milli) {
   return deg_milli >= -5000 && deg_milli <= 190000;
+}
+
+/* Hysteresis-guarded physical fold lid state derived from SLPI hinge_angle (milli-degrees):
+ * closed <= 35 deg (35000 mdeg), open >= 55 deg (55000 mdeg), retain state inside (35, 55) deg.
+ * Mix Fold 2's main hinge reports continuous angle on SLPI SSC rather than toggling GPIO62. */
+constexpr int32_t kHingeCloseDegMilli = 35000;
+constexpr int32_t kHingeOpenDegMilli = 55000;
+
+struct HingeFoldState {
+  int closed = -1;            /* -1 = unknown, 0 = open, 1 = closed */
+  int32_t last_deg_milli = -1;
+  uint32_t transitions = 0;
+};
+
+inline bool step_hinge_fold(HingeFoldState &hs, int32_t deg_milli) {
+  if (!hinge_angle_plausible(deg_milli)) {
+    return false;
+  }
+  hs.last_deg_milli = deg_milli;
+  int next = hs.closed;
+  if (deg_milli <= kHingeCloseDegMilli) {
+    next = 1;
+  } else if (deg_milli >= kHingeOpenDegMilli) {
+    next = 0;
+  } else if (hs.closed < 0) {
+    next = deg_milli < 45000 ? 1 : 0;
+  }
+  const bool changed = (next != hs.closed);
+  if (changed && hs.closed >= 0) {
+    ++hs.transitions;
+  }
+  hs.closed = next;
+  return changed;
+}
+
+/* Orthogonal SO(3) in-plane IMU axis rotation (det = +1) around +Z (out of inner panel).
+ * Mix Fold 2's 2160x1916 scanout has UIKit nominal Portrait (wori=1, 1080x958) rotated 90 deg CCW
+ * relative to physical upright (hinge vertical, camera bar +Y_slpi at top, USB-C -Y_slpi at bottom).
+ * rot=1 (default): (x', y', z') = (-y, +x, +z) maps physical upright (0, +g, 0) to (-g, 0, 0) ->
+ * HID (+1, 0, 0) g -> UIInterfaceOrientationLandscapeRight (wori=4, 958x1080, saf=[0,-1,1,0]),
+ * placing UI top at the camera bar and UI bottom at the USB-C port across all 4 quadrants. */
+constexpr uint32_t kDefaultImuRot = 1u;
+
+inline int32_t neg_sat_i32(int32_t v) {
+  return v == INT32_MIN ? INT32_MAX : -v;
+}
+
+inline void rotate_imu_axes(int32_t x, int32_t y, int32_t z, uint32_t rot, int32_t out[3]) {
+  switch (rot & 3u) {
+    case 0u:
+      out[0] = x;
+      out[1] = y;
+      out[2] = z;
+      break;
+    case 1u:
+      out[0] = neg_sat_i32(y);
+      out[1] = x;
+      out[2] = z;
+      break;
+    case 2u:
+      out[0] = neg_sat_i32(x);
+      out[1] = neg_sat_i32(y);
+      out[2] = z;
+      break;
+    case 3u:
+      out[0] = y;
+      out[1] = neg_sat_i32(x);
+      out[2] = z;
+      break;
+  }
 }
 
 /* Decode SSC proximity near/far state:

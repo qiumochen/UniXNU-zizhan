@@ -232,7 +232,9 @@ void pdmHandle(uint32_t srcNode, uint32_t srcPort, const uint8_t *q, uint32_t n)
  * registry, accel and ambient_light, stream the accelerometer at 10 Hz and log it; nothing is written to the sensor registry. */
 constexpr uint32_t kSnsService = 400, kSnsClientPort = 0x4004;
 uint32_t gSlpiMode, gAlsAutoBright, gGyroWant, gMagWant, gBaroWant, gHingeWant = 1, gProxWant = 1, gSlpiQuiesce = 1;
+uint32_t gImuRot = zizhan_slpi_sensors::kDefaultImuRot, gHingeSimStartS;
 volatile int32_t gProxNearState = 0, gProxSimState = -1, gAlsLuxMilliExport = -1;
+volatile int32_t gHingeClosedState = -1, gHingeSimState = -1, gHingeDegMilliExport = -1;
 uint32_t gSnsNode = 0xffffffffu, gSnsPort, gSnsTxn = 0x100, gSnsStage, gSnsInd;
 uint32_t gAccelSamples, gAlsSamples, gGyroSamples, gMagSamples, gBaroSamples, gHingeSamples, gProxSamples, gProxRawAdc;
 uint64_t gAccelLo, gAccelHi, gAlsLo, gAlsHi, gGyroLo, gGyroHi, gMagLo, gMagHi, gBaroLo, gBaroHi, gHingeLo, gHingeHi, gProxLo, gProxHi, gSnsNextMs;
@@ -242,6 +244,7 @@ bool gProxFound, gProxOn, gProxFallbackStream;
 uint32_t gAccel[3], gAls[2], gGyro[3], gMag[3], gBaro[2], gHinge[3], gProx[2];   // raw IEEE-754 bits: soft-float kernel
 zizhan_slpi_sensors::AutoBrightness gAutoBright;
 zizhan_slpi_sensors::QuiesceState gQuiesce;
+zizhan_slpi_sensors::HingeFoldState gHingeFold;
 int32_t milli(uint32_t bits) {
   return zizhan_slpi_sensors::milli_from_f32(bits);
 }
@@ -424,23 +427,26 @@ void snsEvent(const uint8_t *d, uint32_t n) {
           if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 3; i += 4) memcpy(&gAccel[k++], p3 + i, 4); }
           if (f3 == 2 && w3 == 0) accuracy = int32_t(v3);
         }
+        const int32_t raw[3] = {milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2])};
+        int32_t v[3] = {};
+        zizhan_slpi_sensors::rotate_imu_axes(raw[0], raw[1], raw[2], gImuRot, v);
         if (gSlpiMode == 4) {
-          // zizhan_accel_test=<s>: instead of the real reading, gravity along +y, +x, -y, -x in turn, <s> seconds each: the
-          // four ways of holding the phone, to see iPadOS rotate while it lies on a desk
+          // zizhan_accel_test=<s>: instead of the real reading, physical postures (+y upright, +x CCW, -y upside-down, -x CW)
+          // in SLPI coordinates rotated by gImuRot, <s> seconds each, to see iPadOS rotate while it lies on a desk
           static bool node;
           static uint32_t testS = 0xffffffffu;
           if (testS == 0xffffffffu) { testS = 0; (void)PE_parse_boot_argn("zizhan_accel_test", &testS, sizeof testS); }
           if (!node) node = zizhan_sensors_device_ready();
-          int32_t v[3] = {milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2])};
           if (testS) {
             static const int32_t held[4][3] = {{0, 9807, 0}, {9807, 0, 0}, {0, -9807, 0}, {-9807, 0, 0}};
             const unsigned phase = unsigned(nowMs() / 1000 / testS) % 4;
-            for (unsigned i = 0; i < 3; ++i) v[i] = held[phase][i];
+            zizhan_slpi_sensors::rotate_imu_axes(held[phase][0], held[phase][1], held[phase][2], gImuRot, v);
           }
           zizhan_sensor_post(16, v[0], v[1], v[2]);
         }
         if (gAccelSamples++ < 20)
-          IOLog("ZIZHAN_SLPI: accel #%u x=%d y=%d z=%d mm/s2 accuracy=%d\n", gAccelSamples, milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2]), accuracy);
+          IOLog("ZIZHAN_SLPI: accel #%u x=%d y=%d z=%d rot(%u)=(%d,%d,%d) mm/s2 accuracy=%d\n",
+                gAccelSamples, raw[0], raw[1], raw[2], gImuRot, v[0], v[1], v[2], accuracy);
       } else if (msgId == 1025 && msg && gAlsFound && lo == gAlsLo && hi == gAlsHi) {
         PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
         unsigned k = 0; int32_t accuracy = -1;
@@ -477,12 +483,14 @@ void snsEvent(const uint8_t *d, uint32_t n) {
           if (f3 == 2 && w3 == 0) { accuracy = int32_t(v3); }
         }
         const int32_t rx = milli(gGyro[0]), ry = milli(gGyro[1]), rz = milli(gGyro[2]);
+        int32_t grot[3] = {};
+        zizhan_slpi_sensors::rotate_imu_axes(rx, ry, rz, gImuRot, grot);
         if (gSlpiMode == 4) {
           (void)zizhan_sensors_device_ready();
-          zizhan_sensor_post(18, rx, ry, rz);
+          zizhan_sensor_post(18, grot[0], grot[1], grot[2]);
         }
         if (gGyroSamples++ < 20) {
-          IOLog("ZIZHAN_SLPI: gyro #%u rx=%d ry=%d rz=%d mrad/s accuracy=%d\n", gGyroSamples, rx, ry, rz, accuracy);
+          IOLog("ZIZHAN_SLPI: gyro #%u rx=%d ry=%d rz=%d mrad/s accuracy=%d\n", gGyroSamples, grot[0], grot[1], grot[2], accuracy);
         }
       } else if (msgId == 1025 && msg && gMagFound && lo == gMagLo && hi == gMagHi) {
         PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
@@ -494,10 +502,12 @@ void snsEvent(const uint8_t *d, uint32_t n) {
           if (f3 == 2 && w3 == 0) { accuracy = int32_t(v3); }
         }
         const int32_t mx = milli(gMag[0]), my = milli(gMag[1]), mz = milli(gMag[2]);
-        const uint32_t norm = zizhan_slpi_sensors::mag_norm_milli_ut(mx, my, mz);
+        int32_t mrot[3] = {};
+        zizhan_slpi_sensors::rotate_imu_axes(mx, my, mz, gImuRot, mrot);
+        const uint32_t norm = zizhan_slpi_sensors::mag_norm_milli_ut(mrot[0], mrot[1], mrot[2]);
         if (gSlpiMode == 4) {
           (void)zizhan_sensors_device_ready();
-          zizhan_sensor_post(19, mx, my, mz);
+          zizhan_sensor_post(19, mrot[0], mrot[1], mrot[2]);
         }
         if (gMagSamples++ < 20) {
           IOLog("ZIZHAN_SLPI: mag #%u mx=%d my=%d mz=%d norm=%u milli-uT accuracy=%d\n",
@@ -533,13 +543,24 @@ void snsEvent(const uint8_t *d, uint32_t n) {
         }
         const int32_t deg_m = milli(gHinge[0]);
         const int32_t posture = zizhan_slpi_sensors::hinge_posture(deg_m);
-        if (gSlpiMode == 4 && zizhan_slpi_sensors::hinge_angle_plausible(deg_m)) {
-          (void)zizhan_sensors_device_ready();
-          zizhan_sensor_post(21, deg_m, posture, accuracy);
+        if (zizhan_slpi_sensors::hinge_angle_plausible(deg_m)) {
+          __atomic_store_n(&gHingeDegMilliExport, deg_m, __ATOMIC_RELEASE);
+          if (gHingeSimStartS == 0u) {
+            const int prev_closed = gHingeFold.closed;
+            if (zizhan_slpi_sensors::step_hinge_fold(gHingeFold, deg_m)) {
+              __atomic_store_n(&gHingeClosedState, gHingeFold.closed, __ATOMIC_RELEASE);
+              IOLog("ZIZHAN_SLPI: hinge-lid %d -> %d deg_milli=%d transitions=%u\n",
+                    prev_closed, gHingeFold.closed, deg_m, gHingeFold.transitions);
+            }
+          }
+          if (gSlpiMode == 4) {
+            (void)zizhan_sensors_device_ready();
+            zizhan_sensor_post(21, deg_m, posture, accuracy);
+          }
         }
         if (gHingeSamples++ < 20) {
-          IOLog("ZIZHAN_SLPI: hinge #%u deg_milli=%d posture=%d accuracy=%d msg=%u\n",
-                gHingeSamples, deg_m, posture, accuracy, msgId);
+          IOLog("ZIZHAN_SLPI: hinge #%u deg_milli=%d posture=%d closed=%d accuracy=%d msg=%u\n",
+                gHingeSamples, deg_m, posture, __atomic_load_n(&gHingeClosedState, __ATOMIC_ACQUIRE), accuracy, msgId);
         }
       } else if ((msgId == 769 || msgId == 1031 || msgId == 1025 || msgId == 1026) &&
                  msg && gProxFound && lo == gProxLo && hi == gProxHi) {
@@ -1339,6 +1360,17 @@ again:
         }
       }
     }
+    if (gHingeSimStartS && !cycle && gSlpiMode == 4) {
+      const uint64_t elapsed_s = (now - t0) / 1000ull;
+      const int32_t sim_deg = (elapsed_s >= gHingeSimStartS && elapsed_s < gHingeSimStartS + 20ull) ? 5000 : 177000;
+      __atomic_store_n(&gHingeDegMilliExport, sim_deg, __ATOMIC_RELEASE);
+      const int prev_closed = gHingeFold.closed;
+      if (zizhan_slpi_sensors::step_hinge_fold(gHingeFold, sim_deg)) {
+        __atomic_store_n(&gHingeClosedState, gHingeFold.closed, __ATOMIC_RELEASE);
+        IOLog("ZIZHAN_SLPI: hinge-lid-sim %d -> %d deg_milli=%d elapsed_s=%llu transitions=%u\n",
+              prev_closed, gHingeFold.closed, sim_deg, (unsigned long long)elapsed_s, gHingeFold.transitions);
+      }
+    }
     if (gSlpiMode == 4 && !cycle && gSnsStage >= 10 && gIpcrtr && gIpcrtr->up) {
       const int disp = zizhan_display_power_state ? zizhan_display_power_state() : 1;
       const int lid = zizhan_outer_lid_closed ? zizhan_outer_lid_closed() : 0;
@@ -1349,12 +1381,13 @@ again:
         snsGyroEnable(false);
         snsMagEnable(false);
         snsBaroEnable(false);
-        snsHingeEnable(false);
+        /* Keep on-change hinge_angle armed across display-off standby so physical fold/unfold
+         * always delivers lid transitions (zero wakeup traffic while stationary). */
         if (!zizhan_slpi_sensors::proximity_keep_on_in_standby(lid)) {
           snsProxEnable(false);
         }
-        IOLog("ZIZHAN_SLPI: standby quiesce streams=off lid=%d prox_on=%u pauses=%u resumes=%u\n",
-              lid, gProxOn ? 1u : 0u, gQuiesce.pauses, gQuiesce.resumes);
+        IOLog("ZIZHAN_SLPI: standby quiesce streams=off lid=%d hinge_on=%u prox_on=%u pauses=%u resumes=%u\n",
+              lid, gHingeOn ? 1u : 0u, gProxOn ? 1u : 0u, gQuiesce.pauses, gQuiesce.resumes);
       } else if (qa == zizhan_slpi_sensors::QuiesceAction::Resume) {
         snsAccelEnable(true);
         snsAlsEnable(true);
@@ -1364,11 +1397,16 @@ again:
         if (gHingeWant) { snsHingeEnable(true); }
         if (gProxWant) { snsProxEnable(true); }
         IOLog("ZIZHAN_SLPI: wake resume streams=on pauses=%u resumes=%u\n", gQuiesce.pauses, gQuiesce.resumes);
-      } else if (gQuiesce.quiesced && gProxWant) {
-        if (zizhan_slpi_sensors::proximity_keep_on_in_standby(lid) && !gProxOn) {
-          snsProxEnable(true);
-        } else if (!zizhan_slpi_sensors::proximity_keep_on_in_standby(lid) && gProxOn) {
-          snsProxEnable(false);
+      } else if (gQuiesce.quiesced) {
+        if (gHingeWant && !gHingeOn) {
+          snsHingeEnable(true);
+        }
+        if (gProxWant) {
+          if (zizhan_slpi_sensors::proximity_keep_on_in_standby(lid) && !gProxOn) {
+            snsProxEnable(true);
+          } else if (!zizhan_slpi_sensors::proximity_keep_on_in_standby(lid) && gProxOn) {
+            snsProxEnable(false);
+          }
         }
       }
     }
@@ -1385,13 +1423,13 @@ again:
       case 8: snsSuid("hinge_angle"); gSnsNextMs = now + 200; break;
       case 9:
         if (gAccelFound) {
+          if (gHingeWant && gSlpiMode == 4) { snsHingeEnable(true); }
           if (!gQuiesce.quiesced) {
             snsAccelEnable(true);
             snsAlsEnable(true);
             if (gGyroWant) { snsGyroEnable(true); }
             if (gMagWant) { snsMagEnable(true); }
             if (gBaroWant) { snsBaroEnable(true); }
-            if (gHingeWant && gSlpiMode == 4) { snsHingeEnable(true); }
             if (gProxWant && gSlpiMode == 4) { snsProxEnable(true); }
           } else if (gProxWant && gSlpiMode == 4 &&
                      zizhan_slpi_sensors::proximity_keep_on_in_standby(zizhan_outer_lid_closed ? zizhan_outer_lid_closed() : 0)) {
@@ -1497,10 +1535,32 @@ extern "C" void zizhan_slpi_set_prox_sim(int near) {
   __atomic_store_n(&gProxSimState, near, __ATOMIC_RELEASE);
 }
 
+extern "C" int zizhan_slpi_hinge_closed(void) {
+  const int32_t sim = __atomic_load_n(&gHingeSimState, __ATOMIC_ACQUIRE);
+  if (sim >= 0) {
+    return sim != 0 ? 1 : 0;
+  }
+  return __atomic_load_n(&gHingeClosedState, __ATOMIC_ACQUIRE);
+}
+
+extern "C" int32_t zizhan_slpi_hinge_deg_milli(void) {
+  return __atomic_load_n(&gHingeDegMilliExport, __ATOMIC_ACQUIRE);
+}
+
+extern "C" void zizhan_slpi_set_hinge_sim(int closed) {
+  __atomic_store_n(&gHingeSimState, closed, __ATOMIC_RELEASE);
+}
+
 extern "C" void zizhan_slpi_start(void) {
-  uint32_t mode = 0, adsp = 0, modem = 0, all = 0, proxSim = 0xffffffffu;
+  uint32_t mode = 0, adsp = 0, modem = 0, all = 0, proxSim = 0xffffffffu, imuRot = 0xffffffffu, hingeSim = 0;
   if (PE_parse_boot_argn("zizhan_prox_sim", &proxSim, sizeof proxSim) && proxSim <= 1u) {
     __atomic_store_n(&gProxSimState, int32_t(proxSim), __ATOMIC_RELEASE);
+  }
+  if (PE_parse_boot_argn("zizhan_imu_rot", &imuRot, sizeof imuRot) && imuRot <= 3u) {
+    gImuRot = imuRot;
+  }
+  if (PE_parse_boot_argn("zizhan_hinge_sim", &hingeSim, sizeof hingeSim) && hingeSim >= 20u && hingeSim <= 600u) {
+    gHingeSimStartS = hingeSim;
   }
   if (!PE_parse_boot_argn("zizhan_slpi", &mode, sizeof mode) || mode < 1 || mode > 4) return;
   gSlpiMode = mode;
@@ -1527,5 +1587,6 @@ extern "C" void zizhan_slpi_start(void) {
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &t) != KERN_SUCCESS) { IOLog("ZIZHAN_SLPI: FAIL worker\n"); return; }
   thread_deallocate(t);
-  IOLog("ZIZHAN_SLPI: RUNNING pas=%u region=%llx+%llx\n", kPas, kMpssBase, kMpssSize);
+  IOLog("ZIZHAN_SLPI: RUNNING pas=%u region=%llx+%llx imu_rot=%u hinge_sim=%u\n",
+        kPas, kMpssBase, kMpssSize, gImuRot, gHingeSimStartS);
 }

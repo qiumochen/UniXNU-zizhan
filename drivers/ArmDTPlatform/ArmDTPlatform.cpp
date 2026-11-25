@@ -53,6 +53,9 @@ int pong_backlight_set(uint32_t, uint32_t) { return -1; }
 int zizhan_slpi_proximity_near(void) { return 0; }
 int32_t zizhan_slpi_ambient_lux_milli(void) { return -1; }
 void zizhan_slpi_set_prox_sim(int) {}
+int zizhan_slpi_hinge_closed(void) { return -1; }
+int32_t zizhan_slpi_hinge_deg_milli(void) { return -1; }
+void zizhan_slpi_set_hinge_sim(int) {}
 volatile int32_t native_battery_stats[16] = {};
 }
 #endif

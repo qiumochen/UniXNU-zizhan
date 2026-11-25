@@ -23,6 +23,7 @@ extern "C" { volatile uint32_t pong_zc_flipped_tag = 1; }
 extern "C" void pong_touch_post(uint32_t, uint32_t, uint32_t, uint32_t) {}
 extern "C" void zizhan_outer_fold_show(int) {}
 extern "C" uint32_t zizhan_outer_fold_mode(void) { return 1u; }
+extern "C" int zizhan_slpi_hinge_closed(void) { return slpi_hinge_state; }
 """
 harness = r'''
 #include <assert.h>
@@ -44,7 +45,8 @@ extern "C" { struct vnode *rootvnode = reinterpret_cast<vnode *>(1); }
 static unsigned mode, maps, releases, allocations, sleeps, started;
 static uint64_t clock_ns;
 static uint32_t registers[1024];
-static bool null_map, transitions;
+static bool null_map, transitions, hinge_transitions;
+static int slpi_hinge_state = -1;
 static std::vector<std::string> logs;
 static void IOLog(const char *fmt,...) {
   char buf[1024];va_list ap;va_start(ap,fmt);vsnprintf(buf,sizeof buf,fmt,ap);va_end(ap);
@@ -57,6 +59,7 @@ static void IOSleep(unsigned ms) {
   clock_ns+=uint64_t(ms)*1000000;++sleeps;
   if(sleep_limit&&sleeps>=sleep_limit){throw 18;}  /* follow mode never ends on its own */
   if(transitions) registers[1]=(clock_ns>=30000000000ULL && clock_ns<70000000000ULL)?0:1;
+  if(hinge_transitions) slpi_hinge_state=(clock_ns>=30000000000ULL && clock_ns<70000000000ULL)?1:0;
 }
 static int current_thread(){return 1;}
 static void thread_terminate(int) {}
@@ -138,6 +141,7 @@ int main(int argc,char **argv) {
   else if(which=="output")registers[0]=1<<9;
   else if(which=="mux")registers[0]=1<<2;
   else if(which=="transitions")transitions=true;
+  else if(which=="hinge"){hinge_transitions=true;slpi_hinge_state=0;}
   else assert(which=="baseline");
   IOService platform;
   try {zizhan_hall::start(&platform);} catch(int n) {assert(n==17||(n==18&&which=="daily"));}
@@ -155,7 +159,7 @@ int main(int argc,char **argv) {
   } else {
     assert(maps==1 && releases==1 && sleeps==24000 && clock_ns==120000000000ULL);
     assert(logged("PASS observer baseline=1") && logged("fold_qualified=0"));
-    assert(logged(which=="transitions"?"transitions=2":"transitions=0"));
+    assert(logged((which=="transitions"||which=="hinge")?"transitions=2":"transitions=0"));
     assert(registers[0]==0 && registers[1]==1);
   }
 }
@@ -169,7 +173,7 @@ with tempfile.TemporaryDirectory(prefix="zizhan-hall-probe-") as temp:
                     "-I" + str(ROOT / "drivers/ArmDTPlatform"), str(source),
                     "-o", str(binary)], check=True, timeout=30)
     for case in ("off", "mode", "foreign", "missing", "width", "pin", "base", "root",
-                 "map", "output", "mux", "baseline", "transitions", "daily"):
+                 "map", "output", "mux", "baseline", "transitions", "hinge", "daily"):
         # daily: the endless follow loop is cut by a throw, so the worker never frees its state.
         env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0") if case == "daily" else None
         subprocess.run([str(binary), case], check=True, timeout=10, env=env)

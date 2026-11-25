@@ -25,7 +25,7 @@ extern "C" {
 #define SHENG_BATTMGR_REQUEST_BYTES 24u
 #define SHENG_BATTMGR_ENABLE_BYTES 28u
 
-/* The fields one refresh reads, in order (at most 32: valid has a bit per field). */
+/* The fields one refresh reads, in order (at most 64: valid has a bit per field). */
 enum {
     BmStatus, BmPresent, BmCapacity, BmVoltage, BmCurrent, BmTemperature, BmCharge, BmUsbOnline, BmUsbType, BmUsbVoltage,
     BmUsbCurrent, BmTimeToEmpty, BmTimeToFull, BmGauge1Remaining, BmGauge1Full, BmGauge2Remaining, BmGauge2Full, BmFull, BmDesign,
@@ -34,13 +34,15 @@ enum {
      * thermal level, the charge current the charger runs, the board's view of the adapter (type, watts, PD authenticated), battery
      * authentication of both cells, input suspended */
     BmUsbAdapter, BmUsbLimit, BmUsbMax, BmChargeType, BmThermalLevel, BmChargeCurrent, BmRealType, BmPowerMax, BmPdVerified,
-    BmAuthentic, BmSlaveAuthentic, BmInputSuspend, BmFields
+    BmAuthentic, BmSlaveAuthentic, BmInputSuspend,
+    /* standard BATTERY_GET health (1) and state-of-health percent (5), queried on slow cycles */
+    BmHealth, BmSoh, BmFields
 };
 
 typedef struct {
     int32_t value[BmFields];
-    uint32_t valid;               /* bit per field */
-    uint8_t cursor, in_flight, enabled, slow_due;
+    uint64_t valid;               /* bit per field */
+    uint8_t cursor, in_flight, enabled, slow_due, board_get;
     uint32_t cycles_done, responses, notifications, errors, timeouts, ignored;
     uint32_t refresh_wanted;      /* a notification asked for a new cycle while one ran */
     int last_timeout;             /* the field the last timeout skipped, -1 none */
@@ -63,6 +65,8 @@ typedef struct {
     int voltage_mv, current_ma;   /* current: positive while the battery takes charge */
     int temperature, temperature_valid;  /* valid: a reading in the range a battery can have */
     int raw_mah, full_mah, design_mah, cycles;
+    int health, soh;              /* POWER_SUPPLY_HEALTH_* (0 unknown, 1 Good, 3 Dead) and SOH % (0 unknown) */
+    int gauge_cells, gauge1_rem_mah, gauge1_full_mah, gauge2_rem_mah, gauge2_full_mah;
     int time_to_empty_min, time_to_full_min;  /* -1 unknown */
     uint32_t adapter_family;      /* kIOPSFamilyCode value, 0 when no adapter */
     int adapter_mv, adapter_ma, adapter_watts;

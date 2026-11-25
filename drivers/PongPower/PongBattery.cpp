@@ -71,6 +71,8 @@ class AppleSmartBattery : public IOPMPowerSource {
     uint32_t ringHead = 0, ringCount = 0;
     volatile uint32_t channelUp = 0, channelChanged = 0;
     bool wasUp = false, published = false, healthDiagLogged = false;
+    uint8_t boardGet = 0;
+    int bootVoltageMv = 0;
     uint32_t refreshes = 0;
     ShengBattmgr bm;
     uint32_t sdpLimit = 0;
@@ -150,6 +152,12 @@ class AppleSmartBattery : public IOPMPowerSource {
                                     : (s.time_to_empty_min >= 0 ? s.time_to_empty_min : 0xffff));
         flag("FullyCharged", s.fully_charged);
         number("InstantAmperage", s.current_ma);
+        if (s.voltage_mv > 0) {
+            if (!bootVoltageMv) bootVoltageMv = s.voltage_mv;
+            number("AppleRawBatteryVoltage", s.voltage_mv);
+            number("BootVoltage", bootVoltageMv);
+        }
+        if (s.health > 0) number("PermanentFailureStatus", s.health == 3 ? 1 : 0);
         if (s.temperature_valid) number("Temperature", s.temperature);
         if (s.raw_mah > 0) number("AppleRawCurrentCapacity", s.raw_mah);
         if (s.full_mah > 0) {number("AppleRawMaxCapacity", s.full_mah); number("NominalChargeCapacity", s.full_mah);}
@@ -160,12 +168,13 @@ class AppleSmartBattery : public IOPMPowerSource {
         OSString *serial = OSString::withCString("ZIZHAN-BM4V");
         if (serialKey && serial) setPSProperty(serialKey, serial);
         OSSafeReleaseNULL(serial); OSSafeReleaseNULL(serialKey);
-        OSDictionary *data = OSDictionary::withCapacity(6);
+        OSDictionary *data = OSDictionary::withCapacity(9);
         if (data) {
             const struct {const char *key; int64_t value; bool ok;} fields[] = {
                 {"DesignCapacity", s.design_mah, s.design_mah > 0}, {"CycleCount", s.cycles, s.cycles > 0},
                 {"NominalChargeCapacity", s.full_mah, s.full_mah > 0}, {"StateOfCharge", s.percent, true},
-                {"Voltage", s.voltage_mv, s.voltage_mv > 0}};
+                {"Voltage", s.voltage_mv, s.voltage_mv > 0}, {"Temperature", s.temperature, s.temperature_valid != 0},
+                {"InstantAmperage", s.current_ma, true}, {"StateOfHealth", s.soh, s.soh > 0}};
             for (const auto &f : fields) {
                 OSNumber *n = f.ok ? OSNumber::withNumber((unsigned long long)f.value, 32) : nullptr;
                 if (n) {data->setObject(f.key, n); n->release();}
@@ -243,8 +252,12 @@ class AppleSmartBattery : public IOPMPowerSource {
             }
             OSSafeReleaseNULL(psObj);
             const int32_t auth = native_charger_stats[13];
-            IOLog("ZIZHAN_BATT_HEALTH_DATA: Design=%d Nominal=%d Cycle=%d SoC=%d Volt=%d auth=0x%x(c1=%d/%d,c2=%d/%d,pd=%d/%d,susp=%d/%d)\n",
-                  s.design_mah, s.full_mah, s.cycles, s.percent, s.voltage_mv, (unsigned)auth,
+            IOLog("ZIZHAN_BATT_DATA_KV: DesignCapacity=%d NominalChargeCapacity=%d CycleCount=%d StateOfCharge=%d Voltage=%d Temperature=%d InstantAmperage=%d StateOfHealth=%d\n",
+                  s.design_mah, s.full_mah, s.cycles, s.percent, s.voltage_mv, s.temperature, s.current_ma, s.soh);
+            IOLog("ZIZHAN_BATT_HEALTH_DATA: Design=%d Nominal=%d Cycle=%d SoC=%d Volt=%d Health=%d SOH=%d board_get=%u gauges=%d(%d/%d+%d/%d) timeouts=%u errors=%u auth=0x%x(c1=%d/%d,c2=%d/%d,pd=%d/%d,susp=%d/%d)\n",
+                  s.design_mah, s.full_mah, s.cycles, s.percent, s.voltage_mv, s.health, s.soh, (unsigned)bm.board_get,
+                  s.gauge_cells, s.gauge1_rem_mah, s.gauge1_full_mah, s.gauge2_rem_mah, s.gauge2_full_mah,
+                  bm.timeouts, bm.errors, (unsigned)auth,
                   (auth >> 8) & 1, auth & 1, (auth >> 9) & 1, (auth >> 1) & 1,
                   (auth >> 10) & 1, (auth >> 2) & 1, (auth >> 11) & 1, (auth >> 3) & 1);
         }
@@ -280,7 +293,7 @@ class AppleSmartBattery : public IOPMPowerSource {
                 self->pump();
                 self->refresh->setTimeoutMS(refreshMs());
             }
-            if (!up && self->wasUp) {self->setBatteryInstalled(false);self->setExternalConnected(false);self->setIsCharging(false);self->updateStatus();self->request->cancelTimeout(); sheng_battmgr_init(&self->bm); self->bm.sdp_limit_ua = self->sdpLimit;}
+            if (!up && self->wasUp) {self->setBatteryInstalled(false);self->setExternalConnected(false);self->setIsCharging(false);self->updateStatus();self->request->cancelTimeout(); sheng_battmgr_init(&self->bm); self->bm.sdp_limit_ua = self->sdpLimit; self->bm.board_get = self->boardGet;}
             self->wasUp = up;
         }
         for (;;) {
@@ -319,8 +332,10 @@ class AppleSmartBattery : public IOPMPowerSource {
 public:
     bool startBattery() {
         sheng_battmgr_init(&bm);
-        uint32_t ma = 0;
+        uint32_t ma = 0, bg = 0;
         if (PE_parse_boot_argn("pong_usb_sdp_ma", &ma, sizeof ma)) bm.sdp_limit_ua = ma > 3000 ? 3000000u : ma * 1000u;
+        if (PE_parse_boot_argn("zizhan_batt_board", &bg, sizeof bg) && bg == 1) boardGet = 1;
+        bm.board_get = boardGet;
         sdpLimit = bm.sdp_limit_ua;
         loop = IOWorkLoop::workLoop();
         ringLock = IOSimpleLockAlloc();

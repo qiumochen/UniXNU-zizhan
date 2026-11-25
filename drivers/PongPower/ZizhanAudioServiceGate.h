@@ -114,4 +114,15 @@ static inline uint64_t zizhan_service_start_frame(uint64_t written){
  if(written>UINT64_MAX-ZIZHAN_AUDIO_PERIOD_FRAMES)return UINT64_MAX-(UINT64_MAX%ZIZHAN_AUDIO_PERIOD_FRAMES);
  return written+(ZIZHAN_AUDIO_PERIOD_FRAMES-rest);
 }
+/* Mode-42 start frame: anchor floor at the session's first observed watermark
+ * (never recomputed from cur_written, where ceil(cur)>=floor(cur) prevented any
+ * cushion), then back off cushion_periods behind the newest whole period ready. */
+static inline uint64_t zizhan_service_daemon_start_frame(uint64_t first_written,uint64_t cur_written,
+                                                         unsigned cushion_periods){
+ const uint64_t fl=zizhan_service_start_frame(first_written);
+ if(cur_written<=fl)return fl;
+ const uint64_t newest=cur_written-(cur_written%ZIZHAN_AUDIO_PERIOD_FRAMES);
+ const uint64_t back=(uint64_t)cushion_periods*ZIZHAN_AUDIO_PERIOD_FRAMES;
+ return newest>=fl+back?newest-back:fl;
+}
 #endif

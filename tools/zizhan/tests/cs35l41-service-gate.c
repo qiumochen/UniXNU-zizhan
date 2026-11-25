@@ -78,5 +78,12 @@ int main(void){
  assert(zizhan_service_start_frame(15873)==16320);
  for(uint64_t w=0;w<5000;w+=7){const uint64_t s=zizhan_service_start_frame(w);assert(s>=w&&s-w<480&&s%480==0);}
  assert(zizhan_service_start_frame(UINT64_MAX)%480==0);
+ /* Mode-42 daemon start frame: preserves session floor and backs off cushion_periods behind cur_written. */
+ assert(zizhan_service_daemon_start_frame(30368,30368,5)==30720);
+ assert(zizhan_service_daemon_start_frame(30368,31904,5)==30720);
+ assert(zizhan_service_daemon_start_frame(30368,33120,5)==30720);
+ assert(zizhan_service_daemon_start_frame(30368,33792,5)==31200);
+ assert(zizhan_service_daemon_start_frame(30368,35000,5)==32160);
+ assert(zizhan_service_daemon_start_frame(480,480+6*480,5)==960);
  puts("cs35l41-service-gate: PASS");return 0;
 }

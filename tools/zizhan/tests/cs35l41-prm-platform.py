@@ -101,7 +101,7 @@ extern "C" int zizhan_mic_codec_start(uint32_t *){abort();}
 extern "C" void zizhan_mic_codec_unmute(void){abort();}
 extern "C" void zizhan_mic_codec_stop(void){abort();}
 static bool PE_parse_boot_argn(const char *key,void *out,size_t size){assert(size==4);unsigned value;
- if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat")||!strcmp(key,"zizhan_pulse_dry")||!strcmp(key,"zizhan_write_ms")||!strcmp(key,"zizhan_write_flush")||!strcmp(key,"zizhan_write_probe")||!strcmp(key,"zizhan_audio_stream_ms")||!strcmp(key,"zizhan_audio_inflight")||!strcmp(key,"zizhan_audio_daemon_s")||!strcmp(key,"zizhan_audio_capture")||!strcmp(key,"zizhan_audio_cap_src"))return false;
+ if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat")||!strcmp(key,"zizhan_pulse_dry")||!strcmp(key,"zizhan_write_ms")||!strcmp(key,"zizhan_write_flush")||!strcmp(key,"zizhan_write_probe")||!strcmp(key,"zizhan_audio_stream_ms")||!strcmp(key,"zizhan_audio_inflight")||!strcmp(key,"zizhan_audio_daemon_s")||!strcmp(key,"zizhan_audio_capture")||!strcmp(key,"zizhan_audio_cap_src")||!strcmp(key,"zizhan_audio_dec")||!strcmp(key,"zizhan_audio_loopback")||!strcmp(key,"zizhan_loop_hz"))return false;
  if(!strcmp(key,"zizhan_audio_service"))value=service_arg;else if(!strcmp(key,"zizhan_audio_attended"))value=attended;else if(!strcmp(key,"zizhan_audio_prm"))value=mode;else if(!strcmp(key,"pong_audio"))value=audio;
  else if(!strcmp(key,"zizhan_se15_prepare"))value=prepare_mode;else if(!strcmp(key,"zizhan_se15_observe"))value=observe_mode;else{assert(!strcmp(key,"pong_adsp"));value=adsp;}
  memcpy(out,&value,4);return value!=0;

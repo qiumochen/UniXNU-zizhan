@@ -34,6 +34,13 @@ enum : uint32_t {
   kDesktopH = 958,
   kDesktopY0 = 781,
   kEdgeBezel = 96,
+  kLockPillX0 = 360,
+  kLockPillX1 = 720,
+  kLockPillY0 = 1880,
+  kLockPillY1 = 1980,
+  kDoubleTapMinMs = 40,
+  kDoubleTapMaxMs = 500,
+  kTapHoldMaxMs = 350,
   kNormMax = 65535,
 };
 
@@ -59,6 +66,8 @@ struct StepResult {
   Kind kind;
   bool refresh_hud;
   bool rearm_scan;
+  bool toggle_desktop;
+  bool toggle_clock;
   uint8_t count;
   PostOp ops[kMaxFingers];
 };
@@ -71,9 +80,18 @@ struct Tracker {
   uint32_t max_x = 10800;
   uint32_t max_y = 25200;
   bool super_res = true;
+  uint64_t last_tap_ms = 0;
+  uint64_t tap_down_ms = 0;
+  uint32_t last_tap_x = 0;
+  uint32_t last_tap_y = 0;
+  uint32_t tap_down_x = 0;
+  uint32_t tap_down_y = 0;
+  bool tap_candidate = false;
+  bool pill_armed = false;
   uint32_t events = 0;
   uint32_t posted = 0;
   uint32_t hud_taps = 0;
+  uint32_t mode_toggles = 0;
 };
 
 inline bool contact_type_valid(uint8_t touch_type) {
@@ -194,6 +212,20 @@ inline bool map_desktop_point(const Tracker &t, uint32_t raw_x, uint32_t raw_y,
   return true;
 }
 
+inline uint32_t abs_diff32(uint32_t a, uint32_t b) {
+  return a >= b ? (a - b) : (b - a);
+}
+
+inline bool in_lock_pill(const Tracker &t, uint32_t raw_x, uint32_t raw_y) {
+  const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
+  const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
+  const uint32_t x0 = uint32_t((uint64_t(kLockPillX0) * rx_max) / kPanelW);
+  const uint32_t x1 = uint32_t((uint64_t(kLockPillX1) * rx_max) / kPanelW);
+  const uint32_t y0 = uint32_t((uint64_t(kLockPillY0) * ry_max) / kPanelH);
+  const uint32_t y1 = uint32_t((uint64_t(kLockPillY1) * ry_max) / kPanelH);
+  return raw_x >= x0 && raw_x <= x1 && raw_y >= y0 && raw_y <= y1;
+}
+
 inline void release_all(Tracker &t, StepResult &out) {
   for (uint8_t f = 0; f < kMaxFingers; ++f) {
     const uint16_t bit = uint16_t(1u << f);
@@ -204,9 +236,12 @@ inline void release_all(Tracker &t, StepResult &out) {
   }
   t.down_mask = 0;
   t.desktop_mask = 0;
+  t.tap_candidate = false;
+  t.pill_armed = false;
 }
 
-inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode) {
+inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
+                       uint64_t now_ms = 0, bool allow_toggle = true) {
   StepResult r{};
   const Decoded d = decode_event(ev, t.super_res, t.max_x, t.max_y);
   r.kind = d.kind;
@@ -228,22 +263,72 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode) {
       return r;
     }
     const uint16_t bit = uint16_t(1u << d.finger);
+    const bool was_down = (t.down_mask & bit) != 0u;
     if ((t.desktop_mask & bit) != 0u) {
       r.ops[r.count++] = PostOp{3u, d.finger, t.last_x[d.finger], t.last_y[d.finger]};
       ++t.posted;
     }
     t.down_mask = uint16_t(t.down_mask & ~bit);
     t.desktop_mask = uint16_t(t.desktop_mask & ~bit);
+    if (d.finger == 0u) {
+      if (was_down && t.down_mask == 0u && allow_toggle) {
+        if (mode == MapMode::ClockWakeOnly && t.tap_candidate && now_ms > 0) {
+          const uint64_t held = now_ms >= t.tap_down_ms ? (now_ms - t.tap_down_ms) : 0ull;
+          if (held <= kTapHoldMaxMs) {
+            const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
+            const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
+            if (t.last_tap_ms != 0 &&
+                now_ms >= t.last_tap_ms + kDoubleTapMinMs &&
+                now_ms - t.last_tap_ms <= kDoubleTapMaxMs &&
+                abs_diff32(t.tap_down_x, t.last_tap_x) <= rx_max / 6u &&
+                abs_diff32(t.tap_down_y, t.last_tap_y) <= ry_max / 6u) {
+              r.toggle_desktop = true;
+              ++t.mode_toggles;
+              t.last_tap_ms = 0;
+            } else {
+              t.last_tap_ms = now_ms;
+              t.last_tap_x = t.tap_down_x;
+              t.last_tap_y = t.tap_down_y;
+            }
+          }
+        } else if (mode == MapMode::DesktopViewport && t.pill_armed) {
+          const uint64_t held = (now_ms > 0 && now_ms >= t.tap_down_ms) ? (now_ms - t.tap_down_ms) : 0ull;
+          if (now_ms == 0 || held <= 600ull) {
+            r.toggle_clock = true;
+            ++t.mode_toggles;
+          }
+        }
+      }
+      t.tap_candidate = false;
+      t.pill_armed = false;
+    }
     return r;
   }
   if ((d.kind == Kind::PointerEnter || d.kind == Kind::PointerMotion) && d.valid_contact) {
     const uint16_t bit = uint16_t(1u << d.finger);
     const bool already_down = (t.down_mask & bit) != 0u;
+    if (!already_down && d.finger != 0u) {
+      t.tap_candidate = false;
+      t.pill_armed = false;
+    }
     if (mode == MapMode::ClockWakeOnly) {
       if (!already_down) {
         t.down_mask = uint16_t(t.down_mask | bit);
         ++t.hud_taps;
         r.refresh_hud = true;
+        if (d.finger == 0u && t.down_mask == 1u && allow_toggle && now_ms > 0) {
+          t.tap_candidate = true;
+          t.tap_down_ms = now_ms;
+          t.tap_down_x = d.raw_x;
+          t.tap_down_y = d.raw_y;
+        }
+      } else if (d.finger == 0u && t.tap_candidate) {
+        const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
+        const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
+        if (abs_diff32(d.raw_x, t.tap_down_x) > rx_max / 12u ||
+            abs_diff32(d.raw_y, t.tap_down_y) > ry_max / 12u) {
+          t.tap_candidate = false;
+        }
       }
       return r;
     }
@@ -256,6 +341,13 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode) {
         t.last_y[d.finger] = yn;
         r.ops[r.count++] = PostOp{1u, d.finger, xn, yn};
         ++t.posted;
+        if (d.finger == 0u) {
+          t.pill_armed = false;
+        }
+      } else if (allow_toggle && d.finger == 0u && t.down_mask == 1u && in_lock_pill(t, d.raw_x, d.raw_y)) {
+        t.pill_armed = true;
+        t.tap_down_ms = now_ms;
+        ++t.hud_taps;
       } else {
         ++t.hud_taps;
         r.refresh_hud = true;
@@ -269,6 +361,8 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode) {
       t.last_y[d.finger] = yn;
       r.ops[r.count++] = PostOp{2u, d.finger, xn, yn};
       ++t.posted;
+    } else if (d.finger == 0u && t.pill_armed && !in_lock_pill(t, d.raw_x, d.raw_y)) {
+      t.pill_armed = false;
     }
   }
   return r;

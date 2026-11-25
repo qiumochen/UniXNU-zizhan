@@ -202,11 +202,28 @@ static void worker(void *arg, wait_result_t) {
             }
           }
         } else {
-          const auto action = desktop ? zizhan_lid::decide(true, update.stable, display, now_ms, pressed, last_press_ms)
+          if (!update.stable && desktop) {
+            /* If the user double-tapped from Cover Clock into Cover Desktop while folded, unmute the inner OLED first. */
+            if (zizhan_outer_fold_show) {
+              zizhan_outer_fold_show(0);
+              outer_refresh_ns = when;
+            }
+            if (zizhan_inner_panel_cover_mute) {
+              (void)zizhan_inner_panel_cover_mute(0);
+            }
+            if (pong_scanout_set_cover_redirect) {
+              pong_scanout_set_cover_redirect(0);
+            }
+          }
+          const int eff_display = (!update.stable && zizhan_display_power_state) ? zizhan_display_power_state() : display;
+          const auto action = desktop ? zizhan_lid::decide(true, update.stable, eff_display, now_ms, pressed, last_press_ms)
                                       : zizhan_lid::Action::None;
           IOLog("ZIZHAN_LID: %s lid=%s display=%d desktop=%u presses=%u skips=%u\n", zizhan_lid::name(action),
-                update.stable ? "closed" : "open", display, desktop ? 1u : 0u, presses, skips);
-          if (zizhan_outer_fold_show) { zizhan_outer_fold_show(update.stable ? 1 : 0); outer_refresh_ns = when; }
+                update.stable ? "closed" : "open", eff_display, desktop ? 1u : 0u, presses, skips);
+          if ((update.stable || !desktop) && zizhan_outer_fold_show) {
+            zizhan_outer_fold_show(update.stable ? 1 : 0);
+            outer_refresh_ns = when;
+          }
           if (action == zizhan_lid::Action::PressSleep || action == zizhan_lid::Action::PressWake) {
             pong_touch_post(4u, 0u, 0, 0);   // PongButtonDown, power
             IOSleep(120);

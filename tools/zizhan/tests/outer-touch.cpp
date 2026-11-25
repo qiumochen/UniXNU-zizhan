@@ -95,10 +95,58 @@ static void test_clock_mode_and_calendar_and_blit() {
   assert(row0[1] == 0xff204080u);
 }
 
+static void test_double_tap_and_lock_pill_toggle() {
+  Tracker t{};
+  configure_sysinfo(t, 10800, 25200);
+
+  /* Center tap 1: down at t=1000ms, up at t=1070ms -> refreshes HUD, does not toggle yet */
+  const uint8_t down_mid[8] = {0x13, 0x01, 0x18, 0x15, 0x38, 0x31, 0x30, 0x00};
+  const uint8_t up_f0[8] = {0x33, 0x01, 0, 0, 0, 0, 0, 0};
+  StepResult s = step(t, down_mid, MapMode::ClockWakeOnly, 1000);
+  assert(s.refresh_hud && !s.toggle_desktop && !s.toggle_clock);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 1070);
+  assert(!s.toggle_desktop && t.down_mask == 0);
+
+  /* Center tap 2 after 180ms (t=1250ms down, t=1310ms up) -> toggles Clock -> Desktop cleanly on UP! */
+  s = step(t, down_mid, MapMode::ClockWakeOnly, 1250);
+  assert(!s.toggle_desktop);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 1310);
+  assert(s.toggle_desktop && !s.toggle_clock && t.mode_toggles == 1 && t.down_mask == 0);
+
+  /* Slow second tap (> 500ms later) does NOT false-trigger */
+  s = step(t, down_mid, MapMode::ClockWakeOnly, 2000);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 2060);
+  assert(!s.toggle_desktop);
+  s = step(t, down_mid, MapMode::ClockWakeOnly, 2700);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 2760);
+  assert(!s.toggle_desktop && t.mode_toggles == 1);
+
+  /* Distant second tap (far Y) does NOT false-trigger */
+  const uint8_t down_far[8] = {0x13, 0x01, 0x18, 0x15, uint8_t(4000 & 0xff), uint8_t(4000 >> 8), 0x30, 0x00};
+  s = step(t, down_far, MapMode::ClockWakeOnly, 2900);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 2960);
+  assert(!s.toggle_desktop && t.mode_toggles == 1);
+
+  /* In DesktopViewport: tap inside Lock/Clock pill (x=5400, y=19300) toggles Desktop -> Clock on UP without posting touch */
+  const uint8_t down_pill[8] = {0x13, 0x01, 0x18, 0x15, uint8_t(19300 & 0xff), uint8_t(19300 >> 8), 0x30, 0x00};
+  s = step(t, down_pill, MapMode::DesktopViewport, 4000);
+  assert(s.count == 0 && !s.toggle_clock);
+  s = step(t, up_f0, MapMode::DesktopViewport, 4080);
+  assert(s.count == 0 && s.toggle_clock && !s.toggle_desktop && t.mode_toggles == 2 && t.down_mask == 0);
+
+  /* Dragging out of pill cancels pill tap */
+  const uint8_t move_out[8] = {0x23, 0x01, 0x18, 0x15, uint8_t(21500 & 0xff), uint8_t(21500 >> 8), 0x30, 0x00};
+  s = step(t, down_pill, MapMode::DesktopViewport, 5000);
+  s = step(t, move_out, MapMode::DesktopViewport, 5050);
+  s = step(t, up_f0, MapMode::DesktopViewport, 5100);
+  assert(!s.toggle_clock && t.mode_toggles == 2);
+}
+
 int main() {
   test_decode_super_and_standard();
   test_viewport_and_edge_swipes();
   test_clock_mode_and_calendar_and_blit();
+  test_double_tap_and_lock_pill_toggle();
   printf("outer-touch: PASS\n");
   return 0;
 }

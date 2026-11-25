@@ -18,6 +18,9 @@
 extern "C" struct vnode *rootvnode;
 extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 extern "C" volatile int32_t native_battery_stats[16];
+extern "C" int zizhan_display_power_state(void) __attribute__((weak));
+extern "C" int zizhan_inner_panel_cover_mute(int muted) __attribute__((weak));
+extern "C" void pong_scanout_set_cover_redirect(int active) __attribute__((weak));
 extern "C" uint32_t pong_scanout_cover_snapshot(const uint8_t **va_out, uint64_t *phys_out,
                                                 uint32_t *w_out, uint32_t *h_out, uint32_t *stride_out);
 
@@ -342,7 +345,8 @@ static volatile uint8_t *fb_va, *intf_va;
 static bool ready, misr_on;
 static uint32_t mode_val;
 static uint8_t mode_parsed;
-static volatile uint32_t lid_closed, hud_dirty;
+static uint32_t allow_doubletap = 1;
+static volatile uint32_t lid_closed, hud_dirty, active_view, desktop_busy;
 
 static uint32_t current_mode() {
   if (!mode_parsed) {
@@ -475,6 +479,21 @@ static void draw_status_strip(unsigned y, bool include_time, zizhan_outer_touch:
   }
   draw_battery_pill(800, y + 1, pct, chg);
 }
+static void draw_lock_pill() {
+  const unsigned px = 400, py = 1900, pw = 280, ph = 56, pt = 3;
+  rect(px, py, pw, ph, 0xff1c1c1eu);
+  rect(px, py, pw, pt, 0xff636366u);
+  rect(px, py + ph - pt, pw, pt, 0xff636366u);
+  rect(px, py, pt, ph, 0xff636366u);
+  rect(px + pw - pt, py, pt, ph, 0xff636366u);
+  const unsigned cx = 524, cy = 1912, cs = 32, ct = 3;
+  rect(cx, cy, cs, ct, 0xffd0d4dcu);
+  rect(cx, cy + cs - ct, cs, ct, 0xffd0d4dcu);
+  rect(cx, cy, ct, cs, 0xffd0d4dcu);
+  rect(cx + cs - ct, cy, ct, cs, 0xffd0d4dcu);
+  rect(cx + cs / 2 - 1, cy + 7, 3, 10, 0xffffffffu);
+  rect(cx + cs / 2 - 1, cy + 15, 9, 3, 0xffffffffu);
+}
 static void draw(bool closed) {
   if (!init()) { return; }
   rect(0, 0, 1080, 2520, 0xff000000u);
@@ -490,6 +509,9 @@ static void draw(bool closed) {
     rect(540 - t / 2, y + 2 * H / 3 - t / 2, t, t, 0xffffffffu);
     digit(cal.minute / 10u, 1080 - 60 - 2 * W - gap, y, W, H, t, 0xffffffffu);
     digit(cal.minute % 10u, 1080 - 60 - W, y, W, H, t, 0xffffffffu);
+    if (allow_doubletap) {
+      rect(440, 1924, 200, 6, 0xff48484au);
+    }
     __asm__ volatile("dsb sy" ::: "memory");
     IOLog("ZIZHAN_OUTER_FOLD: closed clock %02u-%02u %02u:%02u batt=%d chg=%u misr=%x\n",
           cal.month, cal.day, cal.hour, cal.minute, pct, chg ? 1u : 0u, misr());
@@ -505,52 +527,118 @@ static uint64_t mono_ms() {
   return ns / 1000000ull;
 }
 
+static void switch_to_desktop() {
+  if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) ||
+      __atomic_load_n(&active_view, __ATOMIC_ACQUIRE) == 2u) {
+    return;
+  }
+  if (pong_scanout_set_cover_redirect) {
+    pong_scanout_set_cover_redirect(1);
+  }
+  if (zizhan_inner_panel_cover_mute) {
+    (void)zizhan_inner_panel_cover_mute(1);
+  }
+  __atomic_store_n(&active_view, 2u, __ATOMIC_RELEASE);
+  const int disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+  bool woke = false;
+  if (disp == 0) {
+    pong_touch_post(4u, 0u, 0, 0);
+    IOSleep(120);
+    pong_touch_post(5u, 0u, 0, 0);
+    woke = true;
+  }
+  IOLog("ZIZHAN_OUTER_FOLD: toggle clock->desktop prev_display=%d woke=%u\n", disp, woke ? 1u : 0u);
+}
+
+static void switch_to_clock() {
+  if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) ||
+      __atomic_load_n(&active_view, __ATOMIC_ACQUIRE) != 2u) {
+    return;
+  }
+  __atomic_store_n(&active_view, 1u, __ATOMIC_RELEASE);
+  for (unsigned w = 0; w < 30 && __atomic_load_n(&desktop_busy, __ATOMIC_ACQUIRE); ++w) {
+    IOSleep(10);
+  }
+  draw(true);
+  if (pong_scanout_set_cover_redirect) {
+    pong_scanout_set_cover_redirect(0);
+  }
+  const int disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+  bool slept = false;
+  if (disp == 1) {
+    pong_touch_post(4u, 0u, 0, 0);
+    IOSleep(120);
+    pong_touch_post(5u, 0u, 0, 0);
+    slept = true;
+    for (unsigned w = 0; w < 40; ++w) {
+      if (zizhan_display_power_state && zizhan_display_power_state() == 0) {
+        break;
+      }
+      IOSleep(50);
+    }
+  }
+  if (zizhan_inner_panel_cover_mute) {
+    (void)zizhan_inner_panel_cover_mute(0);
+  }
+  IOLog("ZIZHAN_OUTER_FOLD: toggle desktop->clock prev_display=%d slept=%u end_display=%d\n",
+        disp, slept ? 1u : 0u, zizhan_display_power_state ? zizhan_display_power_state() : -1);
+}
+
 static void cover_desktop_worker(void *, wait_result_t) {
   thread_set_thread_name(current_thread(), "zizhan_outer_desk");
   for (unsigned i = 0; i < 1200 && !__atomic_load_n(&rootvnode, __ATOMIC_ACQUIRE); ++i) {
     IOSleep(100);
   }
-  bool was_closed = false;
-  uint32_t last_seq = 0, seq_first = 0, seq_last = 0, blits = 0;
+  bool was_active = false;
+  uint32_t last_seq = 0, seq_first = 0, seq_last = 0, blits = 0, idle_skips = 0, idle_streak = 0;
   uint32_t first_misr = 0, last_misr = 0, prev_misr = 0, distinct_misrs = 0;
   uint64_t last_hud_ms = 0, last_misr_ms = 0;
   for (;;) {
     const bool closed = __atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) != 0;
-    if (!closed) {
-      if (was_closed) {
-        was_closed = false;
+    const bool desk_on = closed && (__atomic_load_n(&active_view, __ATOMIC_ACQUIRE) == 2u);
+    if (!desk_on) {
+      if (was_active) {
+        was_active = false;
         uint32_t open_sig = 0;
-        if (init()) {
+        if (!closed && init()) {
           rect(0, 0, 1080, 2520, 0xff000000u);
           __asm__ volatile("dsb sy" ::: "memory");
           open_sig = misr();
         }
-        IOLog("ZIZHAN_OUTER_DESKTOP: SUMMARY blits=%u seq_first=%u seq_last=%u first_misr=%x last_misr=%x distinct_misrs=%u open_misr=%x\n",
-              blits, seq_first, seq_last, first_misr, last_misr, distinct_misrs, open_sig);
+        IOLog("ZIZHAN_OUTER_DESKTOP: SUMMARY blits=%u idle_skips=%u seq_first=%u seq_last=%u first_misr=%x last_misr=%x distinct_misrs=%u open_misr=%x\n",
+              blits, idle_skips, seq_first, seq_last, first_misr, last_misr, distinct_misrs, open_sig);
+        __atomic_store_n(&desktop_busy, 0u, __ATOMIC_RELEASE);
       }
-      IOSleep(60);
+      IOSleep(50);
       continue;
     }
+    __atomic_store_n(&desktop_busy, 1u, __ATOMIC_RELEASE);
     if (!init()) {
       IOSleep(200);
       continue;
     }
     const uint64_t now = mono_ms();
-    if (!was_closed) {
-      was_closed = true;
-      last_seq = 0; seq_first = 0; seq_last = 0; blits = 0;
+    if (!was_active) {
+      was_active = true;
+      last_seq = 0; seq_first = 0; seq_last = 0; blits = 0; idle_skips = 0; idle_streak = 0;
       first_misr = 0; last_misr = 0; prev_misr = 0; distinct_misrs = 0;
       rect(0, 0, 1080, 2520, 0xff000000u);
       rect(0, 777, 1080, 2, 0xff2c2c2eu);
       rect(0, 1741, 1080, 2, 0xff2c2c2eu);
       draw_status_strip(704, true, nullptr, nullptr, nullptr);
+      if (allow_doubletap) {
+        draw_lock_pill();
+      }
       __asm__ volatile("dsb sy" ::: "memory");
       ensure_misr();
       last_hud_ms = now;
       last_misr_ms = 0;
-      IOLog("ZIZHAN_OUTER_DESKTOP: ACTIVE viewport=1080x958@y781\n");
+      IOLog("ZIZHAN_OUTER_DESKTOP: ACTIVE viewport=1080x958@y781 pill=%u\n", allow_doubletap ? 1u : 0u);
     } else if (__atomic_exchange_n(&hud_dirty, 0u, __ATOMIC_ACQ_REL) || now - last_hud_ms >= 15000ull) {
       draw_status_strip(704, true, nullptr, nullptr, nullptr);
+      if (allow_doubletap) {
+        draw_lock_pill();
+      }
       __asm__ volatile("dsb sy" ::: "memory");
       last_hud_ms = now;
     }
@@ -558,34 +646,42 @@ static void cover_desktop_worker(void *, wait_result_t) {
     uint64_t src_phys = 0;
     uint32_t src_w = 0, src_h = 0, src_stride = 0;
     const uint32_t seq = pong_scanout_cover_snapshot(&src_va, &src_phys, &src_w, &src_h, &src_stride);
-    if (seq != 0 && src_va && (seq != last_seq || blits == 0)) {
-      const unsigned rows = zizhan_outer_touch::blit_2to1_bgra(
-          src_va, src_stride, src_w, src_h,
-          fb_va + (0xb8fc9900ull & 0xfffull), 4320u, zizhan_outer_touch::kDesktopY0);
-      if (rows > 0) {
-        __asm__ volatile("dsb sy" ::: "memory");
-        last_seq = seq;
-        if (!seq_first) { seq_first = seq; }
-        seq_last = seq;
-        ++blits;
-        if (blits == 1) {
-          IOSleep(30);
-        }
-        if (blits <= 3 || now - last_misr_ms >= 350ull) {
-          const uint32_t sig = misr_peek();
-          if (sig != 0) {
-            if (!first_misr) { first_misr = sig; }
-            last_misr = sig;
-            if (sig != prev_misr) {
-              ++distinct_misrs;
-              prev_misr = sig;
-            }
+    if (seq != 0 && src_va) {
+      if (seq != last_seq || blits == 0) {
+        const unsigned rows = zizhan_outer_touch::blit_2to1_bgra(
+            src_va, src_stride, src_w, src_h,
+            fb_va + (0xb8fc9900ull & 0xfffull), 4320u, zizhan_outer_touch::kDesktopY0);
+        if (rows > 0) {
+          __asm__ volatile("dsb sy" ::: "memory");
+          last_seq = seq;
+          if (!seq_first) { seq_first = seq; }
+          seq_last = seq;
+          ++blits;
+          idle_streak = 0;
+          if (blits == 1) {
+            IOSleep(25);
           }
-          last_misr_ms = now;
+          if (blits <= 3 || now - last_misr_ms >= 350ull) {
+            const uint32_t sig = misr_peek();
+            if (sig != 0) {
+              if (!first_misr) { first_misr = sig; }
+              last_misr = sig;
+              if (sig != prev_misr) {
+                ++distinct_misrs;
+                prev_misr = sig;
+              }
+            }
+            last_misr_ms = now;
+          }
+        }
+      } else {
+        ++idle_skips;
+        if (idle_streak < 16u) {
+          ++idle_streak;
         }
       }
     }
-    IOSleep(30);
+    IOSleep(idle_streak >= 8u ? 50 : 25);
   }
 }
 }  // namespace fold
@@ -596,9 +692,28 @@ extern "C" uint32_t zizhan_outer_fold_mode(void) {
 
 extern "C" void zizhan_outer_fold_show(int closed) {
   const uint32_t m = fold::current_mode();
-  __atomic_store_n(&fold::lid_closed, closed ? 1u : 0u, __ATOMIC_RELEASE);
-  if (m == 1u) {
-    fold::draw(closed != 0);
+  if (m == 0u) {
+    __atomic_store_n(&fold::lid_closed, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&fold::active_view, 0u, __ATOMIC_RELEASE);
+    return;
+  }
+  if (closed) {
+    const uint32_t was_closed = __atomic_exchange_n(&fold::lid_closed, 1u, __ATOMIC_ACQ_REL);
+    if (!was_closed) {
+      const uint32_t view = (m == 2u) ? 2u : 1u;
+      __atomic_store_n(&fold::active_view, view, __ATOMIC_RELEASE);
+      if (view == 1u) {
+        fold::draw(true);
+      }
+    } else if (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 1u) {
+      fold::draw(true);
+    }
+  } else {
+    __atomic_store_n(&fold::lid_closed, 0u, __ATOMIC_RELEASE);
+    const uint32_t prev = __atomic_exchange_n(&fold::active_view, 0u, __ATOMIC_ACQ_REL);
+    if (prev == 1u) {
+      fold::draw(false);
+    }
   }
 }
 
@@ -805,16 +920,28 @@ static void outer_touch_worker(void *, wait_result_t) {
         if (!xfer(t2, r2, 10) || r2[2] == 0x00) { break; }
       }
     }
-    const auto map_mode = (fold::current_mode() == 2u)
-        ? zizhan_outer_touch::MapMode::DesktopViewport
-        : zizhan_outer_touch::MapMode::ClockWakeOnly;
-    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: UP ok=%u id=%04x sysinfo=%02x%02x/%ux%u super_res=%u max=%ux%u irq=%u map_mode=%u\n",
+    auto cur_map_mode = [&]() {
+      return (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 2u)
+          ? zizhan_outer_touch::MapMode::DesktopViewport
+          : zizhan_outer_touch::MapMode::ClockWakeOnly;
+    };
+    const bool toggle_ok = fold::allow_doubletap != 0u;
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: UP ok=%u id=%04x sysinfo=%02x%02x/%ux%u super_res=%u max=%ux%u irq=%u map_mode=%u toggle=%u\n",
           (spi_ready && chip_id == 0x3640u) ? 1u : 0u, chip_id, sys_hdr[0], sys_hdr[1], scr_x, scr_y,
-          tracker.super_res ? 1u : 0u, tracker.max_x, tracker.max_y, irq.r(4) & 1u, unsigned(map_mode));
+          tracker.super_res ? 1u : 0u, tracker.max_x, tracker.max_y, irq.r(4) & 1u, unsigned(cur_map_mode()),
+          toggle_ok ? 1u : 0u);
     auto dispatch_step = [&](const zizhan_outer_touch::StepResult &sr) {
+      if (sr.toggle_desktop) {
+        fold::switch_to_desktop();
+        return;
+      }
+      if (sr.toggle_clock) {
+        fold::switch_to_clock();
+        return;
+      }
       if (sr.refresh_hud) {
         __atomic_store_n(&fold::hud_dirty, 1u, __ATOMIC_RELEASE);
-        if (fold::current_mode() == 1u) {
+        if (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 1u) {
           fold::draw(true);
         }
       }
@@ -827,40 +954,95 @@ static void outer_touch_worker(void *, wait_result_t) {
         (void)xfer(scan, nullptr, 3);
       }
     };
+    auto encode_pt = [&](uint8_t opcode, uint32_t x, uint32_t y, uint8_t out[8]) {
+      memset(out, 0, 8);
+      out[0] = opcode;
+      out[1] = 0x01;
+      out[6] = (opcode == 0x33u) ? 0x00u : 0x20u;
+      if (tracker.super_res) {
+        out[2] = uint8_t(x); out[3] = uint8_t(x >> 8);
+        out[4] = uint8_t(y); out[5] = uint8_t(y >> 8);
+      } else {
+        out[2] = uint8_t(x);
+        out[3] = uint8_t(((x >> 8) & 0xfu) | ((y & 0xfu) << 4));
+        out[4] = uint8_t(y >> 4);
+      }
+    };
     const uint64_t up_ms = fold::mono_ms();
     bool synth_done = false;
+    unsigned synth_stage = 0;
     while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) {
       if (spi_ready && !(irq.r(4) & 1u)) {
         for (unsigned n = 0; n < 16 && !(irq.r(4) & 1u); ++n) {
           uint8_t t2[10] = {0x87}, r2[10] = {};
           if (!xfer(t2, r2, 10) || r2[2] == 0x00) { break; }
-          const auto sr = zizhan_outer_touch::step(tracker, &r2[2], map_mode);
+          const uint64_t ev_ms = fold::mono_ms();
+          const auto sr = zizhan_outer_touch::step(tracker, &r2[2], cur_map_mode(), ev_ms, toggle_ok);
           dispatch_step(sr);
         }
       }
-      if (outer_touch_synth == 1u && !synth_done && fold::mono_ms() - up_ms >= 2000ull) {
+      const uint64_t elapsed_ms = fold::mono_ms() - up_ms;
+      if (outer_touch_synth == 1u && !synth_done && elapsed_ms >= 2000ull) {
         synth_done = true;
         const uint32_t sx = tracker.max_x / 5u;
-        const uint32_t sy = (uint64_t(zizhan_outer_touch::kDesktopY0 + 180u) * tracker.max_y) / zizhan_outer_touch::kPanelH;
-        uint8_t e1[8] = {0x13, 0x01, 0, 0, 0, 0, 0x20, 0};
-        uint8_t e2[8] = {0x23, 0x01, 0, 0, 0, 0, 0x20, 0};
-        uint8_t e3[8] = {0x33, 0x01, 0, 0, 0, 0, 0x00, 0};
-        if (tracker.super_res) {
-          e1[2] = uint8_t(sx); e1[3] = uint8_t(sx >> 8); e1[4] = uint8_t(sy); e1[5] = uint8_t(sy >> 8);
-          const uint32_t sy2 = sy + tracker.max_y / 40u;
-          e2[2] = uint8_t(sx); e2[3] = uint8_t(sx >> 8); e2[4] = uint8_t(sy2); e2[5] = uint8_t(sy2 >> 8);
-        } else {
-          e1[2] = uint8_t(sx); e1[3] = uint8_t(((sx >> 8) & 0xfu) | ((sy & 0xfu) << 4)); e1[4] = uint8_t(sy >> 4);
-          const uint32_t sy2 = sy + 20u;
-          e2[2] = uint8_t(sx); e2[3] = uint8_t(((sx >> 8) & 0xfu) | ((sy2 & 0xfu) << 4)); e2[4] = uint8_t(sy2 >> 4);
+        const uint32_t sy = uint32_t((uint64_t(zizhan_outer_touch::kDesktopY0 + 180u) * tracker.max_y) / zizhan_outer_touch::kPanelH);
+        const uint32_t sy2 = sy + (tracker.super_res ? (tracker.max_y / 40u) : 20u);
+        uint8_t e1[8], e2[8], e3[8];
+        encode_pt(0x13u, sx, sy, e1);
+        encode_pt(0x23u, sx, sy2, e2);
+        encode_pt(0x33u, sx, sy2, e3);
+        dispatch_step(zizhan_outer_touch::step(tracker, e1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+        IOSleep(40);
+        dispatch_step(zizhan_outer_touch::step(tracker, e2, cur_map_mode(), fold::mono_ms(), toggle_ok));
+        IOSleep(40);
+        dispatch_step(zizhan_outer_touch::step(tracker, e3, cur_map_mode(), fold::mono_ms(), toggle_ok));
+        IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth injected mode=%u events=%u posted=%u hud_taps=%u toggles=%u\n",
+              unsigned(cur_map_mode()), tracker.events, tracker.posted, tracker.hud_taps, tracker.mode_toggles);
+      } else if (outer_touch_synth == 2u) {
+        if (synth_stage == 0u && elapsed_ms >= 4000ull) {
+          synth_stage = 1u;
+          const uint32_t cx = tracker.max_x / 2u, cy = tracker.max_y / 2u;
+          uint8_t d1[8], u1[8];
+          encode_pt(0x13u, cx, cy, d1);
+          encode_pt(0x33u, cx, cy, u1);
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOSleep(60);
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOSleep(150);
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOSleep(60);
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth2 stage=1 double-tap toggles=%u active_view=%u\n",
+                tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 1u && elapsed_ms >= 12000ull) {
+          synth_stage = 2u;
+          const uint32_t sx = tracker.max_x / 5u;
+          const uint32_t sy = uint32_t((uint64_t(zizhan_outer_touch::kDesktopY0 + 180u) * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          const uint32_t sy2 = sy + (tracker.super_res ? (tracker.max_y / 40u) : 20u);
+          uint8_t e1[8], e2[8], e3[8];
+          encode_pt(0x13u, sx, sy, e1);
+          encode_pt(0x23u, sx, sy2, e2);
+          encode_pt(0x33u, sx, sy2, e3);
+          dispatch_step(zizhan_outer_touch::step(tracker, e1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOSleep(40);
+          dispatch_step(zizhan_outer_touch::step(tracker, e2, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOSleep(40);
+          dispatch_step(zizhan_outer_touch::step(tracker, e3, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth2 stage=2 desktop-drag posted=%u active_view=%u\n",
+                tracker.posted, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 2u && elapsed_ms >= 19000ull) {
+          synth_stage = 3u;
+          const uint32_t px = tracker.max_x / 2u;
+          const uint32_t py = uint32_t((1930ull * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          uint8_t d1[8], u1[8];
+          encode_pt(0x13u, px, py, d1);
+          encode_pt(0x33u, px, py, u1);
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOSleep(60);
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth2 stage=3 lock-pill toggles=%u active_view=%u\n",
+                tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
         }
-        dispatch_step(zizhan_outer_touch::step(tracker, e1, map_mode));
-        IOSleep(40);
-        dispatch_step(zizhan_outer_touch::step(tracker, e2, map_mode));
-        IOSleep(40);
-        dispatch_step(zizhan_outer_touch::step(tracker, e3, map_mode));
-        IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth injected mode=%u events=%u posted=%u hud_taps=%u\n",
-              unsigned(map_mode), tracker.events, tracker.posted, tracker.hud_taps);
       }
       IOSleep(8);
     }
@@ -878,8 +1060,8 @@ static void outer_touch_worker(void *, wait_result_t) {
     }
     const unsigned end_irq = irq.r(4) & 1u;
     rst.w(0, s_rst); rst.w(4, s_rst_io); irq.w(0, s_irq);
-    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u restored=%u irq_end=%u\n",
-          tracker.events, tracker.posted, tracker.hud_taps, (r1 && r2 && r3) ? 1u : 0u, end_irq);
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u toggles=%u restored=%u irq_end=%u\n",
+          tracker.events, tracker.posted, tracker.hud_taps, tracker.mode_toggles, (r1 && r2 && r3) ? 1u : 0u, end_irq);
   }
 }
 #endif
@@ -929,12 +1111,17 @@ static void worker(void *, wait_result_t) {
 static void start() {
   uint32_t mode = 0;
   const bool have_probe = PE_parse_boot_argn("zizhan_outer_probe", &mode, sizeof mode) && mode != 0;
-  if (fold::current_mode() == 2u) {
+  uint32_t dtap = 1;
+  if (PE_parse_boot_argn("zizhan_outer_doubletap", &dtap, sizeof dtap)) {
+    fold::allow_doubletap = dtap ? 1u : 0u;
+  }
+  const uint32_t fmode = fold::current_mode();
+  if (fmode == 1u || fmode == 2u) {
     thread_t td = THREAD_NULL;
     if (kernel_thread_start(fold::cover_desktop_worker, nullptr, &td) == KERN_SUCCESS) {
       thread_deallocate(td);
     }
-    IOLog("ZIZHAN_OUTER_DESKTOP: READY mode=2\n");
+    IOLog("ZIZHAN_OUTER_DESKTOP: READY mode=%u doubletap=%u\n", fmode, fold::allow_doubletap);
   }
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   uint32_t touch_on = 0;

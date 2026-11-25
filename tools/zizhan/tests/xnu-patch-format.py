@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 PATCH = Path(__file__).resolve().parents[3] / "patches/xnu-ipados18/0019-zizhan-cs-cache-map-diagnostics.patch"
+PATCH_0045 = Path(__file__).resolve().parents[3] / "patches/xnu-ipados18/0045-zizhan-ux-hygiene-upl-fastpath.patch"
 
 
 class XnuPatchFormatTests(unittest.TestCase):
@@ -35,6 +36,34 @@ class XnuPatchFormatTests(unittest.TestCase):
                                 text=True, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("corrupt patch", result.stderr)
+
+    def test_ux_hygiene_upl_patch_roundtrip(self):
+        text = PATCH_0045.read_text()
+        files = {}
+        cur = None
+        for line in text.splitlines():
+            if line.startswith("--- a/"):
+                cur = line[6:]
+                files[cur] = []
+            elif line.startswith("+++ b/"):
+                continue
+            elif line.startswith("@@ ") and cur:
+                start = int(re.match(r"@@ -(\d+)", line)[1])
+                while len(files[cur]) < start - 1:
+                    files[cur].append(f"/* unused context {len(files[cur])} */")
+            elif cur and line.startswith((" ", "-")):
+                files[cur].append(line[1:])
+        originals = {rel: "\n".join(src) + "\n" for rel, src in files.items()}
+        with tempfile.TemporaryDirectory(prefix="zizhan-ux-patch-") as td:
+            for rel, content in originals.items():
+                p = Path(td) / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(content)
+            for flags in (["--check"], [], ["--reverse", "--check"], ["--reverse"]):
+                subprocess.run(["git", "apply", *flags, str(PATCH_0045)], cwd=td, check=True,
+                               capture_output=True, timeout=10)
+            for rel, content in originals.items():
+                self.assertEqual((Path(td) / rel).read_text(), content)
 
 
 if __name__ == "__main__":

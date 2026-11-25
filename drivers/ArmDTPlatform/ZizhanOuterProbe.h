@@ -12,11 +12,16 @@
 #include <pexpert/pexpert.h>
 #include "ZizhanDailyProfile.h"
 #include "ZizhanOuterTouchPlan.h"
+#include "../PongPower/ZizhanSlpiSensors.h"
 #include <kern/clock.h>
 #include "../PongPower/GeniI2c.h"
 
 extern "C" struct vnode *rootvnode;
 extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
+extern "C" unsigned pong_volume_key_sample(uint32_t code, int down, uint32_t dt_ms);
+extern "C" int zizhan_slpi_proximity_near(void);
+extern "C" int32_t zizhan_slpi_ambient_lux_milli(void);
+extern "C" void zizhan_slpi_set_prox_sim(int near);
 extern "C" volatile int32_t native_battery_stats[16];
 extern "C" int zizhan_display_power_state(void) __attribute__((weak));
 extern "C" int zizhan_inner_panel_cover_mute(int muted) __attribute__((weak));
@@ -346,7 +351,17 @@ static bool ready, misr_on;
 static uint32_t mode_val;
 static uint8_t mode_parsed;
 static uint32_t allow_doubletap = 1;
+static uint32_t allow_pocket_guard = 1;
+static uint32_t allow_outer_dim = 1;
 static volatile uint32_t lid_closed, hud_dirty, active_view, desktop_busy;
+static volatile uint64_t wake_req_ms;
+
+static uint32_t cover_scale_q8() {
+  if (!allow_outer_dim) {
+    return 256u;
+  }
+  return zizhan_slpi_sensors::outer_cover_scale_q8(zizhan_slpi_ambient_lux_milli());
+}
 
 static uint32_t current_mode() {
   if (!mode_parsed) {
@@ -382,9 +397,11 @@ static bool init() {
 }
 static inline volatile uint32_t *row(unsigned y) { return reinterpret_cast<volatile uint32_t *>(fb_va + (0xb8fc9900ull & 0xfffull) + uint64_t(y) * 4320); }
 static void rect(unsigned x0, unsigned y0, unsigned w, unsigned h, uint32_t c) {
+  const uint32_t sc = (c == 0xff000000u) ? 256u : cover_scale_q8();
+  const uint32_t dc = (sc < 256u) ? zizhan_outer_touch::scale_bgra_q8(c, sc) : c;
   for (unsigned y = y0; y < y0 + h && y < 2520; ++y) {
     volatile uint32_t *r = row(y);
-    for (unsigned x = x0; x < x0 + w && x < 1080; ++x) { r[x] = c; }
+    for (unsigned x = x0; x < x0 + w && x < 1080; ++x) { r[x] = dc; }
   }
 }
 /* seven segments a..g of a W x H digit at (x, y), stroke t */
@@ -479,20 +496,38 @@ static void draw_status_strip(unsigned y, bool include_time, zizhan_outer_touch:
   }
   draw_battery_pill(800, y + 1, pct, chg);
 }
-static void draw_lock_pill() {
-  const unsigned px = 400, py = 1900, pw = 280, ph = 56, pt = 3;
+static void draw_pill_box(unsigned px, unsigned py, unsigned pw, unsigned ph) {
+  const unsigned pt = 3;
   rect(px, py, pw, ph, 0xff1c1c1eu);
   rect(px, py, pw, pt, 0xff636366u);
   rect(px, py + ph - pt, pw, pt, 0xff636366u);
   rect(px, py, pt, ph, 0xff636366u);
   rect(px + pw - pt, py, pt, ph, 0xff636366u);
-  const unsigned cx = 524, cy = 1912, cs = 32, ct = 3;
+}
+static void draw_lock_pill() {
+  const unsigned py = 1900, ph = 56;
+  /* 1. VOL- pill (56..256): minus bar */
+  draw_pill_box(56, py, 200, ph);
+  rect(138, py + 26, 36, 4, 0xffe5e5eau);
+  /* 2. HOME pill (284..496): rounded-square home icon */
+  draw_pill_box(284, py, 212, ph);
+  rect(376, py + 14, 28, 3, 0xffe5e5eau);
+  rect(376, py + 39, 28, 3, 0xffe5e5eau);
+  rect(376, py + 14, 3, 28, 0xffe5e5eau);
+  rect(401, py + 14, 3, 28, 0xffe5e5eau);
+  /* 3. CLOCK / LOCK pill (524..756): clock dial + hands */
+  draw_pill_box(524, py, 232, ph);
+  const unsigned cx = 624, cy = 1912, cs = 32, ct = 3;
   rect(cx, cy, cs, ct, 0xffd0d4dcu);
   rect(cx, cy + cs - ct, cs, ct, 0xffd0d4dcu);
   rect(cx, cy, ct, cs, 0xffd0d4dcu);
   rect(cx + cs - ct, cy, ct, cs, 0xffd0d4dcu);
   rect(cx + cs / 2 - 1, cy + 7, 3, 10, 0xffffffffu);
   rect(cx + cs / 2 - 1, cy + 15, 9, 3, 0xffffffffu);
+  /* 4. VOL+ pill (784..1024): plus cross */
+  draw_pill_box(784, py, 240, ph);
+  rect(886, py + 26, 36, 4, 0xffe5e5eau);
+  rect(902, py + 10, 4, 36, 0xffe5e5eau);
 }
 static void draw(bool closed) {
   if (!init()) { return; }
@@ -532,6 +567,7 @@ static void switch_to_desktop() {
       __atomic_load_n(&active_view, __ATOMIC_ACQUIRE) == 2u) {
     return;
   }
+  __atomic_store_n(&wake_req_ms, mono_ms(), __ATOMIC_RELEASE);
   if (pong_scanout_set_cover_redirect) {
     pong_scanout_set_cover_redirect(1);
   }
@@ -543,7 +579,7 @@ static void switch_to_desktop() {
   bool woke = false;
   if (disp == 0) {
     pong_touch_post(4u, 0u, 0, 0);
-    IOSleep(120);
+    IOSleep(80);
     pong_touch_post(5u, 0u, 0, 0);
     woke = true;
   }
@@ -648,9 +684,10 @@ static void cover_desktop_worker(void *, wait_result_t) {
     const uint32_t seq = pong_scanout_cover_snapshot(&src_va, &src_phys, &src_w, &src_h, &src_stride);
     if (seq != 0 && src_va) {
       if (seq != last_seq || blits == 0) {
+        const uint32_t sc_q8 = cover_scale_q8();
         const unsigned rows = zizhan_outer_touch::blit_2to1_bgra(
             src_va, src_stride, src_w, src_h,
-            fb_va + (0xb8fc9900ull & 0xfffull), 4320u, zizhan_outer_touch::kDesktopY0);
+            fb_va + (0xb8fc9900ull & 0xfffull), 4320u, zizhan_outer_touch::kDesktopY0, sc_q8);
         if (rows > 0) {
           __asm__ volatile("dsb sy" ::: "memory");
           last_seq = seq;
@@ -659,7 +696,13 @@ static void cover_desktop_worker(void *, wait_result_t) {
           ++blits;
           idle_streak = 0;
           if (blits == 1) {
-            IOSleep(25);
+            const uint64_t req0 = __atomic_exchange_n(&wake_req_ms, 0ull, __ATOMIC_ACQ_REL);
+            const uint64_t t_now = mono_ms();
+            if (req0 && t_now >= req0) {
+              IOLog("ZIZHAN_OUTER_DESKTOP: first_frame wake_to_blit_ms=%llu scale_q8=%u\n",
+                    (unsigned long long)(t_now - req0), sc_q8);
+            }
+            IOSleep(16);
           }
           if (blits <= 3 || now - last_misr_ms >= 350ull) {
             const uint32_t sig = misr_peek();
@@ -681,13 +724,17 @@ static void cover_desktop_worker(void *, wait_result_t) {
         }
       }
     }
-    IOSleep(idle_streak >= 8u ? 50 : 25);
+    IOSleep(idle_streak >= 8u ? 50 : 16);
   }
 }
 }  // namespace fold
 
 extern "C" uint32_t zizhan_outer_fold_mode(void) {
   return fold::current_mode();
+}
+
+extern "C" int zizhan_outer_lid_closed(void) {
+  return __atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE) ? 1 : 0;
 }
 
 extern "C" void zizhan_outer_fold_show(int closed) {
@@ -926,13 +973,47 @@ static void outer_touch_worker(void *, wait_result_t) {
           : zizhan_outer_touch::MapMode::ClockWakeOnly;
     };
     const bool toggle_ok = fold::allow_doubletap != 0u;
-    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: UP ok=%u id=%04x sysinfo=%02x%02x/%ux%u super_res=%u max=%ux%u irq=%u map_mode=%u toggle=%u\n",
+    auto pocket_now = [&]() -> bool {
+      return fold::allow_pocket_guard != 0u && zizhan_slpi_proximity_near() != 0;
+    };
+    unsigned home_swipes = 0, vol_clicks = 0;
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: UP ok=%u id=%04x sysinfo=%02x%02x/%ux%u super_res=%u max=%ux%u irq=%u map_mode=%u toggle=%u pocket_guard=%u\n",
           (spi_ready && chip_id == 0x3640u) ? 1u : 0u, chip_id, sys_hdr[0], sys_hdr[1], scr_x, scr_y,
           tracker.super_res ? 1u : 0u, tracker.max_x, tracker.max_y, irq.r(4) & 1u, unsigned(cur_map_mode()),
-          toggle_ok ? 1u : 0u);
+          toggle_ok ? 1u : 0u, fold::allow_pocket_guard ? 1u : 0u);
     auto dispatch_step = [&](const zizhan_outer_touch::StepResult &sr) {
+      if (sr.pocket_blocked) {
+        IOLog("ZIZHAN_OUTER_TOUCH_LIVE: pocket-guard blocked double-tap blocks=%u\n", tracker.pocket_blocks);
+        return;
+      }
       if (sr.toggle_desktop) {
         fold::switch_to_desktop();
+        return;
+      }
+      if (sr.bar_action == zizhan_outer_touch::BarAction::VolDown) {
+        (void)pong_volume_key_sample(2u, 1, 0u);
+        (void)pong_volume_key_sample(2u, 0, 0u);
+        ++vol_clicks;
+        return;
+      }
+      if (sr.bar_action == zizhan_outer_touch::BarAction::VolUp) {
+        (void)pong_volume_key_sample(1u, 1, 0u);
+        (void)pong_volume_key_sample(1u, 0, 0u);
+        ++vol_clicks;
+        return;
+      }
+      if (sr.bar_action == zizhan_outer_touch::BarAction::Home) {
+        /* Edge-tagged Home-bar swipe-up on dedicated finger 9 (y >= 62790 triggers DIGITIZER_FROM_EDGE_TIP). */
+        pong_touch_post(1u, 9u, 32768u, 65200u);
+        IOSleep(18);
+        pong_touch_post(2u, 9u, 32768u, 55000u);
+        IOSleep(18);
+        pong_touch_post(2u, 9u, 32768u, 42000u);
+        IOSleep(18);
+        pong_touch_post(2u, 9u, 32768u, 28000u);
+        IOSleep(12);
+        pong_touch_post(3u, 9u, 32768u, 28000u);
+        ++home_swipes;
         return;
       }
       if (sr.toggle_clock) {
@@ -977,7 +1058,7 @@ static void outer_touch_worker(void *, wait_result_t) {
           uint8_t t2[10] = {0x87}, r2[10] = {};
           if (!xfer(t2, r2, 10) || r2[2] == 0x00) { break; }
           const uint64_t ev_ms = fold::mono_ms();
-          const auto sr = zizhan_outer_touch::step(tracker, &r2[2], cur_map_mode(), ev_ms, toggle_ok);
+          const auto sr = zizhan_outer_touch::step(tracker, &r2[2], cur_map_mode(), ev_ms, toggle_ok, pocket_now());
           dispatch_step(sr);
         }
       }
@@ -991,11 +1072,11 @@ static void outer_touch_worker(void *, wait_result_t) {
         encode_pt(0x13u, sx, sy, e1);
         encode_pt(0x23u, sx, sy2, e2);
         encode_pt(0x33u, sx, sy2, e3);
-        dispatch_step(zizhan_outer_touch::step(tracker, e1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+        dispatch_step(zizhan_outer_touch::step(tracker, e1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
         IOSleep(40);
-        dispatch_step(zizhan_outer_touch::step(tracker, e2, cur_map_mode(), fold::mono_ms(), toggle_ok));
+        dispatch_step(zizhan_outer_touch::step(tracker, e2, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
         IOSleep(40);
-        dispatch_step(zizhan_outer_touch::step(tracker, e3, cur_map_mode(), fold::mono_ms(), toggle_ok));
+        dispatch_step(zizhan_outer_touch::step(tracker, e3, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
         IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth injected mode=%u events=%u posted=%u hud_taps=%u toggles=%u\n",
               unsigned(cur_map_mode()), tracker.events, tracker.posted, tracker.hud_taps, tracker.mode_toggles);
       } else if (outer_touch_synth == 2u) {
@@ -1005,13 +1086,13 @@ static void outer_touch_worker(void *, wait_result_t) {
           uint8_t d1[8], u1[8];
           encode_pt(0x13u, cx, cy, d1);
           encode_pt(0x33u, cx, cy, u1);
-          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOSleep(60);
-          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOSleep(150);
-          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOSleep(60);
-          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth2 stage=1 double-tap toggles=%u active_view=%u\n",
                 tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
         } else if (synth_stage == 1u && elapsed_ms >= 12000ull) {
@@ -1023,11 +1104,11 @@ static void outer_touch_worker(void *, wait_result_t) {
           encode_pt(0x13u, sx, sy, e1);
           encode_pt(0x23u, sx, sy2, e2);
           encode_pt(0x33u, sx, sy2, e3);
-          dispatch_step(zizhan_outer_touch::step(tracker, e1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, e1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOSleep(40);
-          dispatch_step(zizhan_outer_touch::step(tracker, e2, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, e2, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOSleep(40);
-          dispatch_step(zizhan_outer_touch::step(tracker, e3, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, e3, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth2 stage=2 desktop-drag posted=%u active_view=%u\n",
                 tracker.posted, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
         } else if (synth_stage == 2u && elapsed_ms >= 19000ull) {
@@ -1037,10 +1118,57 @@ static void outer_touch_worker(void *, wait_result_t) {
           uint8_t d1[8], u1[8];
           encode_pt(0x13u, px, py, d1);
           encode_pt(0x33u, px, py, u1);
-          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOSleep(60);
-          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok));
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
           IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth2 stage=3 lock-pill toggles=%u active_view=%u\n",
+                tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        }
+      } else if (outer_touch_synth == 3u) {
+        /* Full pocket-guard + 4-pill quick bar self-test:
+         * stage 1 (3 s): simulate pocket near=1 -> double-tap blocked (stays active_view=1).
+         * stage 2 (7 s): clear pocket near=0 -> double-tap wakes Desktop (active_view=2).
+         * stage 3 (14 s): tap VOL-, tap HOME, tap VOL+ on bottom quick bar.
+         * stage 4 (22 s): tap CLOCK pill -> returns to Clock & standby (active_view=1). */
+        auto tap_at = [&](uint32_t panel_x, uint32_t panel_y) {
+          const uint32_t rx = uint32_t((uint64_t(panel_x) * tracker.max_x) / zizhan_outer_touch::kPanelW);
+          const uint32_t ry = uint32_t((uint64_t(panel_y) * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          uint8_t d1[8], u1[8];
+          encode_pt(0x13u, rx, ry, d1);
+          encode_pt(0x33u, rx, ry, u1);
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOSleep(55);
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+        };
+        if (synth_stage == 0u && elapsed_ms >= 3000ull) {
+          synth_stage = 1u;
+          zizhan_slpi_set_prox_sim(1);
+          tap_at(540u, 1260u);
+          IOSleep(140);
+          tap_at(540u, 1260u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth3 stage=1 pocket-near blocks=%u active_view=%u\n",
+                tracker.pocket_blocks, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 1u && elapsed_ms >= 7000ull) {
+          synth_stage = 2u;
+          zizhan_slpi_set_prox_sim(-1);
+          tap_at(540u, 1260u);
+          IOSleep(140);
+          tap_at(540u, 1260u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth3 stage=2 pocket-clear toggles=%u active_view=%u\n",
+                tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 2u && elapsed_ms >= 14000ull) {
+          synth_stage = 3u;
+          tap_at(156u, 1930u);   /* VOL- */
+          IOSleep(250);
+          tap_at(390u, 1930u);   /* HOME */
+          IOSleep(250);
+          tap_at(900u, 1930u);   /* VOL+ */
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth3 stage=3 quick-bar bar_actions=%u vol_clicks=%u home_swipes=%u\n",
+                tracker.bar_actions, vol_clicks, home_swipes);
+        } else if (synth_stage == 3u && elapsed_ms >= 22000ull) {
+          synth_stage = 4u;
+          tap_at(640u, 1930u);   /* CLOCK / LOCK */
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth3 stage=4 clock-pill toggles=%u active_view=%u\n",
                 tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
         }
       }
@@ -1060,8 +1188,9 @@ static void outer_touch_worker(void *, wait_result_t) {
     }
     const unsigned end_irq = irq.r(4) & 1u;
     rst.w(0, s_rst); rst.w(4, s_rst_io); irq.w(0, s_irq);
-    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u toggles=%u restored=%u irq_end=%u\n",
-          tracker.events, tracker.posted, tracker.hud_taps, tracker.mode_toggles, (r1 && r2 && r3) ? 1u : 0u, end_irq);
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u toggles=%u blocks=%u bar=%u vol=%u home=%u restored=%u irq_end=%u\n",
+          tracker.events, tracker.posted, tracker.hud_taps, tracker.mode_toggles,
+          tracker.pocket_blocks, tracker.bar_actions, vol_clicks, home_swipes, (r1 && r2 && r3) ? 1u : 0u, end_irq);
   }
 }
 #endif
@@ -1111,9 +1240,15 @@ static void worker(void *, wait_result_t) {
 static void start() {
   uint32_t mode = 0;
   const bool have_probe = PE_parse_boot_argn("zizhan_outer_probe", &mode, sizeof mode) && mode != 0;
-  uint32_t dtap = 1;
+  uint32_t dtap = 1, pguard = 1, odim = 1;
   if (PE_parse_boot_argn("zizhan_outer_doubletap", &dtap, sizeof dtap)) {
     fold::allow_doubletap = dtap ? 1u : 0u;
+  }
+  if (PE_parse_boot_argn("zizhan_outer_pocket", &pguard, sizeof pguard)) {
+    fold::allow_pocket_guard = pguard ? 1u : 0u;
+  }
+  if (PE_parse_boot_argn("zizhan_outer_dim", &odim, sizeof odim)) {
+    fold::allow_outer_dim = odim ? 1u : 0u;
   }
   const uint32_t fmode = fold::current_mode();
   if (fmode == 1u || fmode == 2u) {

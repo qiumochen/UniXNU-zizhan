@@ -581,7 +581,7 @@ sensors_thread(void *unused)
             if (als_count++<8) say("Zizhan sensors HID: als #%u %.3f lux\n",als_count,(int32_t)sample.finger/1000.0);
             continue;
         }
-        if (sample.type>=ZIZHAN_SENSOR_GYRO && sample.type<=ZIZHAN_SENSOR_HINGE) {
+        if (sample.type>=ZIZHAN_SENSOR_GYRO && sample.type<=ZIZHAN_SENSOR_PROXIMITY) {
             if (aux_count++<16) {
                 say("Zizhan sensors HID: aux type=%u a=%d b=%d c=%d\n",
                     sample.type,(int32_t)sample.finger,(int32_t)sample.x,(int32_t)sample.y);

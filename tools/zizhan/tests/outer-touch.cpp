@@ -142,11 +142,60 @@ static void test_double_tap_and_lock_pill_toggle() {
   assert(!s.toggle_clock && t.mode_toggles == 2);
 }
 
+static void test_pocket_guard_quick_bar_and_dim_blit() {
+  Tracker t{};
+  configure_sysinfo(t, 10800, 25200);
+  const uint8_t down_mid[8] = {0x13, 0x01, 0x18, 0x15, 0x38, 0x31, 0x30, 0x00};
+  const uint8_t up_f0[8] = {0x33, 0x01, 0, 0, 0, 0, 0, 0};
+
+  /* 1. Pocket guard (pocket_near=true) blocks double-tap wake and increments pocket_blocks */
+  StepResult s = step(t, down_mid, MapMode::ClockWakeOnly, 1000, true, true);
+  assert(!s.refresh_hud && !s.toggle_desktop);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 1060, true, true);
+  s = step(t, down_mid, MapMode::ClockWakeOnly, 1220, true, true);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 1280, true, true);
+  assert(!s.toggle_desktop && s.pocket_blocked && t.pocket_blocks == 1 && t.mode_toggles == 0);
+
+  /* Once out of pocket (pocket_near=false), double-tap wakes cleanly */
+  s = step(t, down_mid, MapMode::ClockWakeOnly, 2000, true, false);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 2060, true, false);
+  s = step(t, down_mid, MapMode::ClockWakeOnly, 2220, true, false);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 2280, true, false);
+  assert(s.toggle_desktop && !s.pocket_blocked && t.mode_toggles == 1);
+
+  /* 2. Four bottom quick-bar pills: VOL- (x=1500), HOME (x=3900), CLOCK (x=6400), VOL+ (x=9000) at y=19300 */
+  auto tap_bar = [&](uint32_t rx, uint64_t t0) {
+    const uint8_t dn[8] = {0x13, 0x01, uint8_t(rx), uint8_t(rx >> 8), uint8_t(19300 & 0xff), uint8_t(19300 >> 8), 0x30, 0x00};
+    const StepResult r_dn = step(t, dn, MapMode::DesktopViewport, t0);
+    assert(r_dn.count == 0 && r_dn.bar_action == BarAction::None);
+    return step(t, up_f0, MapMode::DesktopViewport, t0 + 60);
+  };
+  s = tap_bar(1500, 3000);
+  assert(s.bar_action == BarAction::VolDown && !s.toggle_clock && s.count == 0);
+  s = tap_bar(3900, 3200);
+  assert(s.bar_action == BarAction::Home && !s.toggle_clock && s.count == 0);
+  s = tap_bar(9000, 3400);
+  assert(s.bar_action == BarAction::VolUp && !s.toggle_clock && s.count == 0);
+  s = tap_bar(6400, 3600);
+  assert(s.bar_action == BarAction::ClockLock && s.toggle_clock && s.count == 0);
+  assert(t.bar_actions == 4 && t.mode_toggles == 2);
+
+  /* 3. Dimmed 2:1 SWAR blit at 50% (scale_q8 = 128) halves RGB channels while keeping alpha 0xff */
+  std::vector<uint32_t> src(2160 * 4, 0xff4080c0u);
+  std::vector<uint8_t> dst(2520 * 4320, 0);
+  const unsigned rows = blit_2to1_bgra(reinterpret_cast<const uint8_t *>(src.data()), 2160 * 4, 2160, 4,
+                                       dst.data(), 4320, kDesktopY0, 128u);
+  assert(rows == 2);
+  const uint32_t *row0 = reinterpret_cast<const uint32_t *>(dst.data() + kDesktopY0 * 4320);
+  assert(row0[0] == 0xff204060u && row0[1] == 0xff204060u);
+}
+
 int main() {
   test_decode_super_and_standard();
   test_viewport_and_edge_swipes();
   test_clock_mode_and_calendar_and_blit();
   test_double_tap_and_lock_pill_toggle();
+  test_pocket_guard_quick_bar_and_dim_blit();
   printf("outer-touch: PASS\n");
   return 0;
 }

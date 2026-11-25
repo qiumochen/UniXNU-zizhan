@@ -254,4 +254,35 @@ inline bool hinge_angle_plausible(int32_t deg_milli) {
   return deg_milli >= -5000 && deg_milli <= 190000;
 }
 
+/* Decode SSC proximity near/far state:
+ * - Native sns_proximity_event (msg_id 769 or 1031): varint event_type 1 = NEAR, 0 = FAR.
+ * - Fallback sns_std_sensor_event (msg_id 1025/1026): distance_cm * 1000 < 3000 (< 3 cm) = NEAR. */
+inline bool proximity_is_near(uint32_t msg_id, uint32_t varint_event_type, int32_t distance_milli) {
+  if (msg_id == 769u || msg_id == 1031u) {
+    return varint_event_type == 1u;
+  }
+  if (msg_id == 1025u || msg_id == 1026u) {
+    return distance_milli >= 0 && distance_milli < 3000;
+  }
+  return false;
+}
+
+/* Keep on-change proximity active while folded (lid_closed != 0) even when the display is off
+ * so pocket guard blocks accidental double-taps in Cover Clock standby; pause when unfolded & screen off. */
+inline bool proximity_keep_on_in_standby(int lid_closed) {
+  return lid_closed != 0;
+}
+
+/* ALS-linked SWAR pixel brightness scale (Q8: 256 = 100%, 144 = 56%) for the 6.56" cover OLED,
+ * avoiding unowned DSI1 DCS writes while softening dark-room glare. */
+inline uint32_t outer_cover_scale_q8(int32_t lux_milli) {
+  if (lux_milli < 0 || lux_milli >= 30000) {
+    return 256u;   /* unknown/off or >= 30 lux indoor/daylight: bit-exact 100% fast path */
+  }
+  if (lux_milli >= 5000) {
+    return 208u;   /* 5..30 lux dim indoor: ~81% */
+  }
+  return 144u;     /* < 5 lux dark room: ~56% night comfort */
+}
+
 }  // namespace zizhan_slpi_sensors

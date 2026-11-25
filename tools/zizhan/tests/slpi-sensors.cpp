@@ -88,6 +88,21 @@ static void test_mag_pressure_and_hinge_helpers() {
   assert(hinge_angle_plausible(90000) && hinge_posture(90000) == 1);
   assert(hinge_angle_plausible(179500) && hinge_posture(179500) == 2);
   assert(!hinge_angle_plausible(250000));
+
+  /* Proximity (msg_id 769/1031 varint event_type 1=near, 0=far; fallback 1025 cm*1000 < 3000) */
+  assert(proximity_is_near(769u, 1u, 0));
+  assert(!proximity_is_near(769u, 0u, 0));
+  assert(proximity_is_near(1031u, 1u, 0));
+  assert(proximity_is_near(1025u, 0u, 1200));
+  assert(!proximity_is_near(1025u, 0u, 5000));
+  assert(proximity_keep_on_in_standby(1));
+  assert(!proximity_keep_on_in_standby(0));
+
+  /* ALS-linked outer cover night-dimming Q8 scale */
+  assert(outer_cover_scale_q8(-1) == 256u);
+  assert(outer_cover_scale_q8(50000) == 256u);
+  assert(outer_cover_scale_q8(15000) == 208u);
+  assert(outer_cover_scale_q8(1200) == 144u);
 }
 
 int main() {

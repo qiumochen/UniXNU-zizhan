@@ -50,6 +50,9 @@ uint32_t pong_scanout_cover_snapshot(const uint8_t **, uint64_t *, uint32_t *, u
 extern "C" {
 int pong_backlight_level(uint32_t *) { return -1; }
 int pong_backlight_set(uint32_t, uint32_t) { return -1; }
+int zizhan_slpi_proximity_near(void) { return 0; }
+int32_t zizhan_slpi_ambient_lux_milli(void) { return -1; }
+void zizhan_slpi_set_prox_sim(int) {}
 volatile int32_t native_battery_stats[16] = {};
 }
 #endif

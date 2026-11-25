@@ -26,6 +26,14 @@ enum class MapMode : uint8_t {
   DesktopViewport = 2,
 };
 
+enum class BarAction : uint8_t {
+  None = 0,
+  VolDown = 1,
+  Home = 2,
+  ClockLock = 3,
+  VolUp = 4,
+};
+
 enum : uint32_t {
   kMaxFingers = 10,
   kPanelW = 1080,
@@ -34,10 +42,18 @@ enum : uint32_t {
   kDesktopH = 958,
   kDesktopY0 = 781,
   kEdgeBezel = 96,
-  kLockPillX0 = 360,
-  kLockPillX1 = 720,
-  kLockPillY0 = 1880,
-  kLockPillY1 = 1980,
+  kBarY0 = 1872,
+  kBarY1 = 1992,
+  kVolDownX0 = 48,
+  kVolDownX1 = 264,
+  kHomePillX0 = 276,
+  kHomePillX1 = 504,
+  kLockPillX0 = 516,
+  kLockPillX1 = 764,
+  kLockPillY0 = 1872,
+  kLockPillY1 = 1992,
+  kVolUpX0 = 776,
+  kVolUpX1 = 1032,
   kDoubleTapMinMs = 40,
   kDoubleTapMaxMs = 500,
   kTapHoldMaxMs = 350,
@@ -68,6 +84,8 @@ struct StepResult {
   bool rearm_scan;
   bool toggle_desktop;
   bool toggle_clock;
+  bool pocket_blocked;
+  BarAction bar_action;
   uint8_t count;
   PostOp ops[kMaxFingers];
 };
@@ -88,10 +106,13 @@ struct Tracker {
   uint32_t tap_down_y = 0;
   bool tap_candidate = false;
   bool pill_armed = false;
+  BarAction armed_bar = BarAction::None;
   uint32_t events = 0;
   uint32_t posted = 0;
   uint32_t hud_taps = 0;
   uint32_t mode_toggles = 0;
+  uint32_t pocket_blocks = 0;
+  uint32_t bar_actions = 0;
 };
 
 inline bool contact_type_valid(uint8_t touch_type) {
@@ -216,14 +237,32 @@ inline uint32_t abs_diff32(uint32_t a, uint32_t b) {
   return a >= b ? (a - b) : (b - a);
 }
 
-inline bool in_lock_pill(const Tracker &t, uint32_t raw_x, uint32_t raw_y) {
+inline BarAction bar_hit_test(const Tracker &t, uint32_t raw_x, uint32_t raw_y) {
   const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
   const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
-  const uint32_t x0 = uint32_t((uint64_t(kLockPillX0) * rx_max) / kPanelW);
-  const uint32_t x1 = uint32_t((uint64_t(kLockPillX1) * rx_max) / kPanelW);
-  const uint32_t y0 = uint32_t((uint64_t(kLockPillY0) * ry_max) / kPanelH);
-  const uint32_t y1 = uint32_t((uint64_t(kLockPillY1) * ry_max) / kPanelH);
-  return raw_x >= x0 && raw_x <= x1 && raw_y >= y0 && raw_y <= y1;
+  const uint32_t y0 = uint32_t((uint64_t(kBarY0) * ry_max) / kPanelH);
+  const uint32_t y1 = uint32_t((uint64_t(kBarY1) * ry_max) / kPanelH);
+  if (raw_y < y0 || raw_y > y1) {
+    return BarAction::None;
+  }
+  const uint32_t px = uint32_t((uint64_t(raw_x) * kPanelW + rx_max / 2u) / rx_max);
+  if (px >= kVolDownX0 && px <= kVolDownX1) {
+    return BarAction::VolDown;
+  }
+  if (px >= kHomePillX0 && px <= kHomePillX1) {
+    return BarAction::Home;
+  }
+  if (px >= kLockPillX0 && px <= kLockPillX1) {
+    return BarAction::ClockLock;
+  }
+  if (px >= kVolUpX0 && px <= kVolUpX1) {
+    return BarAction::VolUp;
+  }
+  return BarAction::None;
+}
+
+inline bool in_lock_pill(const Tracker &t, uint32_t raw_x, uint32_t raw_y) {
+  return bar_hit_test(t, raw_x, raw_y) == BarAction::ClockLock;
 }
 
 inline void release_all(Tracker &t, StepResult &out) {
@@ -238,10 +277,11 @@ inline void release_all(Tracker &t, StepResult &out) {
   t.desktop_mask = 0;
   t.tap_candidate = false;
   t.pill_armed = false;
+  t.armed_bar = BarAction::None;
 }
 
 inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
-                       uint64_t now_ms = 0, bool allow_toggle = true) {
+                       uint64_t now_ms = 0, bool allow_toggle = true, bool pocket_near = false) {
   StepResult r{};
   const Decoded d = decode_event(ev, t.super_res, t.max_x, t.max_y);
   r.kind = d.kind;
@@ -282,8 +322,13 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
                 now_ms - t.last_tap_ms <= kDoubleTapMaxMs &&
                 abs_diff32(t.tap_down_x, t.last_tap_x) <= rx_max / 6u &&
                 abs_diff32(t.tap_down_y, t.last_tap_y) <= ry_max / 6u) {
-              r.toggle_desktop = true;
-              ++t.mode_toggles;
+              if (pocket_near) {
+                r.pocket_blocked = true;
+                ++t.pocket_blocks;
+              } else {
+                r.toggle_desktop = true;
+                ++t.mode_toggles;
+              }
               t.last_tap_ms = 0;
             } else {
               t.last_tap_ms = now_ms;
@@ -291,16 +336,21 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
               t.last_tap_y = t.tap_down_y;
             }
           }
-        } else if (mode == MapMode::DesktopViewport && t.pill_armed) {
+        } else if (mode == MapMode::DesktopViewport && t.armed_bar != BarAction::None) {
           const uint64_t held = (now_ms > 0 && now_ms >= t.tap_down_ms) ? (now_ms - t.tap_down_ms) : 0ull;
           if (now_ms == 0 || held <= 600ull) {
-            r.toggle_clock = true;
-            ++t.mode_toggles;
+            r.bar_action = t.armed_bar;
+            ++t.bar_actions;
+            if (t.armed_bar == BarAction::ClockLock) {
+              r.toggle_clock = true;
+              ++t.mode_toggles;
+            }
           }
         }
       }
       t.tap_candidate = false;
       t.pill_armed = false;
+      t.armed_bar = BarAction::None;
     }
     return r;
   }
@@ -310,12 +360,13 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
     if (!already_down && d.finger != 0u) {
       t.tap_candidate = false;
       t.pill_armed = false;
+      t.armed_bar = BarAction::None;
     }
     if (mode == MapMode::ClockWakeOnly) {
       if (!already_down) {
         t.down_mask = uint16_t(t.down_mask | bit);
         ++t.hud_taps;
-        r.refresh_hud = true;
+        r.refresh_hud = !pocket_near;
         if (d.finger == 0u && t.down_mask == 1u && allow_toggle && now_ms > 0) {
           t.tap_candidate = true;
           t.tap_down_ms = now_ms;
@@ -343,14 +394,21 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
         ++t.posted;
         if (d.finger == 0u) {
           t.pill_armed = false;
+          t.armed_bar = BarAction::None;
         }
-      } else if (allow_toggle && d.finger == 0u && t.down_mask == 1u && in_lock_pill(t, d.raw_x, d.raw_y)) {
-        t.pill_armed = true;
-        t.tap_down_ms = now_ms;
-        ++t.hud_taps;
       } else {
-        ++t.hud_taps;
-        r.refresh_hud = true;
+        const BarAction hit = (allow_toggle && d.finger == 0u && t.down_mask == 1u)
+            ? bar_hit_test(t, d.raw_x, d.raw_y)
+            : BarAction::None;
+        if (hit != BarAction::None) {
+          t.armed_bar = hit;
+          t.pill_armed = (hit == BarAction::ClockLock);
+          t.tap_down_ms = now_ms;
+          ++t.hud_taps;
+        } else {
+          ++t.hud_taps;
+          r.refresh_hud = true;
+        }
       }
       return r;
     }
@@ -361,7 +419,9 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
       t.last_y[d.finger] = yn;
       r.ops[r.count++] = PostOp{2u, d.finger, xn, yn};
       ++t.posted;
-    } else if (d.finger == 0u && t.pill_armed && !in_lock_pill(t, d.raw_x, d.raw_y)) {
+    } else if (d.finger == 0u && t.armed_bar != BarAction::None &&
+               bar_hit_test(t, d.raw_x, d.raw_y) != t.armed_bar) {
+      t.armed_bar = BarAction::None;
       t.pill_armed = false;
     }
   }
@@ -399,9 +459,19 @@ inline uint32_t avg2_bgra(uint32_t a, uint32_t b) {
   return (((a & 0xfefefefeu) >> 1) + ((b & 0xfefefefeu) >> 1) + (a & b & 0x01010101u)) | 0xff000000u;
 }
 
+inline uint32_t scale_bgra_q8(uint32_t c, uint32_t scale_q8) {
+  if (scale_q8 >= 256u) {
+    return c | 0xff000000u;
+  }
+  const uint32_t rb = (((c & 0x00ff00ffu) * scale_q8) >> 8) & 0x00ff00ffu;
+  const uint32_t g = (((c & 0x0000ff00u) * scale_q8) >> 8) & 0x0000ff00u;
+  return 0xff000000u | rb | g;
+}
+
 /* 2:1 SWAR box-filtered downscale of a 2160x1916 BGRA8 frame into a 1080x958 region on the 1080x2520 cover FB. */
 inline unsigned blit_2to1_bgra(const uint8_t *src, uint32_t src_stride, uint32_t src_w, uint32_t src_h,
-                               volatile uint8_t *dst_fb, uint32_t dst_stride, uint32_t dst_y0) {
+                               volatile uint8_t *dst_fb, uint32_t dst_stride, uint32_t dst_y0,
+                               uint32_t scale_q8 = 256u) {
   if (!src || !dst_fb || src_w < 2u || src_h < 2u || src_stride < src_w * 4u || dst_stride < kPanelW * 4u) {
     return 0;
   }
@@ -416,6 +486,7 @@ inline unsigned blit_2to1_bgra(const uint8_t *src, uint32_t src_stride, uint32_t
   if (out_h > kPanelH - dst_y0) {
     out_h = kPanelH - dst_y0;
   }
+  const bool dim = scale_q8 < 256u;
   for (uint32_t y = 0; y < out_h; ++y) {
     const uint32_t *r0 = reinterpret_cast<const uint32_t *>(src + uint64_t(2u * y) * src_stride);
     const uint32_t *r1 = reinterpret_cast<const uint32_t *>(src + uint64_t(2u * y + 1u) * src_stride);
@@ -427,12 +498,22 @@ inline unsigned blit_2to1_bgra(const uint8_t *src, uint32_t src_stride, uint32_t
       const uint32_t bot0 = avg2_bgra(r1[sx], r1[sx + 1u]);
       const uint32_t top1 = avg2_bgra(r0[sx + 2u], r0[sx + 3u]);
       const uint32_t bot1 = avg2_bgra(r1[sx + 2u], r1[sx + 3u]);
-      const uint64_t pair = uint64_t(avg2_bgra(top0, bot0)) | (uint64_t(avg2_bgra(top1, bot1)) << 32);
+      uint32_t p0 = avg2_bgra(top0, bot0);
+      uint32_t p1 = avg2_bgra(top1, bot1);
+      if (dim) {
+        p0 = scale_bgra_q8(p0, scale_q8);
+        p1 = scale_bgra_q8(p1, scale_q8);
+      }
+      const uint64_t pair = uint64_t(p0) | (uint64_t(p1) << 32);
       *reinterpret_cast<volatile uint64_t *>(&dst[x]) = pair;
     }
     for (; x < out_w; ++x) {
       const uint32_t sx = 2u * x;
-      dst[x] = avg2_bgra(avg2_bgra(r0[sx], r0[sx + 1u]), avg2_bgra(r1[sx], r1[sx + 1u]));
+      uint32_t p = avg2_bgra(avg2_bgra(r0[sx], r0[sx + 1u]), avg2_bgra(r1[sx], r1[sx + 1u]));
+      if (dim) {
+        p = scale_bgra_q8(p, scale_q8);
+      }
+      dst[x] = p;
     }
   }
   return out_h;

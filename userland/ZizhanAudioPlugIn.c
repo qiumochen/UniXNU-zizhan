@@ -44,6 +44,8 @@ static atomic_uint gInActive = 1;
 static _Atomic(Float32) gVolume = 0.25f;
 static Float64 gHostTicksPerFrame;
 static uint64_t gZeroOrigin, gZeroSeed;
+static uint64_t gInReadPos;
+static uint32_t gInAnchored;
 static void setHostClock(void);
 
 // ---- Kernel service ------------------------------------------------------------------------------------------------------------
@@ -482,6 +484,9 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
                     uint64_t host=mach_absolute_time(),anchor=gControl->out_anchor_host;
                     gZeroOrigin=host>anchor?(uint64_t)((Float64)(host-anchor)/gHostTicksPerFrame):0;
                     gZeroSeed++;
+                    gInReadPos=0;
+                    gInAnchored=0;
+                    if (captureReady()) zizhan_audio_capture_notify_client(gCapture);
                 }
             }
         }
@@ -550,9 +555,30 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
         uint64_t written = 0;
         if (zizhan_audio_written_stable(gControl, &written) && t > written) zizhan_audio_publish_written(gControl, t);
     } else if (op == kAudioServerPlugInIOOperationReadInput && stream == kInStream && captureReady()) {
-        const uint64_t t_in = (uint64_t)info->mInputTime.mSampleTime;
         const int active_in = atomic_load(&gInActive) ? 1 : 0;
-        (void)zizhan_audio_capture_read_f32(gCapture, gIn, t_in, frames, active_in, (float *)main);
+        if (!active_in) {
+            memset(main, 0, (size_t)frames * sizeof(float));
+        } else {
+            uint64_t cap_w = 0;
+            if (!gInAnchored && zizhan_audio_capture_written_stable(gCapture, &cap_w) && cap_w >= frames) {
+                const uint64_t cushion = 2u * ZIZHAN_AUDIO_PERIOD_FRAMES;
+                gInReadPos = (cap_w > cushion + frames) ? (cap_w - cushion) : (cap_w - frames);
+                gInAnchored = 1;
+            }
+            if (!gInAnchored) {
+                (void)zizhan_audio_capture_read_f32(gCapture, gIn, UINT64_MAX - frames, frames, 1, (float *)main);
+            } else {
+                if (zizhan_audio_capture_written_stable(gCapture, &cap_w)) {
+                    if (gInReadPos + frames > cap_w) {
+                        gInReadPos = (cap_w >= frames) ? (cap_w - frames) : 0;
+                    } else if (cap_w > gInReadPos + ZIZHAN_AUDIO_RING_FRAMES / 2u) {
+                        gInReadPos = cap_w - 2u * ZIZHAN_AUDIO_PERIOD_FRAMES;
+                    }
+                }
+                (void)zizhan_audio_capture_read_f32(gCapture, gIn, gInReadPos, frames, 1, (float *)main);
+                gInReadPos += frames;
+            }
+        }
     }
 
     return 0;

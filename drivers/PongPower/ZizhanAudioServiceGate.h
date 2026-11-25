@@ -53,6 +53,9 @@ static inline int zizhan_service_control_init(volatile ZizhanAudioControl *c,siz
 static inline int zizhan_service_memory_type(unsigned type){
  return type==ZizhanAudioMemoryControl||type==ZizhanAudioMemoryOutput;
 }
+static inline int zizhan_service_memory_type_ex(unsigned type,int capture_enabled){
+ return zizhan_service_memory_type(type)||(capture_enabled&&type==2u);
+}
 /* Start/Stop take no arguments. Stop is always accepted (idempotent);
  * Start succeeds only once a graph owner exists. */
 static inline unsigned zizhan_service_request(unsigned selector,unsigned scalar_in,unsigned struct_in,

@@ -43,6 +43,8 @@ typedef struct {
   volatile uint64_t cap_written;
   volatile uint32_t overflows;
   volatile uint32_t underruns;
+  volatile uint32_t cap_requests;
+  uint32_t reserved0;
 } ZizhanAudioCaptureControl;
 
 /* ADSP TX capture graph builders implemented in ShengAudioReach.c. */
@@ -121,6 +123,29 @@ static inline int zizhan_audio_capture_written_stable(const volatile ZizhanAudio
   return 1;
 }
 
+/* Kernel producer: direct copy of 48 kHz / 16-bit / 1-channel ADSP CODEC_DMA READ_DONE frames
+ * into the 48 kHz mono int16 shared capture ring, then tear-free watermark advance. */
+static inline uint32_t zizhan_audio_capture_push_48k_mono(volatile ZizhanAudioCaptureControl *cap,
+                                                          int16_t *ring,
+                                                          const int16_t *src_48k_mono,
+                                                          uint32_t mono_frames) {
+  if (!zizhan_audio_capture_valid(cap) || !ring || !src_48k_mono || mono_frames == 0u) {
+    return 0u;
+  }
+  uint64_t t = cap->cap_written;
+  for (uint32_t i = 0; i < mono_frames; ++i, ++t) {
+    ring[t % ZIZHAN_AUDIO_RING_FRAMES] = src_48k_mono[i];
+  }
+  zizhan_audio_capture_publish_written(cap, t);
+  return mono_frames;
+}
+
+static inline void zizhan_audio_capture_notify_client(volatile ZizhanAudioCaptureControl *cap) {
+  if (cap) {
+    (void)__atomic_fetch_add(&cap->cap_requests, 1u, __ATOMIC_RELAXED);
+  }
+}
+
 /* Kernel producer: 2:1 box-filter decimation of 96 kHz / 16-bit / 2-channel ADSP READ_DONE frames
  * into the 48 kHz mono int16 shared capture ring, then tear-free watermark advance. */
 static inline uint32_t zizhan_audio_capture_push_96k_stereo(volatile ZizhanAudioCaptureControl *cap,
@@ -170,6 +195,7 @@ static inline uint32_t zizhan_audio_capture_read_f32(volatile ZizhanAudioCapture
     memset(dst, 0, (size_t)frames * sizeof(float));
     return 0u;
   }
+  (void)__atomic_fetch_add(&cap->cap_requests, 1u, __ATOMIC_RELAXED);
   uint64_t written = 0;
   if (!zizhan_audio_capture_written_stable(cap, &written)) {
     memset(dst, 0, (size_t)frames * sizeof(float));

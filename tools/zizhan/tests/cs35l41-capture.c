@@ -54,9 +54,10 @@ static void test_decimation_ring_wrap_and_bounds(void) {
 
   /* Stereo mix average of (16384 + 8192 + 16384 + 8192)/4 = 12288 -> 12288 / 32768 = 0.375f */
   float out[480];
+  assert(cap->cap_requests == 0u);
   const uint32_t got = zizhan_audio_capture_read_f32(
       cap, ring, ZIZHAN_AUDIO_RING_FRAMES - 240u, 480u, 1, out);
-  assert(got == 480u && cap->underruns == 0u && cap->overflows == 0u);
+  assert(got == 480u && cap->underruns == 0u && cap->overflows == 0u && cap->cap_requests == 1u);
   assert(fabsf(out[0] - 0.375f) < 1e-4f && fabsf(out[479] - 0.375f) < 1e-4f);
 
   /* Future read underruns cleanly to 0.0f */
@@ -73,6 +74,18 @@ static void test_decimation_ring_wrap_and_bounds(void) {
   cap->cap_seq = 1u;
   assert(!zizhan_audio_capture_written_stable(cap, &written));
   assert(zizhan_audio_capture_read_f32(cap, ring, ZIZHAN_AUDIO_RING_FRAMES, 16u, 1, out) == 0u);
+
+  /* Direct 48 kHz mono push + client notify */
+  cap->cap_seq = 0u;
+  zizhan_audio_capture_publish_written(cap, 0ull);
+  int16_t mono48[480];
+  for (unsigned i = 0; i < 480u; ++i) mono48[i] = -8192; /* -0.25f */
+  uint32_t req_before = cap->cap_requests;
+  zizhan_audio_capture_notify_client(cap);
+  assert(cap->cap_requests == req_before + 1u);
+  assert(zizhan_audio_capture_push_48k_mono(cap, ring, mono48, 480u) == 480u);
+  assert(zizhan_audio_capture_read_f32(cap, ring, 0ull, 480u, 1, out) == 480u);
+  assert(fabsf(out[0] + 0.25f) < 1e-4f && fabsf(out[479] + 0.25f) < 1e-4f);
 }
 
 static void test_adsp_tx_graph_packets(void) {

@@ -20,6 +20,7 @@
 #include "ShengAudioHostClock.h"
 extern "C" {
 #include "ZizhanAudioServiceGate.h"
+#include "ZizhanAudioCapture.h"
 void ZizhanAudioServiceStaticInit(void);
 // [0] state (1 published, 2 self-check passed; negative: failed step), [1] opens, [2] closes,
 // [3] requests, [4] refused starts, [5] memory maps, [6] gate result
@@ -27,9 +28,14 @@ volatile int32_t native_zizhan_audio_service[8];
 }
 extern kmod_info_t g_kernel_kmod_info;
 namespace {
-IOBufferMemoryDescriptor *gControl,*gRing;
+IOBufferMemoryDescriptor *gControl,*gRing,*gCaptureRing;
+int gCaptureEnabled;
 ZizhanAudioHandoff gHandoff;
 volatile ZizhanAudioControl *control(){return gControl?static_cast<volatile ZizhanAudioControl *>(gControl->getBytesNoCopy()):nullptr;}
+volatile ZizhanAudioCaptureControl *capture_control(){
+ auto c=control();
+ return (gCaptureEnabled&&c)?zizhan_audio_capture_slot(c):nullptr;
+}
 void fail(int step){native_zizhan_audio_service[0]=-step;IOLog("ZIZHAN_AUDIO_SERVICE: failed step=%d; service not published\n",step);}
 // Silent-round evidence: a few seconds later the registry finds the class and the page is still idle.
 void check(void *,wait_result_t){
@@ -78,11 +84,52 @@ void selftest(void *,wait_result_t){
   produced,waited*10,c?(unsigned long long)c->out_written:0ull,gHandoff.phase,c?c->state:~0u);
  thread_terminate(current_thread());
 }
+// Silent input-only capture self-test consumer (zizhan_audio_cap_selftest=1 with PRM mode 42 + zizhan_audio_capture=1):
+// exercises the exact pure-recording StartIO -> ReadInput (out_written==0, cap_requests>0) -> StopIO path without HAL changes.
+void cap_selftest(void *,wait_result_t){
+ IOSleep(24000);
+ auto c=control();auto cap=capture_control();
+ auto in_ring=gCaptureRing?static_cast<int16_t *>(gCaptureRing->getBytesNoCopy()):nullptr;
+ unsigned periods=0,copied=0,waited=0;uint64_t read_cursor=0,last_written=0;bool anchored=false;
+ static float sink[ZIZHAN_AUDIO_PERIOD_FRAMES];
+ const int started=c&&cap&&in_ring&&zizhan_handoff_request_start(&gHandoff);
+ IOLog("ZIZHAN_AUDIO_CAP_SELFTEST: start accepted=%d owner=%u\n",started,gHandoff.owner);
+ if(started){
+  for(;waited<1500&&!(c->state&ZizhanAudioOutputRunning)&&gHandoff.phase<ZizhanHandoffDone;++waited)IOSleep(10);
+  if(c->state&ZizhanAudioOutputRunning){
+   // Signal active input client immediately so daemon_round enters capture-only mode without waiting for out_written.
+   zizhan_audio_capture_notify_client(cap);
+   for(unsigned ms=0;ms<1600&&(c->state&ZizhanAudioOutputRunning);ms+=10){
+    uint64_t w=0;
+    if(zizhan_audio_capture_written_stable(cap,&w)&&w>=ZIZHAN_AUDIO_PERIOD_FRAMES){
+     last_written=w;
+     if(!anchored){
+      read_cursor=w>=2u*ZIZHAN_AUDIO_PERIOD_FRAMES?(w-2u*ZIZHAN_AUDIO_PERIOD_FRAMES):(w-ZIZHAN_AUDIO_PERIOD_FRAMES);
+      anchored=true;
+     }
+     while(anchored&&read_cursor+ZIZHAN_AUDIO_PERIOD_FRAMES<=w){
+      copied+=zizhan_audio_capture_read_f32(cap,in_ring,read_cursor,ZIZHAN_AUDIO_PERIOD_FRAMES,1,sink);
+      read_cursor+=ZIZHAN_AUDIO_PERIOD_FRAMES;
+      ++periods;
+     }
+    }
+    IOSleep(10);
+   }
+  }
+  zizhan_handoff_request_stop(&gHandoff);
+ }
+ IOLog("ZIZHAN_AUDIO_CAP_SELFTEST: %s periods=%u copied_frames=%u cap_written=%llu requests=%u overflows=%u underruns=%u waited_ms=%u\n",
+  (periods>=80&&copied==periods*ZIZHAN_AUDIO_PERIOD_FRAMES&&cap&&cap->overflows==0)?"PASS":"FAIL",
+  periods,copied,(unsigned long long)last_written,cap?cap->cap_requests:0u,cap?cap->overflows:0u,cap?cap->underruns:0u,waited*10);
+ thread_terminate(current_thread());
+}
 }
 extern "C" {
-// For PRM mode 40, the graph owner.
+// For PRM mode 40/42, the graph owner.
 volatile ZizhanAudioControl *zizhan_audio_service_control(void){return native_zizhan_audio_service[0]>=1?control():nullptr;}
 int16_t *zizhan_audio_service_ring(void){return native_zizhan_audio_service[0]>=1&&gRing?static_cast<int16_t *>(gRing->getBytesNoCopy()):nullptr;}
+volatile ZizhanAudioCaptureControl *zizhan_audio_service_capture_control(void){return native_zizhan_audio_service[0]>=1?capture_control():nullptr;}
+int16_t *zizhan_audio_service_capture_ring(void){return native_zizhan_audio_service[0]>=1&&gCaptureEnabled&&gCaptureRing?static_cast<int16_t *>(gCaptureRing->getBytesNoCopy()):nullptr;}
 ZizhanAudioHandoff *zizhan_audio_service_handoff(void){return &gHandoff;}
 }
 class ZizhanAudio : public IOService {
@@ -114,7 +161,8 @@ public:
   native_zizhan_audio_service[2]=native_zizhan_audio_service[2]+1;terminate();return kIOReturnSuccess;
  }
  IOReturn clientMemoryForType(UInt32 type,IOOptionBits *options,IOMemoryDescriptor **memory) override {
-  IOBufferMemoryDescriptor *m=!zizhan_service_memory_type(type)?nullptr:type==ZizhanAudioMemoryControl?gControl:gRing;
+  IOBufferMemoryDescriptor *m=!zizhan_service_memory_type_ex(type,gCaptureEnabled)?nullptr:
+   type==ZizhanAudioMemoryControl?gControl:type==ZizhanAudioMemoryOutput?gRing:gCaptureRing;
   if(!m||!options||!memory)return kIOReturnBadArgument;
   m->retain();*options=0;*memory=m;   // the caller consumes the reference
   native_zizhan_audio_service[5]=native_zizhan_audio_service[5]+1;return kIOReturnSuccess;
@@ -154,13 +202,21 @@ extern "C" void zizhan_audio_service_probe(void){
  if(gate!=ZizhanGateStart){native_zizhan_audio_service[0]=-1;
   IOLog("ZIZHAN_AUDIO_SERVICE: SKIP gate=%u service=%u pong_audio=%u prm=%u\n",gate,service,pong,prm);return;}
  const IOOptionBits flags=IOOptionBits(kIODirectionInOut)|IOOptionBits(kIOMemoryKernelUserShared);
+ unsigned cap_want=0;
+ gCaptureEnabled=PE_parse_boot_argn("zizhan_audio_capture",&cap_want,sizeof cap_want)&&cap_want==1?1:0;
  gControl=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,flags,ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES,4096);
  gRing=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,flags,ZIZHAN_AUDIO_SERVICE_RING_BYTES,4096);
- if(!gControl||!gRing){fail(2);return;}
+ if(gCaptureEnabled){
+  gCaptureRing=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,flags,ZIZHAN_AUDIO_CAPTURE_RING_BYTES,4096);
+ }
+ if(!gControl||!gRing||(gCaptureEnabled&&!gCaptureRing)){fail(2);return;}
  bzero(gRing->getBytesNoCopy(),ZIZHAN_AUDIO_SERVICE_RING_BYTES);
+ if(gCaptureRing){bzero(gCaptureRing->getBytesNoCopy(),ZIZHAN_AUDIO_CAPTURE_RING_BYTES);}
  mach_timebase_info_data_t tb;clock_timebase_info(&tb);
  const uint64_t hz=tb.numer?1000000000ull*tb.denom/tb.numer:0;
- if(!zizhan_service_control_init(control(),ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES,hz,mach_absolute_time())){fail(3);return;}
+ const uint64_t anchor=mach_absolute_time();
+ if(!zizhan_service_control_init(control(),ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES,hz,anchor)){fail(3);return;}
+ if(gCaptureEnabled&&!zizhan_audio_capture_init(control(),ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES,anchor)){fail(3);return;}
  void *h=OSMetaClass::preModLoad(g_kernel_kmod_info.name);if(!h){fail(4);return;}
  ZizhanAudioServiceStaticInit();if(OSMetaClass::postModLoad(h)){fail(5);return;}
  ZizhanAudio *audio=OSTypeAlloc(ZizhanAudio);
@@ -168,12 +224,17 @@ extern "C" void zizhan_audio_service_probe(void){
  if(!audio->start(IOService::getPlatform())||!audio->startAudio()){audio->detach(IOService::getPlatform());audio->release();fail(7);return;}
  audio->release();   // the platform's attachment keeps it
  native_zizhan_audio_service[0]=1;
- IOLog("ZIZHAN_AUDIO_SERVICE: published class=%s control=%u ring=%u hz=%llu ticks_q32=%llu graph=0 ready=0 output=0\n",
-  ZIZHAN_AUDIO_SERVICE_CLASS,ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES,ZIZHAN_AUDIO_SERVICE_RING_BYTES,(unsigned long long)hz,(unsigned long long)control()->ticks_per_frame_q32);
+ IOLog("ZIZHAN_AUDIO_SERVICE: published class=%s control=%u ring=%u capture=%u hz=%llu ticks_q32=%llu graph=0 ready=0 output=0\n",
+  ZIZHAN_AUDIO_SERVICE_CLASS,ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES,ZIZHAN_AUDIO_SERVICE_RING_BYTES,gCaptureEnabled?ZIZHAN_AUDIO_CAPTURE_RING_BYTES:0u,(unsigned long long)hz,(unsigned long long)control()->ticks_per_frame_q32);
  thread_t t=nullptr;if(kernel_thread_start(check,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);
  unsigned self=0;
  if(PE_parse_boot_argn("zizhan_audio_selftest",&self,sizeof self)&&self==1){
   if(has_prm&&zizhan_service_owner_mode(prm)){t=nullptr;if(kernel_thread_start(selftest,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);}
   else IOLog("ZIZHAN_AUDIO_SELFTEST: SKIP prm=%u needs=40\n",prm);
+ }
+ unsigned cap_self=0;
+ if(gCaptureEnabled&&PE_parse_boot_argn("zizhan_audio_cap_selftest",&cap_self,sizeof cap_self)&&cap_self==1){
+  if(has_prm&&prm==ZIZHAN_AUDIO_PRM_DAEMON_MODE){t=nullptr;if(kernel_thread_start(cap_selftest,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);}
+  else IOLog("ZIZHAN_AUDIO_CAP_SELFTEST: SKIP prm=%u needs=42\n",prm);
  }
 }

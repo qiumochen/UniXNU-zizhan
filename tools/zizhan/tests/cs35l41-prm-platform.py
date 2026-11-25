@@ -20,6 +20,7 @@ harness=r'''
 #include "ZizhanAudioPrm.h"
 #include "ZizhanAudioService.h"
 #include "ZizhanAudioServiceGate.h"
+#include "ZizhanAudioCapture.h"
 #include "ZizhanAudioFlow.h"
 #include "ZizhanAudioSilent.h"
 #include "ZizhanTdm.h"
@@ -89,12 +90,14 @@ struct IORegistryEntry{
 static unsigned service_arg;static ZizhanAudioHandoff handoff;
 extern "C" volatile ZizhanAudioControl *zizhan_audio_service_control(void){abort();}
 extern "C" int16_t *zizhan_audio_service_ring(void){abort();}
+extern "C" volatile ZizhanAudioCaptureControl *zizhan_audio_service_capture_control(void){abort();}
+extern "C" int16_t *zizhan_audio_service_capture_ring(void){abort();}
 extern "C" ZizhanAudioHandoff *zizhan_audio_service_handoff(void){return &handoff;}
 extern "C" unsigned zizhan_amp_pulse_flags;unsigned zizhan_amp_pulse_flags;
 extern "C" void zizhan_amp_native_play_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,const ZizhanAudioTransfer *){abort();}
 extern "C" void zizhan_amp_native_daemon_run(const ZizhanPrmState *,ZizhanAudioSilentReceipt *,ZizhanAudioAmpDaemonFn,void *){abort();}
 static bool PE_parse_boot_argn(const char *key,void *out,size_t size){assert(size==4);unsigned value;
- if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat")||!strcmp(key,"zizhan_pulse_dry")||!strcmp(key,"zizhan_write_ms")||!strcmp(key,"zizhan_write_flush")||!strcmp(key,"zizhan_write_probe")||!strcmp(key,"zizhan_audio_stream_ms")||!strcmp(key,"zizhan_audio_inflight")||!strcmp(key,"zizhan_audio_daemon_s"))return false;
+ if(!strcmp(key,"zizhan_pre_off")||!strcmp(key,"zizhan_tone_repeat")||!strcmp(key,"zizhan_pulse_dry")||!strcmp(key,"zizhan_write_ms")||!strcmp(key,"zizhan_write_flush")||!strcmp(key,"zizhan_write_probe")||!strcmp(key,"zizhan_audio_stream_ms")||!strcmp(key,"zizhan_audio_inflight")||!strcmp(key,"zizhan_audio_daemon_s")||!strcmp(key,"zizhan_audio_capture")||!strcmp(key,"zizhan_audio_cap_src"))return false;
  if(!strcmp(key,"zizhan_audio_service"))value=service_arg;else if(!strcmp(key,"zizhan_audio_attended"))value=attended;else if(!strcmp(key,"zizhan_audio_prm"))value=mode;else if(!strcmp(key,"pong_audio"))value=audio;
  else if(!strcmp(key,"zizhan_se15_prepare"))value=prepare_mode;else if(!strcmp(key,"zizhan_se15_observe"))value=observe_mode;else{assert(!strcmp(key,"pong_adsp"));value=adsp;}
  memcpy(out,&value,4);return value!=0;

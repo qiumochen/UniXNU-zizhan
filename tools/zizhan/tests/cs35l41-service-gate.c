@@ -35,9 +35,11 @@ int main(void){
  assert(!zizhan_service_control_init(c,sizeof page,0,0));
  assert(!zizhan_service_control_init(c,sizeof page,(UINT64_MAX>>32)+1,0));
  assert(ZIZHAN_AUDIO_SERVICE_RING_BYTES==262144u&&sizeof(ZizhanAudioControl)<=ZIZHAN_AUDIO_SERVICE_CONTROL_BYTES);
- /* Memory: control and output ring only; no capture ring. */
+ /* Memory: control and output ring only by default; capture ring (2) only when explicitly enabled. */
  assert(zizhan_service_memory_type(0)&&zizhan_service_memory_type(1));
  assert(!zizhan_service_memory_type(2)&&!zizhan_service_memory_type(0xffffffffu));
+ assert(zizhan_service_memory_type_ex(0,0)&&zizhan_service_memory_type_ex(1,0)&&!zizhan_service_memory_type_ex(2,0));
+ assert(zizhan_service_memory_type_ex(2,1)&&!zizhan_service_memory_type_ex(3,1));
  /* Requests: Start refused until a graph owner exists; Stop always accepted; arguments rejected. */
  assert(zizhan_service_request(ZizhanAudioStartOutput,0,0,0,0,0)==ZizhanRequestNotReady);
  assert(zizhan_service_request(ZizhanAudioStartOutput,0,0,0,0,1)==ZizhanRequestOk);

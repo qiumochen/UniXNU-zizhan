@@ -372,14 +372,15 @@ uint32_t zizhan_cap_config(uint8_t *out,uint32_t capacity,uint32_t token){
  at=param_begin(&w,ZizhanCapTdmIid,PARAM_FRAME_SIZE_FACTOR);put32(&w,1);zizhan_tdm_param_end(&w,at);
  at=param_begin(&w,ZizhanCapTdmIid,0x0800106au);put16(&w,1);put16(&w,0);zizhan_tdm_param_end(&w,at);
  at=param_begin(&w,ZizhanCapTdmIid,0x0800113cu);put32(&w,0);put32(&w,0);put32(&w,4);put32(&w,0);zizhan_tdm_param_end(&w,at);
- /* ACDB 0x0800108a {2,0x30,0x31}: rejected (status 17) next to the old 4-channel format; sent with the ACDB 2ch. */
- at=param_begin(&w,ZizhanCapTdmIid,0x0800108au);put16(&w,2);put16(&w,0x30);put16(&w,0x31);zizhan_tdm_param_end(&w,at);
+ /* Channel map {2, 1, 2} (FL/FR) matches downstream ZizhanCapCnvIid + ZizhanCapEncIid {1, 2} so
+  * PCM_CNV forwards all 96 kHz stereo frames; RD_SHMEM 0x08001007 {0, 0} fills full 10 ms (3840 B) buffers. */
+ at=param_begin(&w,ZizhanCapTdmIid,0x0800108au);put16(&w,2);put16(&w,1);put16(&w,2);zizhan_tdm_param_end(&w,at);
  {const uint32_t cv=param_begin(&w,ZizhanCapCnvIid,PARAM_PCM_OUTPUT);
   put32(&w,1);put32(&w,MEDIA_PCM);put32(&w,16u+2u);
   put16(&w,24);put16(&w,1);put16(&w,32);put16(&w,27);put16(&w,1);put16(&w,DEINTERLEAVED_UNPACKED);put16(&w,0);put16(&w,2);
   put8(&w,1);put8(&w,2);zizhan_tdm_param_end(&w,cv);}
  zizhan_pcm_out16i(&w,ZizhanCapEncIid,2u);
- at=param_begin(&w,ZizhanCapRdIid,0x08001007u);put32(&w,1);put32(&w,0);zizhan_tdm_param_end(&w,at);
+ at=param_begin(&w,ZizhanCapRdIid,0x08001007u);put32(&w,0);put32(&w,0);zizhan_tdm_param_end(&w,at);
  cmd_payload_end(&w,cmd);return finish(&w);
 }
 uint32_t zizhan_cap_read(uint8_t *out,uint32_t capacity,uint32_t token,uint64_t address,uint32_t handle,uint32_t bytes){

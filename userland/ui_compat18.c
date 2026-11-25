@@ -1599,6 +1599,84 @@ static void audio18_test_session(void *context)
             session, hz, (int)st_new, (int)st_start, ctx.callbacks, (int)st_stop);
 }
 
+struct audio18_cap_ctx {
+    OSStatus (*enqueue)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    unsigned callbacks;
+    unsigned max_callbacks;
+    unsigned total_frames;
+    float max_abs;
+};
+
+typedef void (*AudioQueueInputCbFn)(void *, AudioQueueRef, AudioQueueBufferRef, const AudioTimeStamp *, UInt32, const AudioStreamPacketDescription *);
+
+static void audio18_cap_cb(void *user, AudioQueueRef q, AudioQueueBufferRef buf,
+                           const AudioTimeStamp *start_time, UInt32 num_packets,
+                           const AudioStreamPacketDescription *pkt_desc)
+{
+    (void)start_time; (void)num_packets; (void)pkt_desc;
+    struct audio18_cap_ctx *ctx = (struct audio18_cap_ctx *)user;
+    if (!ctx || !buf || ctx->callbacks >= ctx->max_callbacks) return;
+    ctx->callbacks++;
+    const unsigned frames = buf->mAudioDataByteSize / (UInt32)sizeof(float);
+    const float *samples = (const float *)buf->mAudioData;
+    ctx->total_frames += frames;
+    for (unsigned i = 0; i < frames; ++i) {
+        float a = fabsf(samples[i]);
+        if (a > ctx->max_abs) ctx->max_abs = a;
+    }
+    (void)ctx->enqueue(q, buf, 0, NULL);
+}
+
+static void audio18_cap_test_session(void *context)
+{
+    unsigned session = (unsigned)(uintptr_t)context;
+    void *atb = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
+    typedef OSStatus (*aq_new_in_fn)(const AudioStreamBasicDescription *, AudioQueueInputCbFn, void *, CFRunLoopRef, CFStringRef, UInt32, AudioQueueRef *);
+    typedef OSStatus (*aq_alloc_fn)(AudioQueueRef, UInt32, AudioQueueBufferRef *);
+    typedef OSStatus (*aq_enq_fn)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    typedef OSStatus (*aq_start_fn)(AudioQueueRef, const AudioTimeStamp *);
+    typedef OSStatus (*aq_stop_fn)(AudioQueueRef, Boolean);
+    typedef OSStatus (*aq_disp_fn)(AudioQueueRef, Boolean);
+    aq_new_in_fn fn_new = atb ? (aq_new_in_fn)dlsym(atb, "AudioQueueNewInput") : NULL;
+    aq_alloc_fn fn_alloc = atb ? (aq_alloc_fn)dlsym(atb, "AudioQueueAllocateBuffer") : NULL;
+    aq_enq_fn fn_enq = atb ? (aq_enq_fn)dlsym(atb, "AudioQueueEnqueueBuffer") : NULL;
+    aq_start_fn fn_start = atb ? (aq_start_fn)dlsym(atb, "AudioQueueStart") : NULL;
+    aq_stop_fn fn_stop = atb ? (aq_stop_fn)dlsym(atb, "AudioQueueStop") : NULL;
+    aq_disp_fn fn_disp = atb ? (aq_disp_fn)dlsym(atb, "AudioQueueDispose") : NULL;
+    if (!fn_new || !fn_alloc || !fn_enq || !fn_start || !fn_stop || !fn_disp) {
+        fprintf(stderr, "Pong audio18: capture session=%u AudioToolbox symbols unavailable\n", session);
+        return;
+    }
+    AudioStreamBasicDescription fmt = {0};
+    fmt.mSampleRate = 48000.0;
+    fmt.mFormatID = kAudioFormatLinearPCM;
+    fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    fmt.mBytesPerPacket = 4;
+    fmt.mFramesPerPacket = 1;
+    fmt.mBytesPerFrame = 4;
+    fmt.mChannelsPerFrame = 1;
+    fmt.mBitsPerChannel = 32;
+    struct audio18_cap_ctx ctx = { .enqueue = fn_enq, .callbacks = 0, .max_callbacks = 32, .total_frames = 0, .max_abs = 0.0f };
+    AudioQueueRef q = NULL;
+    OSStatus st_new = fn_new(&fmt, audio18_cap_cb, &ctx, NULL, NULL, 0, &q);
+    OSStatus st_start = -1, st_stop = -1;
+    if (st_new == 0 && q) {
+        for (unsigned i = 0; i < 3; ++i) {
+            AudioQueueBufferRef b = NULL;
+            if (fn_alloc(q, 4800u * 4u, &b) == 0 && b) {
+                (void)fn_enq(q, b, 0, NULL);
+            }
+        }
+        st_start = fn_start(q, NULL);
+        usleep(1600000);
+        ctx.max_callbacks = 0;
+        st_stop = fn_stop(q, true);
+        (void)fn_disp(q, true);
+    }
+    fprintf(stderr, "Pong audio18: capture session=%u new=%d start=%d callbacks=%u frames=%u max_abs=%.5f stop=%d\n",
+            session, (int)st_new, (int)st_start, ctx.callbacks, ctx.total_frames, (double)ctx.max_abs, (int)st_stop);
+}
+
 static bool zizhan_bringup_preferences(void)
 {
     const bool bringup=boot_option("zizhan_bringup=1");
@@ -2931,6 +3009,10 @@ __attribute__((constructor)) static void pong_ui18_start(void)
                 dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)1u,audio18_test_session);
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,34*NSEC_PER_SEC),
                 dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)2u,audio18_test_session);
+        }
+        if(boot_option("zizhan_audio_cap_test=1")) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,22*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)1u,audio18_cap_test_session);
         }
         skip_setup=boot_option("pong_skip_setup=1");
         /* zizhan: setup adaptation does not authorize forcing an unlock or

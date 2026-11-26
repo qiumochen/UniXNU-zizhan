@@ -37,6 +37,7 @@
 #include "zizhan-weather-observer18.h"
 #include "zizhan-statusbar18.h"
 #include "zizhan-scene-orient18.h"
+#include "zizhan-cllocation18.h"
 
 static bool software_composition;
 static bool scanout_format;
@@ -1374,6 +1375,7 @@ static void photos_context_image(const struct mach_header *header,intptr_t slide
  * Match this image's UUID and entry instructions, never a 20G81 address.
  */
 static void springboard_scene_orientation_policy(void);
+static void zizhan_cllocation_policy(void);
 static void compositor_image(const struct mach_header *header,intptr_t slide)
 {
     brightness18_image(header,slide);
@@ -1386,6 +1388,7 @@ static void compositor_image(const struct mach_header *header,intptr_t slide)
     springboard_platform_policy();
     springboard_setup_policy();
     springboard_scene_orientation_policy();
+    zizhan_cllocation_policy();
     launchservices_directories();
     installd_directory();
     pluginkit_directory();
@@ -3162,6 +3165,183 @@ static void apply_boot_orientation_lock(void *context)
     fprintf(stderr,"Zizhan scene18: applied boot orientation lock=%ld\n",target);
 }
 
+/* Stage 5: Read-only notifyd GNSS -> CoreLocation bridge. Avoids synchronous XPC hangs on
+ * com.apple.locationd.synchronous in adapted LaunchDaemons mode; never logs raw coordinates. */
+struct zizhan_cl_coord2d { double latitude; double longitude; };
+static id (*cl_location_original)(id,SEL);
+static void (*cl_start_original)(id,SEL);
+static BOOL (*cl_enabled_original)(Class,SEL);
+static int (*cl_auth_inst_original)(id,SEL);
+static int (*cl_auth_cls_original)(Class,SEL);
+static bool cl_policy_installed;
+static id cl_active_manager;
+static int cl_tok_sv=-1,cl_tok_ll=-1,cl_tok_aa=-1,cl_tok_vl=-1,cl_tok_upd=-1;
+static dispatch_once_t cl_tok_once;
+
+static int zizhan_read_gnss_snapshot(ZizhanGnssSnapshot *out)
+{
+    dispatch_once(&cl_tok_once,^{
+        (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_SV,&cl_tok_sv);
+        (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_LATLON,&cl_tok_ll);
+        (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_ACCALT,&cl_tok_aa);
+        (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_VEL,&cl_tok_vl);
+    });
+    uint64_t sv=0,ll=0,aa=0,vl=0;
+    if(cl_tok_sv!=-1)(void)notify_get_state(cl_tok_sv,&sv);
+    if(cl_tok_ll!=-1)(void)notify_get_state(cl_tok_ll,&ll);
+    if(cl_tok_aa!=-1)(void)notify_get_state(cl_tok_aa,&aa);
+    if(cl_tok_vl!=-1)(void)notify_get_state(cl_tok_vl,&vl);
+    return zizhan_gnss_unpack(sv,ll,aa,vl,out);
+}
+
+static id zizhan_make_cllocation(const ZizhanGnssSnapshot *snap)
+{
+    Class loc_cls=objc_lookUpClass("CLLocation");
+    Class date_cls=objc_lookUpClass("NSDate");
+    SEL s_init=sel_registerName("initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:speed:timestamp:");
+    if(!loc_cls || !date_cls || !method_abi(class_getInstanceMethod(loc_cls,s_init),"@",7,"{ddddd@"))return nil;
+    id now=((id(*)(Class,SEL))objc_msgSend)(date_cls,sel_registerName("date"));
+    id raw=((id(*)(Class,SEL))objc_msgSend)(loc_cls,sel_registerName("alloc"));
+    if(!raw || !now)return nil;
+    struct zizhan_cl_coord2d coord={snap->lat_e7/1e7,snap->lon_e7/1e7};
+    double alt=snap->alt_dm/10.0;
+    double hacc=snap->hor_unc_dm>0?(snap->hor_unc_dm/10.0):50.0;
+    double course=snap->heading_ddeg>=0?(snap->heading_ddeg/10.0):-1.0;
+    double speed=snap->speed_cms>=0?(snap->speed_cms/100.0):-1.0;
+    id obj=((id(*)(id,SEL,struct zizhan_cl_coord2d,double,double,double,double,double,id))objc_msgSend)(
+        raw,s_init,coord,alt,hacc,25.0,course,speed,now);
+    return obj?((id(*)(id,SEL))objc_msgSend)(obj,sel_registerName("autorelease")):nil;
+}
+
+static void zizhan_deliver_gnss_to_manager(id mgr)
+{
+    ZizhanGnssSnapshot snap;
+    if(!mgr || !zizhan_read_gnss_snapshot(&snap))return;
+    SEL s_del=sel_registerName("delegate");
+    SEL s_upd=sel_registerName("locationManager:didUpdateLocations:");
+    if(!method_abi(class_getInstanceMethod(object_getClass(mgr),s_del),"@",0,""))return;
+    id del=((id(*)(id,SEL))objc_msgSend)(mgr,s_del);
+    if(!del || !((BOOL(*)(id,SEL,SEL))objc_msgSend)(del,sel_registerName("respondsToSelector:"),s_upd))return;
+    id loc=zizhan_make_cllocation(&snap);
+    Class arr_cls=objc_lookUpClass("NSArray");
+    if(!loc || !arr_cls)return;
+    id arr=((id(*)(Class,SEL,id))objc_msgSend)(arr_cls,sel_registerName("arrayWithObject:"),loc);
+    if(arr)((void(*)(id,SEL,id,id))objc_msgSend)(del,s_upd,mgr,arr);
+}
+
+static BOOL zizhan_cl_services_enabled(Class cls,SEL selector)
+{
+    (void)cls;(void)selector;
+    return YES;
+}
+
+static int zizhan_cl_auth_inst(id self,SEL selector)
+{
+    (void)self;(void)selector;
+    return 3; /* kCLAuthorizationStatusAuthorizedAlways */
+}
+
+static int zizhan_cl_auth_cls(Class cls,SEL selector)
+{
+    (void)cls;(void)selector;
+    return 3; /* kCLAuthorizationStatusAuthorizedAlways */
+}
+
+static id zizhan_cl_location(id self,SEL selector)
+{
+    (void)self;(void)selector;
+    ZizhanGnssSnapshot snap;
+    if(zizhan_read_gnss_snapshot(&snap)) {
+        id loc=zizhan_make_cllocation(&snap);
+        if(loc)return loc;
+    }
+    if(boot_option("zizhan_cl_forward_daemon=1") && cl_location_original)
+        return cl_location_original(self,selector);
+    return nil;
+}
+
+static void zizhan_cl_start_updating(id self,SEL selector)
+{
+    cl_active_manager=self;
+    if(cl_tok_upd==-1) {
+        (void)notify_register_dispatch(ZIZHAN_GNSS_NOTIFY_UPDATED,&cl_tok_upd,dispatch_get_main_queue(),^(int t){
+            (void)t;
+            if(cl_active_manager)zizhan_deliver_gnss_to_manager(cl_active_manager);
+        });
+    }
+    if(boot_option("zizhan_cl_forward_daemon=1") && cl_start_original)
+        cl_start_original(self,selector);
+    zizhan_deliver_gnss_to_manager(self);
+}
+
+static void zizhan_cllocation_policy(void)
+{
+    if(cl_policy_installed || boot_option("zizhan_cllocation=0"))return;
+    Class cls=objc_lookUpClass("CLLocationManager");
+    Class loc_cls=objc_lookUpClass("CLLocation");
+    if(!cls || !loc_cls)return;
+    Method m_loc=class_getInstanceMethod(cls,sel_registerName("location"));
+    Method m_start=class_getInstanceMethod(cls,sel_registerName("startUpdatingLocation"));
+    SEL s_init=sel_registerName("initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:speed:timestamp:");
+    if(!method_abi(m_loc,"@",0,"") || !method_abi(m_start,"v",0,"") ||
+       !method_abi(class_getInstanceMethod(loc_cls,s_init),"@",7,"{ddddd@"))return;
+    cl_location_original=(id(*)(id,SEL))method_setImplementation(m_loc,(IMP)zizhan_cl_location);
+    cl_start_original=(void(*)(id,SEL))method_setImplementation(m_start,(IMP)zizhan_cl_start_updating);
+    Method m_en=class_getClassMethod(cls,sel_registerName("locationServicesEnabled"));
+    if(method_abi(m_en,"Bc",0,""))
+        cl_enabled_original=(BOOL(*)(Class,SEL))method_setImplementation(m_en,(IMP)zizhan_cl_services_enabled);
+    Method m_ai=class_getInstanceMethod(cls,sel_registerName("authorizationStatus"));
+    if(method_abi(m_ai,"iI",0,""))
+        cl_auth_inst_original=(int(*)(id,SEL))method_setImplementation(m_ai,(IMP)zizhan_cl_auth_inst);
+    Method m_ac=class_getClassMethod(cls,sel_registerName("authorizationStatus"));
+    if(method_abi(m_ac,"iI",0,""))
+        cl_auth_cls_original=(int(*)(Class,SEL))method_setImplementation(m_ac,(IMP)zizhan_cl_auth_cls);
+    cl_policy_installed=cl_location_original!=NULL && cl_start_original!=NULL;
+    fprintf(stderr,"Zizhan loc18: CLLocationManager GNSS bridge installed=%d en_hook=%d auth_hook=%d (%s)\n",
+        (int)cl_policy_installed,cl_enabled_original!=NULL,cl_auth_inst_original!=NULL,getprogname()?getprogname():"?");
+}
+
+static void zizhan_cllocation_image(const struct mach_header *header,intptr_t slide)
+{
+    (void)header;(void)slide;
+    zizhan_cllocation_policy();
+}
+
+static unsigned loc_probe_tick_count;
+static void zizhan_loc_probe_tick(void *unused)
+{
+    (void)unused;
+    (void)dlopen("/System/Library/Frameworks/CoreLocation.framework/CoreLocation",RTLD_LAZY);
+    zizhan_cllocation_policy();
+    ZizhanGnssSnapshot snap;
+    int gnss_valid=zizhan_read_gnss_snapshot(&snap);
+    /* Verify CLLocation value-object construction & ABI readback without touching locationd XPC. */
+    ZizhanGnssSnapshot synth=snap;
+    if(!gnss_valid) {
+        synth.fix_status=2;synth.lat_e7=373349000;synth.lon_e7=-1220090200;
+        synth.hor_unc_dm=45;synth.alt_dm=523;synth.speed_cms=0;synth.heading_ddeg=-1;
+    }
+    id sample_loc=zizhan_make_cllocation(&synth);
+    int cl_abi_ok=0;
+    double hacc=-1.0;
+    if(sample_loc && method_abi(class_getInstanceMethod(object_getClass(sample_loc),sel_registerName("horizontalAccuracy")),"d",0,"")) {
+        hacc=((double(*)(id,SEL))objc_msgSend)(sample_loc,sel_registerName("horizontalAccuracy"));
+        cl_abi_ok=(hacc>0.0);
+    }
+    Class cls=objc_lookUpClass("CLLocationManager");
+    int enabled=-1;
+    if(cls && method_abi(class_getClassMethod(cls,sel_registerName("locationServicesEnabled")),"Bc",0,""))
+        enabled=(int)((BOOL(*)(Class,SEL))objc_msgSend)(cls,sel_registerName("locationServicesEnabled"));
+    /* Privacy rule (AGENTS.md): log only sanitized status/accuracy/SV counts, NEVER raw coordinates. */
+    fprintf(stderr,"Zizhan loc18 probe[%u]: services_enabled=%d cl_abi_ok=%d cl_hacc=%.1fm gnss_valid=%d seq=%u eng=%u fix=%u vis=%u trk=%u used=%u cn0=%.1f\n",
+        ++loc_probe_tick_count,enabled,cl_abi_ok,hacc,gnss_valid,
+        snap.seq,snap.engine_state,snap.fix_status,snap.sv_visible,snap.sv_tracking,snap.sv_used,snap.max_cn0_tenths/10.0);
+    fflush(stderr);
+    if(loc_probe_tick_count<5)
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),
+            dispatch_get_global_queue(QOS_CLASS_UTILITY,0),NULL,zizhan_loc_probe_tick);
+}
+
 
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
@@ -3171,7 +3351,8 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         if(boot_option("zizhan_net_diag=1")){app_network_start(name);app_weather_start();}
         return;
     }
-    if(!strcmp(name,"MobileSafari") || !strcmp(name,"Weather")) {
+    if(!strcmp(name,"MobileSafari") || !strcmp(name,"Weather") || !strcmp(name,"Maps") || !strcmp(name,"Compass")) {
+        _dyld_register_func_for_add_image(zizhan_cllocation_image);
         if(boot_option("zizhan_app_diag=1"))app_diag_start(name);
         if(boot_option("zizhan_net_diag=1")) {
             app_network_start(name);
@@ -3281,6 +3462,10 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         if(boot_option("zizhan_audio_cap_test=1")) {
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,22*NSEC_PER_SEC),
                 dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)1u,audio18_cap_test_session);
+        }
+        if(boot_option("zizhan_loc_probe=1")) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,16*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_UTILITY,0),NULL,zizhan_loc_probe_tick);
         }
         skip_setup=boot_option("pong_skip_setup=1");
         /* zizhan: setup adaptation does not authorize forcing an unlock or

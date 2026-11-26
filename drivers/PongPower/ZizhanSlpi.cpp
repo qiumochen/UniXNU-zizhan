@@ -1583,7 +1583,7 @@ extern "C" void zizhan_slpi_start(void) {
   (void)PE_parse_boot_argn("pong_adsp", &adsp, sizeof adsp);
   if (adsp == 1) { IOLog("ZIZHAN_SLPI: SKIP pong_adsp=1 (survey) leaves the AOSS mailbox without an owner\n"); return; }
   gShared = adsp >= 2;
-  if (PE_parse_boot_argn("zizhan_modem", &modem, sizeof modem) && modem == 2) { IOLog("ZIZHAN_SLPI: SKIP zizhan_modem=2 owns the same resources\n"); return; }
+  (void)modem;   /* MPSS now uses 0x9ee20000 meta + 0x9f000000 rmtfs and shares PongAdsp's AOSS/SMEM lock */
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &t) != KERN_SUCCESS) { IOLog("ZIZHAN_SLPI: FAIL worker\n"); return; }
   thread_deallocate(t);

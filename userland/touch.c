@@ -19,6 +19,7 @@
 #include <objc/runtime.h>
 #include "touch.h"
 #include "zizhan-oslog18.h"
+#include "zizhan-cllocation18.h"
 #define say(...) fprintf(stderr,__VA_ARGS__)
 /* IOKit's HID event system, the part that has no public header on iOS (prototypes checked against 20F66) */
 typedef struct __IOHIDEvent *IOHIDEventRef;
@@ -522,9 +523,11 @@ sensors_thread(void *unused)
     char args[2048]={0};size_t bytes=sizeof(args)-1;
     if (sysctlbyname("kern.zizhan_bootargs",args,&bytes,NULL,0) && ((bytes=sizeof(args)-1),sysctlbyname("kern.bootargs",args,&bytes,NULL,0))) return NULL;
     args[sizeof(args)-1]=0;
-    /* only with the sensor DSP kept running (boot-arg zizhan_slpi=4): without it there is nothing to report and no service */
+    /* only with the sensor DSP kept running (boot-arg zizhan_slpi=4) or GNSS active (zizhan_gnss=1|2) */
     const char *mode=strstr(args,"zizhan_slpi=4");
-    if (!mode || (mode!=args && mode[-1]!=' ')) return NULL;
+    const char *gnss=strstr(args,"zizhan_gnss=1");
+    if (!gnss) gnss=strstr(args,"zizhan_gnss=2");
+    if ((!mode || (mode!=args && mode[-1]!=' ')) && (!gnss || (gnss!=args && gnss[-1]!=' '))) return NULL;
     /*
      * Both services are made at once, the orientation device first, long before the first sample (the DSP lists its sensors
      * about a minute after the desktop). CoreMotion on the iPad7,12 identity does not compute the orientation from the
@@ -564,9 +567,46 @@ sensors_thread(void *unused)
     /* zizhan_orient_test=1: report the orientations 0..6 in turn, about 10 s each, whatever the accelerometer says */
     const int orientation_test=strstr(args,"zizhan_orient_test=1")!=NULL;
     int last_held=-1;
+    int gnss_tok_sv=-1,gnss_tok_ll=-1,gnss_tok_aa=-1,gnss_tok_vl=-1;
+    uint16_t gnss_seq=0;
+    int32_t gnss_alt_dm=0,gnss_spd_cms=0,gnss_hdg_ddeg=-1;
+    uint8_t gnss_used=0;
+    unsigned gnss_logs=0;
+    (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_SV,&gnss_tok_sv);
+    (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_LATLON,&gnss_tok_ll);
+    (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_ACCALT,&gnss_tok_aa);
+    (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_VEL,&gnss_tok_vl);
     struct pong_touch sample;unsigned count=0,als_count=0,aux_count=0,refused=0;ssize_t length;
     while ((length=read(device,&sample,sizeof(sample)))>0 || (length<0 && errno==EINTR)) {
         if (length!=(ssize_t)sizeof(sample)) continue;
+        if (sample.type==ZIZHAN_SENSOR_GNSS_POS) {
+            if (gnss_tok_ll!=-1) (void)notify_set_state(gnss_tok_ll,zizhan_gnss_pack_latlon((int32_t)sample.finger,(int32_t)sample.x));
+            if (gnss_tok_aa!=-1) (void)notify_set_state(gnss_tok_aa,zizhan_gnss_pack_accalt((int32_t)sample.y,gnss_alt_dm));
+            continue;
+        }
+        if (sample.type==ZIZHAN_SENSOR_GNSS_ALT) {
+            gnss_alt_dm=(int32_t)sample.finger;
+            gnss_spd_cms=(int32_t)sample.x;
+            gnss_hdg_ddeg=(int32_t)sample.y;
+            if (gnss_tok_vl!=-1) (void)notify_set_state(gnss_tok_vl,zizhan_gnss_pack_vel(gnss_spd_cms,gnss_hdg_ddeg,gnss_used));
+            continue;
+        }
+        if (sample.type==ZIZHAN_SENSOR_GNSS_SV) {
+            uint32_t a=sample.finger,b=sample.x;
+            uint8_t eng=(uint8_t)(a&0xffu),fix=(uint8_t)((a>>8)&0xffu),vis=(uint8_t)((a>>16)&0xffu),trk=(uint8_t)((a>>24)&0xffu);
+            uint16_t cn0=(uint16_t)(b&0xffffu);
+            gnss_used=(uint8_t)((b>>16)&0xffu);
+            ++gnss_seq;
+            if (gnss_tok_vl!=-1) (void)notify_set_state(gnss_tok_vl,zizhan_gnss_pack_vel(gnss_spd_cms,gnss_hdg_ddeg,gnss_used));
+            if (gnss_tok_sv!=-1) (void)notify_set_state(gnss_tok_sv,zizhan_gnss_pack_sv(eng,fix,vis,trk,cn0,gnss_seq));
+            if (fix>=1u) (void)notify_post(ZIZHAN_GNSS_NOTIFY_UPDATED);
+            if (gnss_logs<12 || (gnss_logs%20u)==0u) {
+                say("Zizhan sensors HID: gnss seq=%u eng=%u fix=%u vis=%u trk=%u used=%u cn0=%.1f\n",
+                    gnss_seq,eng,fix,vis,trk,gnss_used,cn0/10.0);
+            }
+            ++gnss_logs;
+            continue;
+        }
         if (sample.type==ZIZHAN_SENSOR_LIGHT) {
             if (als && IOHIDEventCreateAmbientLightSensorEvent) {
                 int32_t ml=(int32_t)sample.finger;

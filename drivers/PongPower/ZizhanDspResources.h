@@ -8,7 +8,7 @@
 // helpers belong to the existing ADSP worker, not to a second DSP thread.
 // Callers must keep all QMP step/send and SMEM allocation on that same actor.
 namespace zizhan_dsp {
-enum class Processor { Adsp, Slpi };
+enum class Processor { Adsp, Slpi, Modem };
 enum { BadProcessor = -100, MailboxUnavailable = -101, AckTimeout = -102,
        SmemLockTimeout = -103 };
 
@@ -29,6 +29,10 @@ struct LoadStateOwner {
         case Processor::Slpi:
             command = enabled ? "{class: image, res: load_state, name: slpi, val: on}"
                               : "{class: image, res: load_state, name: slpi, val: off}";
+            break;
+        case Processor::Modem:
+            command = enabled ? "{class: image, res: load_state, name: modem, val: on}"
+                              : "{class: image, res: load_state, name: modem, val: off}";
             break;
         default: return BadProcessor;
         }

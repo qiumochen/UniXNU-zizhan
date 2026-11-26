@@ -42,3 +42,5 @@
 0043-zizhan-sample-proc.patch
 0044-zizhan-volume-key-click-pace.patch
 0045-zizhan-ux-hygiene-upl-fastpath.patch
+0046-zizhan-platform-sleep.patch
+0047-zizhan-app-inject-and-cam-sysctl.patch

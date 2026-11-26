@@ -6,6 +6,7 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <AudioToolbox/AudioQueue.h>
 #include <dispatch/dispatch.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -38,6 +39,7 @@
 #include "zizhan-statusbar18.h"
 #include "zizhan-scene-orient18.h"
 #include "zizhan-cllocation18.h"
+#include "zizhan-ipa-install18.h"
 
 static bool software_composition;
 static bool scanout_format;
@@ -80,6 +82,7 @@ static int (*release_service)(uint32_t);
 static CFURLRef container_root, container_library;
 static void launchservices_directories(void);
 static void installd_directory(void);
+static void installd_codesign_policy(void);
 static void pluginkit_directory(void);
 static void phone_selector_image(const struct mach_header *,intptr_t);
 static void phone_gestalt_image(const struct mach_header *,intptr_t);
@@ -1391,6 +1394,7 @@ static void compositor_image(const struct mach_header *header,intptr_t slide)
     zizhan_cllocation_policy();
     launchservices_directories();
     installd_directory();
+    installd_codesign_policy();
     pluginkit_directory();
     if((!software_composition && !scanout_format) || ((!software_composition || renderer_installed) && format_installed) || header->magic!=MH_MAGIC_64)return;
     const struct mach_header_64 *h=(const struct mach_header_64 *)header;
@@ -1793,6 +1797,29 @@ static void open_url_on_main(void *unused)
     if(!pending_open_url[0])return;
     Class workspace=objc_lookUpClass("LSApplicationWorkspace");
     id ws=workspace?((id(*)(id,SEL))objc_msgSend)((id)workspace,sel_registerName("defaultWorkspace")):nil;
+    if(!strncmp(pending_open_url,"bundle:",7) && pending_open_url[7]) {
+        SEL app=sel_registerName("openApplicationWithBundleID:");
+        CFStringRef identifier=CFStringCreateWithCString(NULL,pending_open_url+7,kCFStringEncodingUTF8);
+        BOOL ok=NO;
+        if(ws && identifier && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),app))
+            ok=((BOOL(*)(id,SEL,id))objc_msgSend)(ws,app,(id)identifier);
+        if(!ok && identifier) {
+            Class uiAppCls=objc_lookUpClass("UIApplication");
+            id sb=uiAppCls?((id(*)(Class,SEL))objc_msgSend)(uiAppCls,sel_registerName("sharedApplication")):nil;
+            SEL sLaunch=sel_registerName("launchApplicationWithIdentifier:suspended:");
+            if(sb && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(sb,sel_registerName("respondsToSelector:"),sLaunch))
+                ok=((BOOL(*)(id,SEL,id,BOOL))objc_msgSend)(sb,sLaunch,(id)identifier,NO);
+        }
+        static unsigned bundle_retries;
+        if(!ok && bundle_retries<2) {
+            bundle_retries++;
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,6*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,open_url_on_main);
+        }
+        fprintf(stderr,"Pong UI18: open-bundle %s returned=%d retry=%u (workspace %d)\n",
+            pending_open_url+7,(int)ok,bundle_retries,ws!=nil);
+        if(identifier)CFRelease(identifier);
+        return;
+    }
     CFURLRef target=CFURLCreateWithBytes(NULL,(const UInt8 *)pending_open_url,strlen(pending_open_url),kCFStringEncodingUTF8,NULL);
     BOOL accepted=NO;
     SEL open=sel_registerName("openSensitiveURL:withOptions:");
@@ -1907,6 +1934,177 @@ static void installd_directory(void)
     fprintf(stderr,"Pong MI18: native installd uses writable _installd Library\n");
 }
 
+/* Track 2 (APP-02): Allow decrypted (cryptid == 0) Ad-hoc / self-signed 4K & 16K third-party IPAs
+ * through installd's MICodeSigningVerifier while preserving clean rejection of FairPlay-encrypted
+ * (cryptid != 0) App Store binaries. Opt-out via boot-arg zizhan_ipa_install=0. */
+static bool installd_codesign_installed;
+static IMP mi_perform_val_original;
+static IMP mi_validate_copy_original;
+
+static int zizhan_mi_inspect_url(id url, ZizhanMachoReport *rep, id *ent_dict_out)
+{
+    if(!url)return ZIZHAN_IPA_ERR_ARGS;
+    UInt8 pbuf[1024]={0};
+    if(!CFURLGetFileSystemRepresentation((CFURLRef)url,true,pbuf,sizeof(pbuf)-1))return ZIZHAN_IPA_ERR_ARGS;
+    struct stat st;
+    if(lstat((const char *)pbuf,&st)!=0)return ZIZHAN_IPA_ERR_ARGS;
+    char exec_path[1024]={0};
+    if(S_ISDIR(st.st_mode)) {
+        /* Bundle directory: read Info.plist CFBundleExecutable */
+        char plist_path[1024];
+        snprintf(plist_path,sizeof(plist_path),"%s/Info.plist",(const char *)pbuf);
+        Class dict_cls=objc_lookUpClass("NSDictionary"),str_cls=objc_lookUpClass("NSString");
+        id pstr=str_cls?((id(*)(Class,SEL,const char *))objc_msgSend)(str_cls,sel_registerName("stringWithUTF8String:"),plist_path):nil;
+        id info=(dict_cls && pstr)?((id(*)(Class,SEL,id))objc_msgSend)(dict_cls,sel_registerName("dictionaryWithContentsOfFile:"),pstr):nil;
+        id exe=info?((id(*)(id,SEL,id))objc_msgSend)(info,sel_registerName("objectForKey:"),(id)CFSTR("CFBundleExecutable")):nil;
+        const char *ename=exe?((const char *(*)(id,SEL))objc_msgSend)(exe,sel_registerName("UTF8String")):NULL;
+        if(!ename || !ename[0])return ZIZHAN_IPA_ERR_NOT_MACHO;
+        snprintf(exec_path,sizeof(exec_path),"%s/%s",(const char *)pbuf,ename);
+    } else {
+        snprintf(exec_path,sizeof(exec_path),"%s",(const char *)pbuf);
+    }
+    int fd=open(exec_path,O_RDONLY);
+    if(fd<0)return ZIZHAN_IPA_ERR_ARGS;
+    struct stat est;
+    if(fstat(fd,&est)!=0 || est.st_size<64 || est.st_size>(512LL<<20)){close(fd);return ZIZHAN_IPA_ERR_TRUNCATED;}
+    size_t sz=(size_t)est.st_size;
+    uint8_t *buf=(uint8_t *)malloc(sz);
+    if(!buf){close(fd);return ZIZHAN_IPA_ERR_ARGS;}
+    size_t off=0;
+    while(off<sz) {
+        ssize_t r=read(fd,buf+off,sz-off);
+        if(r<=0)break;
+        off+=(size_t)r;
+    }
+    close(fd);
+    if(off!=sz){free(buf);return ZIZHAN_IPA_ERR_TRUNCATED;}
+    int rc=zizhan_macho_inspect(buf,sz,rep);
+    if(rc==ZIZHAN_IPA_OK && ent_dict_out && rep->entitlements_len>0 &&
+       (uint64_t)rep->entitlements_off+rep->entitlements_len<=sz) {
+        CFDataRef edata=CFDataCreate(NULL,buf+rep->entitlements_off,(CFIndex)rep->entitlements_len);
+        if(edata) {
+            CFPropertyListRef plist=CFPropertyListCreateWithData(NULL,edata,kCFPropertyListImmutable,NULL,NULL);
+            if(plist) {
+                if(CFGetTypeID(plist)==CFDictionaryGetTypeID())
+                    *ent_dict_out=((id(*)(id,SEL))objc_msgSend)((id)plist,sel_registerName("autorelease"));
+                else
+                    CFRelease(plist);
+            }
+            CFRelease(edata);
+        }
+    }
+    free(buf);
+    return rc;
+}
+
+static BOOL zizhan_mi_perform_validation(id self,SEL selector,id *error)
+{
+    SEL s_bundle=sel_registerName("bundle"),s_exe=sel_registerName("executableURL");
+    id bundle=((BOOL(*)(id,SEL,SEL))objc_msgSend)(self,sel_registerName("respondsToSelector:"),s_bundle)?
+        ((id(*)(id,SEL))objc_msgSend)(self,s_bundle):nil;
+    id exe_url=(bundle && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(bundle,sel_registerName("respondsToSelector:"),s_exe))?
+        ((id(*)(id,SEL))objc_msgSend)(bundle,s_exe):nil;
+    ZizhanMachoReport rep;
+    int rc=zizhan_mi_inspect_url(exe_url,&rep,NULL);
+    if(rc==ZIZHAN_IPA_ERR_FAIRPLAY_ENCRYPTED) {
+        fprintf(stderr,"Zizhan MI18: REJECT FairPlay encrypted Mach-O cryptid=%u\n",rep.cryptid);
+        return ((BOOL(*)(id,SEL,id *))mi_perform_val_original)(self,selector,error);
+    }
+    if(rc==ZIZHAN_IPA_OK) {
+        const char *yes_sels[]={"setAllowAdhocSigning:","setSkipProfileIDValidation:"};
+        const char *no_sels[]={"setPerformOnlineAuthorization:","setVerifyTrustCachePresence:","setValidateResources:"};
+        for(unsigned i=0;i<2;i++) {
+            SEL s=sel_registerName(yes_sels[i]);
+            if(((BOOL(*)(id,SEL,SEL))objc_msgSend)(self,sel_registerName("respondsToSelector:"),s))
+                ((void(*)(id,SEL,BOOL))objc_msgSend)(self,s,YES);
+        }
+        for(unsigned i=0;i<3;i++) {
+            SEL s=sel_registerName(no_sels[i]);
+            if(((BOOL(*)(id,SEL,SEL))objc_msgSend)(self,sel_registerName("respondsToSelector:"),s))
+                ((void(*)(id,SEL,BOOL))objc_msgSend)(self,s,NO);
+        }
+    }
+    return ((BOOL(*)(id,SEL,id *))mi_perform_val_original)(self,selector,error);
+}
+
+static id zizhan_mi_validate_and_copy(id cls,SEL selector,id url,id options,id *error)
+{
+    ZizhanMachoReport rep;
+    id ent_dict=nil;
+    int rc=zizhan_mi_inspect_url(url,&rep,&ent_dict);
+    if(rc==ZIZHAN_IPA_ERR_FAIRPLAY_ENCRYPTED) {
+        return ((id(*)(id,SEL,id,id,id *))mi_validate_copy_original)(cls,selector,url,options,error);
+    }
+    id res=((id(*)(id,SEL,id,id,id *))mi_validate_copy_original)(cls,selector,url,options,error);
+    if(rc!=ZIZHAN_IPA_OK)return res;
+
+    const CFStringRef *k_cdhash=dlsym(RTLD_DEFAULT,"kMISValidationInfoCdHash");
+    const CFStringRef *k_sigid=dlsym(RTLD_DEFAULT,"kMISValidationInfoSigningID");
+    const CFStringRef *k_stype=dlsym(RTLD_DEFAULT,"kMISValidationInfoSignerType");
+    const CFStringRef *k_ents=dlsym(RTLD_DEFAULT,"kMISValidationInfoEntitlements");
+    const CFStringRef *k_native=dlsym(RTLD_DEFAULT,"kMISValidationInfoIsNativeForPlatform");
+
+    CFMutableDictionaryRef info=res?
+        CFDictionaryCreateMutableCopy(NULL,0,(CFDictionaryRef)res):
+        CFDictionaryCreateMutable(NULL,8,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if(!info)return res;
+
+    const char *sid=rep.signing_id[0]?rep.signing_id:"com.zizhan.adhoc";
+    if(!res) {
+        CFDataRef cdh=CFDataCreate(NULL,rep.cdhash,20);
+        if(cdh && k_cdhash && *k_cdhash)CFDictionarySetValue(info,*k_cdhash,cdh);
+        if(cdh)CFRelease(cdh);
+
+        CFStringRef sref=CFStringCreateWithCString(NULL,sid,kCFStringEncodingUTF8);
+        if(sref && k_sigid && *k_sigid)CFDictionarySetValue(info,*k_sigid,sref);
+        if(sref)CFRelease(sref);
+
+        int stype=6; /* 22H374 libmis AdHoc=6 -> MICodeSignerType=5 */
+        CFNumberRef ntype=CFNumberCreate(NULL,kCFNumberIntType,&stype);
+        if(ntype && k_stype && *k_stype)CFDictionarySetValue(info,*k_stype,ntype);
+        if(ntype)CFRelease(ntype);
+
+        if(k_native && *k_native)CFDictionarySetValue(info,*k_native,kCFBooleanTrue);
+    }
+
+    /* Ensure every decrypted Ad-hoc bundle carries application-identifier so installd accepts bare codesign -s - IPAs */
+    if(k_ents && *k_ents) {
+        CFDictionaryRef cur_ents=(CFDictionaryRef)CFDictionaryGetValue(info,*k_ents);
+        if(!cur_ents && ent_dict)cur_ents=(CFDictionaryRef)ent_dict;
+        CFMutableDictionaryRef ments=cur_ents?
+            CFDictionaryCreateMutableCopy(NULL,0,cur_ents):
+            CFDictionaryCreateMutable(NULL,4,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        if(ments) {
+            if(!CFDictionaryGetValue(ments,CFSTR("application-identifier"))) {
+                char appid[320];
+                snprintf(appid,sizeof(appid),"ZIZHAN0000.%s",sid);
+                CFStringRef aref=CFStringCreateWithCString(NULL,appid,kCFStringEncodingUTF8);
+                if(aref){CFDictionarySetValue(ments,CFSTR("application-identifier"),aref);CFRelease(aref);}
+            }
+            CFDictionarySetValue(info,*k_ents,ments);
+            CFRelease(ments);
+        }
+    }
+
+    if(!res && error)*error=nil;
+    fprintf(stderr,"Zizhan MI18: validated decrypted Mach-O id=%s page_bytes=%u orig_ok=%d\n",sid,rep.cd_page_bytes,res!=nil);
+    return ((id(*)(id,SEL))objc_msgSend)((id)info,sel_registerName("autorelease"));
+}
+
+static void installd_codesign_policy(void)
+{
+    if(!installd_process || installd_codesign_installed || boot_option("zizhan_ipa_install=0"))return;
+    Class cls=objc_lookUpClass("MICodeSigningVerifier");
+    if(!cls)return;
+    Method m_perf=class_getInstanceMethod(cls,sel_registerName("performValidationWithError:"));
+    Method m_copy=class_getClassMethod(cls,sel_registerName("_validateSignatureAndCopyInfoForURL:withOptions:error:"));
+    if(!m_perf || !m_copy)return;
+    mi_perform_val_original=method_setImplementation(m_perf,(IMP)zizhan_mi_perform_validation);
+    mi_validate_copy_original=method_setImplementation(m_copy,(IMP)zizhan_mi_validate_and_copy);
+    installd_codesign_installed=mi_perform_val_original!=NULL && mi_validate_copy_original!=NULL;
+    fprintf(stderr,"Zizhan MI18: decrypted 4K/16K IPA MICodeSigningVerifier hook=%d\n",(int)installd_codesign_installed);
+}
+
 static id ls_directory(id self,SEL selector)
 {
     (void)self;
@@ -1923,6 +2121,27 @@ static id ls_directory(id self,SEL selector)
  * preserving the original database/schema, app containers and XPC methods.
  * These are real directories, not successful replies from a fake MCM daemon.
  */
+static void zizhan_purge_csstore_tree(const char *root, unsigned depth)
+{
+    if(depth>4)return;
+    DIR *d=opendir(root);
+    if(!d)return;
+    struct dirent *de;
+    while((de=readdir(d))!=NULL) {
+        if(!strcmp(de->d_name,".") || !strcmp(de->d_name,".."))continue;
+        char sub[512];
+        snprintf(sub,sizeof(sub),"%s/%s",root,de->d_name);
+        struct stat st;
+        if(lstat(sub,&st)!=0)continue;
+        if(S_ISDIR(st.st_mode)) {
+            zizhan_purge_csstore_tree(sub,depth+1);
+        } else if(strstr(de->d_name,".csstore") || strstr(de->d_name,"com.apple.LaunchServices")) {
+            (void)unlink(sub);
+        }
+    }
+    closedir(d);
+}
+
 static void launchservices_directories(void)
 {
     if(!launchservices_process || launchservices_installed || geteuid()!=501)return;
@@ -1951,6 +2170,15 @@ static void launchservices_directories(void)
             fprintf(stderr,"Pong LS18: writable directory unavailable %s errno=%d\n",dirs[i],errno);
             return;
         }
+    }
+    /* One-shot LaunchServices cache refresh when ZizhanInstaller.app is newly added to /Applications */
+    struct stat ist,mst;
+    const char *stamp="/private/var/mobile/Library/Pong/LaunchServices/.zizhan_installer_v2";
+    if(stat("/Applications/ZizhanInstaller.app/Info.plist",&ist)==0 && stat(stamp,&mst)!=0) {
+        zizhan_purge_csstore_tree("/private/var/mobile/Library/Pong/LaunchServices",0);
+        int sfd=open(stamp,O_CREAT|O_WRONLY|O_TRUNC,0600);
+        if(sfd>=0){(void)write(sfd,"1\n",2);close(sfd);}
+        fprintf(stderr,"Pong LS18: purged stale csstore to index ZizhanInstaller.app\n");
     }
     const char *paths[]={dirs[1],dirs[3],dirs[6],dirs[9]};
     CFURLRef urls[4]={0};
@@ -3342,17 +3570,37 @@ static void zizhan_loc_probe_tick(void *unused)
             dispatch_get_global_queue(QOS_CLASS_UTILITY,0),NULL,zizhan_loc_probe_tick);
 }
 
+#include "zizhan-avcapture18.h"
+
+static bool is_core_daemon_or_shell(const char *name)
+{
+    static const char *const kCore[]={
+        "SpringBoard","backboardd","Preferences","containermanagerd","containermanagerd_system",
+        "usermanagerd","lsd","installd","pkd","runningboardd","PosterBoard","Photos","weatherd"
+    };
+    for(unsigned i=0;i<sizeof(kCore)/sizeof(kCore[0]);i++)
+        if(!strcmp(name,kCore[i]))return true;
+    return false;
+}
 
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
     const char *name=getprogname();
     if(!name)return;
+    if(geteuid()==0 && !boot_option("zizhan_inject_apps=0")) {
+        uint32_t one=1;
+        (void)sysctlbyname("kern.zizhan_inject_apps",NULL,NULL,&one,sizeof(one));
+    }
     if(!strcmp(name,"weatherd")) {
         if(boot_option("zizhan_net_diag=1")){app_network_start(name);app_weather_start();}
         return;
     }
-    if(!strcmp(name,"MobileSafari") || !strcmp(name,"Weather") || !strcmp(name,"Maps") || !strcmp(name,"Compass")) {
+    if(!is_core_daemon_or_shell(name)) {
+        (void)dup2(2,1);setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);
+        zizhan_cllocation_policy();
+        zizhan_avcapture_policy();
         _dyld_register_func_for_add_image(zizhan_cllocation_image);
+        _dyld_register_func_for_add_image(zizhan_avcapture_image);
         if(boot_option("zizhan_app_diag=1"))app_diag_start(name);
         if(boot_option("zizhan_net_diag=1")) {
             app_network_start(name);
@@ -3486,6 +3734,10 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         }
     }
     if(strcmp(name,"backboardd")==0) {
+        if(!boot_option("zizhan_inject_apps=0")) {
+            uint32_t one=1;
+            (void)sysctlbyname("kern.zizhan_inject_apps",NULL,NULL,&one,sizeof(one));
+        }
         software_composition=boot_option("pong_ui_software=1");
         scanout_format=true;
         backboard_container();

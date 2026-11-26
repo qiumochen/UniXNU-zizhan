@@ -4,6 +4,7 @@
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
 #include "ZizhanCamProbe.h"
+#include "ZizhanCamStream.h"
 #include "ZizhanModemProbe.h"
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" {
@@ -31,6 +32,7 @@ void pong_power_start_optional(void) {
  zizhan_mpss_start();          // default off; zizhan_modem=2 with pong_adsp=0: boot the modem once, watch it, stop it (stage 1b)
  zizhan_slpi_start();          // default off; zizhan_slpi=1 with pong_adsp=0: boot the sensor DSP once, list its QMI services (SENS-01)
  zizhan_cam_probe::start();   // default off; 1 read-only inventory, 2 attended front-camera chip id
+ zizhan_cam_stream::start();  // on-demand userland AVCaptureSession streaming (idle = 0 mW)
  unsigned enabled=0;PE_parse_boot_argn("pong_adsp",&enabled,sizeof(enabled));
  if(!enabled)return;
  sheng_adsp_probe();   // pong_adsp=1: map and survey only (zizhan bring-up); 2: boot the DSP and its clients

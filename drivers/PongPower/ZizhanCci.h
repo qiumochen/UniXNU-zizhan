@@ -98,4 +98,28 @@ static inline int zizhan_cci_read16_m(const ZizhanCciOps *o, unsigned m, uint8_t
 static inline int zizhan_cci_read16(const ZizhanCciOps *o, uint8_t addr7, uint16_t reg, uint8_t *buf, unsigned len) {
   return zizhan_cci_read16_m(o, 0, addr7, reg, buf, len);
 }
+
+/* Write a single 8-bit value to a 16-bit register of a 7-bit slave on master m (i2c-qcom-cci.c cci_i2c_write). */
+static inline int zizhan_cci_write16_u8_m(const ZizhanCciOps *o, unsigned m, uint8_t addr7, uint16_t reg, uint8_t val) {
+  if (!o || !o->read || !o->write || !o->pause_us || !o->polls || addr7 > 0x7f || m > 1) return ZizhanCciArgument;
+  const uint32_t q0 = 0x310u + 0x200u * m;
+  o->write(o->context, q0, 1u | ((uint32_t)addr7 << 4));
+  o->write(o->context, q0, 9u | (3u << 4) | ((uint32_t)(reg >> 8) << 8) | ((uint32_t)(reg & 0xffu) << 16) | ((uint32_t)val << 24));
+  o->write(o->context, q0, 8u | (1u << 8));
+  return zizhan_cci_run_m(o, m, 0, m ? (1u << 16) : (1u << 4));
+}
+
+typedef struct { uint16_t reg; uint8_t val; } ZizhanCciReg8;
+static inline int zizhan_cci_write16_table_m(const ZizhanCciOps *o, unsigned m, uint8_t addr7,
+                                             const ZizhanCciReg8 *tbl, unsigned count, unsigned *done_out) {
+  if (done_out) *done_out = 0;
+  if (!tbl && count) return ZizhanCciArgument;
+  for (unsigned i = 0; i < count; ++i) {
+    const int rc = zizhan_cci_write16_u8_m(o, m, addr7, tbl[i].reg, tbl[i].val);
+    if (rc) return rc;
+    if (done_out) *done_out = i + 1u;
+    if (tbl[i].reg == 0x0103u && (tbl[i].val & 1u)) o->pause_us(o->context, 1000);   /* sensor SW reset settle */
+  }
+  return ZizhanCciOk;
+}
 #endif

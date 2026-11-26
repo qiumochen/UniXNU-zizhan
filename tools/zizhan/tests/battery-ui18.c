@@ -50,8 +50,14 @@ int main(void)
     assert(zizhan_battery_format_soh_live(&cold, buf, sizeof(buf)) == 1);
     assert(strcmp(buf, "-5.7 \xc2\xb0" "C") == 0);
 
-    /* 4. Small buffer bounds check. */
+    /* 4. Small buffer bounds check + two-switch clean filter IDs. */
     assert(zizhan_battery_format_capacity(&hw, buf, 8) == 0);
+    assert(zizhan_battery_is_kept_switch_id("BATTERY_PERCENTAGE_IDENTIFIER") == 1);
+    assert(zizhan_battery_is_kept_switch_id("LOW_POWER_MODE_IDENTIFIER") == 1);
+    assert(zizhan_battery_is_kept_switch_id("BATTERY_HEALTH_TITLE") == 0);
+    assert(zizhan_battery_is_kept_switch_id("PLBatteryUIGraphLast24Hours") == 0);
+    assert(zizhan_battery_is_kept_switch_id("") == 0);
+    assert(zizhan_battery_is_kept_switch_id(NULL) == 0);
 
     printf("PASS battery-ui18\n");
     return 0;

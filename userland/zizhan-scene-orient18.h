@@ -84,4 +84,22 @@ static inline long zizhan_scene_orient_apply(long candidate, long current_orient
     return candidate;
 }
 
+/* Override SBDeviceApplicationSceneHandle defaultInterfaceOrientation / _launchingInterfaceOrientationForOrientation:
+ * on cold launch (current_live_orient == 0) so SpringBoard's zoom-in placeholder container and SBHomeGrabberView
+ * ("小白条") start directly at the locked/active upright orientation instead of flashing 1 (left edge / sideways). */
+static inline long zizhan_scene_launch_orient_override(int enabled, long current_live_orient,
+                                                       long orig_orient, int user_locked,
+                                                       long lock_orient, long active_orient,
+                                                       int scene_supports_candidate)
+{
+    if (!enabled || current_live_orient != 0) {
+        return orig_orient;
+    }
+    long cand = zizhan_scene_orient_candidate(1, 0, user_locked, lock_orient, active_orient);
+    if (cand >= 1 && cand <= 4 && scene_supports_candidate) {
+        return cand;
+    }
+    return orig_orient;
+}
+
 #endif

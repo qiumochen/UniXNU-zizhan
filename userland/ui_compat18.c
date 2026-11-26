@@ -2909,6 +2909,8 @@ orientation_watch(void *unused)
  * Disable with boot-arg zizhan_scene_orient=0. */
 static void (*scene_orient_original)(id,SEL,id,id,id);
 static unsigned long (*scene_supp_mask_original)(id,SEL);
+static long (*scene_default_orient_original)(id,SEL);
+static long (*scene_launching_orient_original)(id,SEL,long);
 static bool scene_orient_installed;
 static unsigned scene_orient_logs;
 static char scene_pad_mask_key;
@@ -2991,6 +2993,67 @@ static unsigned long zizhan_main_scene_supported_orientations(id self,SEL select
     }
     return zizhan_effective_pad_orient_mask(1,0,0,orig,ipad_mask,has_any);
 }
+static void query_sb_orient_state(id handle,long *live_out,int *locked_out,long *lock_ori_out,long *active_ori_out)
+{
+    long live=0,lock_ori=0,active_ori=0;
+    int locked=0;
+    if(handle) {
+        Class hcls=object_getClass(handle);
+        SEL s_cur=sel_registerName("currentInterfaceOrientation");
+        if(hcls && method_abi(class_getInstanceMethod(hcls,s_cur),"qQ",0,""))
+            live=((long(*)(id,SEL))objc_msgSend)(handle,s_cur);
+    }
+    id lm=singleton("SBOrientationLockManager");
+    if(lm) {
+        Class lcls=object_getClass(lm);
+        SEL s_locked=sel_registerName("isUserLocked"),s_lori=sel_registerName("userLockOrientation");
+        if(method_abi(class_getInstanceMethod(lcls,s_locked),"Bc",0,""))
+            locked=(int)((BOOL(*)(id,SEL))objc_msgSend)(lm,s_locked);
+        if(method_abi(class_getInstanceMethod(lcls,s_lori),"qQ",0,""))
+            lock_ori=((long(*)(id,SEL))objc_msgSend)(lm,s_lori);
+    }
+    Class acls=objc_lookUpClass("UIApplication");
+    id app=(acls && method_abi(class_getClassMethod(acls,sel_registerName("sharedApplication")),"@",0,""))?
+        ((id(*)(Class,SEL))objc_msgSend)(acls,sel_registerName("sharedApplication")):nil;
+    if(app) {
+        SEL s_active=sel_registerName("activeInterfaceOrientation");
+        if(method_abi(class_getInstanceMethod(object_getClass(app),s_active),"qQ",0,""))
+            active_ori=((long(*)(id,SEL))objc_msgSend)(app,s_active);
+    }
+    if(live_out)*live_out=live;
+    if(locked_out)*locked_out=locked;
+    if(lock_ori_out)*lock_ori_out=lock_ori;
+    if(active_ori_out)*active_ori_out=active_ori;
+}
+static long zizhan_default_interface_orientation(id self,SEL selector)
+{
+    long orig=scene_default_orient_original?scene_default_orient_original(self,selector):0;
+    long live=0,lock_ori=0,active_ori=0;int locked=0,sup=0;
+    query_sb_orient_state(self,&live,&locked,&lock_ori,&active_ori);
+    long cand=zizhan_scene_orient_candidate(1,live!=0,locked,lock_ori,active_ori);
+    Class hcls=object_getClass(self);
+    SEL s_supports=sel_registerName("_mainSceneSupportsInterfaceOrientation:");
+    if(cand>=1 && cand<=4 && hcls && method_abi(class_getInstanceMethod(hcls,s_supports),"Bc",1,"q"))
+        sup=(int)((BOOL(*)(id,SEL,long))objc_msgSend)(self,s_supports,cand);
+    return zizhan_scene_launch_orient_override(1,live,orig,locked,lock_ori,active_ori,sup);
+}
+static long zizhan_launching_interface_orientation(id self,SEL selector,long req_ori)
+{
+    long orig=scene_launching_orient_original?scene_launching_orient_original(self,selector,req_ori):req_ori;
+    long live=0,lock_ori=0,active_ori=0;int locked=0,sup=0;
+    query_sb_orient_state(self,&live,&locked,&lock_ori,&active_ori);
+    long cand=zizhan_scene_orient_candidate(1,live!=0,locked,lock_ori,active_ori);
+    Class hcls=object_getClass(self);
+    SEL s_supports=sel_registerName("_mainSceneSupportsInterfaceOrientation:");
+    if(cand>=1 && cand<=4 && hcls && method_abi(class_getInstanceMethod(hcls,s_supports),"Bc",1,"q"))
+        sup=(int)((BOOL(*)(id,SEL,long))objc_msgSend)(self,s_supports,cand);
+    long out=zizhan_scene_launch_orient_override(1,live,orig,locked,lock_ori,active_ori,sup);
+    if(out!=orig && __atomic_fetch_add(&scene_orient_logs,1,__ATOMIC_RELAXED)<24) {
+        fprintf(stderr,"Zizhan scene18: launch container orientation %ld -> %ld (req=%ld locked=%d lock_ori=%ld active=%ld)\n",
+            orig,out,req_ori,locked,lock_ori,active_ori);
+    }
+    return out;
+}
 static void zizhan_modify_scene_settings(id self,SEL selector,id settings,id ctx,id entity)
 {
     SEL s_exists=sel_registerName("sceneIfExists");
@@ -3060,21 +3123,30 @@ static void springboard_scene_orientation_policy(void)
     if(!cls || !core)return;
     SEL sel=sel_registerName("_modifyApplicationSceneSettings:fromRequestContext:entity:");
     SEL sel_mask=sel_registerName("_mainSceneSupportedInterfaceOrientations");
+    SEL sel_def=sel_registerName("defaultInterfaceOrientation");
+    SEL sel_launch=sel_registerName("_launchingInterfaceOrientationForOrientation:");
     Method own=class_getInstanceMethod(cls,sel);
     Method sup=class_getInstanceMethod(class_getSuperclass(cls),sel);
     Method mask_own=class_getInstanceMethod(cls,sel_mask);
     Method mask_sup=class_getInstanceMethod(class_getSuperclass(cls),sel_mask);
+    Method def_own=class_getInstanceMethod(cls,sel_def);
+    Method launch_own=class_getInstanceMethod(cls,sel_launch);
     Method core_get=class_getInstanceMethod(core,sel_registerName("interfaceOrientation"));
     Method core_set=class_getInstanceMethod(core,sel_registerName("setInterfaceOrientation:"));
     if(!own || own==sup || !method_abi(own,"v",3,"@@@") ||
        !mask_own || mask_own==mask_sup || !method_abi(mask_own,"qQ",0,"") ||
+       !def_own || !method_abi(def_own,"qQ",0,"") ||
+       !launch_own || !(method_abi(launch_own,"qQ",1,"q") || method_abi(launch_own,"qQ",1,"Q")) ||
        !method_abi(core_get,"qQ",0,"") ||
        !(method_abi(core_set,"v",1,"q") || method_abi(core_set,"v",1,"Q")) ||
        !method_abi(class_getInstanceMethod(cls,sel_registerName("sceneIfExists")),"@",0,"") ||
        !method_abi(class_getInstanceMethod(cls,sel_registerName("_mainSceneSupportsInterfaceOrientation:")),"Bc",1,"q"))return;
     scene_supp_mask_original=(unsigned long(*)(id,SEL))method_setImplementation(mask_own,(IMP)zizhan_main_scene_supported_orientations);
+    scene_default_orient_original=(long(*)(id,SEL))method_setImplementation(def_own,(IMP)zizhan_default_interface_orientation);
+    scene_launching_orient_original=(long(*)(id,SEL,long))method_setImplementation(launch_own,(IMP)zizhan_launching_interface_orientation);
     scene_orient_original=(void(*)(id,SEL,id,id,id))method_setImplementation(own,(IMP)zizhan_modify_scene_settings);
-    scene_orient_installed=scene_orient_original!=NULL && scene_supp_mask_original!=NULL;
+    scene_orient_installed=scene_orient_original!=NULL && scene_supp_mask_original!=NULL &&
+        scene_default_orient_original!=NULL && scene_launching_orient_original!=NULL;
     fprintf(stderr,"Zizhan scene18: SBDeviceApplicationSceneHandle cold-launch orientation hook=%d\n",(int)scene_orient_installed);
 }
 static void apply_boot_orientation_lock(void *context)

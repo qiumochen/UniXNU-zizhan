@@ -51,6 +51,14 @@ int main(void)
     /* Scene-manifest iPad app with no Info.plist orientation keys: 0 -> 0x1e before client settings. */
     assert(zizhan_effective_pad_orient_mask(1, 0, 0, 0UL, 0UL, 0) == 0x1eUL);
 
+    /* 9. Cold-launch placeholder & SBHomeGrabberView container orientation override (Preferences / FaceTime). */
+    assert(zizhan_scene_launch_orient_override(1, 0, 1, 1, 4, 4, 1) == 4);
+    assert(zizhan_scene_launch_orient_override(1, 0, 1, 0, 0, 4, 1) == 4);
+    /* Live scene (current_live_orient != 0) or unsupported candidate keeps orig_orient untouched. */
+    assert(zizhan_scene_launch_orient_override(1, 4, 1, 1, 4, 4, 1) == 1);
+    assert(zizhan_scene_launch_orient_override(1, 0, 1, 1, 4, 4, 0) == 1);
+    assert(zizhan_scene_launch_orient_override(0, 0, 1, 1, 4, 4, 1) == 1);
+
     printf("PASS scene-orient18\n");
     return 0;
 }

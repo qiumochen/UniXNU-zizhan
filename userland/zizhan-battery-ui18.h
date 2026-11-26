@@ -4,6 +4,18 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
+
+/* User-confirmed clean Battery pane policy: keep ONLY the two functional switches
+ * (Battery Percentage + Low Power Mode) and drop spinning usage charts / unavailable health rows. */
+static inline int zizhan_battery_is_kept_switch_id(const char *ident)
+{
+    if (!ident) {
+        return 0;
+    }
+    return strcmp(ident, "BATTERY_PERCENTAGE_IDENTIFIER") == 0 ||
+           strcmp(ident, "LOW_POWER_MODE_IDENTIFIER") == 0;
+}
 
 /* Pure-C formatting of genuine Qualcomm ADSP battmgr telemetry read via IOPS
  * ("InternalBattery"). Never fabricates Apple Battery Service State, Battery

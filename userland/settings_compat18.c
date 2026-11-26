@@ -309,7 +309,7 @@ static CGImageRef scale_icon(CGImageRef input,double scale)
  * DesignCapacity, CycleCount, StateOfHealth, Voltage, Temperature) read live via IOPS in
  * Settings > Battery without fabricating Apple Battery Service Flags/State, UPOCount, or WRa.
  * Disable with boot-arg zizhan_batt_ui=0. */
-static IMP bui_specifiers_original,bhui_specifiers_original;
+static IMP bui_specifiers_original,bhui_specifiers_original,bui_insert_contig_original;
 static bool bui_hw_installed,bhui_hw_installed;
 static bool dict_int_value(CFDictionaryRef dict,CFStringRef key,int *out)
 {
@@ -485,12 +485,81 @@ static bool specifiers_has_id(id list,CFStringRef want)
     }
     return false;
 }
+static bool specifier_id_utf8(id sp,char *buf,size_t cap)
+{
+    if(!sp || !buf || !cap)return false;
+    buf[0]='\0';
+    SEL s_id=sel_registerName("identifier");
+    if(!((BOOL(*)(id,SEL,SEL))objc_msgSend)(sp,sel_registerName("respondsToSelector:"),s_id))return false;
+    id ident=((id(*)(id,SEL))objc_msgSend)(sp,s_id);
+    if(!ident || CFGetTypeID((CFTypeRef)ident)!=CFStringGetTypeID())return false;
+    return CFStringGetCString((CFStringRef)ident,buf,cap,kCFStringEncodingUTF8)!=0;
+}
+static long specifier_cell_type(id sp)
+{
+    if(!sp)return -1;
+    SEL s_ct=sel_registerName("cellType");
+    if(!((BOOL(*)(id,SEL,SEL))objc_msgSend)(sp,sel_registerName("respondsToSelector:"),s_ct))return -1;
+    return ((long(*)(id,SEL))objc_msgSend)(sp,s_ct);
+}
+static void zizhan_bui_insert_contiguous(id self,SEL selector,id specs,unsigned long idx,BOOL anim)
+{
+    /* In default two-switch mode, ignore asynchronous PerfPowerServices / PLBatteryUI graph & spinner insertions. */
+    if(!settings_boot_option("zizhan_batt_ui=full")) {
+        if(!specs)return;
+        SEL s_cnt=sel_registerName("count"),s_at=sel_registerName("objectAtIndex:");
+        unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(specs,s_cnt);
+        bool any_kept=false;
+        for(unsigned long i=0;i<n;i++) {
+            id sp=((id(*)(id,SEL,unsigned long))objc_msgSend)(specs,s_at,i);
+            char idbuf[96];
+            if(specifier_id_utf8(sp,idbuf,sizeof(idbuf)) && zizhan_battery_is_kept_switch_id(idbuf))any_kept=true;
+        }
+        if(!any_kept)return;
+    }
+    if(bui_insert_contig_original)
+        ((void(*)(id,SEL,id,unsigned long,BOOL))bui_insert_contig_original)(self,selector,specs,idx,anim);
+}
 static id zizhan_bui_specifiers(id self,SEL selector)
 {
     id list=((id(*)(id,SEL))bui_specifiers_original)(self,selector);
-    if(!list || specifiers_has_id(list,CFSTR("ZIZHAN_BATT_HW_GROUP")))return list;
+    if(!list)return list;
     Class mut_cls=objc_lookUpClass("NSMutableArray");
     if(!mut_cls || !((BOOL(*)(id,SEL,Class))objc_msgSend)(list,sel_registerName("isKindOfClass:"),mut_cls))return list;
+    if(!settings_boot_option("zizhan_batt_ui=full")) {
+        /* Default two-switch clean mode: retain ONLY Battery Percentage + Low Power Mode switches
+         * (and the single native group header/footer preceding Low Power Mode), removing all spinners & empty charts. */
+        SEL s_cnt=sel_registerName("count"),s_at=sel_registerName("objectAtIndex:");
+        SEL s_rem=sel_registerName("removeAllObjects"),s_add=sel_registerName("addObject:");
+        unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(list,s_cnt);
+        id pct_sp=nil,lpm_sp=nil,lpm_group=nil,last_group=nil;
+        for(unsigned long i=0;i<n;i++) {
+            id sp=((id(*)(id,SEL,unsigned long))objc_msgSend)(list,s_at,i);
+            if(!sp)continue;
+            if(specifier_cell_type(sp)==0)last_group=sp;
+            char idbuf[96];
+            if(!specifier_id_utf8(sp,idbuf,sizeof(idbuf)))continue;
+            if(!strcmp(idbuf,"BATTERY_PERCENTAGE_IDENTIFIER") && !pct_sp)pct_sp=sp;
+            else if(!strcmp(idbuf,"LOW_POWER_MODE_IDENTIFIER") && !lpm_sp){lpm_sp=sp;lpm_group=last_group;}
+        }
+        if(pct_sp || lpm_sp) {
+            if(pct_sp)((id(*)(id,SEL))objc_msgSend)(pct_sp,sel_registerName("retain"));
+            if(lpm_sp)((id(*)(id,SEL))objc_msgSend)(lpm_sp,sel_registerName("retain"));
+            if(lpm_group)((id(*)(id,SEL))objc_msgSend)(lpm_group,sel_registerName("retain"));
+            ((void(*)(id,SEL))objc_msgSend)(list,s_rem);
+            if(lpm_group)((void(*)(id,SEL,id))objc_msgSend)(list,s_add,lpm_group);
+            if(pct_sp)((void(*)(id,SEL,id))objc_msgSend)(list,s_add,pct_sp);
+            if(lpm_sp)((void(*)(id,SEL,id))objc_msgSend)(list,s_add,lpm_sp);
+            if(lpm_group)((void(*)(id,SEL))objc_msgSend)(lpm_group,sel_registerName("release"));
+            if(lpm_sp)((void(*)(id,SEL))objc_msgSend)(lpm_sp,sel_registerName("release"));
+            if(pct_sp)((void(*)(id,SEL))objc_msgSend)(pct_sp,sel_registerName("release"));
+            static unsigned slim_logged;
+            if(__atomic_fetch_add(&slim_logged,1,__ATOMIC_RELAXED)<4)
+                record("BatteryUIController slimmed to two switches (Battery Percentage + Low Power Mode)");
+        }
+        return list;
+    }
+    if(specifiers_has_id(list,CFSTR("ZIZHAN_BATT_HW_GROUP")))return list;
     ZizhanBatteryHwTelemetry t;
     if(!read_battery_hw_telemetry(&t))return list;
     CFArrayRef hw=build_battery_hw_specifiers(self,&t);
@@ -562,7 +631,16 @@ static void battery_hw_install(void)
             register_battery_getters(bui);
             bui_specifiers_original=method_setImplementation(m,(IMP)zizhan_bui_specifiers);
             bui_hw_installed=bui_specifiers_original!=NULL;
-            if(bui_hw_installed)record("22H374 BatteryUIController real hardware health group installed");
+            SEL s_ins=sel_registerName("insertContiguousSpecifiers:atIndex:animated:");
+            Method m_ins=class_getInstanceMethod(bui,s_ins);
+            if(m_ins && (abi(m_ins,"v",3,"@QB") || abi(m_ins,"v",3,"@qB") || abi(m_ins,"v",3,"@Qc") || abi(m_ins,"v",3,"@qc"))) {
+                IMP orig_ins=method_getImplementation(m_ins);
+                if(class_addMethod(bui,s_ins,(IMP)zizhan_bui_insert_contiguous,method_getTypeEncoding(m_ins)))
+                    bui_insert_contig_original=orig_ins;
+                else
+                    bui_insert_contig_original=method_setImplementation(m_ins,(IMP)zizhan_bui_insert_contiguous);
+            }
+            if(bui_hw_installed)record("22H374 BatteryUIController two-switch clean policy installed");
         }
     }
     if(!bhui_hw_installed) {

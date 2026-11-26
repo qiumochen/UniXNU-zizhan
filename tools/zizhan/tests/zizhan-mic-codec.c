@@ -225,6 +225,16 @@ int main(void) {
   assert(bus.swrm[0x0004u / 4u] == 0x00u);
   assert(bus.tlmm[0] == 0xdead0001u);
 
+  /* 4. Calibrated speech-level gain (ADC1=16, TX_DEC0=+24 dB=0x18) + bounds rejection (>40 dB). */
+  init_bus(&bus);
+  assert(zizhan_mic_hw_bringup_vol(&ops, &st, 0u, 16u, 0x18u) == 1);
+  assert(st.adc_gain == 16u && st.dec_vol == 0x18u);
+  assert(bus.wcd[0x300eu] == (0x20u | 16u));
+  assert(bus.tx[0x0404u / 4u] == 0x18u);
+  zizhan_mic_hw_teardown(&ops, &st);
+  assert(bus.tx[0x0404u / 4u] == 0x00u);
+  assert(zizhan_mic_hw_bringup_vol(&ops, &st, 0u, 16u, 41u) == 0);
+
   printf("PASS zizhan-mic-codec\n");
   return 0;
 }

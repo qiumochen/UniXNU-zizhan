@@ -41,7 +41,7 @@ static int16_t *gIn;
 static atomic_uint gIoUsers;
 static atomic_uint gOutActive = 1;
 static atomic_uint gInActive = 1;
-static _Atomic(Float32) gVolume = 0.25f;
+static _Atomic(Float32) gVolume = 0.55f;
 static Float64 gHostTicksPerFrame;
 static uint64_t gZeroOrigin, gZeroSeed;
 static uint64_t gInReadPos;
@@ -193,7 +193,10 @@ static OSStatus IsPropertySettable(AudioServerPlugInDriverRef d, AudioObjectID o
     return HasProperty(d, o, pid, a) ? 0 : kAudioHardwareUnknownPropertyError;
 }
 
-static const Float32 kMinVolumeDb = -48.0f;
+/* Mobile speaker dB span: audiomxd divides DecibelRange into 16 steps; -26 dB gives 1.625 dB/step
+ * (80% slider = -5.2 dB = 0.55 linear instead of -12 dB = 0.251 under the old -48 dB studio span),
+ * while 0% (-26 dB) remains exact digital silence (0.0f). */
+static const Float32 kMinVolumeDb = -26.0f;
 static Float32 toDb(Float32 scalar) {
     if (scalar <= 0.0f) { return kMinVolumeDb; }
     Float32 db = 20.0f * log10f(scalar);
@@ -536,7 +539,21 @@ static OSStatus WillDoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o,
 static OSStatus BeginIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client, UInt32 op, UInt32 frames, const AudioServerPlugInIOCycleInfo *info) {
     (void)d; (void)o; (void)client; (void)op; (void)frames; (void)info; return 0;
 }
-static inline int16_t toS16(Float32 v) {if(!isfinite(v))v=0; v *= 32767.0f; return (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v);}
+/* Soft-knee +3.0 dB (1.4125x) presence boost with smooth Hermite saturation above |x| = 0.5:
+ * quiet voice memos and dialogue get full +3 dB lift (combined with kMinVolumeDb=-26 dB -> +9.8 dB at 80%),
+ * while 0 dBFS normalized music peaks compress smoothly into [-32767, +32767] without hard clipping. */
+static inline int16_t toS16(Float32 v) {
+    if (!isfinite(v) || v == 0.0f) return 0;
+    const Float32 sign = v < 0.0f ? -1.0f : 1.0f;
+    Float32 a = fabsf(v) * 1.4125375f;
+    if (a > 0.65f) {
+        const Float32 excess = a - 0.65f;
+        a = 0.65f + 0.35f * (excess / (0.35f + excess));
+    }
+    if (a > 1.0f) a = 1.0f;
+    const Float32 scaled = sign * a * 32767.0f;
+    return (int16_t)(scaled > 32767.0f ? 32767 : scaled < -32768.0f ? -32768 : scaled);
+}
 static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, AudioObjectID stream, UInt32 client, UInt32 op, UInt32 frames,
                               const AudioServerPlugInIOCycleInfo *info, void *main, void *secondary) {
     (void)d; (void)o; (void)client; (void)secondary;

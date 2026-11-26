@@ -172,15 +172,21 @@ extern "C" int zizhan_mic_codec_start(uint32_t *channel_mask_out) {
   if (PE_parse_boot_argn("zizhan_mic_dec", &dec_arg, sizeof(dec_arg)) && dec_arg > 7u) {
     dec_arg = 0u;
   }
-  unsigned gain_arg = 12u;
+  /* Calibrated defaults for Mix Fold 2 main mic: ADC1 +24 dB (step 16) + TX_DEC0 +24 dB (0x18),
+   * lifting normal speech from ~-28 dBFS (max_abs ~1330 in video-1) to ~-14 dBFS with 14 dB headroom. */
+  unsigned gain_arg = 16u;
   if (PE_parse_boot_argn("zizhan_mic_gain", &gain_arg, sizeof(gain_arg)) && gain_arg > 20u) {
-    gain_arg = 12u;
+    gain_arg = 16u;
   }
-  const int ok = zizhan_mic_hw_bringup(&kOps, &gMic.hw, (uint8_t)dec_arg, (uint8_t)gain_arg);
-  IOLog("ZIZHAN_MIC_CODEC: %s stage=%d swrm_ver=%x clk=%x slaves=%x dev=%u id=%x:%x devid=%x efuse=%x bank=%u dec=%u mask=%x gain=%u timeouts=%u audio_output=0\n",
+  unsigned dvol_arg = 24u;
+  if (PE_parse_boot_argn("zizhan_mic_dvol", &dvol_arg, sizeof(dvol_arg)) && dvol_arg > 40u) {
+    dvol_arg = 24u;
+  }
+  const int ok = zizhan_mic_hw_bringup_vol(&kOps, &gMic.hw, (uint8_t)dec_arg, (uint8_t)gain_arg, (uint8_t)dvol_arg);
+  IOLog("ZIZHAN_MIC_CODEC: %s stage=%d swrm_ver=%x clk=%x slaves=%x dev=%u id=%x:%x devid=%x efuse=%x bank=%u dec=%u mask=%x gain=%u dvol=%u timeouts=%u audio_output=0\n",
         ok ? "PASS" : "FAIL", gMic.hw.stage, gMic.hw.swrm_ver, gMic.hw.clk_status, gMic.hw.slaves,
         gMic.hw.slave_dev, gMic.hw.slave_id1, gMic.hw.slave_id0, gMic.hw.dev_id, gMic.hw.efuse,
-        gMic.hw.bank_after, gMic.hw.dec_idx, gMic.hw.channel_mask, gMic.hw.adc_gain, gMic.hw.fifo_timeouts);
+        gMic.hw.bank_after, gMic.hw.dec_idx, gMic.hw.channel_mask, gMic.hw.adc_gain, gMic.hw.dec_vol, gMic.hw.fifo_timeouts);
   if (!ok) {
     if (gMic.bobc1_voted && gMic.bobc1_addr) {
       (void)pong_rpmh_vote(gMic.bobc1_addr + 4u, 0u);

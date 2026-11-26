@@ -72,6 +72,7 @@ typedef struct {
   uint8_t slave_dev;
   uint8_t dec_idx;
   uint8_t adc_gain;
+  uint8_t dec_vol;
   uint8_t efuse;
   uint8_t bank_after;
   uint8_t saved_tlmm;
@@ -232,15 +233,16 @@ static inline void zizhan_mic_hw_teardown(const ZizhanMicHwOps *ops, ZizhanMicHw
   }
 }
 
-static inline int zizhan_mic_hw_bringup(const ZizhanMicHwOps *ops, ZizhanMicHwState *st,
-                                        uint8_t dec_idx, uint8_t adc_gain) {
-  if (!ops || !st || dec_idx > 7u || adc_gain > 20u) {
+static inline int zizhan_mic_hw_bringup_vol(const ZizhanMicHwOps *ops, ZizhanMicHwState *st,
+                                            uint8_t dec_idx, uint8_t adc_gain, uint8_t dec_vol) {
+  if (!ops || !st || dec_idx > 7u || adc_gain > 20u || dec_vol > 40u) {
     return 0;
   }
   memset(st, 0, sizeof(*st));
   st->cmd_id = 14u;
   st->dec_idx = dec_idx;
   st->adc_gain = adc_gain;
+  st->dec_vol = dec_vol;
 
   /* 1. Save TLMM gpio43 and pulse active-low WCD9385 reset. */
   st->stage = ZizhanMicStageReset;
@@ -519,7 +521,7 @@ static inline int zizhan_mic_hw_bringup(const ZizhanMicHwOps *ops, ZizhanMicHwSt
   ops->tx_wr32(ops->ctx, sec2, 0x0bu);
   ops->tx_wr32(ops->ctx, sec7_0, 0x3cu);
   ops->tx_wr32(ops->ctx, sec7, 0x20u);
-  ops->tx_wr32(ops->ctx, vol, 0x10u);
+  ops->tx_wr32(ops->ctx, vol, dec_vol);
   ops->tx_wr32(ops->ctx, ctl, 0x74u);
   ops->tx_wr32(ops->ctx, ctl, 0x34u);
   ops->tx_wr32(ops->ctx, sec6, 0x02u);
@@ -529,6 +531,11 @@ static inline int zizhan_mic_hw_bringup(const ZizhanMicHwOps *ops, ZizhanMicHwSt
   st->channel_mask = 1u << dec_idx;
   st->stage = ZizhanMicStageReady;
   return 1;
+}
+
+static inline int zizhan_mic_hw_bringup(const ZizhanMicHwOps *ops, ZizhanMicHwState *st,
+                                        uint8_t dec_idx, uint8_t adc_gain) {
+  return zizhan_mic_hw_bringup_vol(ops, st, dec_idx, adc_gain, 0x10u);
 }
 
 static inline void zizhan_mic_hw_unmute(const ZizhanMicHwOps *ops, ZizhanMicHwState *st) {

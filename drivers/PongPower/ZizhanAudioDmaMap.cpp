@@ -16,7 +16,7 @@ namespace {
 struct Owner {
  struct Write {size_t at;uint64_t value;unsigned bits;};Write trace[32]={};unsigned trace_count=0,trace_overflow=0;
  IOBufferMemoryDescriptor *tables=nullptr;IOMemoryMap *map=nullptr;volatile uint8_t *registers=nullptr;
- uint64_t base=0,bytes=0,table_pa=0;unsigned once=0,lock_held=0;
+ uint64_t base=0,bytes=0,table_pa=0;unsigned once=0,lock_held=0,active=0;
  ArmSmmu4KConfig lower={};ArmSmmu4KResult built={};ArmSmmu4KContextConfig config={};
  ArmSmmu4KRange range={};unsigned char visited[16]={};ArmSmmu4KAuditRegion audit_region={};ArmSmmu4KAuditConfig audit={};ArmSmmu4KAuditResult audited={};
  ArmSmmu4KIo io={};zizhan_audio_dma_map::State state;
@@ -100,7 +100,7 @@ bool failed(const char *stage){
  // A partially programmed context may still refer to these real tables.
  // Retain all storage/MMIO until actual reset,without blocking other actors
  // on the global lock. No new audio trial is allowed in this boot.
- if(!owner.state.attempted){release_safe();}unlock();return false;
+ owner.active=0;if(!owner.state.attempted){release_safe();}unlock();return false;
 }
 }
 namespace {
@@ -159,19 +159,25 @@ extern "C" bool zizhan_audio_dma_map_begin(void){
  IOLog("ZIZHAN_AUDIO_DMAMAP: audit complete=%u leaves=%lu descriptors=%lu real_owned_tables=1\n",o.audited.complete,static_cast<unsigned long>(o.audited.lower.leaf_pages),static_cast<unsigned long>(o.audited.lower.descriptor_reads));
  IOLog("ZIZHAN_AUDIO_DMAMAP: PASS installed=1 base=%llx bytes=%llu table=%llx pages=%lu slot=%u bank=%u context_readback=%u tlb=%u fault=%x fault_mask=c00001fe masked_fault=%x data=0 audio_output=0\n",
   o.base,o.bytes,o.table_pa,static_cast<unsigned long>(o.built.table_pages),o.state.slot,o.state.bank,o.state.programmed.readback_valid,o.state.programmed.tlb_synchronized,o.state.programmed.fault_status,o.state.programmed.fault_status&0xc00001feu);
+ // Bank SCTLR.M and SMR valid bit are now live in hardware registers, so concurrent SMMU
+ // clients (e.g. PongWifi SID 0x1c01) will observe our owned bank/ASID/slot and pick disjoint ones.
+ // Release the global lease immediately instead of holding it across persistent audio daemon lifetime.
+ o.active=1;unlock();
  {unsigned watch=0;thread_t thread=nullptr;
   if(PE_parse_boot_argn("zizhan_dma_watch",&watch,sizeof watch)&&watch==1){o.watch_running=1;
    if(kernel_thread_start(dma_watch,nullptr,&thread)==KERN_SUCCESS)thread_deallocate(thread);else o.watch_running=0;}}
  return true;
 }
 extern "C" bool zizhan_audio_dma_map_end(void){
- auto &o=owner;if(!o.lock_held||!o.state.installed)return false;
+ auto &o=owner;if(!o.active||!o.state.installed)return false;
  dma_watch_stop();
+ if(!o.lock_held){if(!pong_smmu_lease_lock()){return failed("restore-lock");}o.lock_held=1;}
  if(!zizhan_audio_dma_map::restore(o.io,o.config,o.state))return failed("restore");
+ o.active=0;
  IOLog("ZIZHAN_AUDIO_DMAMAP: PASS installed=0 stream_restored=1 context_retired=1 prior_context_restored=0 uncertain=0 slot=%u bank=%u tlb=%u disabled=%u native_idle_readback=1 data=0 audio_output=0\n",
   o.state.slot,o.state.bank,o.state.disabled.tlb_synchronized,o.state.disabled.disabled_verified);
  release_safe();unlock();return true;
 }
 
-extern "C" uint64_t zizhan_audio_dma_map_address(void){return owner.state.installed&&owner.lock_held?(owner.base|(1ull<<32)):0;}
-extern "C" void zizhan_audio_dma_map_retain(void){if(owner.state.attempted&&!owner.state.restored){IOLog("ZIZHAN_AUDIO_DMAMAP: RETAIN until-reset phase=%u installed=%u tables=1 audio_output=0\n",owner.state.phase,owner.state.installed);unlock();}}
+extern "C" uint64_t zizhan_audio_dma_map_address(void){return owner.active&&owner.state.installed?(owner.base|(1ull<<32)):0;}
+extern "C" void zizhan_audio_dma_map_retain(void){if(owner.state.attempted&&!owner.state.restored){owner.active=0;IOLog("ZIZHAN_AUDIO_DMAMAP: RETAIN until-reset phase=%u installed=%u tables=1 audio_output=0\n",owner.state.phase,owner.state.installed);unlock();}}

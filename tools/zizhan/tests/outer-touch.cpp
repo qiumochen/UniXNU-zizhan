@@ -190,12 +190,66 @@ static void test_pocket_guard_quick_bar_and_dim_blit() {
   assert(row0[0] == 0xff204060u && row0[1] == 0xff204060u);
 }
 
+static void test_swipe_up_wake_and_chin_home() {
+  Tracker t{};
+  configure_sysinfo(t, 10800, 25200);
+  const uint8_t up_f0[8] = {0x33, 0x01, 0, 0, 0, 0, 0, 0};
+
+  auto mk = [](uint8_t op, uint32_t rx, uint32_t ry, uint8_t out[8]) {
+    out[0] = op; out[1] = 0x01;
+    out[2] = uint8_t(rx); out[3] = uint8_t(rx >> 8);
+    out[4] = uint8_t(ry); out[5] = uint8_t(ry >> 8);
+    out[6] = 0x30; out[7] = 0x00;
+  };
+
+  /* 1. Pocket-guarded upward swipe on Cover Clock is blocked */
+  uint8_t dn[8], mv[8];
+  mk(0x13, 5400, 21000, dn);
+  mk(0x23, 5450, 15000, mv);
+  (void)step(t, dn, MapMode::ClockWakeOnly, 1000, true, true);
+  (void)step(t, mv, MapMode::ClockWakeOnly, 1080, true, true);
+  StepResult s = step(t, up_f0, MapMode::ClockWakeOnly, 1150, true, true);
+  assert(!s.toggle_desktop && s.pocket_blocked && t.pocket_blocks == 1 && t.swipe_wakes == 0);
+
+  /* 2. Downward or horizontal swipes on Cover Clock do NOT wake */
+  mk(0x13, 5400, 15000, dn);
+  mk(0x23, 5400, 21000, mv);
+  (void)step(t, dn, MapMode::ClockWakeOnly, 2000, true, false);
+  (void)step(t, mv, MapMode::ClockWakeOnly, 2080, true, false);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 2150, true, false);
+  assert(!s.toggle_desktop && t.swipe_wakes == 0);
+
+  mk(0x13, 2000, 18000, dn);
+  mk(0x23, 8500, 15500, mv);
+  (void)step(t, dn, MapMode::ClockWakeOnly, 2500, true, false);
+  (void)step(t, mv, MapMode::ClockWakeOnly, 2580, true, false);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 2650, true, false);
+  assert(!s.toggle_desktop && t.swipe_wakes == 0);
+
+  /* 3. Clean upward swipe on Cover Clock wakes directly into 2:1 Cover Desktop */
+  mk(0x13, 5400, 21000, dn);
+  mk(0x23, 5420, 15500, mv);
+  (void)step(t, dn, MapMode::ClockWakeOnly, 3000, true, false);
+  (void)step(t, mv, MapMode::ClockWakeOnly, 3090, true, false);
+  s = step(t, up_f0, MapMode::ClockWakeOnly, 3160, true, false);
+  assert(s.toggle_desktop && !s.pocket_blocked && t.swipe_wakes == 1 && t.mode_toggles == 1);
+
+  /* 4. Upward swipe from lower chin (y=22000 -> 16000) in DesktopViewport triggers Home/Unlock */
+  mk(0x13, 5400, 22000, dn);
+  mk(0x23, 5380, 16000, mv);
+  (void)step(t, dn, MapMode::DesktopViewport, 4000, true, false);
+  (void)step(t, mv, MapMode::DesktopViewport, 4090, true, false);
+  s = step(t, up_f0, MapMode::DesktopViewport, 4170, true, false);
+  assert(s.bar_action == BarAction::Home && !s.toggle_clock && t.swipe_homes == 1 && t.bar_actions == 1);
+}
+
 int main() {
   test_decode_super_and_standard();
   test_viewport_and_edge_swipes();
   test_clock_mode_and_calendar_and_blit();
   test_double_tap_and_lock_pill_toggle();
   test_pocket_guard_quick_bar_and_dim_blit();
+  test_swipe_up_wake_and_chin_home();
   printf("outer-touch: PASS\n");
   return 0;
 }

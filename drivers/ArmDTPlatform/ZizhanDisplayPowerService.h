@@ -133,8 +133,10 @@ extern "C" int zizhan_inner_panel_cover_mute(int muted) {
     if (!cover_muted) {
       if (runtime.state.state == ZizhanDisplayStateOn) {
         uint32_t lvl = 0;
-        if (pong_backlight_level(&lvl) == 0) {
+        if (pong_backlight_level(&lvl) == 0 && lvl > 0) {
           cover_saved_bl = lvl;
+        } else if (!cover_saved_bl) {
+          cover_saved_bl = 307u;
         }
         (void)pong_backlight_set(0, 1000);
         const int dsi = zizhan_dsi_power_sequence(ZizhanDisplayOffCommands, ZizhanDisplayOffWaits, 2, 1);

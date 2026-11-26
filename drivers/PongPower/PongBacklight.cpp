@@ -67,7 +67,9 @@ class PongBacklight : public IOService {
     bool needVerification = false;
     enum Operation { ReadInitial, WriteLevel, ReadVerify } operation = ReadInitial;
     uint32_t savedDma = 0, savedLength = 0, savedTrigger = 0, savedPattern = 0, savedControl = 0;
-    uint32_t level = 0, sending = 0, from = 0, goal = 0;
+    uint32_t level = 0, lastNonZeroLevel = 0, sending = 0, from = 0, goal = 0;
+    uint32_t wakeClampLevel = 0, wakeClamps = 0;
+    uint64_t wakeClampUntilNs = 0;
     uint64_t deadline = 0, classDeadline = 0, fadeStart = 0, fadeDuration = 0, leaseDeadline = 0, busDeadline = 0;
     uint64_t request = 0;
     uint32_t requestedFade = 0, requests = 0, writes = 0, reads = 0;
@@ -271,6 +273,9 @@ class PongBacklight : public IOService {
                 reads++;
                 if (operation == ReadVerify && returned != sending) { fail("DCS brightness readback differs"); return; }
                 level = returned;
+                if (returned > 0) {
+                    __atomic_store_n(&lastNonZeroLevel, returned, __ATOMIC_RELEASE);
+                }
                 if (probe == 1 && operation == ReadInitial) {
                     IOLog("PongBacklight: read-only brightness PASS level=%u max=%u writes=%u\n", level, board.maximum, writes);
                     __atomic_store_n(&stopped, true, __ATOMIC_RELEASE);
@@ -333,12 +338,26 @@ class PongBacklight : public IOService {
 public:
     bool readLevelForPower(uint32_t *answer) {
         if (!answer || !published || __atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return false;
-        *answer = __atomic_load_n(&level, __ATOMIC_ACQUIRE);
+        uint32_t cur = __atomic_load_n(&level, __ATOMIC_ACQUIRE);
+        if (!cur) {
+            /* CoreBrightness fades brightness to 0 milliseconds before RequestPowerChange(0);
+             * preserve the real pre-fade DBV so unfold/wake restores the actual ambient/slider level. */
+            const uint32_t prev = __atomic_load_n(&lastNonZeroLevel, __ATOMIC_ACQUIRE);
+            if (prev) cur = prev;
+        }
+        *answer = cur;
         return true;
     }
     bool setLevelForPower(uint32_t target, uint32_t timeout_ms) {
         if (!published || __atomic_load_n(&stopped, __ATOMIC_ACQUIRE)) return false;
         target = clamped(target);
+        if (target > 0) {
+            __atomic_store_n(&lastNonZeroLevel, target, __ATOMIC_RELEASE);
+            __atomic_store_n(&wakeClampLevel, target, __ATOMIC_RELEASE);
+            __atomic_store_n(&wakeClampUntilNs, nowNs() + 2500000000ULL, __ATOMIC_RELEASE);
+        } else {
+            __atomic_store_n(&wakeClampUntilNs, 0ULL, __ATOMIC_RELEASE);
+        }
         const uint64_t deadline = nowNs() + uint64_t(timeout_ms) * 1000000ULL;
         __atomic_add_fetch(&requests, 1u, __ATOMIC_RELAXED);
         __atomic_store_n(&request, (1ULL << 63) | (uint64_t(target) << 16), __ATOMIC_RELEASE);
@@ -419,7 +438,16 @@ public:
         __atomic_store_n(&requestedFade, (uint32_t)ms, __ATOMIC_RELAXED);
         if (!brightness) return kIOReturnSuccess;
         const int64_t value = (int64_t)brightness->unsigned64BitValue();
-        const uint32_t target = value < 0 ? 0 : clamped(value > board.maximum ? board.maximum : (uint32_t)value);
+        uint32_t target = value < 0 ? 0 : clamped(value > board.maximum ? board.maximum : (uint32_t)value);
+        /* Suppress CoreBrightness's post-wake 50% (1024) burst right after power-on so unfolding
+         * in indoor lighting stays smoothly at the restored pre-sleep/ALS level instead of flashing bright. */
+        const uint64_t clampUntil = __atomic_load_n(&wakeClampUntilNs, __ATOMIC_ACQUIRE);
+        const uint32_t clampTarget = __atomic_load_n(&wakeClampLevel, __ATOMIC_ACQUIRE);
+        if (target > 0 && clampUntil && nowNs() < clampUntil && clampTarget > 0 && target > clampTarget) {
+            if (__atomic_fetch_add(&wakeClamps, 1u, __ATOMIC_RELAXED) < 16)
+                IOLog("PongBacklight: suppressed post-wake burst %u -> %u\n", target, clampTarget);
+            target = clampTarget;
+        }
         if (probe == 3 && !target) {
             if (__atomic_fetch_add(&rejectedZero, 1u, __ATOMIC_RELAXED) < 8)
                 IOLog("PongBacklight: native qualification rejected zero brightness; current level retained\n");

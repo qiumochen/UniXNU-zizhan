@@ -57,6 +57,7 @@ enum : uint32_t {
   kDoubleTapMinMs = 40,
   kDoubleTapMaxMs = 500,
   kTapHoldMaxMs = 350,
+  kSwipeMaxMs = 900,
   kNormMax = 65535,
 };
 
@@ -104,7 +105,10 @@ struct Tracker {
   uint32_t last_tap_y = 0;
   uint32_t tap_down_x = 0;
   uint32_t tap_down_y = 0;
+  uint32_t cur_raw_x = 0;
+  uint32_t cur_raw_y = 0;
   bool tap_candidate = false;
+  bool swipe_candidate = false;
   bool pill_armed = false;
   BarAction armed_bar = BarAction::None;
   uint32_t events = 0;
@@ -113,6 +117,8 @@ struct Tracker {
   uint32_t mode_toggles = 0;
   uint32_t pocket_blocks = 0;
   uint32_t bar_actions = 0;
+  uint32_t swipe_wakes = 0;
+  uint32_t swipe_homes = 0;
 };
 
 inline bool contact_type_valid(uint8_t touch_type) {
@@ -276,6 +282,7 @@ inline void release_all(Tracker &t, StepResult &out) {
   t.down_mask = 0;
   t.desktop_mask = 0;
   t.tap_candidate = false;
+  t.swipe_candidate = false;
   t.pill_armed = false;
   t.armed_bar = BarAction::None;
 }
@@ -312,11 +319,19 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
     t.desktop_mask = uint16_t(t.desktop_mask & ~bit);
     if (d.finger == 0u) {
       if (was_down && t.down_mask == 0u && allow_toggle) {
-        if (mode == MapMode::ClockWakeOnly && t.tap_candidate && now_ms > 0) {
-          const uint64_t held = now_ms >= t.tap_down_ms ? (now_ms - t.tap_down_ms) : 0ull;
-          if (held <= kTapHoldMaxMs) {
-            const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
-            const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
+        const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
+        const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
+        const uint64_t held = (now_ms > 0 && now_ms >= t.tap_down_ms) ? (now_ms - t.tap_down_ms) : 0ull;
+        const uint32_t dy_up = (t.swipe_candidate && t.tap_down_y > t.cur_raw_y)
+            ? (t.tap_down_y - t.cur_raw_y)
+            : 0u;
+        const uint32_t dx_abs = t.swipe_candidate ? abs_diff32(t.cur_raw_x, t.tap_down_x) : 0u;
+        const bool valid_swipe_up = t.swipe_candidate &&
+            (now_ms == 0 || held <= kSwipeMaxMs) &&
+            dy_up >= ry_max / 14u &&
+            dy_up > dx_abs;
+        if (mode == MapMode::ClockWakeOnly) {
+          if (t.tap_candidate && now_ms > 0 && held <= kTapHoldMaxMs) {
             if (t.last_tap_ms != 0 &&
                 now_ms >= t.last_tap_ms + kDoubleTapMinMs &&
                 now_ms - t.last_tap_ms <= kDoubleTapMaxMs &&
@@ -335,20 +350,34 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
               t.last_tap_x = t.tap_down_x;
               t.last_tap_y = t.tap_down_y;
             }
+          } else if (valid_swipe_up) {
+            if (pocket_near) {
+              r.pocket_blocked = true;
+              ++t.pocket_blocks;
+            } else {
+              r.toggle_desktop = true;
+              ++t.mode_toggles;
+              ++t.swipe_wakes;
+            }
+            t.last_tap_ms = 0;
           }
-        } else if (mode == MapMode::DesktopViewport && t.armed_bar != BarAction::None) {
-          const uint64_t held = (now_ms > 0 && now_ms >= t.tap_down_ms) ? (now_ms - t.tap_down_ms) : 0ull;
-          if (now_ms == 0 || held <= 600ull) {
+        } else if (mode == MapMode::DesktopViewport) {
+          if (t.armed_bar != BarAction::None && (now_ms == 0 || held <= 600ull)) {
             r.bar_action = t.armed_bar;
             ++t.bar_actions;
             if (t.armed_bar == BarAction::ClockLock) {
               r.toggle_clock = true;
               ++t.mode_toggles;
             }
+          } else if (valid_swipe_up) {
+            r.bar_action = BarAction::Home;
+            ++t.bar_actions;
+            ++t.swipe_homes;
           }
         }
       }
       t.tap_candidate = false;
+      t.swipe_candidate = false;
       t.pill_armed = false;
       t.armed_bar = BarAction::None;
     }
@@ -359,6 +388,7 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
     const bool already_down = (t.down_mask & bit) != 0u;
     if (!already_down && d.finger != 0u) {
       t.tap_candidate = false;
+      t.swipe_candidate = false;
       t.pill_armed = false;
       t.armed_bar = BarAction::None;
     }
@@ -367,18 +397,25 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
         t.down_mask = uint16_t(t.down_mask | bit);
         ++t.hud_taps;
         r.refresh_hud = !pocket_near;
-        if (d.finger == 0u && t.down_mask == 1u && allow_toggle && now_ms > 0) {
-          t.tap_candidate = true;
+        if (d.finger == 0u && t.down_mask == 1u && allow_toggle) {
+          t.tap_candidate = (now_ms > 0);
+          t.swipe_candidate = true;
           t.tap_down_ms = now_ms;
           t.tap_down_x = d.raw_x;
           t.tap_down_y = d.raw_y;
+          t.cur_raw_x = d.raw_x;
+          t.cur_raw_y = d.raw_y;
         }
-      } else if (d.finger == 0u && t.tap_candidate) {
-        const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
-        const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
-        if (abs_diff32(d.raw_x, t.tap_down_x) > rx_max / 12u ||
-            abs_diff32(d.raw_y, t.tap_down_y) > ry_max / 12u) {
-          t.tap_candidate = false;
+      } else if (d.finger == 0u) {
+        t.cur_raw_x = d.raw_x;
+        t.cur_raw_y = d.raw_y;
+        if (t.tap_candidate) {
+          const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
+          const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
+          if (abs_diff32(d.raw_x, t.tap_down_x) > rx_max / 12u ||
+              abs_diff32(d.raw_y, t.tap_down_y) > ry_max / 12u) {
+            t.tap_candidate = false;
+          }
         }
       }
       return r;
@@ -393,10 +430,22 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
         r.ops[r.count++] = PostOp{1u, d.finger, xn, yn};
         ++t.posted;
         if (d.finger == 0u) {
+          t.swipe_candidate = false;
           t.pill_armed = false;
           t.armed_bar = BarAction::None;
         }
       } else {
+        const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
+        const uint32_t vp_bottom = uint32_t((uint64_t(kDesktopY0 + kDesktopH) * ry_max) / kPanelH);
+        const bool in_lower_chin = (allow_toggle && d.finger == 0u && t.down_mask == 1u && d.raw_y >= vp_bottom);
+        if (in_lower_chin) {
+          t.swipe_candidate = true;
+          t.tap_down_ms = now_ms;
+          t.tap_down_x = d.raw_x;
+          t.tap_down_y = d.raw_y;
+          t.cur_raw_x = d.raw_x;
+          t.cur_raw_y = d.raw_y;
+        }
         const BarAction hit = (allow_toggle && d.finger == 0u && t.down_mask == 1u)
             ? bar_hit_test(t, d.raw_x, d.raw_y)
             : BarAction::None;
@@ -419,10 +468,16 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
       t.last_y[d.finger] = yn;
       r.ops[r.count++] = PostOp{2u, d.finger, xn, yn};
       ++t.posted;
-    } else if (d.finger == 0u && t.armed_bar != BarAction::None &&
-               bar_hit_test(t, d.raw_x, d.raw_y) != t.armed_bar) {
-      t.armed_bar = BarAction::None;
-      t.pill_armed = false;
+    } else if (d.finger == 0u) {
+      if (t.swipe_candidate) {
+        t.cur_raw_x = d.raw_x;
+        t.cur_raw_y = d.raw_y;
+      }
+      if (t.armed_bar != BarAction::None &&
+          bar_hit_test(t, d.raw_x, d.raw_y) != t.armed_bar) {
+        t.armed_bar = BarAction::None;
+        t.pill_armed = false;
+      }
     }
   }
   return r;

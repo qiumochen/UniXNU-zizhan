@@ -1174,6 +1174,62 @@ static void outer_touch_worker(void *, wait_result_t) {
           IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth3 stage=4 clock-pill toggles=%u active_view=%u\n",
                 tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
         }
+      } else if (outer_touch_synth == 4u) {
+        /* Cover Clock swipe-up wake + lower-chin swipe-up Home/Unlock self-test:
+         * stage 1 (3 s): pocket near=1 -> swipe-up blocked (stays active_view=1).
+         * stage 2 (7 s): pocket near=0 -> swipe-up wakes Desktop (active_view=2, swipe_wakes=1).
+         * stage 3 (14 s): lower-chin swipe-up (y=2200 -> 1650) triggers Home/Unlock swipe (swipe_homes=1).
+         * stage 4 (21 s): tap CLOCK pill -> returns to Clock standby (active_view=1). */
+        auto swipe_panel = [&](uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1) {
+          const uint32_t rx0 = uint32_t((uint64_t(x0) * tracker.max_x) / zizhan_outer_touch::kPanelW);
+          const uint32_t ry0 = uint32_t((uint64_t(y0) * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          const uint32_t rxm = (rx0 + uint32_t((uint64_t(x1) * tracker.max_x) / zizhan_outer_touch::kPanelW)) / 2u;
+          const uint32_t rym = (ry0 + uint32_t((uint64_t(y1) * tracker.max_y) / zizhan_outer_touch::kPanelH)) / 2u;
+          const uint32_t rx1 = uint32_t((uint64_t(x1) * tracker.max_x) / zizhan_outer_touch::kPanelW);
+          const uint32_t ry1 = uint32_t((uint64_t(y1) * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          uint8_t d1[8], m1[8], m2[8], u1[8];
+          encode_pt(0x13u, rx0, ry0, d1);
+          encode_pt(0x23u, rxm, rym, m1);
+          encode_pt(0x23u, rx1, ry1, m2);
+          encode_pt(0x33u, rx1, ry1, u1);
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOSleep(35);
+          dispatch_step(zizhan_outer_touch::step(tracker, m1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOSleep(35);
+          dispatch_step(zizhan_outer_touch::step(tracker, m2, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOSleep(35);
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+        };
+        if (synth_stage == 0u && elapsed_ms >= 3000ull) {
+          synth_stage = 1u;
+          zizhan_slpi_set_prox_sim(1);
+          swipe_panel(540u, 2100u, 540u, 1500u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth4 stage=1 pocket-swipe blocks=%u active_view=%u\n",
+                tracker.pocket_blocks, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 1u && elapsed_ms >= 7000ull) {
+          synth_stage = 2u;
+          zizhan_slpi_set_prox_sim(-1);
+          swipe_panel(540u, 2100u, 540u, 1500u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth4 stage=2 swipe-wake toggles=%u swipe_wakes=%u active_view=%u\n",
+                tracker.mode_toggles, tracker.swipe_wakes, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 2u && elapsed_ms >= 14000ull) {
+          synth_stage = 3u;
+          swipe_panel(540u, 2250u, 540u, 1600u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth4 stage=3 chin-home swipe_homes=%u home_swipes=%u\n",
+                tracker.swipe_homes, home_swipes);
+        } else if (synth_stage == 3u && elapsed_ms >= 21000ull) {
+          synth_stage = 4u;
+          const uint32_t rx = uint32_t((640ull * tracker.max_x) / zizhan_outer_touch::kPanelW);
+          const uint32_t ry = uint32_t((1930ull * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          uint8_t d1[8], u1[8];
+          encode_pt(0x13u, rx, ry, d1);
+          encode_pt(0x33u, rx, ry, u1);
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOSleep(55);
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth4 stage=4 clock-pill toggles=%u active_view=%u\n",
+                tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        }
       }
       IOSleep(8);
     }
@@ -1191,8 +1247,9 @@ static void outer_touch_worker(void *, wait_result_t) {
     }
     const unsigned end_irq = irq.r(4) & 1u;
     rst.w(0, s_rst); rst.w(4, s_rst_io); irq.w(0, s_irq);
-    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u toggles=%u blocks=%u bar=%u vol=%u home=%u restored=%u irq_end=%u\n",
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u toggles=%u swipes=%u/%u blocks=%u bar=%u vol=%u home=%u restored=%u irq_end=%u\n",
           tracker.events, tracker.posted, tracker.hud_taps, tracker.mode_toggles,
+          tracker.swipe_wakes, tracker.swipe_homes,
           tracker.pocket_blocks, tracker.bar_actions, vol_clicks, home_swipes, (r1 && r2 && r3) ? 1u : 0u, end_irq);
   }
 }

@@ -46,6 +46,8 @@ struct Domain {
 static Domain domains[]={{0,4,2016000},{4,3,2745600},{7,1,2995200}};
 static Domain l3{0,0,0};
 static IOMemoryMap *pdmem_map;
+static volatile uint32_t gSleepFloor;
+static unsigned gL3Mode = 1;
 static unsigned thermalLevel()
 {
     if(!&pong_cpu_thermal_level)return 0;
@@ -91,6 +93,13 @@ static void setTop(Domain &d)
     for(unsigned i=0;i<d.levels;++i)if(d.khz[i] && d.khz[i]<=d.cap_khz &&
         (!thermal || d.khz[i]<=thermal))top=i;
     if(top!=40 && d.regs[0x320/4]!=top){*d.pdmem=top;d.regs[0x320/4]=top;}
+    d.down=0;
+}
+static void setFloor(Domain &d)
+{
+    unsigned low=40;
+    for(unsigned i=0;i<d.levels;++i)if(d.khz[i]){low=i;break;}
+    if(low!=40 && d.regs[0x320/4]!=low){*d.pdmem=low;d.regs[0x320/4]=low;}
     d.down=0;
 }
 static uint64_t ticksToNs(uint64_t t){uint64_t ns=0;absolutetime_to_nanoseconds(t,&ns);return ns;}
@@ -201,6 +210,7 @@ static void worker(void *,wait_result_t)
     unsigned live=0;for(unsigned i=0;i<3;++i)live+=prepare(domains[i],i);
     if(!live){IOLog("Pong CPU: EPSS skipped: no valid native LUT\n");stop();}
     unsigned l3Mode=1;PE_parse_boot_argn("pong_l3",&l3Mode,sizeof l3Mode);
+    gL3Mode=l3Mode;
     if(!prepareL3())IOLog("Pong CPU: L3 not voted (unmapped, invalid LUT or disabled)\n");
     unsigned probeOn=0;PE_parse_boot_argn("pong_cpu_probe",&probeOn,sizeof probeOn);
     if(probeOn)probe();
@@ -217,6 +227,11 @@ static void worker(void *,wait_result_t)
     bool l3Thermal=false;
     unsigned lastThermal=0;
     for(unsigned tick=0;;++tick) {
+        if(__atomic_load_n(&gSleepFloor,__ATOMIC_ACQUIRE)) {
+            IOSleep(100);
+            stamp=mach_absolute_time();
+            continue;
+        }
         // 8 ms: a touch is seen within a frame or so; the load policy below still runs every 32 ms
         IOSleep(8);
         if(boostMs && &pong_touch_activity && pong_touch_activity!=touches) {
@@ -345,4 +360,17 @@ static void start()
     if(result==KERN_SUCCESS)thread_deallocate(thread);
     else IOLog("Pong CPU: optional EPSS worker unavailable %d\n",result);
 }
+}
+extern "C" void pong_cpu_policy_set_sleep(int asleep)
+{
+    using namespace PongCpuPolicy;
+    if(asleep) {
+        __atomic_store_n(&gSleepFloor,1u,__ATOMIC_RELEASE);
+        for(auto &d:domains)if(d.live)setFloor(d);
+        if(l3.live)voteL3(0u);
+        __asm__ volatile("dsb oshst":::"memory");
+    } else {
+        if(gL3Mode==1 && l3.live && l3.levels>0)voteL3(l3.levels-1);
+        __atomic_store_n(&gSleepFloor,0u,__ATOMIC_RELEASE);
+    }
 }

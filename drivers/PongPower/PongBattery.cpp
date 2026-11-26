@@ -69,7 +69,7 @@ class AppleSmartBattery : public IOPMPowerSource {
     IOSimpleLock *ringLock = nullptr;
     struct {uint32_t length; uint8_t data[kMessage];} ring[kRing];
     uint32_t ringHead = 0, ringCount = 0;
-    volatile uint32_t channelUp = 0, channelChanged = 0;
+    volatile uint32_t channelUp = 0, channelChanged = 0, forceRefresh = 0;
     bool wasUp = false, published = false, healthDiagLogged = false;
     uint8_t boardGet = 0;
     int bootVoltageMv = 0;
@@ -122,6 +122,7 @@ class AppleSmartBattery : public IOPMPowerSource {
         for (unsigned i = 0; i < 7; ++i) native_battery_raw[i] = (bm.valid >> fields[i]) & 1 ? bm.value[fields[i]] : -999999;
         native_battery_raw[7] = (int32_t)bm.valid;
         native_battery_raw[8] = bm.last_timeout;
+        native_battery_raw[9] = (bm.valid >> BmCharge) & 1 ? bm.value[BmCharge] : -999999;
         static const int charger[13] = {BmUsbOnline, BmUsbType, BmUsbAdapter, BmRealType, BmUsbLimit, BmUsbMax, BmUsbVoltage, BmUsbCurrent,
                                         BmStatus, BmChargeType, BmThermalLevel, BmChargeCurrent, BmPowerMax};
         static const int milli[13] = {0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0};
@@ -296,6 +297,11 @@ class AppleSmartBattery : public IOPMPowerSource {
             if (!up && self->wasUp) {self->setBatteryInstalled(false);self->setExternalConnected(false);self->setIsCharging(false);self->updateStatus();self->request->cancelTimeout(); sheng_battmgr_init(&self->bm); self->bm.sdp_limit_ua = self->sdpLimit; self->bm.board_get = self->boardGet;}
             self->wasUp = up;
         }
+        const uint32_t forced = __atomic_exchange_n(&self->forceRefresh, 0u, __ATOMIC_ACQ_REL);
+        if (forced && self->wasUp) {
+            sheng_battmgr_refresh(&self->bm, forced > 1u ? 1 : 0);
+            self->handle(BmAnswer);
+        }
         for (;;) {
             uint8_t data[kMessage];
             uint32_t length = 0;
@@ -352,8 +358,30 @@ public:
         native_battery_stats[0] = 2;
         return true;
     }
+    int triggerImmediateRefresh(int slow) {
+        if (!inbox || !__atomic_load_n(&channelUp, __ATOMIC_ACQUIRE)) return -1;
+        __atomic_store_n(&forceRefresh, slow ? 2u : 1u, __ATOMIC_RELEASE);
+        inbox->interruptOccurred(nullptr, nullptr, 0);
+        return 0;
+    }
 };
 OSDefineMetaClassAndStructors(AppleSmartBattery, IOPMPowerSource)
+static AppleSmartBattery *gBatteryInstance;
+
+extern "C" int pong_battery_request_refresh(int slow) {
+    return gBatteryInstance ? gBatteryInstance->triggerImmediateRefresh(slow) : -1;
+}
+
+extern "C" int pong_battery_gauge_snapshot(int32_t *charge_uah, int32_t *volt_mv, int32_t *curr_ma, uint32_t *cycles) {
+    if (native_battery_stats[0] < 4) return -1;
+    const int32_t q = __atomic_load_n(&native_battery_raw[9], __ATOMIC_ACQUIRE);
+    if (q <= 0) return -1;
+    if (charge_uah) *charge_uah = q;
+    if (volt_mv) *volt_mv = __atomic_load_n(&native_battery_stats[2], __ATOMIC_ACQUIRE);
+    if (curr_ma) *curr_ma = __atomic_load_n(&native_battery_stats[3], __ATOMIC_ACQUIRE);
+    if (cycles) *cycles = static_cast<uint32_t>(__atomic_load_n(&native_battery_stats[6], __ATOMIC_ACQUIRE));
+    return 0;
+}
 
 // Called by BatteryProbe.cpp once this file's classes are registered.
 extern "C" void sheng_battery_start(void) {
@@ -369,5 +397,6 @@ extern "C" void sheng_battery_start(void) {
         battery->release();
         return;
     }
+    gBatteryInstance = battery;
     battery->release();  // the platform's attachment keeps it
 }

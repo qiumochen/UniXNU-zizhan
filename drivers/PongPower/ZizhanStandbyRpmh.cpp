@@ -31,9 +31,11 @@ extern "C" int zizhan_display_power_state(void);
 namespace {
 constexpr uint64_t kCmdDb = 0x80860000, kCmdDbSize = 0x20000, kRsc = 0x17a20000, kRscSize = 0x10000;
 constexpr unsigned kTcsBase = 0xd00, kTcsStride = 0x2a0, kCmdStride = 20, kTcsCount = 7;
+IOLock *gStandbyLock;
+bool gReady, gSleepActive;
 uint8_t *gDb;
 QcomRpmhResource gCx, gMx;
-uint32_t gTarget, gDump, gBw, gBwSec = 120;
+uint32_t gTarget, gDump, gBw, gBwSec = 120, gSleepCx = 32;
 struct Bus { const char *name; uint32_t addr, boot, wake, unit; uint16_t width; bool have, is_low; };
 Bus gBus[4] = {
     {"MM0", 0, 0, 0, 0, 32, false, false},
@@ -176,9 +178,9 @@ void applyBusMask(unsigned low_bits, const char *reason) {
 
 uint64_t us() { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000; }
 
-void apply(bool low) {
+void applyTarget(bool low, uint32_t targetLevel) {
   uint32_t cx = 0, mx = 0;
-  const uint32_t level = low ? gTarget : 0xffffffffu;
+  const uint32_t level = low ? targetLevel : 0xffffffffu;
   const bool found = !qcom_rpmh_level_index(&gCx, level, &cx) && !qcom_rpmh_level_index(&gMx, level, &mx);
   const uint64_t t0 = us();
   bool ok = found;
@@ -189,11 +191,28 @@ void apply(bool low) {
   if (gDump) { dump(low ? "standby" : "resume"); }
 }
 
+void apply(bool low) {
+  applyTarget(low, gTarget);
+}
+
+bool ensureReady() {
+  if (gReady) return true;
+  if (!readDb() || qcom_cmd_db_find(gDb, kCmdDbSize, "cx.lvl", &gCx) || qcom_cmd_db_find(gDb, kCmdDbSize, "mx.lvl", &gMx) ||
+      !gCx.level_count || !gMx.level_count) {
+    return false;
+  }
+  learnBus();
+  gReady = true;
+  return true;
+}
+
 void worker(void *, wait_result_t) {
   thread_set_thread_name(current_thread(), "zizhan_standby");
   IOSleep(30000);   // the device log (a 2 MiB console ring) loses early boot; start and report once boot is over
-  if (!readDb() || qcom_cmd_db_find(gDb, kCmdDbSize, "cx.lvl", &gCx) || qcom_cmd_db_find(gDb, kCmdDbSize, "mx.lvl", &gMx) ||
-      !gCx.level_count || !gMx.level_count) {
+  if (gStandbyLock) IOLockLock(gStandbyLock);
+  const bool ok = ensureReady();
+  if (gStandbyLock) IOLockUnlock(gStandbyLock);
+  if (!ok) {
     IOLog("ZIZHAN_STANDBY_RPMH: FAIL command database\n");
     return;
   }
@@ -202,7 +221,6 @@ void worker(void *, wait_result_t) {
   for (unsigned i = 0, k = 0; i < gMx.level_count; ++i) { k += snprintf(mx + k, sizeof mx - k, " %u", unsigned(gMx.levels[i])); }
   IOLog("ZIZHAN_STANDBY_RPMH: RUNNING target=%u bw=%u bw_s=%u cx %05x levels%s; mx %05x levels%s\n",
         gTarget, gBw, gBwSec, gCx.address, cx, gMx.address, mx);
-  if (gBw) { learnBus(); }
   if (gDump) { dump("boot"); }   // nothing in this kernel writes the SLEEP/WAKE slots, so they still hold the firmware's sets
   const unsigned phaseTicks = gBwSec * 2u;   // 500 ms loop period
   unsigned offFor = 0;
@@ -252,10 +270,30 @@ void worker(void *, wait_result_t) {
 }
 }  // namespace
 
+extern "C" void zizhan_standby_rpmh_sleep(int low) {
+  if (!gStandbyLock) gStandbyLock = IOLockAlloc();
+  if (!gStandbyLock) return;
+  IOLockLock(gStandbyLock);
+  if (ensureReady()) {
+    if (low && !gSleepActive) {
+      applyBusMask(3u, "system-sleep");
+      if (gSleepCx > 0) applyTarget(true, gSleepCx);
+      gSleepActive = true;
+    } else if (!low && gSleepActive) {
+      if (gSleepCx > 0) applyTarget(false, gSleepCx);
+      applyBusMask(0u, "system-wake");
+      gSleepActive = false;
+    }
+  }
+  IOLockUnlock(gStandbyLock);
+}
+
 extern "C" void zizhan_standby_rpmh_start(void) {
+  if (!gStandbyLock) gStandbyLock = IOLockAlloc();
   PE_parse_boot_argn("zizhan_standby_cx", &gTarget, sizeof gTarget);
   PE_parse_boot_argn("zizhan_rpmh_dump", &gDump, sizeof gDump);
   PE_parse_boot_argn("zizhan_standby_bw", &gBw, sizeof gBw);
+  PE_parse_boot_argn("zizhan_sleep_cx", &gSleepCx, sizeof gSleepCx);
   uint32_t sec = 0;
   if (PE_parse_boot_argn("zizhan_standby_bw_s", &sec, sizeof sec) && sec >= 30 && sec <= 300) {
     gBwSec = sec;

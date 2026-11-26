@@ -32,6 +32,7 @@
 #include "ZizhanThermalService.h"
 #include "ZizhanPowerAudit.h"
 #include "ZizhanDisplayPowerService.h"
+#include "ZizhanSleep.h"
 
 extern "C" bool pong_cpu_start(IOService *platform);
 
@@ -57,6 +58,11 @@ int zizhan_slpi_hinge_closed(void) { return -1; }
 int32_t zizhan_slpi_hinge_deg_milli(void) { return -1; }
 void zizhan_slpi_set_hinge_sim(int) {}
 volatile int32_t native_battery_stats[16] = {};
+void zizhan_standby_rpmh_sleep(int) {}
+int pong_battery_request_refresh(int) { return -1; }
+int pong_battery_gauge_snapshot(int32_t *, int32_t *, int32_t *, uint32_t *) { return -1; }
+int zizhan_audio_sleep_busy(void) { return 0; }
+int zizhan_cam_sleep_busy(void) { return 0; }
 }
 #endif
 #if XNU_PONG_WIFI
@@ -279,6 +285,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   zizhan_bt_probe::start();
   zizhan_top::start();          // default off; zizhan_top=1 logs the busiest processes every 30 s (POWER-03)
   zizhan_cpu_offline::start();  // daily default: CPU 2..7 offline while the display is off (zizhan_cpu_offline=0 disables)
+  zizhan_sleep::start(provider); // POWER-02: IOPMrootDomain platform sleep (zizhan_sleep=1 / platform-sleep=1)
   zizhan_outer_probe::start();
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack

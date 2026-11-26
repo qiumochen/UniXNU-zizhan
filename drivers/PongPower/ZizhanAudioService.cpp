@@ -238,3 +238,11 @@ extern "C" void zizhan_audio_service_probe(void){
   else IOLog("ZIZHAN_AUDIO_CAP_SELFTEST: SKIP prm=%u needs=42\n",prm);
  }
 }
+
+extern "C" int zizhan_audio_sleep_busy(void){
+ auto c=control();
+ if(c&&(c->state&ZizhanAudioOutputRunning))return 1;
+ auto cap=capture_control();
+ if(cap&&(cap->state&ZizhanAudioCapRunning))return 1;
+ return 0;
+}

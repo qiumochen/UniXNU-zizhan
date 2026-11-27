@@ -118,6 +118,30 @@ static void test_zizhan_sleep_plan(void)
     assert(zizhan_autosleep_due(1, 0, 0, 1, 0, 0, 10u, 4u) == 0); /* audio busy holds off */
     assert(zizhan_autosleep_due(1, 0, 1, 0, 0, 0, 10u, 4u) == 0); /* legacy A/B hold */
     assert(zizhan_autosleep_due(0, 0, 0, 0, 0, 0, 10u, 4u) == 0); /* display on */
+
+    /* POWER-08: 250 ms sleep tick cadence (40 ticks = 10 s watchdog keepalive) */
+    assert(armcpu_sleep_tick_interval(250u, 19200000ull) == 4800000ull);
+    assert(zizhan_sleep_tick_plan(0u, 250u, 0, 0, 0, &ping) == ZizhanWakeNone && ping == 1);
+    assert(zizhan_sleep_tick_plan(20u, 250u, 0, 0, 0, &ping) == ZizhanWakeNone && ping == 0);
+    assert(zizhan_sleep_tick_plan(40u, 250u, 0, 0, 0, &ping) == ZizhanWakeNone && ping == 1);
+
+    /* POWER-08: Outer DSI1 panel target state & DCS FIFO word encoding */
+    assert(zizhan_outer_panel_wanted(0, 0, 1, 0) == 1); /* disabled -> keep UEFI state */
+    assert(zizhan_outer_panel_wanted(1, 0, 0, 1) == 1); /* probe active -> keep on */
+    assert(zizhan_outer_panel_wanted(1, 0, 0, 0) == 0); /* unfolded awake -> outer OFF */
+    assert(zizhan_outer_panel_wanted(1, 0, 1, 0) == 0); /* unfolded asleep -> outer OFF */
+    assert(zizhan_outer_panel_wanted(1, 1, 0, 0) == 1); /* folded awake -> outer ON */
+    assert(zizhan_outer_panel_wanted(1, 1, 1, 0) == 0); /* folded deep sleep -> outer OFF */
+
+    uint32_t w[2] = {0, 0};
+    zizhan_dsi_dcs_short0_words(0x28u, w);
+    assert(w[0] == 0x80050028u && w[1] == 0u);
+    zizhan_dsi_dcs_short0_words(0x10u, w);
+    assert(w[0] == 0x80050010u && w[1] == 0u);
+    zizhan_dsi_dcs_dbv_words(0u, 1, w);
+    assert(w[0] == 0xc0390003u && w[1] == 0xff000051u);
+    zizhan_dsi_dcs_dbv_words(0x0133u, 1, w);
+    assert(w[0] == 0xc0390003u && w[1] == 0xff330151u);
 }
 
 int main(void)

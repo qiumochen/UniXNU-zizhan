@@ -24,6 +24,7 @@ enum class Kind : uint8_t {
 enum class MapMode : uint8_t {
   ClockWakeOnly = 1,
   DesktopViewport = 2,
+  DesktopFull1to1 = 3,
 };
 
 enum class BarAction : uint8_t {
@@ -32,18 +33,30 @@ enum class BarAction : uint8_t {
   Home = 2,
   ClockLock = 3,
   VolUp = 4,
+  ZoomToggle = 5,
 };
 
 enum : uint32_t {
   kMaxFingers = 10,
   kPanelW = 1080,
   kPanelH = 2520,
+  kInnerW = 2160,
+  kInnerH = 1916,
   kDesktopW = 1080,
   kDesktopH = 958,
   kDesktopY0 = 781,
+  kFullY0 = 220,
+  kFullH = 1916,
+  kFullDefaultCropX = 540,
   kEdgeBezel = 96,
   kBarY0 = 1872,
   kBarY1 = 1992,
+  kZoomPillY0 = 2024,
+  kZoomPillY1 = 2124,
+  kZoomPillX0 = 340,
+  kZoomPillX1 = 740,
+  kFullBarY0 = 2180,
+  kFullBarY1 = 2300,
   kVolDownX0 = 48,
   kVolDownX1 = 264,
   kHomePillX0 = 276,
@@ -119,6 +132,8 @@ struct Tracker {
   uint32_t bar_actions = 0;
   uint32_t swipe_wakes = 0;
   uint32_t swipe_homes = 0;
+  uint32_t zoom_toggles = 0;
+  uint32_t crop_x0 = kFullDefaultCropX;
 };
 
 inline bool contact_type_valid(uint8_t touch_type) {
@@ -206,13 +221,16 @@ inline void configure_sysinfo(Tracker &t, uint16_t scr_x_res, uint16_t scr_y_res
   }
 }
 
-inline bool map_desktop_point(const Tracker &t, uint32_t raw_x, uint32_t raw_y,
-                              bool check_band, uint32_t *out_x, uint32_t *out_y) {
+inline bool map_mode_point(const Tracker &t, MapMode mode, uint32_t raw_x, uint32_t raw_y,
+                           bool check_band, uint32_t *out_x, uint32_t *out_y) {
   const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
   const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
-  const uint32_t vp_y0 = uint32_t((uint64_t(kDesktopY0) * ry_max) / kPanelH);
-  const uint32_t vp_h = uint32_t((uint64_t(kDesktopH) * ry_max) / kPanelH);
-  const uint32_t bezel = uint32_t((uint64_t(kEdgeBezel) * ry_max) / kPanelH);
+  const bool full = (mode == MapMode::DesktopFull1to1);
+  const uint32_t dst_y0 = full ? kFullY0 : kDesktopY0;
+  const uint32_t dst_h = full ? kFullH : kDesktopH;
+  const uint32_t vp_y0 = uint32_t((uint64_t(dst_y0) * ry_max) / kPanelH);
+  const uint32_t vp_h = uint32_t((uint64_t(dst_h) * ry_max) / kPanelH);
+  const uint32_t bezel = uint32_t((uint64_t(full ? 36u : kEdgeBezel) * ry_max) / kPanelH);
   const uint32_t band_lo = vp_y0 > bezel ? (vp_y0 - bezel) : 0u;
   const uint32_t band_hi = vp_y0 + vp_h + bezel;
   if (check_band && (raw_y < band_lo || raw_y > band_hi)) {
@@ -226,7 +244,15 @@ inline bool map_desktop_point(const Tracker &t, uint32_t raw_x, uint32_t raw_y,
     cy = vp_y0 + vp_h;
   }
   cy -= vp_y0;
-  uint32_t xn = uint32_t((uint64_t(cx) * kNormMax + rx_max / 2u) / rx_max);
+  uint32_t xn = 0;
+  if (full) {
+    const uint32_t crop = t.crop_x0 <= (kInnerW - kPanelW) ? t.crop_x0 : kFullDefaultCropX;
+    const uint64_t inner_px_num = uint64_t(crop) * rx_max + uint64_t(cx) * kPanelW;
+    const uint64_t inner_den = uint64_t(kInnerW) * rx_max;
+    xn = inner_den ? uint32_t((inner_px_num * kNormMax + inner_den / 2u) / inner_den) : 0u;
+  } else {
+    xn = uint32_t((uint64_t(cx) * kNormMax + rx_max / 2u) / rx_max);
+  }
   uint32_t yn = vp_h ? uint32_t((uint64_t(cy) * kNormMax + vp_h / 2u) / vp_h) : 0u;
   if (xn > kNormMax) {
     xn = kNormMax;
@@ -239,19 +265,40 @@ inline bool map_desktop_point(const Tracker &t, uint32_t raw_x, uint32_t raw_y,
   return true;
 }
 
+inline bool map_desktop_point(const Tracker &t, uint32_t raw_x, uint32_t raw_y,
+                              bool check_band, uint32_t *out_x, uint32_t *out_y) {
+  return map_mode_point(t, MapMode::DesktopViewport, raw_x, raw_y, check_band, out_x, out_y);
+}
+
 inline uint32_t abs_diff32(uint32_t a, uint32_t b) {
   return a >= b ? (a - b) : (b - a);
 }
 
-inline BarAction bar_hit_test(const Tracker &t, uint32_t raw_x, uint32_t raw_y) {
+inline BarAction bar_hit_test_mode(const Tracker &t, MapMode mode, uint32_t raw_x, uint32_t raw_y) {
   const uint32_t rx_max = t.max_x ? t.max_x : 10800u;
   const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
+  const uint32_t px = uint32_t((uint64_t(raw_x) * kPanelW + rx_max / 2u) / rx_max);
+  const uint32_t py = uint32_t((uint64_t(raw_y) * kPanelH + ry_max / 2u) / ry_max);
+  if (mode == MapMode::DesktopFull1to1) {
+    /* 5-pill bottom bar at y=2180..2300: VOL- (36..224), HOME (240..428), 2:1 ZOOM (444..636), CLOCK (652..840), VOL+ (856..1044) */
+    if (py < kFullBarY0 || py > kFullBarY1) {
+      return BarAction::None;
+    }
+    if (px >= 36u && px <= 224u) return BarAction::VolDown;
+    if (px >= 240u && px <= 428u) return BarAction::Home;
+    if (px >= 444u && px <= 636u) return BarAction::ZoomToggle;
+    if (px >= 652u && px <= 840u) return BarAction::ClockLock;
+    if (px >= 856u && px <= 1044u) return BarAction::VolUp;
+    return BarAction::None;
+  }
+  if (py >= kZoomPillY0 && py <= kZoomPillY1 && px >= kZoomPillX0 && px <= kZoomPillX1) {
+    return BarAction::ZoomToggle;
+  }
   const uint32_t y0 = uint32_t((uint64_t(kBarY0) * ry_max) / kPanelH);
   const uint32_t y1 = uint32_t((uint64_t(kBarY1) * ry_max) / kPanelH);
   if (raw_y < y0 || raw_y > y1) {
     return BarAction::None;
   }
-  const uint32_t px = uint32_t((uint64_t(raw_x) * kPanelW + rx_max / 2u) / rx_max);
   if (px >= kVolDownX0 && px <= kVolDownX1) {
     return BarAction::VolDown;
   }
@@ -265,6 +312,10 @@ inline BarAction bar_hit_test(const Tracker &t, uint32_t raw_x, uint32_t raw_y) 
     return BarAction::VolUp;
   }
   return BarAction::None;
+}
+
+inline BarAction bar_hit_test(const Tracker &t, uint32_t raw_x, uint32_t raw_y) {
+  return bar_hit_test_mode(t, MapMode::DesktopViewport, raw_x, raw_y);
 }
 
 inline bool in_lock_pill(const Tracker &t, uint32_t raw_x, uint32_t raw_y) {
@@ -361,13 +412,15 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
             }
             t.last_tap_ms = 0;
           }
-        } else if (mode == MapMode::DesktopViewport) {
+        } else if (mode == MapMode::DesktopViewport || mode == MapMode::DesktopFull1to1) {
           if (t.armed_bar != BarAction::None && (now_ms == 0 || held <= 600ull)) {
             r.bar_action = t.armed_bar;
             ++t.bar_actions;
             if (t.armed_bar == BarAction::ClockLock) {
               r.toggle_clock = true;
               ++t.mode_toggles;
+            } else if (t.armed_bar == BarAction::ZoomToggle) {
+              ++t.zoom_toggles;
             }
           } else if (valid_swipe_up) {
             r.bar_action = BarAction::Home;
@@ -422,8 +475,11 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
     }
     if (!already_down) {
       t.down_mask = uint16_t(t.down_mask | bit);
+      const BarAction hit_first = (allow_toggle && d.finger == 0u && t.down_mask == 1u)
+          ? bar_hit_test_mode(t, mode, d.raw_x, d.raw_y)
+          : BarAction::None;
       uint32_t xn = 0, yn = 0;
-      if (map_desktop_point(t, d.raw_x, d.raw_y, true, &xn, &yn)) {
+      if (hit_first == BarAction::None && map_mode_point(t, mode, d.raw_x, d.raw_y, true, &xn, &yn)) {
         t.desktop_mask = uint16_t(t.desktop_mask | bit);
         t.last_x[d.finger] = xn;
         t.last_y[d.finger] = yn;
@@ -436,7 +492,8 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
         }
       } else {
         const uint32_t ry_max = t.max_y ? t.max_y : 25200u;
-        const uint32_t vp_bottom = uint32_t((uint64_t(kDesktopY0 + kDesktopH) * ry_max) / kPanelH);
+        const uint32_t dst_end = (mode == MapMode::DesktopFull1to1) ? (kFullY0 + kFullH) : (kDesktopY0 + kDesktopH);
+        const uint32_t vp_bottom = uint32_t((uint64_t(dst_end) * ry_max) / kPanelH);
         const bool in_lower_chin = (allow_toggle && d.finger == 0u && t.down_mask == 1u && d.raw_y >= vp_bottom);
         if (in_lower_chin) {
           t.swipe_candidate = true;
@@ -446,9 +503,7 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
           t.cur_raw_x = d.raw_x;
           t.cur_raw_y = d.raw_y;
         }
-        const BarAction hit = (allow_toggle && d.finger == 0u && t.down_mask == 1u)
-            ? bar_hit_test(t, d.raw_x, d.raw_y)
-            : BarAction::None;
+        const BarAction hit = hit_first;
         if (hit != BarAction::None) {
           t.armed_bar = hit;
           t.pill_armed = (hit == BarAction::ClockLock);
@@ -463,7 +518,7 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
     }
     if ((t.desktop_mask & bit) != 0u) {
       uint32_t xn = 0, yn = 0;
-      (void)map_desktop_point(t, d.raw_x, d.raw_y, false, &xn, &yn);
+      (void)map_mode_point(t, mode, d.raw_x, d.raw_y, false, &xn, &yn);
       t.last_x[d.finger] = xn;
       t.last_y[d.finger] = yn;
       r.ops[r.count++] = PostOp{2u, d.finger, xn, yn};
@@ -474,7 +529,7 @@ inline StepResult step(Tracker &t, const uint8_t ev[8], MapMode mode,
         t.cur_raw_y = d.raw_y;
       }
       if (t.armed_bar != BarAction::None &&
-          bar_hit_test(t, d.raw_x, d.raw_y) != t.armed_bar) {
+          bar_hit_test_mode(t, mode, d.raw_x, d.raw_y) != t.armed_bar) {
         t.armed_bar = BarAction::None;
         t.pill_armed = false;
       }
@@ -569,6 +624,49 @@ inline unsigned blit_2to1_bgra(const uint8_t *src, uint32_t src_stride, uint32_t
         p = scale_bgra_q8(p, scale_q8);
       }
       dst[x] = p;
+    }
+  }
+  return out_h;
+}
+
+/* OUTER-03: 1:1 Retina pixel-exact full-height crop blit (1080x1916 from [crop_x0..crop_x0+1080, 0..1916])
+ * into dst_y0..dst_y0+1916 on the 1080x2520 cover FB (85%+ screen coverage, zero downscale blur). */
+inline unsigned blit_1to1_crop_bgra(const uint8_t *src, uint32_t src_stride, uint32_t src_w, uint32_t src_h,
+                                    uint32_t crop_x0, volatile uint8_t *dst_fb, uint32_t dst_stride,
+                                    uint32_t dst_y0, uint32_t scale_q8 = 256u) {
+  if (!src || !dst_fb || src_w < kPanelW || src_h < 1u || src_stride < src_w * 4u || dst_stride < kPanelW * 4u) {
+    return 0;
+  }
+  if (dst_y0 >= kPanelH) {
+    return 0;
+  }
+  const uint32_t x0 = (crop_x0 + kPanelW <= src_w) ? crop_x0 : ((src_w - kPanelW) / 2u);
+  uint32_t out_h = src_h;
+  if (out_h > kPanelH - dst_y0) {
+    out_h = kPanelH - dst_y0;
+  }
+  const bool dim = scale_q8 < 256u;
+  for (uint32_t y = 0; y < out_h; ++y) {
+    const uint32_t *r0 = reinterpret_cast<const uint32_t *>(src + uint64_t(y) * src_stride) + x0;
+    volatile uint32_t *dst = reinterpret_cast<volatile uint32_t *>(dst_fb + uint64_t(dst_y0 + y) * dst_stride);
+    uint32_t x = 0;
+    if (!dim) {
+      for (; x + 1u < kPanelW; x += 2u) {
+        const uint64_t pair = (uint64_t(r0[x] | 0xff000000u)) | (uint64_t(r0[x + 1u] | 0xff000000u) << 32);
+        *reinterpret_cast<volatile uint64_t *>(&dst[x]) = pair;
+      }
+      for (; x < kPanelW; ++x) {
+        dst[x] = r0[x] | 0xff000000u;
+      }
+    } else {
+      for (; x + 1u < kPanelW; x += 2u) {
+        const uint32_t p0 = scale_bgra_q8(r0[x], scale_q8);
+        const uint32_t p1 = scale_bgra_q8(r0[x + 1u], scale_q8);
+        *reinterpret_cast<volatile uint64_t *>(&dst[x]) = uint64_t(p0) | (uint64_t(p1) << 32);
+      }
+      for (; x < kPanelW; ++x) {
+        dst[x] = scale_bgra_q8(r0[x], scale_q8);
+      }
     }
   }
   return out_h;

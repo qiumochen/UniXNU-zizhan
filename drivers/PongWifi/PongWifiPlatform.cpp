@@ -62,6 +62,7 @@ uint8_t *arenaVa; uint64_t tablePa,msiPa; uint64_t cbOffset;
 uint32_t idleMs=5;   // zizhan_wifi_idle_ms (POWER-06)
 uint32_t raiseMs=100;  // zizhan_wifi_raise_ms (POWER-06): emulated interrupt fallback period (default 100; 1 = the old every-ms raise); MSIs raise at once
 uint32_t psMode=2;   // zizhan_wifi_ps (POWER-06): daily default 2 = power save while the display is off; 0 disables
+volatile int gWifiSystemAsleep=0;
 extern "C" int zizhan_display_power_state(void);
 extern "C" int nw_wifi_set_ps(int on);
 extern "C" void nw_wifi_mhi_state(char *out,int n);
@@ -679,7 +680,7 @@ void worker(void *,wait_result_t) {
    if(net) {
     static uint64_t aspmAt;
     if(aspmMode==1&&aspmAt!=~0ull){if(!aspmAt)aspmAt=now()+30000;else if(now()>=aspmAt){aspmAt=~0ull;enableAspm();}}
-    if(psMode==2){static int shown=-1;const int off=zizhan_display_power_state()==0;if(off!=shown){shown=off;nw_wifi_set_ps(off);}}
+    if(psMode==2){static int shown=-1;const int off=(zizhan_display_power_state()==0||__atomic_load_n(&gWifiSystemAsleep,__ATOMIC_ACQUIRE)!=0);if(off!=shown){shown=off;nw_wifi_set_ps(off);}}
     progress(5);testNetwork(st);
     if(now()>=diagnosticsAt) {
      diagnosticsAt=now()+15000;
@@ -693,10 +694,11 @@ void worker(void *,wait_result_t) {
    progress(7);
    // POWER-06: an idle pass used to sleep a fixed 5 ms (200 wake-ups a second, each polling the rings over PCIe). With
    // zizhan_wifi_idle_ms=<ms> an idle pass waits for the MSI handler or a queued frame (signalWorker) for at most that long;
-   // the timeout stays because irq() turns MSI off after 64 empty interrupts. Default 5 keeps the old cadence.
+   // the timeout stays because irq() turns MSI off after 64 empty interrupts. Default 5 keeps the old cadence; screen-off relaxes to >=50 ms.
    if(busy)IOSleep(1);
    else if(!__atomic_exchange_n(&wake,0,__ATOMIC_ACQ_REL)) {
-    assert_wait_timeout(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)),THREAD_UNINT,idleMs,kMillisecondScale);
+    const uint32_t effIdle=(zizhan_display_power_state()==0&&idleMs<50u)?50u:idleMs;
+    assert_wait_timeout(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)),THREAD_UNINT,effIdle,kMillisecondScale);
     // A signal that landed between the exchange and assert_wait is not lost: wake ourselves, so the block returns at once.
     if(__atomic_load_n(&wake,__ATOMIC_ACQUIRE)){thread_wakeup(reinterpret_cast<event_t>(const_cast<uint32_t *>(&wake)));}
     thread_block(THREAD_CONTINUE_NULL);
@@ -722,12 +724,18 @@ extern "C" void pong_wifi_wake(void) {signalWorker();}
 extern "C" int pong_wifi_irq_due(uint64_t t) {
  static uint64_t last;static uint32_t seen;
  const uint32_t arrived=__atomic_load_n(&msiArrivals,__ATOMIC_RELAXED);
- if(arrived!=seen||t-last>=raiseMs){seen=arrived;last=t;return 1;}
+ const uint32_t effRaise=(zizhan_display_power_state()==0&&raiseMs<500u)?500u:raiseMs;
+ if(arrived!=seen||t-last>=effRaise){seen=arrived;last=t;return 1;}
  return 0;
 }
 // POWER-06: 802.11 station power save (build-pong-ath11k.py patches the shared nw_sta). zizhan_wifi_ps=1 always, =2 (default) while
 // the display is off (the worker follows the display and calls nw_wifi_set_ps); the wanted state at each link-up comes from here.
-extern "C" int pong_wifi_ps(void) {return psMode==1||(psMode==2&&zizhan_display_power_state()==0);}
+extern "C" int pong_wifi_ps(void) {return psMode==1||(psMode==2&&(zizhan_display_power_state()==0||__atomic_load_n(&gWifiSystemAsleep,__ATOMIC_ACQUIRE)!=0));}
+extern "C" void pong_wifi_set_system_sleep(int asleep) {
+ __atomic_store_n(&gWifiSystemAsleep,asleep?1:0,__ATOMIC_RELEASE);
+ signalWorker();
+ if(asleep)IOSleep(25);
+}
 extern "C" void native_wifi_logf(int level,const char *fmt,...) {char line[256];va_list a;va_start(a,fmt);vsnprintf(line,sizeof line,fmt,a);va_end(a);log(level,line);}
 extern "C" void pong_wifi_start_optional(void) {
  pong_rpmh_init();

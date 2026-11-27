@@ -57,6 +57,9 @@ extern volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 
 void pong_cpu_policy_set_sleep(int asleep);
 void zizhan_standby_rpmh_sleep(int low);
+void pong_wifi_set_system_sleep(int asleep);
+void zizhan_mpss_set_system_sleep(int asleep);
+void zizhan_outer_panel_sleep(int asleep);
 int pong_battery_request_refresh(int slow);
 int pong_battery_gauge_snapshot(int32_t *charge_uah, int32_t *volt_mv, int32_t *curr_ma, uint32_t *cycles);
 int zizhan_audio_sleep_busy(void);
@@ -68,7 +71,7 @@ namespace zizhan_sleep {
 constexpr uint64_t kTlmmPhys = 0x0f100000ULL;
 constexpr uint32_t kGpioStride = 0x1000U;
 constexpr uint32_t kIo = 0x4U, kIntrCfg = 0x8U, kIntrStatus = 0xcU;
-constexpr uint32_t kTickMs = 100U;
+static uint32_t gTickMs = 250U;
 
 static IOMemoryMap *gTlmmMap;
 static uintptr_t gTlmm;
@@ -88,6 +91,7 @@ static volatile uint64_t gLastAsleepMs;
 static uint32_t gAutoSleepS = 4;
 static uint32_t gWakeAfterS = 0;
 static uint32_t gCycles = 0;
+static uint32_t gStartDelayS = 15;
 static uint32_t gAwakeBetweenS = 8;
 static uint32_t gAbWindowS = 0;
 static uint32_t gWakeLightDisplay = 1;
@@ -165,7 +169,7 @@ static int boardTick() {
   const int pwr = pong_buttons_sleep_check();
   const int lid = gTlmm ? zizhan_sleep_lid_changed(tlmmRead(ZIZHAN_SLEEP_LID_GPIO, kIo), gLidClosedAtSleep) : 0;
   int doPing = 0;
-  const int src = zizhan_sleep_tick_plan(idx, kTickMs, deadlineSoon, pwr, lid, &doPing);
+  const int src = zizhan_sleep_tick_plan(idx, gTickMs, deadlineSoon, pwr, lid, &doPing);
   if (doPing) {
     pong_boot_reset::ping_from_sleep();
     gWdtPingsInSleep = gWdtPingsInSleep + 1;
@@ -188,14 +192,14 @@ static void boardRestore() {
   __asm__ volatile("dsb sy" ::: "memory");
 }
 
-static const armcpu_sleep_board kBoard = {
+static armcpu_sleep_board gBoard = {
     boardPrepare,
     boardShouldWake,
     boardRestore,
     kWakeSpis,
     1u,
     boardTick,
-    kTickMs,
+    250U,
 };
 
 static void postShortPowerKey() {
@@ -224,14 +228,20 @@ static IOReturn pmNotify(void *, void *, natural_t message, IOService *, void *,
     /* Re-online any user-offlined cores so IOCPUSleepKernel cleanly puts all 7 secondary cores (1..7)
      * into REASON_SYSTEM PSCI CPU_OFF and wakes all 7 on resume. */
     zizhan_cpu_offline::prepare_system_sleep();
+    pong_wifi_set_system_sleep(1);
+    zizhan_mpss_set_system_sleep(1);
+    zizhan_outer_panel_sleep(1);
     pong_cpu_policy_set_sleep(1);
     zizhan_standby_rpmh_sleep(1);
-    IOLog("ZIZHAN_SLEEP: WILL_SLEEP lid=%s power_key_ready=%d wake_after=%us\n",
-          gLidClosedAtSleep ? "closed" : "open", pong_buttons_ready(), gWakeAfterS);
+    IOLog("ZIZHAN_SLEEP: WILL_SLEEP lid=%s power_key_ready=%d wake_after=%us tick_ms=%u\n",
+          gLidClosedAtSleep ? "closed" : "open", pong_buttons_ready(), gWakeAfterS, gTickMs);
     break;
   case kIOMessageSystemWillPowerOn: {
     zizhan_standby_rpmh_sleep(0);
     pong_cpu_policy_set_sleep(0);
+    pong_wifi_set_system_sleep(0);
+    zizhan_mpss_set_system_sleep(0);
+    zizhan_outer_panel_sleep(0);
     const char *why = zizhan_sleep_wake_name(armcpu_sleep_stats.last_reason, gWakeSource);
     const int userWake = (gWakeSource == ZizhanWakePower ||
                           (gWakeSource == ZizhanWakeLid && !lidClosedNow()) ||
@@ -378,11 +388,15 @@ static void runCyclesTest() {
     IOLog("ZIZHAN_SLEEP_CYCLES: SKIP desktop-timeout\n");
     return;
   }
-  IOSleep(15000);
+  __atomic_store_n(&gHoldLegacy, 1u, __ATOMIC_RELEASE); /* coordinator drives explicit sleep requests per cycle */
+  IOSleep(gStartDelayS * 1000u);
+  if (gStartDelayS > 20u) {
+    (void)zizhan_pmrd_boot_complete();
+    IOSleep(500);
+  }
   const uint32_t sleepS = gWakeAfterS ? gWakeAfterS : 12u;
   armcpu_sleep_set_wake_after(sleepS);
   gWakeAfterS = sleepS;
-  __atomic_store_n(&gHoldLegacy, 1u, __ATOMIC_RELEASE); /* coordinator drives explicit sleep requests per cycle */
 
   uint32_t passed = 0;
   for (uint32_t c = 1; c <= gCycles && !pong_boot_reset::deadline_due_soon(20u); ++c) {
@@ -392,12 +406,21 @@ static void runCyclesTest() {
       for (unsigned w = 0; w < 40 && zizhan_display_power_state() != 0; ++w) IOSleep(100);
     }
     IOSleep(800);
+    int32_t qc0 = 0, vc0 = 0, ic0 = 0, qc1 = 0, vc1 = 0, ic1 = 0;
+    (void)sampleBatteryFresh(&qc0, &vc0, &ic0);
     const int rc = zizhan_pmrd_request_sleep();
     for (unsigned w = 0; w < (sleepS + 25u) * 10u; ++w) {
       if (__atomic_load_n(&gWakeCompletedCount, __ATOMIC_ACQUIRE) > wakes0) break;
       IOSleep(100);
     }
     const bool woke = __atomic_load_n(&gWakeCompletedCount, __ATOMIC_ACQUIRE) > wakes0;
+    IOSleep(250);
+    (void)sampleBatteryFresh(&qc1, &vc1, &ic1);
+    const int32_t cycMa = (ic1 < 0) ? -ic1 : 0;
+    const int32_t cycMw = int32_t((int64_t(cycMa) * ((vc1 > 2500) ? vc1 : 4300) + 500ll) / 1000ll);
+    IOLog("ZIZHAN_SLEEP_BATT: cycle=%u/%u asleep_ms=%llu q_mah=%d->%d v_mv=%d->%d i0_ma=%d i1_ma=%d deep_sleep_ma=%d deep_sleep_mw=%d\n",
+          c, gCycles, static_cast<unsigned long long>(__atomic_load_n(&gLastAsleepMs, __ATOMIC_ACQUIRE)),
+          qc0, qc1, vc0, vc1, ic0, ic1, cycMa, cycMw);
     const uint32_t flip0 = &pong_zc_flipped_tag ? __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE) : 0u;
     if (zizhan_display_power_state() == 0) {
       postShortPowerKey();
@@ -428,7 +451,7 @@ static void coordinator(void *, wait_result_t) {
   if (spiRc == kIOReturnSuccess) {
     armcpu_spi_set_awake_enable(ZIZHAN_SLEEP_LID_INTID, false);
   }
-  const int regRc = armcpu_sleep_register(&kBoard);
+  const int regRc = armcpu_sleep_register(&gBoard);
   IONotifier *notifier = nullptr;
   for (unsigned tries = 0; tries < 120 && !notifier; ++tries) {
     if (IOService::getPMRootDomain()) {
@@ -440,12 +463,12 @@ static void coordinator(void *, wait_result_t) {
   (void)waitDesktopReady();
   IOSleep(5000);
   int bootRc = 0;
-  if (gAbWindowS < 15) {
+  if (gAbWindowS < 15 && !(gCycles > 0 && gStartDelayS > 20u)) {
     bootRc = zizhan_pmrd_boot_complete();
     IOSleep(500);
   }
-  IOLog("ZIZHAN_SLEEP: RUNNING spi240=%d reg=%d notifier=%d pmrd_boot=%d autosleep_s=%u wake_s=%u cycles=%u ab_s=%u\n",
-        spiRc, regRc, notifier ? 1 : 0, bootRc, gAutoSleepS, gWakeAfterS, gCycles, gAbWindowS);
+  IOLog("ZIZHAN_SLEEP: RUNNING spi240=%d reg=%d notifier=%d pmrd_boot=%d autosleep_s=%u wake_s=%u cycles=%u ab_s=%u tick_ms=%u\n",
+        spiRc, regRc, notifier ? 1 : 0, bootRc, gAutoSleepS, gWakeAfterS, gCycles, gAbWindowS, gTickMs);
   if (regRc != 0 || !notifier) {
     IOLog("ZIZHAN_SLEEP: FAIL prerequisite reg=%d notifier=%d\n", regRc, notifier ? 1 : 0);
     thread_terminate(current_thread());
@@ -487,15 +510,23 @@ static void coordinator(void *, wait_result_t) {
 
 static void start(IOService *) {
   if (!armcpu_sleep_enabled()) return;
+  if (PE_parse_boot_argn("zizhan_sleep_tick_ms", &gTickMs, sizeof(gTickMs))) {
+    if (gTickMs < 50U) gTickMs = 50U;
+    if (gTickMs > 1000U) gTickMs = 1000U;
+  }
+  gBoard.tick_ms = gTickMs;
   (void)PE_parse_boot_argn("zizhan_autosleep_s", &gAutoSleepS, sizeof(gAutoSleepS));
   if (!PE_parse_boot_argn("zizhan_sleep_wake_s", &gWakeAfterS, sizeof(gWakeAfterS))) {
     (void)PE_parse_boot_argn("platform-sleep-wake-after", &gWakeAfterS, sizeof(gWakeAfterS));
   }
   (void)PE_parse_boot_argn("zizhan_sleep_cycles", &gCycles, sizeof(gCycles));
+  (void)PE_parse_boot_argn("zizhan_sleep_start_s", &gStartDelayS, sizeof(gStartDelayS));
   (void)PE_parse_boot_argn("zizhan_sleep_awake_s", &gAwakeBetweenS, sizeof(gAwakeBetweenS));
   (void)PE_parse_boot_argn("zizhan_sleep_ab", &gAbWindowS, sizeof(gAbWindowS));
   (void)PE_parse_boot_argn("zizhan_sleep_wake_display", &gWakeLightDisplay, sizeof(gWakeLightDisplay));
   if (gCycles > 50) gCycles = 50;
+  if (gStartDelayS < 3) gStartDelayS = 3;
+  if (gStartDelayS > 600) gStartDelayS = 600;
   if (gAwakeBetweenS < 3) gAwakeBetweenS = 3;
 
   IODeviceMemory *mem = IODeviceMemory::withRange(kTlmmPhys, IOByteCount(ZIZHAN_SLEEP_GPIO_COUNT) * kGpioStride);

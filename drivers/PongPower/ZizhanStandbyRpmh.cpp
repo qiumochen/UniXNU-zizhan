@@ -37,9 +37,10 @@ uint8_t *gDb;
 QcomRpmhResource gCx, gMx;
 uint32_t gTarget, gDump, gBw, gBwSec = 120, gSleepCx = 32;
 struct Bus { const char *name; uint32_t addr, boot, wake, unit; uint16_t width; bool have, is_low; };
-Bus gBus[4] = {
+Bus gBus[5] = {
     {"MM0", 0, 0, 0, 0, 32, false, false},
     {"SN2", 0, 0, 0, 0, 16, false, false},
+    {"SN7", 0, 0, 0, 0, 16, false, false},
     {"MC0", 0, 0, 0, 0, 4, false, false},
     {"SH0", 0, 0, 0, 0, 16, false, false},
 };
@@ -133,6 +134,15 @@ uint32_t nominalBcmVote(uint32_t unit, uint16_t width) {
   return kBcmCommit | kBcmValid | (uint32_t(ab) << 14) | uint32_t(ib);
 }
 
+uint32_t pcieBcmVote(uint32_t unit, uint16_t width) {
+  if (!unit || !width) { return kBcmMax; }
+  const uint64_t scaled = (2000000ull * width + 15ull) / 16ull;
+  uint64_t x = (scaled * 1000ull + unit - 1ull) / unit;
+  if (x < 1ull) { x = 1ull; }
+  if (x > 0x3fffull) { x = 0x3fffull; }
+  return kBcmCommit | kBcmValid | (uint32_t(x) << 14) | uint32_t(x);
+}
+
 // The last value each bus resource got in TCS0's retained batch (commands run in order, so a later one wins).
 void learnBus() {
   auto memory = IODeviceMemory::withRange(kRsc, kRscSize);
@@ -150,21 +160,23 @@ void learnBus() {
   }
   map->release();
   for (auto &b : gBus) {
-    b.wake = (b.have && b.boot) ? (b.boot | kBcmCommit) : nominalBcmVote(b.unit, b.width);
+    const bool isSn7 = !strncmp(b.name, "SN7", 3);
+    b.wake = (b.have && b.boot) ? (b.boot | kBcmCommit)
+                                : (isSn7 ? pcieBcmVote(b.unit, b.width) : nominalBcmVote(b.unit, b.width));
     IOLog("ZIZHAN_STANDBY_BW: %s addr %05x unit %u width %u boot %s %08x wake %08x\n",
           b.name, b.addr, b.unit, b.width, b.have ? "value" : "unknown", b.boot, b.wake);
   }
 }
 
 void applyBusMask(unsigned low_bits, const char *reason) {
-  char res[192];
+  char res[224];
   unsigned k = 0;
-  for (unsigned i = 0; i < 4; ++i) {
+  for (unsigned i = 0; i < 5; ++i) {
     Bus &b = gBus[i];
-    const bool ddr = i >= 2;
-    const unsigned bit = ddr ? 2u : 1u;
+    const bool dyn = i >= 2;
+    const unsigned bit = (i >= 3) ? 2u : 1u;
     if (!b.addr) { continue; }
-    if (!ddr && !b.have) { continue; }
+    if (!dyn && !b.have) { continue; }
     const bool want_low = (low_bits & bit) != 0;
     if (want_low == b.is_low) { continue; }
     const uint32_t value = want_low ? kBcmMin : b.wake;
@@ -228,6 +240,11 @@ void worker(void *, wait_result_t) {
   unsigned curMask = 0, phase = 0, window = 0;
   for (;;) {
     IOSleep(500);
+    if (gStandbyLock) IOLockLock(gStandbyLock);
+    if (gSleepActive) {
+      if (gStandbyLock) IOLockUnlock(gStandbyLock);
+      continue;
+    }
     if (zizhan_display_power_state() == 0) {
       if (++offFor == 6 && !low && (gTarget || gBw)) {   // off for 3 s (CPU offline acts at 2 s)
         phase = 0;
@@ -259,13 +276,14 @@ void worker(void *, wait_result_t) {
       offFor = 0;
       if (low) {
         if (gTarget) { apply(false); }
-        if (curMask || gBus[0].is_low || gBus[1].is_low || gBus[2].is_low || gBus[3].is_low) {
+        if (curMask || gBus[0].is_low || gBus[1].is_low || gBus[2].is_low || gBus[3].is_low || gBus[4].is_low) {
           applyBusMask(0u, "display on");
         }
         curMask = 0;
         low = false;
       }
     }
+    if (gStandbyLock) IOLockUnlock(gStandbyLock);
   }
 }
 }  // namespace

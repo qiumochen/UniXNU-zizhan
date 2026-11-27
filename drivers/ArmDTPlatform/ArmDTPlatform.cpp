@@ -47,6 +47,9 @@ void pong_scanout_set_cover_redirect(int) {}
 uint32_t pong_scanout_cover_snapshot(const uint8_t **, uint64_t *, uint32_t *, uint32_t *, uint32_t *) { return 0; }
 }
 #endif
+#if !XNU_PONG_WIFI
+extern "C" void pong_wifi_set_system_sleep(int) {}
+#endif
 #if !(XNU_PONG_WIFI || XNU_PONG_POWER)
 extern "C" {
 int pong_backlight_level(uint32_t *) { return -1; }
@@ -59,6 +62,7 @@ int32_t zizhan_slpi_hinge_deg_milli(void) { return -1; }
 void zizhan_slpi_set_hinge_sim(int) {}
 volatile int32_t native_battery_stats[16] = {};
 void zizhan_standby_rpmh_sleep(int) {}
+void zizhan_mpss_set_system_sleep(int) {}
 int pong_battery_request_refresh(int) { return -1; }
 int pong_battery_gauge_snapshot(int32_t *, int32_t *, int32_t *, uint32_t *) { return -1; }
 int zizhan_audio_sleep_busy(void) { return 0; }

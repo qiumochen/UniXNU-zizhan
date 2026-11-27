@@ -33,6 +33,7 @@ extern "C" void pong_adsp_smem_unlock(void);
 extern "C" int pong_adsp_modem_load_state(int on);
 extern "C" void zizhan_sensor_post(uint32_t kind, int32_t a, int32_t b, int32_t c);
 extern "C" bool zizhan_sensors_device_ready(void);
+extern "C" int zizhan_display_power_state(void);
 extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 
 namespace {
@@ -142,8 +143,10 @@ constexpr uint32_t kPdmPort = 0x4000, kModemNode = 0, kDmsClientPort = 0x4002;
  * changes state unless opt-in zizhan_gnss_lpm=1 transitions OFFLINE(3) -> LOW_POWER(1) Airplane Mode (never ONLINE(0)). */
 uint32_t gDmsPort, gUimPort, gLocPort;
 uint8_t gModemOpMode = 0xffu;
-bool gDmsAsked, gShared;
-uint32_t gGnssMode, gGnssLpm, gLocRxLogged;
+bool gDmsAsked, gShared, gGnssPausedForStandby;
+uint32_t gGnssMode, gGnssLpm, gLocRxLogged, gGnssStandbyPause = 1;
+volatile int gMpssSystemAsleep;
+uint64_t gDispOffSinceMs;
 ZizhanQmiLoc gLoc;
 constexpr uint32_t kUimClientPort = 0x4003, kLocClientPort = 0x4004;
 constexpr uint32_t kSensorGnssSv = 23, kSensorGnssPos = 24, kSensorGnssAlt = 25;
@@ -606,8 +609,37 @@ again:
         IOLog("ZIZHAN_MPSS: uim get card status sent to 0:%x\n", gUimPort);
       }
     }
+    const bool dispOff = (zizhan_display_power_state() == 0);
+    if (!dispOff) {
+      gDispOffSinceMs = 0;
+    } else if (!gDispOffSinceMs) {
+      gDispOffSinceMs = now;
+    }
+    const bool wantGnssPause = gGnssStandbyPause != 0u &&
+        (__atomic_load_n(&gMpssSystemAsleep, __ATOMIC_ACQUIRE) != 0 ||
+         (gGnssMode == 2u && dispOff && gDispOffSinceMs && now - gDispOffSinceMs >= 3000ull));
+    if (!cycle && gGnssMode && gLocPort && gIpcrtr && gIpcrtr->up) {
+      if (wantGnssPause && !gGnssPausedForStandby && gLoc.stage == ZIZHAN_QMI_LOC_STAGE_RUNNING) {
+        uint8_t stopPkt[16];
+        const uint32_t slen = zizhan_qmi_loc_build_stop(gLoc.next_txn++, gLoc.session_id, stopPkt, sizeof stopPkt);
+        if (slen) {
+          qrtrSend(1, kModemNode, gLocPort, kLocClientPort, stopPkt, slen);
+          gGnssPausedForStandby = true;
+          IOLog("ZIZHAN_GNSS: standby pause -> QMI_LOC stop sent (asleep=%d disp_off=%d)\n",
+                __atomic_load_n(&gMpssSystemAsleep, __ATOMIC_ACQUIRE), dispOff ? 1 : 0);
+        }
+      } else if (!wantGnssPause && gGnssPausedForStandby) {
+        uint8_t startPkt[64];
+        const uint32_t slen = zizhan_qmi_loc_build_start(gLoc.next_txn++, gLoc.session_id, 1000u, startPkt, sizeof startPkt);
+        if (slen) {
+          qrtrSend(1, kModemNode, gLocPort, kLocClientPort, startPkt, slen);
+          gGnssPausedForStandby = false;
+          IOLog("ZIZHAN_GNSS: standby resume -> QMI_LOC start sent\n");
+        }
+      }
+    }
     /* QMI_LOC (service 16, instance 2) runs natively while MPSS remains in boot operating_mode=3 (OFFLINE, zero RF). */
-    if (!cycle && gGnssMode && gLocPort && gIpcrtr && gIpcrtr->up && gDmsAsked && now - t0 > 6000) {
+    if (!cycle && gGnssMode && !wantGnssPause && gLocPort && gIpcrtr && gIpcrtr->up && gDmsAsked && now - t0 > 6000) {
       uint8_t locTx[64];
       uint32_t locLen = 0;
       if (zizhan_qmi_loc_step(&gLoc, now, locTx, sizeof locTx, &locLen) && locLen > 0) {
@@ -645,7 +677,7 @@ again:
     }
     if (!cycle) glinkService();
     if (now - t0 > 10000 && !(lastBits != 0xffffffffu && (lastBits & kReady))) break;
-    IOSleep(10);
+    IOSleep((dispOff && now - t0 > 15000ull) ? 100 : 10);
   }
   stage = 27;
 out:
@@ -701,6 +733,10 @@ out:
 }
 }  // namespace
 
+extern "C" void zizhan_mpss_set_system_sleep(int asleep) {
+  __atomic_store_n(&gMpssSystemAsleep, asleep ? 1 : 0, __ATOMIC_RELEASE);
+}
+
 extern "C" void zizhan_mpss_start(void) {
   uint32_t mode = 0, gnss = 0, adsp = 0;
   (void)PE_parse_boot_argn("zizhan_modem", &mode, sizeof mode);
@@ -708,6 +744,7 @@ extern "C" void zizhan_mpss_start(void) {
   if (mode != 2 && (gnss < 1 || gnss > 2)) return;
   gGnssMode = gnss;
   (void)PE_parse_boot_argn("zizhan_gnss_lpm", &gGnssLpm, sizeof gGnssLpm);
+  (void)PE_parse_boot_argn("zizhan_gnss_standby_pause", &gGnssStandbyPause, sizeof gGnssStandbyPause);
   (void)PE_parse_boot_argn("pong_adsp", &adsp, sizeof adsp);
   if (adsp == 1) { IOLog("ZIZHAN_MPSS: SKIP pong_adsp=1 (survey) leaves the AOSS mailbox without an owner\n"); return; }
   gShared = adsp >= 2;

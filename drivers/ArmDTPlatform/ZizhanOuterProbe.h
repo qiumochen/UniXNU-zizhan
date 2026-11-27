@@ -12,6 +12,7 @@
 #include <pexpert/pexpert.h>
 #include "ZizhanDailyProfile.h"
 #include "ZizhanOuterTouchPlan.h"
+#include "ZizhanSleepPlan.h"
 #include "../PongPower/ZizhanSlpiSensors.h"
 #include <kern/clock.h>
 #include "../PongPower/GeniI2c.h"
@@ -345,16 +346,23 @@ pads_back:
  * with top status bar while the inner 8.02" OLED is cover-muted. INTF_2 MISR signs every output frame as closed-loop proof. */
 namespace fold {
 /* Kept for the life of the system (no function-local statics: the kernel has no guard variables). */
-static IOMemoryMap *fb_map, *intf_map;
-static volatile uint8_t *fb_va, *intf_va;
-static bool ready, misr_on;
+static IOMemoryMap *fb_map, *intf_map, *gcc_map, *dispcc_map, *dsi1_map;
+static volatile uint8_t *fb_va, *intf_va, *gcc_va, *dispcc_va, *dsi1_va;
+static IOLock *power_lock;
+static bool ready, misr_on, outer_panel_on = true, outer_dsi_quarantined = false;
 static uint32_t mode_val;
 static uint8_t mode_parsed;
 static uint32_t allow_doubletap = 1;
 static uint32_t allow_pocket_guard = 1;
 static uint32_t allow_outer_dim = 1;
-static volatile uint32_t lid_closed, hud_dirty, active_view, desktop_busy;
+static uint32_t outer_power_en = 1;
+static uint32_t outer_dbv = 0x0133u;
+static uint32_t prefer_full_1to1 = 1;
+static volatile uint32_t lid_closed, hud_dirty, active_view, desktop_busy, system_asleep;
 static volatile uint64_t wake_req_ms;
+
+static inline bool is_desktop_view(uint32_t v) { return v == 2u || v == 3u; }
+static inline uint32_t desktop_target_view() { return prefer_full_1to1 ? 3u : 2u; }
 
 static uint32_t cover_scale_q8() {
   if (!allow_outer_dim) {
@@ -394,6 +402,164 @@ static bool init() {
   intf_va = map_once(0xae37000, 0x1000, kIOMapInhibitCache, &intf_map);
   ready = fb_va && intf_va;
   return ready;
+}
+
+static unsigned sample_gpio87_edges() {
+  Ro p;
+  if (!p.open(0xf100000ull + 87ull * 0x1000, 0x1000)) { return ~0u; }
+  unsigned edges = 0, last = p.r(4) & 1u;
+  for (unsigned i = 0; i < 2000; ++i) {
+    const unsigned v = p.r(4) & 1u;
+    if (v != last) { ++edges; }
+    last = v;
+    IODelay(20);
+  }
+  return edges;
+}
+
+static bool ensure_dsi1_ready() {
+  if (!gcc_va) { gcc_va = map_once(0x00137000ull, 0x1000, kIOMapInhibitCache, &gcc_map); }
+  if (!dispcc_va) { dispcc_va = map_once(0x0af00000ull, 0x10000, kIOMapInhibitCache, &dispcc_map); }
+  if (!gcc_va || !dispcc_va) { return false; }
+  auto gr = [](volatile uint8_t *b, uint32_t o) -> uint32_t {
+    const uint32_t v = *reinterpret_cast<volatile uint32_t *>(b + o);
+    __asm__ volatile("dmb oshld" ::: "memory");
+    return v;
+  };
+  auto gw = [](volatile uint8_t *b, uint32_t o, uint32_t v) {
+    *reinterpret_cast<volatile uint32_t *>(b + o) = v;
+    __asm__ volatile("dsb sy" ::: "memory");
+  };
+  if (gr(gcc_va, 0x004) & 0x80000000u) {
+    gw(gcc_va, 0x004, gr(gcc_va, 0x004) | 1u);
+    for (unsigned i = 0; i < 2000 && (gr(gcc_va, 0x004) & 0x80000000u); ++i) { IODelay(1); }
+    if (gr(gcc_va, 0x004) & 0x80000000u) { return false; }
+  }
+  if (!(gr(dispcc_va, 0x9000) & 0x80000000u)) { return false; }
+  if (gr(dispcc_va, 0x80a4) & 0x80000000u) {
+    gw(dispcc_va, 0x80a4, gr(dispcc_va, 0x80a4) | 1u);
+    for (unsigned i = 0; i < 2000 && (gr(dispcc_va, 0x80a4) & 0x80000000u); ++i) { IODelay(1); }
+    if (gr(dispcc_va, 0x80a4) & 0x80000000u) { return false; }
+  }
+  /* Require both DSI1 byte1_clk (0x8030) and esc1_clk (0x803c) running before touching DSI1 MMIO. */
+  if ((gr(dispcc_va, 0x8030) & 0x80000000u) || (gr(dispcc_va, 0x803c) & 0x80000000u)) { return false; }
+  if (!dsi1_va) { dsi1_va = map_once(0x0ae96000ull, 0x1000, kIOMapInhibitCache, &dsi1_map); }
+  if (!dsi1_va) { return false; }
+  const uint32_t ver = gr(dsi1_va, 0x000), ctrl = gr(dsi1_va, 0x004);
+  return ((ver >> 28) == 2u) && ((ctrl & 1u) != 0u);
+}
+
+static int dsi1_fifo_send(const uint32_t words[2], uint32_t wire_words, bool low_power) {
+  if (outer_dsi_quarantined || !ensure_dsi1_ready()) { return -1; }
+  auto dr = [](uint32_t o) -> uint32_t {
+    const uint32_t v = *reinterpret_cast<volatile uint32_t *>(dsi1_va + o);
+    __asm__ volatile("dmb oshld" ::: "memory");
+    return v;
+  };
+  auto dw = [](uint32_t o, uint32_t v) {
+    *reinterpret_cast<volatile uint32_t *>(dsi1_va + o) = v;
+    __asm__ volatile("dsb sy" ::: "memory");
+  };
+  constexpr uint32_t kDmaBusy = 1u << 1, kMdpBusy = 1u << 2, kDmaDone = 1u, kErrPending = 1u << 24;
+  constexpr uint32_t kEnables = (1u << 1) | (1u << 9) | (1u << 11) | (1u << 13) | (1u << 15) |
+                                (1u << 17) | (1u << 21) | (1u << 25) | (1u << 29) | (1u << 31);
+  unsigned tries = 0;
+  while (dr(0x008) & (kDmaBusy | kMdpBusy)) {
+    if (++tries >= 2500u) { return -2; }
+    IODelay(20);
+  }
+  if ((dr(0x15c) & 1u) || (dr(0x110) & kErrPending)) { return -3; }
+  const uint32_t s_ctrl = dr(0x004), s_dma = dr(0x03c), s_len = dr(0x04c), s_trig = dr(0x084), s_pat = dr(0x15c);
+  dw(0x004, s_ctrl | 4u);
+  dw(0x110, (dr(0x110) & kEnables) | kDmaDone);
+  dw(0x084, (s_trig & ~0xfu) | 4u);
+  dw(0x15c, 0x30006u);
+  dw(0x17c, words[0]);
+  dw(0x17c, words[1]);
+  dw(0x03c, (s_dma & ~((3u << 30) | (1u << 29) | (1u << 26) | (1u << 24))) |
+            (1u << 28) | (low_power ? (1u << 26) : 0u));
+  dw(0x04c, wire_words * 4u);
+  dw(0x090, 1u);
+  bool complete = false, err = false;
+  for (tries = 0; tries < 2500u; ++tries) {
+    const uint32_t irq = dr(0x110), st = dr(0x008);
+    err = (irq & kErrPending) != 0u;
+    complete = (irq & kDmaDone) != 0u && !(st & kDmaBusy);
+    if (err || complete) { break; }
+    IODelay(20);
+  }
+  if (dr(0x008) & kDmaBusy) {
+    outer_dsi_quarantined = true;
+    return -4;
+  }
+  dw(0x110, (dr(0x110) & kEnables) | kDmaDone);
+  dw(0x15c, 0u);
+  dw(0x1ec, 1u); IODelay(1); dw(0x1ec, 0u);
+  dw(0x03c, s_dma); dw(0x04c, s_len); dw(0x084, s_trig); dw(0x15c, s_pat); dw(0x004, s_ctrl);
+  return (complete && !err) ? 0 : -5;
+}
+
+static int dsi1_set_power_locked(bool want_on) {
+  uint32_t w[2] = {};
+  if (!want_on) {
+    zizhan_dsi_dcs_dbv_words(0u, 1, w);
+    int rc = dsi1_fifo_send(w, 2u, false);
+    if (rc) { return rc; }
+    zizhan_dsi_dcs_short0_words(0x28u, w);
+    rc = dsi1_fifo_send(w, 1u, true);
+    if (rc) { return rc; }
+    IOSleep(10);
+    zizhan_dsi_dcs_short0_words(0x10u, w);
+    rc = dsi1_fifo_send(w, 1u, true);
+    if (rc) { return rc; }
+    IOSleep(120);
+    return 0;
+  }
+  zizhan_dsi_dcs_short0_words(0x11u, w);
+  int rc = dsi1_fifo_send(w, 1u, true);
+  if (rc) { return rc; }
+  IOSleep(120);
+  zizhan_dsi_dcs_short0_words(0x29u, w);
+  rc = dsi1_fifo_send(w, 1u, true);
+  if (rc) { return rc; }
+  IOSleep(120);
+  zizhan_dsi_dcs_dbv_words(outer_dbv, 1, w);
+  rc = dsi1_fifo_send(w, 2u, false);
+  if (rc) { return rc; }
+  IOSleep(20);
+  return 0;
+}
+
+static void sync_panel_power(const char *why, bool probe_active = false) {
+  if (!power_lock) { power_lock = IOLockAlloc(); }
+  if (!power_lock) { return; }
+  IOLockLock(power_lock);
+  const int want = zizhan_outer_panel_wanted(
+      outer_power_en != 0u ? 1 : 0,
+      __atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) != 0u ? 1 : 0,
+      __atomic_load_n(&system_asleep, __ATOMIC_ACQUIRE) != 0u ? 1 : 0,
+      probe_active ? 1 : 0);
+  const bool want_on = want != 0;
+  if (want_on != outer_panel_on) {
+    const int rc = dsi1_set_power_locked(want_on);
+    if (rc == 0) {
+      outer_panel_on = want_on;
+    } else if (!want_on && !outer_dsi_quarantined) {
+      /* On partial off failure, attempt clean recovery to ON so panel state stays known. */
+      (void)dsi1_set_power_locked(true);
+    }
+    uint32_t df = 0;
+    if (init()) {
+      const uint32_t f0 = ir(0xac);
+      IOSleep(30);
+      df = ir(0xac) - f0;
+    }
+    const unsigned edges = sample_gpio87_edges();
+    IOLog("ZIZHAN_OUTER_POWER: %s target=%s reason=%s rc=%d dbv=0x%x gpio87_edges=%u intf2_df=%u quarantine=%u\n",
+          rc == 0 ? "PASS" : "FAIL", want_on ? "on" : "off", why, rc,
+          want_on ? outer_dbv : 0u, edges, df, outer_dsi_quarantined ? 1u : 0u);
+  }
+  IOLockUnlock(power_lock);
 }
 static inline volatile uint32_t *row(unsigned y) { return reinterpret_cast<volatile uint32_t *>(fb_va + (0xb8fc9900ull & 0xfffull) + uint64_t(y) * 4320); }
 static void rect(unsigned x0, unsigned y0, unsigned w, unsigned h, uint32_t c) {
@@ -529,6 +695,50 @@ static void draw_lock_pill() {
   rect(886, py + 26, 36, 4, 0xffe5e5eau);
   rect(902, py + 10, 4, 36, 0xffe5e5eau);
 }
+static void draw_zoom_pill_2to1() {
+  /* Bottom-center ZOOM pill in 2:1 mode: (340..740, y=2044..2100) inside kZoomPillX0..X1 / kZoomPillY0..Y1 */
+  const unsigned px = 340, py = 2044, pw = 400, ph = 56;
+  draw_pill_box(px, py, pw, ph);
+  /* Crisp 1:1 expand icon: two vertical bars + colon in the middle */
+  rect(500, py + 14, 6, 28, 0xff64d2ffu);
+  rect(537, py + 18, 6, 6, 0xffe5e5eau);
+  rect(537, py + 32, 6, 6, 0xffe5e5eau);
+  rect(574, py + 14, 6, 28, 0xff64d2ffu);
+}
+
+static void draw_full_5pill_bar() {
+  /* 5-pill bar at y=2212..2268 (inside kFullBarY0..Y1 = 2180..2300):
+   * VOL- (36..224), HOME (240..428), 2:1 ZOOM (444..636), CLOCK (652..840), VOL+ (856..1044) */
+  const unsigned py = 2212, ph = 56;
+  draw_pill_box(36, py, 188, ph);
+  rect(112, py + 26, 36, 4, 0xffe5e5eau);
+
+  draw_pill_box(240, py, 188, ph);
+  rect(320, py + 14, 28, 3, 0xffe5e5eau);
+  rect(320, py + 39, 28, 3, 0xffe5e5eau);
+  rect(320, py + 14, 3, 28, 0xffe5e5eau);
+  rect(345, py + 14, 3, 28, 0xffe5e5eau);
+
+  draw_pill_box(444, py, 192, ph);
+  digit(2, 502, py + 13, 18, 30, 4, 0xff64d2ffu);
+  rect(537, py + 20, 4, 4, 0xffe5e5eau);
+  rect(537, py + 32, 4, 4, 0xffe5e5eau);
+  digit(1, 558, py + 13, 18, 30, 4, 0xff64d2ffu);
+
+  draw_pill_box(652, py, 188, ph);
+  const unsigned cx = 730, cy = py + 12, cs = 32, ct = 3;
+  rect(cx, cy, cs, ct, 0xffd0d4dcu);
+  rect(cx, cy + cs - ct, cs, ct, 0xffd0d4dcu);
+  rect(cx, cy, ct, cs, 0xffd0d4dcu);
+  rect(cx + cs - ct, cy, ct, cs, 0xffd0d4dcu);
+  rect(cx + cs / 2 - 1, cy + 7, 3, 10, 0xffffffffu);
+  rect(cx + cs / 2 - 1, cy + 15, 9, 3, 0xffffffffu);
+
+  draw_pill_box(856, py, 188, ph);
+  rect(932, py + 26, 36, 4, 0xffe5e5eau);
+  rect(948, py + 10, 4, 36, 0xffe5e5eau);
+}
+
 static void draw(bool closed) {
   if (!init()) { return; }
   rect(0, 0, 1080, 2520, 0xff000000u);
@@ -562,9 +772,21 @@ static uint64_t mono_ms() {
   return ns / 1000000ull;
 }
 
+static void toggle_zoom_mode() {
+  const uint32_t cur = __atomic_load_n(&active_view, __ATOMIC_ACQUIRE);
+  if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) || !is_desktop_view(cur)) {
+    return;
+  }
+  const uint32_t next = (cur == 3u) ? 2u : 3u;
+  prefer_full_1to1 = (next == 3u) ? 1u : 0u;
+  __atomic_store_n(&active_view, next, __ATOMIC_RELEASE);
+  __atomic_store_n(&hud_dirty, 1u, __ATOMIC_RELEASE);
+  IOLog("ZIZHAN_OUTER_FOLD: zoom toggle view=%u->%u (%s)\n", cur, next, next == 3u ? "1:1-full" : "2:1-overview");
+}
+
 static void switch_to_desktop() {
   if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) ||
-      __atomic_load_n(&active_view, __ATOMIC_ACQUIRE) == 2u) {
+      is_desktop_view(__atomic_load_n(&active_view, __ATOMIC_ACQUIRE))) {
     return;
   }
   __atomic_store_n(&wake_req_ms, mono_ms(), __ATOMIC_RELEASE);
@@ -574,7 +796,8 @@ static void switch_to_desktop() {
   if (zizhan_inner_panel_cover_mute) {
     (void)zizhan_inner_panel_cover_mute(1);
   }
-  __atomic_store_n(&active_view, 2u, __ATOMIC_RELEASE);
+  const uint32_t target_view = desktop_target_view();
+  __atomic_store_n(&active_view, target_view, __ATOMIC_RELEASE);
   const int disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
   bool woke = false;
   if (disp == 0) {
@@ -583,12 +806,12 @@ static void switch_to_desktop() {
     pong_touch_post(5u, 0u, 0, 0);
     woke = true;
   }
-  IOLog("ZIZHAN_OUTER_FOLD: toggle clock->desktop prev_display=%d woke=%u\n", disp, woke ? 1u : 0u);
+  IOLog("ZIZHAN_OUTER_FOLD: toggle clock->desktop view=%u prev_display=%d woke=%u\n", target_view, disp, woke ? 1u : 0u);
 }
 
 static void switch_to_clock() {
   if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) ||
-      __atomic_load_n(&active_view, __ATOMIC_ACQUIRE) != 2u) {
+      !is_desktop_view(__atomic_load_n(&active_view, __ATOMIC_ACQUIRE))) {
     return;
   }
   __atomic_store_n(&active_view, 1u, __ATOMIC_RELEASE);
@@ -627,19 +850,23 @@ static void cover_desktop_worker(void *, wait_result_t) {
   }
   if (current_mode() != 0u && !__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
     draw(false);
+    sync_panel_power("boot-open");
   }
   bool was_active = false;
+  uint32_t rendered_view = 0;
   uint32_t last_seq = 0, seq_first = 0, seq_last = 0, blits = 0, idle_skips = 0, idle_streak = 0;
   uint32_t first_misr = 0, last_misr = 0, prev_misr = 0, distinct_misrs = 0;
   uint64_t last_hud_ms = 0, last_misr_ms = 0;
   for (;;) {
     const bool closed = __atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) != 0;
-    const bool desk_on = closed && (__atomic_load_n(&active_view, __ATOMIC_ACQUIRE) == 2u);
+    const uint32_t cur_view = __atomic_load_n(&active_view, __ATOMIC_ACQUIRE);
+    const bool desk_on = closed && is_desktop_view(cur_view);
     if (!desk_on) {
       if (was_active) {
         was_active = false;
+        rendered_view = 0;
         uint32_t open_sig = 0;
-        if (!closed && init()) {
+        if (!closed && init() && outer_panel_on) {
           rect(0, 0, 1080, 2520, 0xff000000u);
           __asm__ volatile("dsb sy" ::: "memory");
           open_sig = misr();
@@ -657,26 +884,53 @@ static void cover_desktop_worker(void *, wait_result_t) {
       continue;
     }
     const uint64_t now = mono_ms();
-    if (!was_active) {
-      was_active = true;
-      last_seq = 0; seq_first = 0; seq_last = 0; blits = 0; idle_skips = 0; idle_streak = 0;
-      first_misr = 0; last_misr = 0; prev_misr = 0; distinct_misrs = 0;
+    const bool full_mode = (cur_view == 3u);
+    if (!was_active || cur_view != rendered_view) {
+      if (!was_active) {
+        was_active = true;
+        seq_first = 0; seq_last = 0; blits = 0; idle_skips = 0;
+        first_misr = 0; last_misr = 0; prev_misr = 0; distinct_misrs = 0;
+      }
+      rendered_view = cur_view;
+      last_seq = 0;
+      idle_streak = 0;
       rect(0, 0, 1080, 2520, 0xff000000u);
-      rect(0, 777, 1080, 2, 0xff2c2c2eu);
-      rect(0, 1741, 1080, 2, 0xff2c2c2eu);
-      draw_status_strip(704, true, nullptr, nullptr, nullptr);
-      if (allow_doubletap) {
-        draw_lock_pill();
+      if (full_mode) {
+        rect(0, 217, 1080, 2, 0xff2c2c2eu);
+        rect(0, 2138, 1080, 2, 0xff2c2c2eu);
+        draw_status_strip(136, true, nullptr, nullptr, nullptr);
+        if (allow_doubletap) {
+          draw_full_5pill_bar();
+        }
+      } else {
+        rect(0, 777, 1080, 2, 0xff2c2c2eu);
+        rect(0, 1741, 1080, 2, 0xff2c2c2eu);
+        draw_status_strip(704, true, nullptr, nullptr, nullptr);
+        if (allow_doubletap) {
+          draw_lock_pill();
+          draw_zoom_pill_2to1();
+        }
       }
       __asm__ volatile("dsb sy" ::: "memory");
       ensure_misr();
       last_hud_ms = now;
       last_misr_ms = 0;
-      IOLog("ZIZHAN_OUTER_DESKTOP: ACTIVE viewport=1080x958@y781 pill=%u\n", allow_doubletap ? 1u : 0u);
+      IOLog("ZIZHAN_OUTER_DESKTOP: ACTIVE viewport=%s mode=%s pill=%u\n",
+            full_mode ? "1080x1916@y220" : "1080x958@y781",
+            full_mode ? "1:1-full" : "2:1-overview",
+            allow_doubletap ? 1u : 0u);
     } else if (__atomic_exchange_n(&hud_dirty, 0u, __ATOMIC_ACQ_REL) || now - last_hud_ms >= 15000ull) {
-      draw_status_strip(704, true, nullptr, nullptr, nullptr);
-      if (allow_doubletap) {
-        draw_lock_pill();
+      if (full_mode) {
+        draw_status_strip(136, true, nullptr, nullptr, nullptr);
+        if (allow_doubletap) {
+          draw_full_5pill_bar();
+        }
+      } else {
+        draw_status_strip(704, true, nullptr, nullptr, nullptr);
+        if (allow_doubletap) {
+          draw_lock_pill();
+          draw_zoom_pill_2to1();
+        }
       }
       __asm__ volatile("dsb sy" ::: "memory");
       last_hud_ms = now;
@@ -688,9 +942,13 @@ static void cover_desktop_worker(void *, wait_result_t) {
     if (seq != 0 && src_va) {
       if (seq != last_seq || blits == 0) {
         const uint32_t sc_q8 = cover_scale_q8();
-        const unsigned rows = zizhan_outer_touch::blit_2to1_bgra(
-            src_va, src_stride, src_w, src_h,
-            fb_va + (0xb8fc9900ull & 0xfffull), 4320u, zizhan_outer_touch::kDesktopY0, sc_q8);
+        const unsigned rows = full_mode
+            ? zizhan_outer_touch::blit_1to1_crop_bgra(
+                  src_va, src_stride, src_w, src_h, zizhan_outer_touch::kFullDefaultCropX,
+                  fb_va + (0xb8fc9900ull & 0xfffull), 4320u, zizhan_outer_touch::kFullY0, sc_q8)
+            : zizhan_outer_touch::blit_2to1_bgra(
+                  src_va, src_stride, src_w, src_h,
+                  fb_va + (0xb8fc9900ull & 0xfffull), 4320u, zizhan_outer_touch::kDesktopY0, sc_q8);
         if (rows > 0) {
           __asm__ volatile("dsb sy" ::: "memory");
           last_seq = seq;
@@ -736,8 +994,19 @@ extern "C" uint32_t zizhan_outer_fold_mode(void) {
   return fold::current_mode();
 }
 
+extern "C" uint32_t zizhan_outer_active_view(void) {
+  return __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE);
+}
+
 extern "C" int zizhan_outer_lid_closed(void) {
   return __atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE) ? 1 : 0;
+}
+
+extern "C" void zizhan_outer_panel_sleep(int asleep) {
+  __atomic_store_n(&fold::system_asleep, asleep ? 1u : 0u, __ATOMIC_RELEASE);
+  if (fold::current_mode() != 0u) {
+    fold::sync_panel_power(asleep ? "system-sleep" : "system-wake");
+  }
 }
 
 extern "C" void zizhan_outer_fold_show(int closed) {
@@ -749,8 +1018,9 @@ extern "C" void zizhan_outer_fold_show(int closed) {
   }
   if (closed) {
     const uint32_t was_closed = __atomic_exchange_n(&fold::lid_closed, 1u, __ATOMIC_ACQ_REL);
+    fold::sync_panel_power("fold-close");
     if (!was_closed) {
-      const uint32_t view = (m == 2u) ? 2u : 1u;
+      const uint32_t view = (m == 2u || m == 3u) ? fold::desktop_target_view() : 1u;
       __atomic_store_n(&fold::active_view, view, __ATOMIC_RELEASE);
       if (view == 1u) {
         fold::draw(true);
@@ -759,11 +1029,15 @@ extern "C" void zizhan_outer_fold_show(int closed) {
       fold::draw(true);
     }
   } else {
-    __atomic_store_n(&fold::lid_closed, 0u, __ATOMIC_RELEASE);
     const uint32_t prev = __atomic_exchange_n(&fold::active_view, 0u, __ATOMIC_ACQ_REL);
-    if (prev != 0u) {
+    for (unsigned w = 0; w < 15 && __atomic_load_n(&fold::desktop_busy, __ATOMIC_ACQUIRE); ++w) {
+      IOSleep(10);
+    }
+    if (prev != 0u && fold::outer_panel_on) {
       fold::draw(false);
     }
+    __atomic_store_n(&fold::lid_closed, 0u, __ATOMIC_RELEASE);
+    fold::sync_panel_power("fold-open");
   }
 }
 
@@ -971,9 +1245,10 @@ static void outer_touch_worker(void *, wait_result_t) {
       }
     }
     auto cur_map_mode = [&]() {
-      return (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 2u)
-          ? zizhan_outer_touch::MapMode::DesktopViewport
-          : zizhan_outer_touch::MapMode::ClockWakeOnly;
+      const uint32_t v = __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE);
+      if (v == 3u) { return zizhan_outer_touch::MapMode::DesktopFull1to1; }
+      if (v == 2u) { return zizhan_outer_touch::MapMode::DesktopViewport; }
+      return zizhan_outer_touch::MapMode::ClockWakeOnly;
     };
     const bool toggle_ok = fold::allow_doubletap != 0u;
     auto pocket_now = [&]() -> bool {
@@ -991,6 +1266,10 @@ static void outer_touch_worker(void *, wait_result_t) {
       }
       if (sr.toggle_desktop) {
         fold::switch_to_desktop();
+        return;
+      }
+      if (sr.bar_action == zizhan_outer_touch::BarAction::ZoomToggle) {
+        fold::toggle_zoom_mode();
         return;
       }
       if (sr.bar_action == zizhan_outer_touch::BarAction::VolDown) {
@@ -1230,6 +1509,60 @@ static void outer_touch_worker(void *, wait_result_t) {
           IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth4 stage=4 clock-pill toggles=%u active_view=%u\n",
                 tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
         }
+      } else if (outer_touch_synth == 5u) {
+        /* OUTER-03 full-height 1:1 Retina (1080x1916@y220) + live ZOOM toggle self-test:
+         * stage 1 (3 s): swipe-up on Cover Clock -> wakes into 1:1 FullHeight (active_view=3).
+         * stage 2 (8 s): tap center (540, 1178) in 1:1 viewport -> posts touch at (32768, 32768).
+         * stage 3 (12 s): tap 2:1 ZOOM pill (540, 2240) on 5-pill bar -> switches live to active_view=2.
+         * stage 4 (16 s): tap 1:1 FULL pill (540, 2070) in 2:1 mode -> switches live back to active_view=3.
+         * stage 5 (21 s): tap CLOCK pill (746, 2240) on 5-pill bar -> returns to Clock standby (active_view=1). */
+        auto tap_at5 = [&](uint32_t panel_x, uint32_t panel_y) {
+          const uint32_t rx = uint32_t((uint64_t(panel_x) * tracker.max_x) / zizhan_outer_touch::kPanelW);
+          const uint32_t ry = uint32_t((uint64_t(panel_y) * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          uint8_t d1[8], u1[8];
+          encode_pt(0x13u, rx, ry, d1);
+          encode_pt(0x33u, rx, ry, u1);
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOSleep(55);
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+        };
+        if (synth_stage == 0u && elapsed_ms >= 3000ull) {
+          synth_stage = 1u;
+          const uint32_t rx0 = uint32_t((540ull * tracker.max_x) / zizhan_outer_touch::kPanelW);
+          const uint32_t ry0 = uint32_t((2100ull * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          const uint32_t ry1 = uint32_t((1500ull * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          uint8_t d1[8], m1[8], u1[8];
+          encode_pt(0x13u, rx0, ry0, d1);
+          encode_pt(0x23u, rx0, (ry0 + ry1) / 2u, m1);
+          encode_pt(0x33u, rx0, ry1, u1);
+          dispatch_step(zizhan_outer_touch::step(tracker, d1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOSleep(40);
+          dispatch_step(zizhan_outer_touch::step(tracker, m1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOSleep(40);
+          dispatch_step(zizhan_outer_touch::step(tracker, u1, cur_map_mode(), fold::mono_ms(), toggle_ok, pocket_now()));
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth5 stage=1 swipe-wake active_view=%u swipe_wakes=%u\n",
+                __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE), tracker.swipe_wakes);
+        } else if (synth_stage == 1u && elapsed_ms >= 8000ull) {
+          synth_stage = 2u;
+          tap_at5(540u, 1178u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth5 stage=2 tap-1to1 posted=%u active_view=%u\n",
+                tracker.posted, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 2u && elapsed_ms >= 12000ull) {
+          synth_stage = 3u;
+          tap_at5(540u, 2240u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth5 stage=3 zoom-to-2to1 zooms=%u active_view=%u\n",
+                tracker.zoom_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 3u && elapsed_ms >= 16000ull) {
+          synth_stage = 4u;
+          tap_at5(540u, 2070u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth5 stage=4 zoom-to-1to1 zooms=%u active_view=%u\n",
+                tracker.zoom_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        } else if (synth_stage == 4u && elapsed_ms >= 21000ull) {
+          synth_stage = 5u;
+          tap_at5(746u, 2240u);
+          IOLog("ZIZHAN_OUTER_TOUCH_LIVE: synth5 stage=5 clock-pill toggles=%u active_view=%u\n",
+                tracker.mode_toggles, __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE));
+        }
       }
       IOSleep(8);
     }
@@ -1247,8 +1580,8 @@ static void outer_touch_worker(void *, wait_result_t) {
     }
     const unsigned end_irq = irq.r(4) & 1u;
     rst.w(0, s_rst); rst.w(4, s_rst_io); irq.w(0, s_irq);
-    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u toggles=%u swipes=%u/%u blocks=%u bar=%u vol=%u home=%u restored=%u irq_end=%u\n",
-          tracker.events, tracker.posted, tracker.hud_taps, tracker.mode_toggles,
+    IOLog("ZIZHAN_OUTER_TOUCH_LIVE: DOWN events=%u posted=%u hud_taps=%u toggles=%u zooms=%u swipes=%u/%u blocks=%u bar=%u vol=%u home=%u restored=%u irq_end=%u\n",
+          tracker.events, tracker.posted, tracker.hud_taps, tracker.mode_toggles, tracker.zoom_toggles,
           tracker.swipe_wakes, tracker.swipe_homes,
           tracker.pocket_blocks, tracker.bar_actions, vol_clicks, home_swipes, (r1 && r2 && r3) ? 1u : 0u, end_irq);
   }
@@ -1300,7 +1633,20 @@ static void worker(void *, wait_result_t) {
 static void start() {
   uint32_t mode = 0;
   const bool have_probe = PE_parse_boot_argn("zizhan_outer_probe", &mode, sizeof mode) && mode != 0;
-  uint32_t dtap = 1, pguard = 1, odim = 1;
+  if (!fold::power_lock) {
+    fold::power_lock = IOLockAlloc();
+  }
+  uint32_t opwr = 0;
+  if (zizhan_daily::arg("zizhan_outer_power", &opwr, zizhan_daily::kOuterPower)) {
+    fold::outer_power_en = (have_probe ? 0u : (opwr ? 1u : 0u));
+  } else {
+    fold::outer_power_en = 0u;
+  }
+  uint32_t odbv = 0;
+  if (PE_parse_boot_argn("zizhan_outer_dbv", &odbv, sizeof odbv) && odbv >= 4u && odbv <= 0x0fffu) {
+    fold::outer_dbv = odbv;
+  }
+  uint32_t dtap = 1, pguard = 1, odim = 1, ofull = 1;
   if (PE_parse_boot_argn("zizhan_outer_doubletap", &dtap, sizeof dtap)) {
     fold::allow_doubletap = dtap ? 1u : 0u;
   }
@@ -1310,19 +1656,30 @@ static void start() {
   if (PE_parse_boot_argn("zizhan_outer_dim", &odim, sizeof odim)) {
     fold::allow_outer_dim = odim ? 1u : 0u;
   }
+  const bool explicit_full = PE_parse_boot_argn("zizhan_outer_full", &ofull, sizeof ofull);
+  fold::prefer_full_1to1 = explicit_full ? (ofull ? 1u : 0u) : (zizhan_daily::profile_on() ? 1u : 0u);
+#if XNU_PONG_WIFI || XNU_PONG_POWER
+  (void)PE_parse_boot_argn("zizhan_outer_touch_synth", &outer_touch_synth, sizeof outer_touch_synth);
+  if (!explicit_full && outer_touch_synth >= 1u && outer_touch_synth <= 4u) {
+    fold::prefer_full_1to1 = 0u;   /* preserve legacy 2:1 coordinates for synth 1..4 */
+  }
+#endif
   const uint32_t fmode = fold::current_mode();
-  if (fmode == 1u || fmode == 2u) {
+  if (fmode == 3u && !explicit_full) {
+    fold::prefer_full_1to1 = 1u;
+  }
+  if (fmode >= 1u && fmode <= 3u) {
     thread_t td = THREAD_NULL;
     if (kernel_thread_start(fold::cover_desktop_worker, nullptr, &td) == KERN_SUCCESS) {
       thread_deallocate(td);
     }
-    IOLog("ZIZHAN_OUTER_DESKTOP: READY mode=%u doubletap=%u\n", fmode, fold::allow_doubletap);
+    IOLog("ZIZHAN_OUTER_DESKTOP: READY mode=%u doubletap=%u full_1to1=%u outer_power=%u\n",
+          fmode, fold::allow_doubletap, fold::prefer_full_1to1, fold::outer_power_en);
   }
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   uint32_t touch_on = 0;
   if ((!have_probe || mode < 4u) &&
       zizhan_daily::arg("zizhan_outer_touch", &touch_on, zizhan_daily::kOuterTouch) && touch_on == 1u) {
-    (void)PE_parse_boot_argn("zizhan_outer_touch_synth", &outer_touch_synth, sizeof outer_touch_synth);
     thread_t tt = THREAD_NULL;
     if (kernel_thread_start(outer_touch_worker, nullptr, &tt) == KERN_SUCCESS) {
       thread_deallocate(tt);

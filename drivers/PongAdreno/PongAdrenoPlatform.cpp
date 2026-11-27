@@ -439,8 +439,9 @@ static void dcvs(void *,wait_result_t)
     /* POWER-08: with the display off the GPU still wakes ~24 times a second at 0 % busy (vs-a), and each wake boosts to
      * >= 578 MHz (nominal voltage) for 50 ms, so it never rests at the floor. While the display is off the governor holds
      * pong_gpu_off_level (default 1: 220 MHz, low SVS); 0 keeps the display-on policy. */
-    unsigned offLevel=1;
+    unsigned offLevel=1,sleepZeroBus=1;
     (void)PE_parse_boot_argn("pong_gpu_off_level",&offLevel,sizeof(offLevel));
+    (void)PE_parse_boot_argn("zizhan_gpu_sleep_bus",&sleepZeroBus,sizeof(sleepZeroBus));
     if(bootTop<1 || bootTop>13)bootTop=13;
     if(bootFloor<1)bootFloor=1;
     if(bootFloor>bootTop)bootFloor=bootTop;
@@ -451,6 +452,7 @@ static void dcvs(void *,wait_result_t)
     uint64_t lastBusy=0;
     if(PongAdrenoGmuBusyTicks(&gmu,&lastBusy)) {record("SKIP DCVS busy read",1);done();return;}
     unsigned cur=pong_adreno_start_level<1 || pong_adreno_start_level>13?9:pong_adreno_start_level;
+    unsigned curBus=PongAdrenoPowerLevels[13-cur].bus;
     const uint64_t first=lastBusy;
     uint64_t lastT=mach_absolute_time(),idleSince=lastT,runNs=0,winBusy=0,winNs=0,atLevel[14]={};
     uint64_t boostAbs=0,wakeAbs=0,touchEnd=0,wakeEnd=0;
@@ -458,10 +460,10 @@ static void dcvs(void *,wait_result_t)
     nanoseconds_to_absolutetime(50000000ull,&wakeAbs);
     uint32_t touches=&pong_touch_activity?pong_touch_activity:0;
     unsigned down=0,hold=0,changes=0,failed=0,touchBoosts=0,wakeBoosts=0;
-    bool idle=false,moved=false;
+    bool idle=false,moved=false,inOffState=false;
     record("DCVS started (sheng governor)",0,(uint64_t(floor)<<32)|top,cur);
     for(;;) {
-        IOSleep(16);
+        IOSleep((inOffState && idle && cur==floor && (!sleepZeroBus || curBus==0u)) ? 64 : 16);
         const unsigned thermal=(&pong_gpu_thermal_level)?
             __atomic_load_n(&pong_gpu_thermal_level,__ATOMIC_ACQUIRE):0;
         const unsigned thermalTop=thermal>12u?1u:13u-thermal;
@@ -470,6 +472,7 @@ static void dcvs(void *,wait_result_t)
         {
             static bool wasOff;
             const bool off=offLevel && &zizhan_display_power_state && zizhan_display_power_state()==0;
+            inOffState=off;
             if(off) {
                 top=offLevel<top?offLevel:top;
                 floor=top;
@@ -541,9 +544,13 @@ static void dcvs(void *,wait_result_t)
         }
         if(want<floor)want=floor;
         if(want>top)want=top;
-        if(want!=cur) {
+        const unsigned wantBus=(inOffState && sleepZeroBus && busyNs*20<=ns && want==floor)?0u:PongAdrenoPowerLevels[13-want].bus;
+        if(want!=cur || wantBus!=curBus) {
             uint32_t error=0;
-            if(!PongAdrenoGmuSetLevel(&gmu,want,PongAdrenoPowerLevels[13-want].bus,&error)) {hold=want>cur;cur=want;++changes;}
+            if(!PongAdrenoGmuSetLevel(&gmu,want,wantBus,&error)) {
+                if((curBus==0u)!=(wantBus==0u))IOLog("PONG GPU DCVS: ddr bus index %u -> %u (level %u)\n",curBus,wantBus,want);
+                hold=want>cur;cur=want;curBus=wantBus;++changes;
+            }
             else if(++failed>=8) {record("STOP DCVS: votes refused",error,want,cur);break;}
             down=0;
         }

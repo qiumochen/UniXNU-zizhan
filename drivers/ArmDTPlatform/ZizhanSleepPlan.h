@@ -132,4 +132,36 @@ static inline int zizhan_autosleep_due(int display_off, int sleep_in_progress, i
     return off_seconds >= autosleep_s ? 1 : 0;
 }
 
+/* POWER-08: Outer L18 secondary 6.56" AMOLED (DSI1 0xae96000 + INTF_2 0xae37000) power policy.
+ * When outer_power_enabled is 0 or a diagnostic outer probe is active, keep UEFI's always-on state (1).
+ * Otherwise, power the outer panel ON only when the phone is folded (lid_closed != 0) AND not in system sleep. */
+static inline int zizhan_outer_panel_wanted(int outer_power_enabled, int lid_closed,
+                                            int system_asleep, int probe_active)
+{
+    if (!outer_power_enabled || probe_active) {
+        return 1;
+    }
+    if (system_asleep) {
+        return 0;
+    }
+    return lid_closed ? 1 : 0;
+}
+
+/* Encode a 1-byte DCS short write (0x05) into an even pair of Qualcomm DSI FIFO words. */
+static inline void zizhan_dsi_dcs_short0_words(uint8_t dcs_cmd, uint32_t out_words[2])
+{
+    out_words[0] = (1u << 31) | (0x05u << 16) | (uint32_t)dcs_cmd;
+    out_words[1] = 0u;
+}
+
+/* Encode a 12-bit swapped-DBV DCS brightness write (0x51, big-endian payload on L18 prim/sec panels)
+ * matching PongBacklight.cpp's verified 0xc0390003u / 0xff000051u | (wire << 8) format. */
+static inline void zizhan_dsi_dcs_dbv_words(uint32_t dbv_12bit, int swapped_dbv, uint32_t out_words[2])
+{
+    const uint32_t clamped = dbv_12bit > 0x0fffu ? 0x0fffu : dbv_12bit;
+    const uint32_t wire = swapped_dbv ? (((clamped & 0xffu) << 8) | ((clamped >> 8) & 0xffu)) : clamped;
+    out_words[0] = 0xc0390003u;
+    out_words[1] = 0xff000051u | (wire << 8);
+}
+
 #endif /* ZIZHAN_SLEEP_PLAN_H */

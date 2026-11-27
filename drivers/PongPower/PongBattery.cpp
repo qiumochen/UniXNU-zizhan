@@ -71,7 +71,7 @@ class AppleSmartBattery : public IOPMPowerSource {
     uint32_t ringHead = 0, ringCount = 0;
     volatile uint32_t channelUp = 0, channelChanged = 0, forceRefresh = 0;
     bool wasUp = false, published = false, healthDiagLogged = false;
-    uint8_t boardGet = 0;
+    uint8_t boardGet = 1;
     int bootVoltageMv = 0;
     uint32_t refreshes = 0;
     ShengBattmgr bm;
@@ -338,9 +338,10 @@ class AppleSmartBattery : public IOPMPowerSource {
 public:
     bool startBattery() {
         sheng_battmgr_init(&bm);
-        uint32_t ma = 0, bg = 0;
+        uint32_t ma = 0, bg = 1;
         if (PE_parse_boot_argn("pong_usb_sdp_ma", &ma, sizeof ma)) bm.sdp_limit_ua = ma > 3000 ? 3000000u : ma * 1000u;
-        if (PE_parse_boot_argn("zizhan_batt_board", &bg, sizeof bg) && bg == 1) boardGet = 1;
+        (void)PE_parse_boot_argn("zizhan_batt_board", &bg, sizeof bg);
+        boardGet = bg ? 1 : 0;
         bm.board_get = boardGet;
         sdpLimit = bm.sdp_limit_ua;
         loop = IOWorkLoop::workLoop();

@@ -128,6 +128,36 @@ int main(void) {
     assert(s.gauge1_full_mah == 1755 && s.gauge2_full_mah == 1755);
     /* (1710 + 1695) / (1755 + 1755) = 3405 / 3510 = 97.008% -> 97% */
     assert(s.percent == 97);
+    assert(s.adapter_watts == 67);
+
+    /* 2b. SDP/CDP host current limit opt-in (DCP/PD remain firmware-owned). */
+    ShengBattmgr bl;
+    sheng_battmgr_init(&bl);
+    bl.sdp_limit_ua = 900000u;
+    bl.valid = (1ull << BmUsbOnline) | (1ull << BmUsbType) | (1ull << BmUsbAdapter) | (1ull << BmUsbLimit);
+    bl.value[BmUsbOnline] = 1;
+    bl.value[BmUsbType] = 6; /* PD: must NEVER touch firmware charging limit */
+    bl.value[BmUsbAdapter] = 6;
+    bl.value[BmUsbLimit] = 500000;
+    sheng_battmgr_refresh(&bl, 0);
+    answer_cycle(&bl, 0);
+    assert(bl.limit_due == 0);
+    /* SDP port (1) with 500 mA limit < wanted 900 mA -> schedules USB_SET 900000 uA */
+    sheng_battmgr_init(&bl);
+    bl.sdp_limit_ua = 900000u;
+    sheng_battmgr_refresh(&bl, 0);
+    {
+        uint8_t q[SHENG_BATTMGR_REQUEST_BYTES], rp[24];
+        for (;;) {
+            assert(sheng_battmgr_next(&bl, q) == SHENG_BATTMGR_REQUEST_BYTES);
+            uint32_t op = le32(q + 8), pr = le32(q + 16);
+            int32_t v = (op == SHENG_BATTMGR_OP_USB_GET && (pr == 6 || pr == 7)) ? 1
+                        : (op == SHENG_BATTMGR_OP_USB_GET && pr == 5) ? 500000 : 1;
+            make_reply(rp, op, pr, v, 0);
+            if (sheng_battmgr_receive(&bl, rp, sizeof rp) == BmCycleDone) break;
+        }
+        assert(bl.limit_due == 900000u);
+    }
 
     /* 3. Timeout on an unanswered request skips cleanly and finishes cycle. */
     sheng_battmgr_refresh(&b, 0);

@@ -322,6 +322,8 @@ int zizhan_cs35l41_native_rates_run(unsigned,unsigned,GeniI2c *,const ZizhanAmpC
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_protection_run(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,ZizhanAmpRun *);
+void zizhan_audio_set_receiver_mode(int on);
+int zizhan_audio_get_receiver_mode(void);
 #ifdef __cplusplus
 }
 #endif

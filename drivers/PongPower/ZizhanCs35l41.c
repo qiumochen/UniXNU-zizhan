@@ -1140,16 +1140,32 @@ typedef struct {
  GeniI2c *bus;const ZizhanAmpClock *clock;ZizhanAmpRun *out;
  NativePulse context[2];ZizhanPulseOps io[2];int reason;
 } DaemonPoll;
+static volatile unsigned g_zizhan_receiver_mode = 0;
+void zizhan_audio_set_receiver_mode(int on) {
+ __atomic_store_n(&g_zizhan_receiver_mode, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+int zizhan_audio_get_receiver_mode(void) {
+ return (int)__atomic_load_n(&g_zizhan_receiver_mode, __ATOMIC_ACQUIRE);
+}
 static int daemon_amp_arm(void *p){
  DaemonPoll *dp=p;ZizhanAmpRun *out=dp->out;
  if(dp->reason||out->transport.controller_uncertain||geni_i2c_busy(dp->bus)){return 0;}
+ const unsigned recv_only=__atomic_load_n(&g_zizhan_receiver_mode,__ATOMIC_ACQUIRE);
  for(unsigned chip=0;chip<2;++chip){
   ZizhanPulseReceipt *r=&out->pulse[chip];
   if(!r->patch_on||(r->armed&&!r->disabled)){dp->reason=ZizhanAmpPrerequisite;return 0;}
   r->attempted=5;r->acknowledged=5;r->enabled=0;r->disabled=0;r->data_ack=0;r->complete=0;
   r->reason=0;r->armed=0;r->polls=0;r->pcm_source=0;r->gain_set=0;
+  if(recv_only&&chip==1u){
+   /* Top earpiece receiver mode (VoiceChat): keep Bottom speaker 0x42 muted at 0x3300. */
+   r->disabled=1;r->data_ack=1;r->complete=1;continue;
+  }
   dp->bus->address=chip?0x42:0x40;out->failed_chip=chip;out->failed_stage=10;
-  if(zizhan_pulse_arm(&dp->io[chip],r)){
+  const unsigned saved_lvl=dp->io[chip].android_level;
+  if(recv_only&&chip==0u){dp->io[chip].android_level=0u;} /* -12 dB ear-safe receiver level */
+  const int arm_rc=zizhan_pulse_arm(&dp->io[chip],r);
+  dp->io[chip].android_level=saved_lvl;
+  if(arm_rc){
    dp->reason=ZizhanAmpProtocol;
    for(unsigned prev=chip+1;prev-->0;){
     if(out->transport.controller_uncertain||geni_i2c_busy(dp->bus)){break;}
@@ -1172,7 +1188,7 @@ static int daemon_amp_poll(void *p){
  }
  for(unsigned chip=0;chip<2;++chip){
   uint32_t halo=0;dp->bus->address=chip?0x42:0x40;out->failed_chip=chip;
-  if(zizhan_pulse_hold_check(&dp->io[chip],&out->pulse[chip])){dp->reason=ZizhanAmpProtocol;return 1;}
+  if(out->pulse[chip].armed&&zizhan_pulse_hold_check(&dp->io[chip],&out->pulse[chip])){dp->reason=ZizhanAmpProtocol;return 1;}
   if(run_read(dp->bus,dp->clock,0x28007d0,&halo,out)||halo!=2){dp->reason=ZizhanAmpStateChanged;return 1;}
  }
  return 0;

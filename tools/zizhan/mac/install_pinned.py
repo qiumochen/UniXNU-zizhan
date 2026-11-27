@@ -112,6 +112,8 @@ def main():
     if state.get('base') not in (None, base):
         raise SystemExit(f'file moved since the last run ({state["base"]:#x} -> {base:#x}); refusing to resume')
     state['base'], state['file_bytes'] = base, file_bytes
+    if a.file != '/data/hackios/root.img':
+        state['file'] = a.file
     global BOUNDS
     BOUNDS = (base, base + file_bytes)
     if any(w['offset'] < 4096 or w['offset'] + w['size'] > file_bytes for w in windows):

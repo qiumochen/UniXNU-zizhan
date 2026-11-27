@@ -130,7 +130,10 @@ uint32_t sheng_battmgr_next(ShengBattmgr *b, uint8_t out[SHENG_BATTMGR_REQUEST_B
  * (CDP 3) its 1.5 A; others (dedicated chargers, Type-C current, PD contracts) are the firmware's own. */
 static uint32_t wanted_limit(const ShengBattmgr *b, int port)
 {
-    (void)b;(void)port;return 0; /* Charging limits remain firmware-owned. */
+    if (!b || !b->sdp_limit_ua) return 0;
+    if (port == 1) return b->sdp_limit_ua;
+    if (port == 3) return b->sdp_limit_ua > 1500000u ? b->sdp_limit_ua : 1500000u;
+    return 0; /* Dedicated chargers, Type-C, PD, and PPS contracts stay 100% firmware/JEITA-owned. */
 }
 
 /* After a cycle: a set is due when the port wants a higher limit than the firmware reports, at most three tries per port type. */
@@ -265,6 +268,9 @@ void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s)
         if (s->adapter_mv < 0) s->adapter_mv = 0;
         if (s->adapter_ma < 0) s->adapter_ma = -s->adapter_ma;
         s->adapter_watts = (int)(((int64_t)s->adapter_mv * s->adapter_ma + 500000) / 1000000);
+        if (HAS(BmPowerMax) && V(BmPowerMax) > s->adapter_watts && V(BmPowerMax) <= 150) {
+            s->adapter_watts = V(BmPowerMax);
+        }
     } else {
         s->adapter_family = 0;
         s->adapter_mv = s->adapter_ma = s->adapter_watts = 0;

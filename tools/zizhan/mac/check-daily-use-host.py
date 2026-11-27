@@ -14,7 +14,7 @@ def main():
                  "power-transaction.py",
                  "power-query.py", "power-inventory.py", "adsp-event-wait.py", "slpi-std.py", "slpi-sensors.py", "cs35l41-capture.py", "zizhan-mic-codec.py", "bt-hci-shim.py",
                  "scene-orient18.py", "battery-ui18.py", "qmi-loc.py", "cllocation18.py", "cam-isp.py", "zizhan-sleep.py", "ipa-install18.py", "avcapture18.py",
-                 "sheng-battmgr.py", "m3-standalone-preflight.py",
+                 "sheng-battmgr.py", "zizhan-haptics.py", "m3-standalone-preflight.py",
                  "panel-program.py", "panel-pool.py", "zc-fence-target.py", "adreno-span-collect.py", "display-owner.py", "dsi-command.py", "dsi-domain.py", "userland-policy-audit.py",
                  "service-policy.py", "fat.py"):
         subprocess.run([sys.executable, str(ROOT / "tools/zizhan/tests" / name)],

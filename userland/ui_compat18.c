@@ -2183,14 +2183,14 @@ static void launchservices_directories(void)
             return;
         }
     }
-    /* One-shot LaunchServices cache refresh when ZizhanInstaller.app v3 is updated in /Applications */
+    /* One-shot LaunchServices cache refresh when ZizhanBootstrap.app v4 replaces ZizhanInstaller.app in /Applications */
     struct stat ist,mst;
-    const char *stamp="/private/var/mobile/Library/Pong/LaunchServices/.zizhan_installer_v3";
-    if(stat("/Applications/ZizhanInstaller.app/Info.plist",&ist)==0 && stat(stamp,&mst)!=0) {
+    const char *stamp="/private/var/mobile/Library/Pong/LaunchServices/.zizhan_installer_v4";
+    if(stat("/Applications/ZizhanBootstrap.app/Info.plist",&ist)==0 && stat(stamp,&mst)!=0) {
         zizhan_purge_csstore_tree("/private/var/mobile/Library/Pong/LaunchServices",0);
         int sfd=open(stamp,O_CREAT|O_WRONLY|O_TRUNC,0600);
         if(sfd>=0){(void)write(sfd,"1\n",2);close(sfd);}
-        fprintf(stderr,"Pong LS18: purged stale csstore to index ZizhanInstaller.app\n");
+        fprintf(stderr,"Pong LS18: purged stale csstore to index ZizhanBootstrap.app and Customer IPA apps\n");
     }
     const char *paths[]={dirs[1],dirs[3],dirs[6],dirs[9]};
     CFURLRef urls[4]={0};
@@ -3823,21 +3823,27 @@ static id zizhan_app_group_url(id self, SEL _cmd, id groupId) {
     return url ? ((id(*)(id, SEL))objc_msgSend)((id)url, sel_registerName("autorelease")) : nil;
 }
 
+static void zizhan_trigger_hap_cmd(int cmd) {
+    if (zizhan_cam_ctl_write(cmd) != 0) {
+        usleep(2000);
+        (void)zizhan_cam_ctl_write(cmd);
+    }
+}
 static void zizhan_hap_impact(id self, SEL _cmd) {
-    (void)zizhan_cam_ctl_write(0x102);
+    zizhan_trigger_hap_cmd(0x102);
     if (gOrigImpactOccurred) ((void(*)(id, SEL))gOrigImpactOccurred)(self, _cmd);
 }
 static void zizhan_hap_impact_int(id self, SEL _cmd, double intensity) {
-    (void)zizhan_cam_ctl_write(intensity >= 0.7 ? 0x103 : 0x101);
+    zizhan_trigger_hap_cmd(intensity >= 0.7 ? 0x103 : 0x101);
     if (gOrigImpactIntensity) ((void(*)(id, SEL, double))gOrigImpactIntensity)(self, _cmd, intensity);
 }
 static void zizhan_hap_selection(id self, SEL _cmd) {
-    (void)zizhan_cam_ctl_write(0x104);
+    zizhan_trigger_hap_cmd(0x104);
     if (gOrigSelectionChanged) ((void(*)(id, SEL))gOrigSelectionChanged)(self, _cmd);
 }
 static void zizhan_hap_notif(id self, SEL _cmd, long ntype) {
     int cmd = (ntype == 1) ? 0x106 : (ntype == 2 ? 0x107 : 0x105);
-    (void)zizhan_cam_ctl_write(cmd);
+    zizhan_trigger_hap_cmd(cmd);
     if (gOrigNotifOccurred) ((void(*)(id, SEL, long))gOrigNotifOccurred)(self, _cmd, ntype);
 }
 
@@ -4171,8 +4177,27 @@ __attribute__((constructor)) static void pong_ui18_start(void)
             (void)boot_value("pong_open_at=",openat,sizeof(openat));
             snprintf(pending_open_url,sizeof(pending_open_url),"%s",openurl);
             int at=atoi(openat);if(at<=0)at=15;
-            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)at*NSEC_PER_SEC),
-                dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),NULL,open_pending_url);
+            struct timeval kbt={0,0};size_t kbtsz=sizeof(kbt);
+            bool same_boot_done=false;
+            if(strcmp(openurl,"bundle:com.zizhan.bootstrap")==0 && sysctlbyname("kern.boottime",&kbt,&kbtsz,NULL,0)==0) {
+                char sbuf[64]={0};int bfd=open("/private/var/tmp/.zizhan_bootstrap_boottime",O_RDONLY);
+                if(bfd>=0){(void)read(bfd,sbuf,sizeof(sbuf)-1);close(bfd);same_boot_done=(atol(sbuf)==(long)kbt.tv_sec && kbt.tv_sec>0);}
+            }
+            if(same_boot_done) {
+                if(boot_option("zizhan_ux_tour=1")) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,26*NSEC_PER_SEC),dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{
+                        snprintf(pending_open_url,sizeof(pending_open_url),"bundle:com.zizhan.compatsuite");
+                        open_pending_url(NULL);
+                    });
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,52*NSEC_PER_SEC),dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{
+                        snprintf(pending_open_url,sizeof(pending_open_url),"bundle:com.zizhan.installer");
+                        open_pending_url(NULL);
+                    });
+                }
+            } else {
+                dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)at*NSEC_PER_SEC),
+                    dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),NULL,open_pending_url);
+            }
         }
     }
     if(strcmp(name,"backboardd")==0) {

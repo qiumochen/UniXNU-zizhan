@@ -439,18 +439,33 @@ static inline int zizhan_qr_decode_grid(const uint8_t grid[44 * 44], uint8_t n,
         const uint8_t y2 = (i < 7u) ? (uint8_t)(n - 1u - i) : 8u;
         raw2 = (uint16_t)((raw2 << 1) | (grid[(size_t)y2 * n + x2] & 1u));
     }
-    int best_d = -1, best_dist = 4;
+    /* Check timing pattern alternating modules along row 6 and col 6 (8..n-9) */
+    if (n > 17u) {
+        unsigned timing_err = 0, timing_tot = 0;
+        for (uint8_t t = 8u; t + 8u < n; ++t) {
+            const uint8_t want = (t & 1u) ? 0u : 1u;
+            if ((grid[6u * n + t] & 1u) != want) ++timing_err;
+            if ((grid[(size_t)t * n + 6u] & 1u) != want) ++timing_err;
+            timing_tot += 2u;
+        }
+        if (timing_err * 5u > timing_tot) return 0;
+    }
+
+    int best_d = -1, best_sum = 4;
     for (int d = 0; d < 32; ++d) {
         uint32_t v = (uint32_t)d << 10;
         for (int b = 14; b >= 10; --b) {
             if (v & (1u << b)) v ^= 0x537u << (b - 10);
         }
         const uint16_t cw = (uint16_t)((((uint32_t)d << 10) | v) ^ 0x5412u);
-        for (unsigned copy = 0; copy < 2u; ++copy) {
-            uint16_t diff = cw ^ (copy == 0u ? raw1 : raw2);
-            int dist = 0;
-            while (diff) { diff &= (uint16_t)(diff - 1u); ++dist; }
-            if (dist < best_dist) { best_dist = dist; best_d = d; }
+        uint16_t diff1 = cw ^ raw1, diff2 = cw ^ raw2;
+        int dist1 = 0, dist2 = 0;
+        while (diff1) { diff1 &= (uint16_t)(diff1 - 1u); ++dist1; }
+        while (diff2) { diff2 &= (uint16_t)(diff2 - 1u); ++dist2; }
+        /* Require BOTH redundant 15-bit format copies to match BCH(15,5) closely */
+        if (dist1 <= 2 && dist2 <= 2 && (dist1 + dist2) < best_sum) {
+            best_sum = dist1 + dist2;
+            best_d = d;
         }
     }
     if (best_d < 0) return 0;
@@ -569,7 +584,7 @@ static inline int zizhan_qr_scan_bgra(const uint8_t *bgra, uint16_t w, uint16_t 
             if (l < lo) lo = l;
             if (l > hi) hi = l;
         }
-        if ((uint16_t)(hi - lo) < 40u) continue;
+        if ((uint16_t)(hi - lo) < 76u) continue;
         const uint8_t thr = (uint8_t)(((uint16_t)lo + (uint16_t)hi) >> 1);
 
         uint16_t run[5] = {0, 0, 0, 0, 0};
@@ -644,7 +659,7 @@ static inline int zizhan_qr_scan_bgra(const uint8_t *bgra, uint16_t w, uint16_t 
 
                 const int32_t dist_px = (int32_t)zizhan_cam_isqrt16((uint32_t)(d_tr2 > 65024 ? 65024 : d_tr2));
                 const int32_t avg_span = ((int32_t)fnd[i].span + fnd[j].span + fnd[k].span) / 3;
-                if (avg_span < 7) continue;
+                if (avg_span < 12) continue;
                 /* Estimate N = 7 + round(dist_px * 7 / avg_span), snapped to 4*ver + 17 */
                 int est_n = 7 + (dist_px * 7 + (avg_span >> 1)) / avg_span;
                 int ver0 = (est_n - 15) / 4;

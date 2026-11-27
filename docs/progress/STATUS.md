@@ -15,7 +15,7 @@
 | --- | --- |
 | 源码 | `main`（`dac504b`）保持稳定基线；`wip/2026-11-17-audio-sensors` 在三大 P0 基础上再完成第二梯队 1–4 与第三梯队 2：**熄屏纯电池深睡破 1 W（`-219 mA / 952 mW`，稳态底噪 `730 mW`）**、**非破坏性 `64 GiB` 根卷（`48 GiB` Data）+ `IPA 安装器` v2（`<=12 GiB` 流式上传 + 第三方容器 Metal/Keychain/AppGroup/`9:16` 视口 `8/8 PASS`）**、**`960×720` 三摄 `AVCaptureSession`（`1x/0.6x/前置` 热切 + `DW9800V` 对焦 + `RumbaS4H` OIS）**、**PM8350B X 轴线性马达 + 顶部听筒路由** 与 **外屏 `1:1` 满高视网膜桌面（`1080×1916` + `ZOOM` 胶囊）**。 |
 | 启动方式 | Mac 后部 USB-A `fastboot boot` 临时启动（默认自动返回、电源键 3 s 回 fastboot）；M3 双启动包 `m3-standalone-1128`（`43fbb97bf71d…`，`build-play205`）已通过离线全项与原厂备份校验，待在场 RAM 预演。 |
-| 手机安装 | iPadOS 18.7.10 / 22H374（默认 `iPad7,12`），新增单段连续 `64 GiB` **`sens-hal-v23-64g`**（`/data/hackios/root-64g.img`，`Data` 空余 `47.2 GiB`，UI `253ae60032b2…`），并 `100%` 原样保留 `19.4 GiB` `sens-hal-v22`（`/data/hackios/root.img`）及 10-28 全分区备份。 |
+| 手机安装 | iPadOS 18.7.10 / 22H374（默认 `iPad7,12`），新增单段连续 `64 GiB` **`sens-hal-v26-64g`**（`/data/hackios/root-64g.img`，`Data` 空余 `46.8 GiB`，UI `a370df9c8804…`，主屏幕第 1 页已预置 `IPA 安装器` / `扫码相机验证` / `兼容套件验证` 三枚图标），并 `100%` 原样保留 `19.4 GiB` `sens-hal-v22`（`/data/hackios/root.img`）及 10-28 全分区备份。 |
 | 默认能用 | 内屏 120 Hz + GPU 零拷贝、**`<1 W` 熄屏深睡与开合/电源键秒醒**、**`48 GiB` Data + `IPA 安装器` v2（大型脱壳应用免签安装/Metal/Keychain/卸载）**、**第三方应用 `960×720` 三摄扫码/拍照/切换**、**X 轴线性马达触感**、**通话听筒/双扬声器自动路由**、**外屏 `1:1` 满高桌面 + `ZOOM` 切换**、Wi-Fi、`3 Mbps` 蓝牙、双开关电池页、北京时间、温控、1 Hz GPS。 |
 | 需参数/待在场 | **全功能集中验收 `run-video-5.sh`**（`<1 W` 熄屏深睡 + `48 GiB` 空间局域网直传大包 IPA + 第三方三摄 `960×720` 扫码/拍照 + 线性马达手感 + 通话听筒/外放 + 外屏 `1:1` 满高操作 + 户外 GPS）、M3 双启动 RAM 预演。 |
 | 不能用 | 未脱壳 App Store 加密 IPA（`cryptid=1`，安装器已拦截提示）、原厂系统 `Camera.app`（`FigCapture` 私有 C 层未桩，第三方相机/`AVCaptureSession` 均正常）、蜂窝数据（MPSS 锁定离线仅跑 GPS）、天气预报（卡 FairPlay）。 |

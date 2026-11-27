@@ -95,3 +95,6 @@
 - **在场一键验收与 M3 双启动镜像（均带 `ZIZHAN_USER_PRESENT=yes` 门禁，零分区写入）**：
   - 全功能主验收：`ZIZHAN_USER_PRESENT=yes bash work/m1-firstsound/run-video-5.sh`（镜像 `out/video-5` `49844203791c…`，挂载 `64 GiB` 根卷并开启真实音频外放/主麦/听筒路由与真实 X 轴线性马达震动；`run-video-1.sh` 已自动转发至 `run-video-5.sh`）。
   - M3 独立双启动包：`work/m3-standalone-1128/pong-xnu-aprime.img`（`43fbb97bf71d35dad3c23efd1c2553f3755f3ea45f8fe776516fc7c39c72b877`），离线全项与原厂 `boot_b.img.gz` 备份校验 `M3_STANDALONE_PREFLIGHT: PASS`（`backup_verified: true`）。
+- **晚间在场初测反馈闭环（`sens-hal-v26-64g` / `ux-fix-3` / `ux-verify-clean` / `ux-home-check`）**：
+  - 将 `ZizhanInstaller`（`com.zizhan.installer`，「IPA 安装器」）、`ZizhanDemoApp`（`com.zizhan.demoapp`，「扫码相机验证」）与 `ZizhanCompatSuite`（`com.zizhan.compatsuite`，「兼容套件验证」）统一封装为 `16K` 用户域应用（保留 `/Applications/ZizhanBootstrap.app` 系统引导器并去除冗余 `LS rebuild` 使单包安装提速至 `~1.5 s`），三枚图标全部置顶于主屏幕第 1 页（`ux-home-check.shot1.png` `192/192` 完整帧确认）。
+  - 重构 `ZizhanCompatSuite` 与 `ZizhanDemoApp` 交互逻辑：人类常规启动不再自动触发马达震动，保持 `960×720` 相机画面持续预览不断流（`ux-verify-clean` 连续 280+ 帧），新增 9 按钮交互控制台（三摄切换、AF 对焦、JPEG 拍照、暂停预览、X 轴震动、听筒/双扬 `1.1 s` 试音切换）及 `1x` 等效标准视角裁切与 ISO-18004 双副本 BCH(15,5) + 对比度门限防暗噪误识别。

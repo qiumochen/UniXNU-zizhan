@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /* ZizhanDemoApp: Real third-party containerized UIKit app packaged as a 16 KiB page-signed
- * decrypted .ipa (com.zizhan.demoapp) to validate end-to-end IPA sideloading, CoreLocation GNSS,
- * and system-level AVCaptureSession (live camera preview + photo capture + QR code recognition)
- * inside /private/var/containers/Bundle/Application/<UUID>/ZizhanDemoApp.app! */
+ * decrypted .ipa (com.zizhan.demoapp, "扫码相机验证") to validate end-to-end IPA sideloading,
+ * CoreLocation GNSS, and 3-camera 960x720 AVCaptureSession (1x / 0.6x / Front live switching,
+ * DW9800V autofocus, JPEG photo capture, and real-time QR code recognition). */
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreLocation/CoreLocation.h>
@@ -33,12 +33,13 @@ static bool demo_boot_option(const char *opt) {
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UILabel *qrLabel;
 @property (nonatomic, strong) UIView *previewHost;
+@property (nonatomic, strong) NSArray<UIButton *> *lensButtons;
 @property (nonatomic, strong) AVCaptureSession *session;
 @property (nonatomic, strong) AVCaptureVideoPreviewLayer *previewLayer;
 @property (nonatomic, strong) AVCapturePhotoOutput *photoOutput;
 @property (nonatomic, strong) AVCaptureMetadataOutput *metaOutput;
 @property (nonatomic, strong) CLLocationManager *locMgr;
-@property (nonatomic, assign) AVCaptureDevicePosition currentPos;
+@property (nonatomic, assign) int currentLensTag; /* 1=1x, 4=0.6x, 2=Front */
 @property (nonatomic, assign) unsigned qrHits;
 @property (nonatomic, assign) unsigned photosSaved;
 @property (nonatomic, copy) NSString *lastQrPayload;
@@ -46,27 +47,42 @@ static bool demo_boot_option(const char *opt) {
 
 @implementation ZizhanDemoController
 
+- (UIButton *)makeBtn:(NSString *)title bg:(UIColor *)bg sel:(SEL)sel tag:(NSInteger)tag {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [b setTitle:title forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:15.0];
+    b.titleLabel.adjustsFontSizeToFitWidth = YES;
+    b.titleLabel.minimumScaleFactor = 0.75;
+    b.backgroundColor = bg;
+    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    b.layer.cornerRadius = 10.0;
+    b.tag = tag;
+    [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithRed:0.06 green:0.08 blue:0.12 alpha:1.0];
-    self.title = @"Zizhan 16K IPA · 相机与扫码验证";
-    self.currentPos = AVCaptureDevicePositionBack;
+    self.title = @"MIX Fold 2 · 三摄与扫码相机";
+    self.currentLensTag = 1;
 
     UILabel *banner = [[UILabel alloc] init];
     banner.translatesAutoresizingMaskIntoConstraints = NO;
-    banner.text = @"第三方 16K 脱壳 IPA 已安装运行 (com.zizhan.demoapp)";
-    banner.font = [UIFont boldSystemFontOfSize:20.0];
+    banner.text = @"960×720 三摄实时取景 · 二维码秒级识别 · 自动对焦拍照";
+    banner.font = [UIFont boldSystemFontOfSize:18.0];
     banner.textColor = [UIColor colorWithRed:0.35 green:0.92 blue:0.62 alpha:1.0];
     banner.textAlignment = NSTextAlignmentCenter;
     banner.numberOfLines = 0;
 
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statusLabel.text = [NSString stringWithFormat:@"Bundle Path: %@\n正在初始化 AVCaptureSession + CoreLocation...",
-                             [[NSBundle mainBundle] bundlePath]];
-    self.statusLabel.font = [UIFont monospacedSystemFontOfSize:13.0 weight:UIFontWeightRegular];
+    self.statusLabel.text = @"正在初始化 960×720 三摄 AVCaptureSession 与 CoreLocation GNSS...";
+    self.statusLabel.font = [UIFont monospacedSystemFontOfSize:12.5 weight:UIFontWeightRegular];
     self.statusLabel.textColor = [UIColor colorWithWhite:0.88 alpha:1.0];
-    self.statusLabel.numberOfLines = 0;
+    self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.numberOfLines = 2;
 
     self.previewHost = [[UIView alloc] init];
     self.previewHost.translatesAutoresizingMaskIntoConstraints = NO;
@@ -78,34 +94,24 @@ static bool demo_boot_option(const char *opt) {
 
     self.qrLabel = [[UILabel alloc] init];
     self.qrLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.qrLabel.text = @"二维码识别: 等待帧输入...";
-    self.qrLabel.font = [UIFont boldSystemFontOfSize:16.0];
+    self.qrLabel.text = @"二维码识别就绪：对准任意二维码即可实时读取内容";
+    self.qrLabel.font = [UIFont boldSystemFontOfSize:15.5];
     self.qrLabel.textColor = [UIColor colorWithRed:1.0 green:0.84 blue:0.30 alpha:1.0];
     self.qrLabel.textAlignment = NSTextAlignmentCenter;
-    self.qrLabel.numberOfLines = 0;
+    self.qrLabel.numberOfLines = 2;
 
-    UIButton *flipBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    flipBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [flipBtn setTitle:@"切换前/后摄" forState:UIControlStateNormal];
-    flipBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16.0];
-    flipBtn.backgroundColor = [UIColor colorWithRed:0.16 green:0.42 blue:0.85 alpha:1.0];
-    [flipBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    flipBtn.layer.cornerRadius = 10.0;
-    [flipBtn addTarget:self action:@selector(toggleCamera) forControlEvents:UIControlEventTouchUpInside];
+    UIColor *idleBg = [UIColor colorWithRed:0.16 green:0.26 blue:0.42 alpha:1.0];
+    UIButton *b1x   = [self makeBtn:@"1x 主摄"     bg:idleBg sel:@selector(onSelectLens:) tag:1];
+    UIButton *b06   = [self makeBtn:@"0.6x 超广角" bg:idleBg sel:@selector(onSelectLens:) tag:4];
+    UIButton *bFr   = [self makeBtn:@"前置镜头"    bg:idleBg sel:@selector(onSelectLens:) tag:2];
+    UIButton *bSnap = [self makeBtn:@"对焦 + 拍照" bg:[UIColor colorWithRed:0.15 green:0.62 blue:0.42 alpha:1.0]
+                                sel:@selector(takePhoto) tag:10];
+    self.lensButtons = @[b1x, b06, bFr];
 
-    UIButton *snapBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    snapBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [snapBtn setTitle:@"拍照 (JPEG)" forState:UIControlStateNormal];
-    snapBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16.0];
-    snapBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.65 blue:0.42 alpha:1.0];
-    [snapBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    snapBtn.layer.cornerRadius = 10.0;
-    [snapBtn addTarget:self action:@selector(takePhoto) forControlEvents:UIControlEventTouchUpInside];
-
-    UIStackView *btnRow = [[UIStackView alloc] initWithArrangedSubviews:@[flipBtn, snapBtn]];
+    UIStackView *btnRow = [[UIStackView alloc] initWithArrangedSubviews:@[b1x, b06, bFr, bSnap]];
     btnRow.translatesAutoresizingMaskIntoConstraints = NO;
     btnRow.axis = UILayoutConstraintAxisHorizontal;
-    btnRow.spacing = 16.0;
+    btnRow.spacing = 10.0;
     btnRow.distribution = UIStackViewDistributionFillEqually;
 
     [self.view addSubview:banner];
@@ -115,28 +121,36 @@ static bool demo_boot_option(const char *opt) {
     [self.view addSubview:btnRow];
 
     UILayoutGuide *g = self.view.safeAreaLayoutGuide;
+    NSLayoutConstraint *prefW = [self.previewHost.widthAnchor constraintEqualToConstant:560.0];
+    prefW.priority = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint *prefH = [self.previewHost.heightAnchor constraintEqualToConstant:420.0];
+    prefH.priority = UILayoutPriorityDefaultHigh;
+
     [NSLayoutConstraint activateConstraints:@[
-        [banner.topAnchor constraintEqualToAnchor:g.topAnchor constant:12.0],
-        [banner.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16.0],
-        [banner.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16.0],
+        [banner.topAnchor constraintEqualToAnchor:g.topAnchor constant:10.0],
+        [banner.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:14.0],
+        [banner.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-14.0],
 
-        [self.statusLabel.topAnchor constraintEqualToAnchor:banner.bottomAnchor constant:8.0],
-        [self.statusLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16.0],
-        [self.statusLabel.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16.0],
+        [self.statusLabel.topAnchor constraintEqualToAnchor:banner.bottomAnchor constant:6.0],
+        [self.statusLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:14.0],
+        [self.statusLabel.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-14.0],
 
-        [self.previewHost.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:12.0],
+        [self.previewHost.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:10.0],
         [self.previewHost.centerXAnchor constraintEqualToAnchor:g.centerXAnchor],
-        [self.previewHost.widthAnchor constraintLessThanOrEqualToAnchor:g.widthAnchor constant:-32.0],
-        [self.previewHost.widthAnchor constraintEqualToConstant:480.0],
-        [self.previewHost.heightAnchor constraintEqualToConstant:360.0],
+        [self.previewHost.widthAnchor constraintLessThanOrEqualToAnchor:g.widthAnchor constant:-28.0],
+        prefW,
+        prefH,
+        [self.previewHost.heightAnchor constraintLessThanOrEqualToAnchor:g.heightAnchor multiplier:0.62],
 
-        [self.qrLabel.topAnchor constraintEqualToAnchor:self.previewHost.bottomAnchor constant:12.0],
-        [self.qrLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16.0],
-        [self.qrLabel.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16.0],
+        [self.qrLabel.topAnchor constraintEqualToAnchor:self.previewHost.bottomAnchor constant:10.0],
+        [self.qrLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:14.0],
+        [self.qrLabel.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-14.0],
 
-        [btnRow.topAnchor constraintEqualToAnchor:self.qrLabel.bottomAnchor constant:14.0],
+        [btnRow.topAnchor constraintEqualToAnchor:self.qrLabel.bottomAnchor constant:12.0],
         [btnRow.centerXAnchor constraintEqualToAnchor:g.centerXAnchor],
-        [btnRow.widthAnchor constraintEqualToConstant:360.0],
+        [btnRow.leadingAnchor constraintGreaterThanOrEqualToAnchor:g.leadingAnchor constant:14.0],
+        [btnRow.trailingAnchor constraintLessThanOrEqualToAnchor:g.trailingAnchor constant:-14.0],
+        [btnRow.widthAnchor constraintLessThanOrEqualToConstant:560.0],
         [btnRow.heightAnchor constraintEqualToConstant:44.0],
     ]];
 
@@ -149,8 +163,13 @@ static bool demo_boot_option(const char *opt) {
     self.locMgr.delegate = self;
     [self.locMgr startUpdatingLocation];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self startCameraPosition:self.currentPos];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDidBackground)
+                                                 name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onWillForeground)
+                                                 name:UIApplicationWillEnterForegroundNotification object:nil];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self selectLensTag:1];
     });
 }
 
@@ -161,63 +180,92 @@ static bool demo_boot_option(const char *opt) {
     }
 }
 
-- (void)startCameraPosition:(AVCaptureDevicePosition)pos {
-    if (self.session) {
-        [self.session stopRunning];
-        [self.previewLayer removeFromSuperlayer];
-        self.session = nil;
+- (void)onDidBackground {
+    if (self.session && self.session.isRunning) [self.session stopRunning];
+}
+
+- (void)onWillForeground {
+    if (self.session && !self.session.isRunning && !demo_boot_option("zizhan_cam_autotest=1")) {
+        [self.session startRunning];
     }
-    AVAuthorizationStatus auth = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
-    AVCaptureDevice *dev = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
-                                                              mediaType:AVMediaTypeVideo
-                                                               position:pos];
+}
+
+- (AVCaptureDevice *)deviceForTag:(int)tag {
+    if (tag == 4) {
+        return [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInUltraWideCamera
+                                                  mediaType:AVMediaTypeVideo
+                                                   position:AVCaptureDevicePositionBack];
+    }
+    if (tag == 2) {
+        return [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                                                  mediaType:AVMediaTypeVideo
+                                                   position:AVCaptureDevicePositionFront];
+    }
+    return [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                                              mediaType:AVMediaTypeVideo
+                                               position:AVCaptureDevicePositionBack];
+}
+
+- (void)selectLensTag:(int)tag {
+    self.currentLensTag = tag;
+    AVCaptureDevice *dev = [self deviceForTag:tag];
     if (!dev) dev = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
-    NSError *err = nil;
-    AVCaptureDeviceInput *inp = dev ? [AVCaptureDeviceInput deviceInputWithDevice:dev error:&err] : nil;
-    AVCaptureSession *sess = [[AVCaptureSession alloc] init];
-    if (inp && [sess canAddInput:inp]) [sess addInput:inp];
+    if (!self.session) {
+        AVCaptureSession *sess = [[AVCaptureSession alloc] init];
+        AVCapturePhotoOutput *pout = [[AVCapturePhotoOutput alloc] init];
+        if ([sess canAddOutput:pout]) [sess addOutput:pout];
+        self.photoOutput = pout;
 
-    AVCapturePhotoOutput *pout = [[AVCapturePhotoOutput alloc] init];
-    if ([sess canAddOutput:pout]) [sess addOutput:pout];
-    self.photoOutput = pout;
-
-    AVCaptureMetadataOutput *mout = [[AVCaptureMetadataOutput alloc] init];
-    if ([sess canAddOutput:mout]) {
-        [sess addOutput:mout];
-        [mout setMetadataObjectsDelegate:self queue:dispatch_get_main_queue()];
-        if ([[mout availableMetadataObjectTypes] containsObject:AVMetadataObjectTypeQRCode]) {
-            mout.metadataObjectTypes = @[AVMetadataObjectTypeQRCode];
+        AVCaptureMetadataOutput *mout = [[AVCaptureMetadataOutput alloc] init];
+        if ([sess canAddOutput:mout]) {
+            [sess addOutput:mout];
+            [mout setMetadataObjectsDelegate:self queue:dispatch_get_main_queue()];
+            if ([[mout availableMetadataObjectTypes] containsObject:AVMetadataObjectTypeQRCode]) {
+                mout.metadataObjectTypes = @[AVMetadataObjectTypeQRCode];
+            }
         }
+        self.metaOutput = mout;
+
+        AVCaptureVideoPreviewLayer *layer = [AVCaptureVideoPreviewLayer layerWithSession:sess];
+        layer.videoGravity = AVLayerVideoGravityResizeAspectFill;
+        layer.frame = self.previewHost.bounds;
+        [self.previewHost.layer addSublayer:layer];
+        self.previewLayer = layer;
+        self.session = sess;
     }
-    self.metaOutput = mout;
 
-    AVCaptureVideoPreviewLayer *layer = [AVCaptureVideoPreviewLayer layerWithSession:sess];
-    layer.videoGravity = AVLayerVideoGravityResizeAspectFill;
-    layer.frame = self.previewHost.bounds;
-    [self.previewHost.layer addSublayer:layer];
-    self.previewLayer = layer;
-    self.session = sess;
-    [sess startRunning];
+    AVCaptureDeviceInput *inp = dev ? [AVCaptureDeviceInput deviceInputWithDevice:dev error:nil] : nil;
+    if (inp) [self.session addInput:inp];
+    if (!self.session.isRunning) [self.session startRunning];
 
+    for (UIButton *b in self.lensButtons) {
+        b.backgroundColor = (b.tag == tag)
+            ? [UIColor colorWithRed:0.16 green:0.52 blue:0.88 alpha:1.0]
+            : [UIColor colorWithRed:0.16 green:0.26 blue:0.42 alpha:1.0];
+    }
+
+    AVAuthorizationStatus auth = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
     CLLocation *loc = self.locMgr.location;
     self.statusLabel.text = [NSString stringWithFormat:
-        @"Bundle: %@\nCamera Auth=%ld Device=%@ (pos=%ld) running=%d | GPS valid=%d hAcc=%.1fm",
-        [[NSBundle mainBundle] bundleIdentifier], (long)auth,
-        dev ? dev.localizedName : @"nil", (long)pos, (int)sess.isRunning,
-        loc != nil, loc ? loc.horizontalAccuracy : -1.0];
-    fprintf(stderr, "ZIZHAN_DEMOAPP: CAMERA_START pos=%ld auth=%ld dev=%s running=%d gps_ok=%d\n",
-            (long)pos, (long)auth, dev ? [[dev uniqueID] UTF8String] : "nil",
-            (int)sess.isRunning, loc != nil);
+        @"当前镜头: %@ (960×720 持续预览中)\n权限=%ld | GPS定位=%@ (精度 %.1fm)",
+        dev ? dev.localizedName : @"nil", (long)auth,
+        loc ? @"已就绪" : @"搜星中", loc ? loc.horizontalAccuracy : -1.0];
+    fprintf(stderr, "ZIZHAN_DEMOAPP: CAMERA_START tag=%d auth=%ld dev=%s running=%d gps_ok=%d\n",
+            tag, (long)auth, dev ? [[dev uniqueID] UTF8String] : "nil",
+            (int)self.session.isRunning, loc != nil);
     fflush(stderr);
 
-    if (demo_boot_option("zizhan_cam_autotest=1") && self.photosSaved == 0 && pos == AVCaptureDevicePositionBack) {
+    if (demo_boot_option("zizhan_cam_autotest=1") && self.photosSaved == 0 && tag == 1) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             [self takePhoto];
         });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 9 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            [self toggleCamera];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            [self selectLensTag:4];
         });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 14 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            [self selectLensTag:2];
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             [self takePhoto];
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 18 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
@@ -231,14 +279,18 @@ static bool demo_boot_option(const char *opt) {
     }
 }
 
-- (void)toggleCamera {
-    self.currentPos = (self.currentPos == AVCaptureDevicePositionBack)
-                      ? AVCaptureDevicePositionFront : AVCaptureDevicePositionBack;
-    [self startCameraPosition:self.currentPos];
+- (void)onSelectLens:(UIButton *)sender {
+    [self selectLensTag:(int)sender.tag];
 }
 
 - (void)takePhoto {
     if (!self.photoOutput) return;
+    AVCaptureDevice *dev = [self deviceForTag:self.currentLensTag];
+    if (dev && [dev isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
+        [dev lockForConfiguration:nil];
+        [dev setFocusMode:AVCaptureFocusModeAutoFocus];
+        [dev unlockForConfiguration];
+    }
     AVCapturePhotoSettings *settings = [AVCapturePhotoSettings photoSettings];
     [self.photoOutput capturePhotoWithSettings:settings delegate:self];
 }
@@ -254,9 +306,9 @@ static bool demo_boot_option(const char *opt) {
             error ? [[error localizedDescription] UTF8String] : "none");
     fflush(stderr);
     self.qrLabel.text = self.lastQrPayload
-        ? [NSString stringWithFormat:@"扫码: %@ | 拍照 #%u (%lu B)",
+        ? [NSString stringWithFormat:@"扫码: %@ | 拍照 #%u (960×720, %lu B)",
            self.lastQrPayload, self.photosSaved, (unsigned long)(jpeg ? jpeg.length : 0)]
-        : [NSString stringWithFormat:@"拍照成功 #%u: %lu 字节 JPEG | 二维码命中=%u",
+        : [NSString stringWithFormat:@"拍照成功 #%u: 960×720 JPEG (%lu 字节) | 二维码命中=%u",
            self.photosSaved, (unsigned long)(jpeg ? jpeg.length : 0), self.qrHits];
 }
 

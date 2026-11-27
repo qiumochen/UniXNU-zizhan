@@ -401,7 +401,11 @@ static void *http_server_thread(void *unused) {
             (unsigned long)self.ipas.count, (unsigned long)self.installedApps.count, freeGib, totGib);
     fflush(stderr);
 
-    if (installer_boot_option("zizhan_ipa_autotest=2")) {
+    if (installer_boot_option("zizhan_ipa_autotest=3")) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            [self runBootstrapAllDesktopApps];
+        });
+    } else if (installer_boot_option("zizhan_ipa_autotest=2")) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             [self runAutoTestWithTarget:@"/pong/ipas/ZizhanCompatSuite-16k.ipa"];
         });
@@ -602,6 +606,7 @@ static BOOL launch_bundle_id(NSString *bid) {
     NSError *instErr = nil;
     NSDictionary *resInfo = nil;
     BOOL ok = NO;
+    BOOL usedMiClient = NO;
 
     (void)dlopen("/System/Library/PrivateFrameworks/InstalledContentLibrary.framework/InstalledContentLibrary", RTLD_LAZY);
     (void)dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_LAZY);
@@ -647,6 +652,7 @@ static BOOL launch_bundle_id(NSString *bid) {
                 client, sInstUrl, appURL, ident, 2u, miOpts, NO, comp);
             (void)dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 45 * NSEC_PER_SEC));
             ok = miOk;
+            if (miOk) usedMiClient = YES;
             instErr = miErr;
             if ([miRecs isKindOfClass:[NSDictionary class]]) resInfo = miRecs;
             fprintf(stderr, "ZIZHAN_IPA_INSTALLER: MIInstallerClient bundle=%s ok=%d err=%s\n",
@@ -681,8 +687,8 @@ static BOOL launch_bundle_id(NSString *bid) {
                 fprintf(stderr, "ZIZHAN_IPA_INSTALLER: LS registerApplication %s ok=%d\n", [[burl path] UTF8String], (int)rok);
             }
         }
-        /* MIInstallerClient already registers the bundle with lsd; only rebuild the user DB on legacy fallback. */
-        if (!resInfo) {
+        /* MIInstallerClient already registers the bundle with lsd & SpringBoard; only rebuild user DB on legacy fallback. */
+        if (!usedMiClient) {
             SEL sRebuild = sel_registerName("_LSPrivateRebuildApplicationDatabasesForSystemApps:internal:user:");
             if ([ws respondsToSelector:sRebuild]) {
                 BOOL rb = ((BOOL(*)(id, SEL, BOOL, BOOL, BOOL))objc_msgSend)(ws, sRebuild, NO, NO, YES);
@@ -701,6 +707,129 @@ static BOOL launch_bundle_id(NSString *bid) {
     if (ok && bundleOut) *bundleOut = bundleID;
     if (!ok && errOut) *errOut = instErr ? [instErr localizedDescription] : @"MobileInstallation 安装返回失败";
     return ok;
+}
+
+static pid_t find_process_pid_by_name(const char *proc_name) {
+    int (*p_listpids)(void *, int) = (int (*)(void *, int))dlsym(RTLD_DEFAULT, "proc_listallpids");
+    int (*p_procname)(int, void *, uint32_t) = (int (*)(int, void *, uint32_t))dlsym(RTLD_DEFAULT, "proc_name");
+    if (!p_listpids || !p_procname) return -1;
+    pid_t pids[2048];
+    int bytes = p_listpids(pids, (int)sizeof(pids));
+    if (bytes <= 0) return -1;
+    int count = bytes / (int)sizeof(pid_t);
+    if (count > 2048) count = 2048;
+    for (int i = 0; i < count; ++i) {
+        if (pids[i] <= 1) continue;
+        char name[64] = {0};
+        if (p_procname(pids[i], name, sizeof(name)) > 0 && strcmp(name, proc_name) == 0) {
+            return pids[i];
+        }
+    }
+    return -1;
+}
+
+static void pin_zizhan_apps_to_springboard_page1(void) {
+    NSArray<NSString *> *targets = @[@"com.zizhan.installer", @"com.zizhan.demoapp", @"com.zizhan.compatsuite"];
+    NSArray<NSString *> *plistPaths = @[
+        @"/private/var/mobile/Library/SpringBoard/IconState.plist",
+        @"/private/var/mobile/Library/SpringBoard/DesiredIconState.plist"
+    ];
+    BOOL updatedAny = NO;
+    for (NSString *path in plistPaths) {
+        NSDictionary *orig = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (![orig isKindOfClass:[NSDictionary class]]) continue;
+        NSMutableDictionary *root = [orig mutableCopy];
+        NSArray *lists = root[@"iconLists"];
+        if (![lists isKindOfClass:[NSArray class]] || lists.count == 0) continue;
+
+        NSMutableArray *newLists = [NSMutableArray arrayWithCapacity:lists.count];
+        for (id pg in lists) {
+            if ([pg isKindOfClass:[NSArray class]]) {
+                NSMutableArray *mpg = [pg mutableCopy];
+                [mpg removeObjectsInArray:targets];
+                [newLists addObject:mpg];
+            } else {
+                [newLists addObject:pg];
+            }
+        }
+        NSMutableArray *page0 = newLists[0];
+        /* Insert right after widgets on Page 1 so all 3 icons appear immediately on unlock */
+        NSUInteger insIdx = 0;
+        while (insIdx < page0.count && [page0[insIdx] isKindOfClass:[NSDictionary class]]) {
+            ++insIdx;
+        }
+        for (NSInteger i = (NSInteger)targets.count - 1; i >= 0; --i) {
+            [page0 insertObject:targets[(NSUInteger)i] atIndex:insIdx];
+        }
+        /* Move any overflow string icons beyond Page 1 capacity (17 items incl. 5 widgets) onto Page 2 */
+        if (newLists.count < 2) [newLists addObject:[NSMutableArray array]];
+        NSMutableArray *page1 = newLists[1];
+        while (page0.count > 17 && [page0.lastObject isKindOfClass:[NSString class]]) {
+            id moved = page0.lastObject;
+            [page0 removeLastObject];
+            [page1 insertObject:moved atIndex:0];
+        }
+        root[@"iconLists"] = newLists;
+        NSData *bplist = [NSPropertyListSerialization dataWithPropertyList:root
+                                                                    format:NSPropertyListBinaryFormat_v1_0
+                                                                   options:0
+                                                                     error:nil];
+        if (bplist && [bplist writeToFile:path atomically:YES]) {
+            chown([path fileSystemRepresentation], 501, 501);
+            chmod([path fileSystemRepresentation], 0644);
+            updatedAny = YES;
+        }
+    }
+    fprintf(stderr, "ZIZHAN_IPA_INSTALLER: PIN_PAGE1 updated=%d\n", (int)updatedAny);
+    fflush(stderr);
+    if (updatedAny) {
+        pid_t sbPid = find_process_pid_by_name("SpringBoard");
+        fprintf(stderr, "ZIZHAN_IPA_INSTALLER: restarting SpringBoard pid=%d to reload Page 1 icons\n", (int)sbPid);
+        fflush(stderr);
+        if (sbPid > 1) kill(sbPid, SIGKILL);
+    }
+}
+
+static long current_boot_epoch_sec(void) {
+    struct timeval bt = {0, 0};
+    size_t sz = sizeof(bt);
+    if (sysctlbyname("kern.boottime", &bt, &sz, NULL, 0) == 0 && bt.tv_sec > 0) return (long)bt.tv_sec;
+    return 1;
+}
+
+- (void)runBootstrapAllDesktopApps {
+    const char *bootGuard = "/private/var/tmp/.zizhan_bootstrap_boottime";
+    const long bootSec = current_boot_epoch_sec();
+    NSString *prev = [NSString stringWithContentsOfFile:[NSString stringWithUTF8String:bootGuard]
+                                               encoding:NSUTF8StringEncoding error:nil];
+    if (prev && [prev longLongValue] == (long long)bootSec) {
+        fprintf(stderr, "ZIZHAN_IPA_INSTALLER: BOOTSTRAP_SKIP already completed this boot (%ld)\n", bootSec);
+        fflush(stderr);
+        return;
+    }
+    [[NSString stringWithFormat:@"%ld\n", bootSec] writeToFile:[NSString stringWithUTF8String:bootGuard]
+                                                    atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray<NSString *> *suiteIpas = @[
+            @"/pong/ipas/ZizhanInstaller-16k.ipa",
+            @"/pong/ipas/ZizhanDemoApp-16k.ipa",
+            @"/pong/ipas/ZizhanCompatSuite-16k.ipa"
+        ];
+        unsigned okCount = 0;
+        for (NSString *ipa in suiteIpas) {
+            NSString *bid = nil, *err = nil;
+            BOOL ok = [self installIpaAtPath:ipa installedBundleOut:&bid errorMessage:&err];
+            if (ok) ++okCount;
+            fprintf(stderr, "ZIZHAN_IPA_INSTALLER: BOOTSTRAP_ITEM ipa=%s ok=%d bundle=%s err=%s\n",
+                    [ipa UTF8String], (int)ok, bid ? [bid UTF8String] : "nil", err ? [err UTF8String] : "none");
+            fflush(stderr);
+        }
+        fprintf(stderr, "ZIZHAN_IPA_INSTALLER: BOOTSTRAP_ALL ok=%u/%lu\n", okCount, (unsigned long)suiteIpas.count);
+        fflush(stderr);
+        sleep(2);
+        pin_zizhan_apps_to_springboard_page1();
+    });
 }
 
 - (void)runAutoTestWithTarget:(NSString *)targetIpa {
@@ -810,27 +939,32 @@ static BOOL launch_bundle_id(NSString *bid) {
     } else if (indexPath.section == 1 && indexPath.row < (NSInteger)self.installedApps.count) {
         NSDictionary *app = self.installedApps[(NSUInteger)indexPath.row];
         NSString *bid = app[@"bundleID"];
+        BOOL isSelf = [bid isEqualToString:@"com.zizhan.installer"];
         UIAlertController *ac = [UIAlertController
             alertControllerWithTitle:app[@"name"]
                              message:[NSString stringWithFormat:@"Bundle ID: %@\nBundle: %@\nData: %@",
                                       bid, app[@"bundlePath"] ?: @"-", app[@"dataPath"] ?: @"-"]
                       preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"立即打开" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            (void)a;
-            (void)launch_bundle_id(bid);
-        }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"卸载应用" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-            (void)a;
-            [self uninstallBundleID:bid];
-        }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        if (!isSelf) {
+            [ac addAction:[UIAlertAction actionWithTitle:@"立即打开" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                (void)a;
+                (void)launch_bundle_id(bid);
+            }]];
+            [ac addAction:[UIAlertAction actionWithTitle:@"卸载应用" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+                (void)a;
+                [self uninstallBundleID:bid];
+            }]];
+        }
+        [ac addAction:[UIAlertAction actionWithTitle:(isSelf ? @"好 (内置安装器受保护)" : @"取消") style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:ac animated:YES completion:nil];
     }
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
-    return indexPath.section == 1 && indexPath.row < (NSInteger)self.installedApps.count;
+    if (indexPath.section != 1 || indexPath.row >= (NSInteger)self.installedApps.count) return NO;
+    NSString *bid = self.installedApps[(NSUInteger)indexPath.row][@"bundleID"];
+    return ![bid isEqualToString:@"com.zizhan.installer"];
 }
 
 - (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {

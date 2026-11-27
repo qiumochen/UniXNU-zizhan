@@ -144,8 +144,10 @@ def edit_image(image, snippet, ui=None, init=None):
 
 def install_and_verify(trial, plan, ui_sha, helper_sha):
     layout = trial / "ufs-layout.json"
+    state_before = json.loads((trial / "resume-install.json").read_text())
+    file_args = ["--file", state_before["file"]] if state_before.get("file") else []
     run([sys.executable, str(REPO / "tools/zizhan/mac/install_pinned.py"), "--layout", str(layout),
-         "--state", str(trial / "resume-install.json"), "--resume", "--only", "OS"], cwd=ROOT)
+         "--state", str(trial / "resume-install.json"), *file_args, "--resume", "--only", "OS"], cwd=ROOT)
     state = json.loads((trial / "resume-install.json").read_text())
     state["manifest"] = True
     (trial / "resume-install.json").write_text(json.dumps(state, indent=1))

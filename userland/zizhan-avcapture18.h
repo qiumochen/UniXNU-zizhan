@@ -489,6 +489,51 @@ static CGImageRef zcam_make_cgimage_from_bgra(const uint8_t *bgra, uint16_t w, u
     return img;
 }
 
+/* Center 1.6x optical-equivalent crop (600x450 -> 960x720) when 1x main mode uses ultra-wide OV13B10 fallback,
+ * so 1x (~78 deg standard FOV), 0.6x (123 deg ultra-wide FOV), and Front (IMX596) show 3 distinct views! */
+static CGImageRef zcam_make_cgimage_for_frame(const ZizhanCamFrameHeader *hdr, const uint8_t *bgra) {
+    if (hdr && hdr->sensor_pos == 1u &&
+        (hdr->flags & ZIZHAN_CAM_FLAG_FALLBACK) &&
+        !(hdr->flags & ZIZHAN_CAM_FLAG_QR_STAMP) &&
+        hdr->width == 960u && hdr->height == 720u && hdr->stride >= 960u * 4u) {
+        const uint16_t cw = 600u, ch = 450u;
+        const uint16_t x0 = (hdr->width - cw) / 2u;
+        const uint16_t y0 = (hdr->height - ch) / 2u;
+        const uint32_t outStride = 960u * 4u;
+        uint8_t *scaled = (uint8_t *)malloc((size_t)outStride * 720u);
+        if (scaled) {
+            for (uint32_t dy = 0; dy < 720u; ++dy) {
+                const uint32_t sy_q8 = ((uint32_t)y0 << 8) + (dy * ((uint32_t)(ch - 1u) << 8)) / 719u;
+                const uint32_t sy = sy_q8 >> 8;
+                const uint32_t wy = sy_q8 & 0xffu;
+                const uint8_t *r0 = bgra + (size_t)sy * hdr->stride;
+                const uint8_t *r1 = bgra + (size_t)(sy + 1u < hdr->height ? sy + 1u : sy) * hdr->stride;
+                uint8_t *dst = scaled + (size_t)dy * outStride;
+                for (uint32_t dx = 0; dx < 960u; ++dx) {
+                    const uint32_t sx_q8 = ((uint32_t)x0 << 8) + (dx * ((uint32_t)(cw - 1u) << 8)) / 959u;
+                    const uint32_t sx = sx_q8 >> 8;
+                    const uint32_t wx = sx_q8 & 0xffu;
+                    const uint32_t sx1 = (sx + 1u < hdr->width) ? (sx + 1u) : sx;
+                    const uint8_t *p00 = r0 + sx * 4u, *p01 = r0 + sx1 * 4u;
+                    const uint8_t *p10 = r1 + sx * 4u, *p11 = r1 + sx1 * 4u;
+                    const uint32_t w00 = (256u - wx) * (256u - wy);
+                    const uint32_t w01 = wx * (256u - wy);
+                    const uint32_t w10 = (256u - wx) * wy;
+                    const uint32_t w11 = wx * wy;
+                    dst[dx * 4u + 0u] = (uint8_t)((p00[0] * w00 + p01[0] * w01 + p10[0] * w10 + p11[0] * w11 + 32768u) >> 16);
+                    dst[dx * 4u + 1u] = (uint8_t)((p00[1] * w00 + p01[1] * w01 + p10[1] * w10 + p11[1] * w11 + 32768u) >> 16);
+                    dst[dx * 4u + 2u] = (uint8_t)((p00[2] * w00 + p01[2] * w01 + p10[2] * w10 + p11[2] * w11 + 32768u) >> 16);
+                    dst[dx * 4u + 3u] = 255u;
+                }
+            }
+            CGImageRef img = zcam_make_cgimage_from_bgra(scaled, 960u, 720u, outStride);
+            free(scaled);
+            return img;
+        }
+    }
+    return zcam_make_cgimage_from_bgra(bgra, hdr->width, hdr->height, hdr->stride);
+}
+
 static id zcam_encode_jpeg_from_cgimage(CGImageRef img) {
     zcam_resolve_media_syms();
     if (!img || !p_CGImageDestinationCreateWithData || !p_CGImageDestinationAddImage || !p_CGImageDestinationFinalize) return nil;
@@ -532,7 +577,7 @@ static void zcam_pump_tick(ZizhanSessionCtx *ctx) {
     ++ctx->frames_delivered;
 
     const uint8_t *bgra = ctx->frame_buf + sizeof(ZizhanCamFrameHeader);
-    CGImageRef cgImg = zcam_make_cgimage_from_bgra(bgra, hdr->width, hdr->height, hdr->stride);
+    CGImageRef cgImg = zcam_make_cgimage_for_frame(hdr, bgra);
     if (!cgImg) return;
 
     if (ctx->frames_delivered == 1 || (ctx->frames_delivered % 40u) == 0u) {
@@ -969,7 +1014,7 @@ static void zcam_pout_capture(id self, SEL _cmd, id settings, id delegate) {
         got >= sizeof(ZizhanCamFrameHeader) + 64u) {
         const ZizhanCamFrameHeader *hdr = (const ZizhanCamFrameHeader *)buf;
         if (hdr->magic == ZIZHAN_CAM_MAGIC && (size_t)sizeof(ZizhanCamFrameHeader) + (size_t)hdr->stride * hdr->height <= got) {
-            cgImg = zcam_make_cgimage_from_bgra(buf + sizeof(ZizhanCamFrameHeader), hdr->width, hdr->height, hdr->stride);
+            cgImg = zcam_make_cgimage_for_frame(hdr, buf + sizeof(ZizhanCamFrameHeader));
         }
     }
     free(buf);

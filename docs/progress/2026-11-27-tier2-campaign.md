@@ -98,3 +98,8 @@
 - **晚间在场初测反馈闭环（`sens-hal-v26-64g` / `ux-fix-3` / `ux-verify-clean` / `ux-home-check`）**：
   - 将 `ZizhanInstaller`（`com.zizhan.installer`，「IPA 安装器」）、`ZizhanDemoApp`（`com.zizhan.demoapp`，「扫码相机验证」）与 `ZizhanCompatSuite`（`com.zizhan.compatsuite`，「兼容套件验证」）统一封装为 `16K` 用户域应用（保留 `/Applications/ZizhanBootstrap.app` 系统引导器并去除冗余 `LS rebuild` 使单包安装提速至 `~1.5 s`），三枚图标全部置顶于主屏幕第 1 页（`ux-home-check.shot1.png` `192/192` 完整帧确认）。
   - 重构 `ZizhanCompatSuite` 与 `ZizhanDemoApp` 交互逻辑：人类常规启动不再自动触发马达震动，保持 `960×720` 相机画面持续预览不断流（`ux-verify-clean` 连续 280+ 帧），新增 9 按钮交互控制台（三摄切换、AF 对焦、JPEG 拍照、暂停预览、X 轴震动、听筒/双扬 `1.1 s` 试音切换）及 `1x` 等效标准视角裁切与 ISO-18004 双副本 BCH(15,5) + 对比度门限防暗噪误识别。
+- **晚间二轮在场实测（`video-7`）用户验收记录与待修挂起项**：
+  1. **相机图像（`CAM-04`）**：前后各摄像头取景方向不对、噪点明显且色彩不准（扫码暂未验证）。根因指向传感器贴装需 `90°/270°` 转置、`flipY=1` 翻转奇偶行改变了 Bayer 相位（`GRBG↔BGGR`）引发红蓝绿通道错位偏色，以及暗光高模拟增益下缺少时域降噪与 CCM 矩阵。
+  2. **合盖外屏状态与旋转（`OUTER-04`）**：物理合上后外屏未处于锁屏时钟态，框内仍呈横屏并跟随重力感应旋转（需在合盖过渡时强制进入锁屏态并在 `outer_closed=1` 期间冻结竖屏方向、屏蔽旋转传感器）。
+  3. **外屏电源键（`OUTER-05`）**：合盖外屏状态下短按物理电源键无反应（电源键休眠/唤醒状态机尚未覆盖 `outer_closed=1` 下的外屏 `DSI1` 亮灭控制）。
+  - 按用户指示先完整记录归档，暂不启动新一轮修改。

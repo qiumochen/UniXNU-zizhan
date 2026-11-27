@@ -309,15 +309,44 @@ static inline int zizhan_macho_inspect(const uint8_t *buf, size_t len, ZizhanMac
     return ZIZHAN_IPA_OK;
 }
 
-/* Compute exact SuperBlob byte size needed to append an Ad-hoc 4 KiB SHA-256 signature. */
+/* Compute exact SuperBlob byte bound needed to append an Ad-hoc 4 KiB SHA-256 signature
+ * with embedded XML entitlements (application-identifier, keychain-access-groups, application-groups). */
 static inline size_t zizhan_macho_adhoc_blob_bound(size_t code_limit, const char *ident) {
-    const size_t id_len = (ident && ident[0]) ? (strlen(ident) + 1u) : 10u;
+    const size_t id_len = (ident && ident[0]) ? (strlen(ident) + 1u) : 18u;
     const size_t n_slots = (code_limit + 4095u) / 4096u;
-    const size_t cd_len = 88u + ((id_len + 3u) & ~3u) + n_slots * 32u;
-    return 20u + cd_len + 32u; /* SuperBlob(12) + BlobIndex(8) + CodeDirectory + alignment slack */
+    const size_t cd_len = 88u + ((id_len + 3u) & ~3u) + 5u * 32u + n_slots * 32u;
+    return 28u + cd_len + 640u + 64u;
 }
 
-/* Sign an unsigned thin arm64 Mach-O buffer with a minimal Ad-hoc 4 KiB SHA-256 CodeDirectory.
+static inline size_t zizhan_ipa_build_default_entitlements_xml(const char *sig_id, char *out, size_t cap) {
+    static const char kPfx[] =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<plist version=\"1.0\"><dict>\n"
+        "<key>application-identifier</key><string>ZIZHAN0000.";
+    static const char kMid[] =
+        "</string>\n"
+        "<key>get-task-allow</key><true/>\n"
+        "<key>keychain-access-groups</key><array><string>ZIZHAN0000.*</string><string>*</string></array>\n"
+        "<key>com.apple.security.application-groups</key><array><string>group.com.zizhan.shared</string></array>\n"
+        "</dict></plist>\n";
+    const size_t pfx_len = sizeof(kPfx) - 1u;
+    const size_t mid_len = sizeof(kMid) - 1u;
+    size_t id_len = 0u;
+    while (sig_id && sig_id[id_len] && id_len < 96u) {
+        const char c = sig_id[id_len];
+        if (c == '<' || c == '>' || c == '&' || c == '"') break;
+        ++id_len;
+    }
+    if (!out || cap < pfx_len + id_len + mid_len + 1u) return 0u;
+    memcpy(out, kPfx, pfx_len);
+    if (id_len) memcpy(out + pfx_len, sig_id, id_len);
+    memcpy(out + pfx_len + id_len, kMid, mid_len);
+    out[pfx_len + id_len + mid_len] = '\0';
+    return pfx_len + id_len + mid_len;
+}
+
+/* Sign an unsigned thin arm64 Mach-O buffer with an Ad-hoc 4 KiB SHA-256 CodeDirectory +
+ * embedded XML Entitlements (CSSLOT_ENTITLEMENTS=5, hashed into special slot -5).
  * `buf` must have capacity `>= cur_len + zizhan_macho_adhoc_blob_bound(cur_len, ident)`.
  * Returns 0 and writes `*new_len_out` on success. */
 static inline int zizhan_macho_sign_adhoc_4k(uint8_t *buf, size_t cur_len, size_t buf_cap,
@@ -373,11 +402,18 @@ static inline int zizhan_macho_sign_adhoc_4k(uint8_t *buf, size_t cur_len, size_
     const size_t aligned_limit = (code_limit + 15u) & ~15u;
     const size_t id_len = strlen(sig_id) + 1u;
     const size_t id_padded = (id_len + 3u) & ~3u;
+    const uint32_t n_special = 5u; /* CSSLOT_ENTITLEMENTS = 5 */
     const uint32_t n_slots = (uint32_t)((aligned_limit + 4095u) / 4096u);
-    const uint32_t cd_hdr_len = 88u; /* CS_CodeDirectory v0x20400 (execSegBase/Limit/Flags included) */
-    const uint32_t cd_len = cd_hdr_len + (uint32_t)id_padded + n_slots * 32u;
-    const uint32_t sb_len = 20u + cd_len;
-    if (aligned_limit + sb_len > buf_cap) return ZIZHAN_IPA_ERR_ARGS;
+    const uint32_t cd_hdr_len = 88u; /* CS_CodeDirectory v0x20400 */
+    const uint32_t hash_off = cd_hdr_len + (uint32_t)id_padded + n_special * 32u;
+    const uint32_t cd_len = hash_off + n_slots * 32u;
+
+    char ent_xml[640];
+    const uint32_t ent_xml_len = (uint32_t)zizhan_ipa_build_default_entitlements_xml(sig_id, ent_xml, sizeof(ent_xml));
+    const uint32_t ent_blob_len = 8u + ent_xml_len;
+    const uint32_t sb_hdr_len = 28u; /* SuperBlob(12) + 2 * BlobIndex(8) */
+    const uint32_t sb_len = sb_hdr_len + cd_len + ent_blob_len;
+    if (!ent_xml_len || aligned_limit + sb_len > buf_cap) return ZIZHAN_IPA_ERR_ARGS;
 
     if (aligned_limit > code_limit) {
         memset(buf + code_limit, 0, aligned_limit - code_limit);
@@ -402,24 +438,30 @@ static inline int zizhan_macho_sign_adhoc_4k(uint8_t *buf, size_t cur_len, size_
     zizhan_ipa_put_le64(buf + linkedit_cmd_off + 32u, le_vmsz);
     zizhan_ipa_put_le64(buf + linkedit_cmd_off + 48u, le_filesz);
 
-    /* Write SuperBlob + CodeDirectory v0x20400 */
+    /* Write SuperBlob + CodeDirectory v0x20400 + CSMAGIC_EMBEDDED_ENTITLEMENTS */
     uint8_t *sb = buf + aligned_limit;
     memset(sb, 0, sb_len);
     zizhan_ipa_put_be32(sb + 0u,  0xfade0cc0u); /* CSMAGIC_EMBEDDED_SIGNATURE */
     zizhan_ipa_put_be32(sb + 4u,  sb_len);
-    zizhan_ipa_put_be32(sb + 8u,  1u);          /* count = 1 */
+    zizhan_ipa_put_be32(sb + 8u,  2u);          /* count = 2 */
     zizhan_ipa_put_be32(sb + 12u, 0u);          /* CSSLOT_CODEDIRECTORY */
-    zizhan_ipa_put_be32(sb + 16u, 20u);         /* offset = 20 */
+    zizhan_ipa_put_be32(sb + 16u, sb_hdr_len);
+    zizhan_ipa_put_be32(sb + 20u, 5u);          /* CSSLOT_ENTITLEMENTS */
+    zizhan_ipa_put_be32(sb + 24u, sb_hdr_len + cd_len);
 
-    uint8_t *cd = sb + 20u;
-    const uint32_t hash_off = cd_hdr_len + (uint32_t)id_padded;
+    uint8_t *eb = sb + sb_hdr_len + cd_len;
+    zizhan_ipa_put_be32(eb + 0u, 0xfade7171u);  /* CSMAGIC_EMBEDDED_ENTITLEMENTS */
+    zizhan_ipa_put_be32(eb + 4u, ent_blob_len);
+    memcpy(eb + 8u, ent_xml, ent_xml_len);
+
+    uint8_t *cd = sb + sb_hdr_len;
     zizhan_ipa_put_be32(cd + 0u,  0xfade0c02u); /* CSMAGIC_CODEDIRECTORY */
     zizhan_ipa_put_be32(cd + 4u,  cd_len);
     zizhan_ipa_put_be32(cd + 8u,  0x00020400u); /* version 2.4 (execSeg support) */
     zizhan_ipa_put_be32(cd + 12u, 0x00000002u); /* CS_ADHOC */
     zizhan_ipa_put_be32(cd + 16u, hash_off);    /* hashOffset */
     zizhan_ipa_put_be32(cd + 20u, cd_hdr_len);  /* identOffset */
-    zizhan_ipa_put_be32(cd + 24u, 0u);          /* nSpecialSlots */
+    zizhan_ipa_put_be32(cd + 24u, n_special);   /* nSpecialSlots = 5 */
     zizhan_ipa_put_be32(cd + 28u, n_slots);     /* nCodeSlots */
     zizhan_ipa_put_be32(cd + 32u, (uint32_t)aligned_limit); /* codeLimit */
     cd[36u] = 32u;                              /* hashSize = 32 (SHA-256) */
@@ -440,6 +482,8 @@ static inline int zizhan_macho_sign_adhoc_4k(uint8_t *buf, size_t cur_len, size_
     zizhan_ipa_put_be32(cd + 84u, zizhan_ipa_le32(buf + 12u) == 2u ? 1u : 0u); /* CS_EXECSEG_MAIN_BINARY */
 
     memcpy(cd + cd_hdr_len, sig_id, id_len);
+    /* Special slot -5 (CSSLOT_ENTITLEMENTS) sits at hash_off - 5 * 32 */
+    zizhan_ipa_sha256(eb, ent_blob_len, cd + hash_off - 5u * 32u);
     for (uint32_t p = 0; p < n_slots; ++p) {
         const size_t poff = (size_t)p * 4096u;
         const size_t plen = (poff + 4096u <= aligned_limit) ? 4096u : (aligned_limit - poff);

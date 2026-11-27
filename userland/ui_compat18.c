@@ -16,9 +16,11 @@
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <mach-o/nlist.h>
 #include <math.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -2081,6 +2083,16 @@ static id zizhan_mi_validate_and_copy(id cls,SEL selector,id url,id options,id *
                 CFStringRef aref=CFStringCreateWithCString(NULL,appid,kCFStringEncodingUTF8);
                 if(aref){CFDictionarySetValue(ments,CFSTR("application-identifier"),aref);CFRelease(aref);}
             }
+            if(!CFDictionaryGetValue(ments,CFSTR("keychain-access-groups"))) {
+                const void *kag[2]={CFSTR("ZIZHAN0000.*"),CFSTR("*")};
+                CFArrayRef arr=CFArrayCreate(NULL,kag,2,&kCFTypeArrayCallBacks);
+                if(arr){CFDictionarySetValue(ments,CFSTR("keychain-access-groups"),arr);CFRelease(arr);}
+            }
+            if(!CFDictionaryGetValue(ments,CFSTR("com.apple.security.application-groups"))) {
+                const void *ag[1]={CFSTR("group.com.zizhan.shared")};
+                CFArrayRef arr=CFArrayCreate(NULL,ag,1,&kCFTypeArrayCallBacks);
+                if(arr){CFDictionarySetValue(ments,CFSTR("com.apple.security.application-groups"),arr);CFRelease(arr);}
+            }
             CFDictionarySetValue(info,*k_ents,ments);
             CFRelease(ments);
         }
@@ -2171,9 +2183,9 @@ static void launchservices_directories(void)
             return;
         }
     }
-    /* One-shot LaunchServices cache refresh when ZizhanInstaller.app is newly added to /Applications */
+    /* One-shot LaunchServices cache refresh when ZizhanInstaller.app v3 is updated in /Applications */
     struct stat ist,mst;
-    const char *stamp="/private/var/mobile/Library/Pong/LaunchServices/.zizhan_installer_v2";
+    const char *stamp="/private/var/mobile/Library/Pong/LaunchServices/.zizhan_installer_v3";
     if(stat("/Applications/ZizhanInstaller.app/Info.plist",&ist)==0 && stat(stamp,&mst)!=0) {
         zizhan_purge_csstore_tree("/private/var/mobile/Library/Pong/LaunchServices",0);
         int sfd=open(stamp,O_CREAT|O_WRONLY|O_TRUNC,0600);
@@ -3572,6 +3584,431 @@ static void zizhan_loc_probe_tick(void *unused)
 
 #include "zizhan-avcapture18.h"
 
+/* --- Tier 2.1 & 2.4 (APP-03 / PERIPH-01): Third-party container sandbox, Keychain -34018 fallback,
+ * Shared AppGroup container, Haptics/Earpiece bridge, and Folded 9:16 window fit --- */
+static bool gAppCompatObjcInstalled;
+static IMP gOrigAppGroupUrl;
+static IMP gOrigImpactOccurred;
+static IMP gOrigImpactIntensity;
+static IMP gOrigSelectionChanged;
+static IMP gOrigNotifOccurred;
+static IMP gOrigAudioSetMode;
+static IMP gOrigAudioOverridePort;
+static IMP gOrigWinLayout;
+static bool gVoiceChatModeActive;
+
+static OSStatus (*gOrigSecItemAdd)(CFDictionaryRef, CFTypeRef *);
+static OSStatus (*gOrigSecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
+static OSStatus (*gOrigSecItemUpdate)(CFDictionaryRef, CFDictionaryRef);
+static OSStatus (*gOrigSecItemDelete)(CFDictionaryRef);
+static void (*gOrigAudioPlaySys)(uint32_t);
+static void (*gOrigAudioPlayAlert)(uint32_t);
+
+static pthread_mutex_t gKeychainFallbackLock = PTHREAD_MUTEX_INITIALIZER;
+
+static void zizhan_kc_plist_path(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) home = "/private/var/mobile";
+    snprintf(out, cap, "%s/Library/PongKeychain.plist", home);
+}
+
+static CFMutableDictionaryRef zizhan_kc_load_locked(void) {
+    char path[512];
+    zizhan_kc_plist_path(path, sizeof(path));
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && st.st_size > 0 && st.st_size < (4 << 20)) {
+            uint8_t *buf = (uint8_t *)malloc((size_t)st.st_size);
+            if (buf) {
+                ssize_t r = read(fd, buf, (size_t)st.st_size);
+                if (r == st.st_size) {
+                    CFDataRef d = CFDataCreate(NULL, buf, (CFIndex)r);
+                    if (d) {
+                        CFPropertyListRef pl = CFPropertyListCreateWithData(NULL, d, kCFPropertyListMutableContainersAndLeaves, NULL, NULL);
+                        CFRelease(d);
+                        free(buf);
+                        close(fd);
+                        if (pl && CFGetTypeID(pl) == CFDictionaryGetTypeID()) return (CFMutableDictionaryRef)pl;
+                        if (pl) CFRelease(pl);
+                        return CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+                    }
+                }
+                free(buf);
+            }
+        }
+        close(fd);
+    }
+    return CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+}
+
+static void zizhan_kc_save_locked(CFDictionaryRef store) {
+    if (!store) return;
+    CFDataRef data = CFPropertyListCreateData(NULL, store, kCFPropertyListBinaryFormat_v1_0, 0, NULL);
+    if (!data) return;
+    char path[512], tmp[528];
+    zizhan_kc_plist_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        const UInt8 *p = CFDataGetBytePtr(data);
+        CFIndex len = CFDataGetLength(data);
+        ssize_t off = 0;
+        while (off < len) {
+            ssize_t w = write(fd, p + off, (size_t)(len - off));
+            if (w <= 0) break;
+            off += w;
+        }
+        close(fd);
+        if (off == len) (void)rename(tmp, path);
+        else (void)unlink(tmp);
+    }
+    CFRelease(data);
+}
+
+static CFStringRef zizhan_kc_item_key(CFDictionaryRef dict) {
+    if (!dict) return CFSTR("genp||");
+    const CFStringRef keys[4] = { CFSTR("class"), CFSTR("svce"), CFSTR("acct"), CFSTR("sdmn") };
+    char parts[4][128];
+    for (unsigned i = 0; i < 4; ++i) {
+        parts[i][0] = '\0';
+        CFTypeRef v = CFDictionaryGetValue(dict, keys[i]);
+        if (v && CFGetTypeID(v) == CFStringGetTypeID()) {
+            CFStringGetCString((CFStringRef)v, parts[i], sizeof(parts[i]), kCFStringEncodingUTF8);
+        }
+    }
+    char full[560];
+    snprintf(full, sizeof(full), "%s|%s|%s|%s",
+             parts[0][0] ? parts[0] : "genp", parts[1], parts[2], parts[3]);
+    return CFStringCreateWithCString(NULL, full, kCFStringEncodingUTF8);
+}
+
+static OSStatus zizhan_hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+    OSStatus st = gOrigSecItemAdd ? gOrigSecItemAdd(attributes, result) : -34018;
+    if (st != -34018 && st != -25291) return st;
+    if (!attributes) return -50;
+    pthread_mutex_lock(&gKeychainFallbackLock);
+    CFMutableDictionaryRef store = zizhan_kc_load_locked();
+    CFStringRef k = zizhan_kc_item_key(attributes);
+    OSStatus outSt = 0;
+    if (CFDictionaryContainsKey(store, k)) {
+        outSt = -25299; /* errSecDuplicateItem */
+    } else {
+        CFMutableDictionaryRef entry = CFDictionaryCreateMutableCopy(NULL, 0, attributes);
+        CFDictionaryRemoveValue(entry, CFSTR("r_Data"));
+        CFDictionaryRemoveValue(entry, CFSTR("r_Attributes"));
+        CFDictionarySetValue(store, k, entry);
+        zizhan_kc_save_locked(store);
+        if (result) {
+            CFTypeRef rData = CFDictionaryGetValue(attributes, CFSTR("r_Data"));
+            CFTypeRef vData = CFDictionaryGetValue(entry, CFSTR("v_Data"));
+            if (rData == kCFBooleanTrue && vData) *result = CFRetain(vData);
+            else *result = CFRetain(entry);
+        }
+        CFRelease(entry);
+    }
+    CFRelease(k);
+    CFRelease(store);
+    pthread_mutex_unlock(&gKeychainFallbackLock);
+    return outSt;
+}
+
+static OSStatus zizhan_hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    OSStatus st = gOrigSecItemCopyMatching ? gOrigSecItemCopyMatching(query, result) : -34018;
+    if (st != -34018 && st != -25291 && st != -25300) return st;
+    if (!query) return -50;
+    pthread_mutex_lock(&gKeychainFallbackLock);
+    CFMutableDictionaryRef store = zizhan_kc_load_locked();
+    CFStringRef k = zizhan_kc_item_key(query);
+    CFDictionaryRef entry = (CFDictionaryRef)CFDictionaryGetValue(store, k);
+    OSStatus outSt = -25300; /* errSecItemNotFound */
+    if (entry && CFGetTypeID(entry) == CFDictionaryGetTypeID()) {
+        outSt = 0;
+        if (result) {
+            CFTypeRef rData = CFDictionaryGetValue(query, CFSTR("r_Data"));
+            CFTypeRef rAttr = CFDictionaryGetValue(query, CFSTR("r_Attributes"));
+            CFTypeRef vData = CFDictionaryGetValue(entry, CFSTR("v_Data"));
+            if (rData == kCFBooleanTrue && rAttr != kCFBooleanTrue && vData) {
+                *result = CFRetain(vData);
+            } else {
+                *result = CFDictionaryCreateCopy(NULL, entry);
+            }
+        }
+    }
+    CFRelease(k);
+    CFRelease(store);
+    pthread_mutex_unlock(&gKeychainFallbackLock);
+    return outSt;
+}
+
+static OSStatus zizhan_hook_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attrsToUpdate) {
+    OSStatus st = gOrigSecItemUpdate ? gOrigSecItemUpdate(query, attrsToUpdate) : -34018;
+    if (st != -34018 && st != -25291 && st != -25300) return st;
+    if (!query || !attrsToUpdate) return -50;
+    pthread_mutex_lock(&gKeychainFallbackLock);
+    CFMutableDictionaryRef store = zizhan_kc_load_locked();
+    CFStringRef k = zizhan_kc_item_key(query);
+    CFDictionaryRef cur = (CFDictionaryRef)CFDictionaryGetValue(store, k);
+    OSStatus outSt = -25300;
+    if (cur && CFGetTypeID(cur) == CFDictionaryGetTypeID()) {
+        CFMutableDictionaryRef upd = CFDictionaryCreateMutableCopy(NULL, 0, cur);
+        const CFIndex n = CFDictionaryGetCount(attrsToUpdate);
+        if (n > 0 && n <= 64) {
+            const void *ukeys[64], *uvals[64];
+            CFDictionaryGetKeysAndValues(attrsToUpdate, ukeys, uvals);
+            for (CFIndex i = 0; i < n; ++i) CFDictionarySetValue(upd, ukeys[i], uvals[i]);
+        }
+        CFDictionarySetValue(store, k, upd);
+        CFRelease(upd);
+        zizhan_kc_save_locked(store);
+        outSt = 0;
+    }
+    CFRelease(k);
+    CFRelease(store);
+    pthread_mutex_unlock(&gKeychainFallbackLock);
+    return outSt;
+}
+
+static OSStatus zizhan_hook_SecItemDelete(CFDictionaryRef query) {
+    OSStatus st = gOrigSecItemDelete ? gOrigSecItemDelete(query) : -34018;
+    if (st != -34018 && st != -25291 && st != -25300) return st;
+    if (!query) return -50;
+    pthread_mutex_lock(&gKeychainFallbackLock);
+    CFMutableDictionaryRef store = zizhan_kc_load_locked();
+    CFStringRef k = zizhan_kc_item_key(query);
+    OSStatus outSt = CFDictionaryContainsKey(store, k) ? 0 : -25300;
+    if (outSt == 0) {
+        CFDictionaryRemoveValue(store, k);
+        zizhan_kc_save_locked(store);
+    }
+    CFRelease(k);
+    CFRelease(store);
+    pthread_mutex_unlock(&gKeychainFallbackLock);
+    return outSt;
+}
+
+static void zizhan_hook_AudioPlaySys(uint32_t soundID) {
+    if (soundID == 1519u || soundID == 1520u || soundID == 1521u || soundID == 4095u ||
+        (soundID >= 1100u && soundID <= 1400u)) {
+        (void)zizhan_cam_ctl_write(0x102);
+    }
+    if (gOrigAudioPlaySys) gOrigAudioPlaySys(soundID);
+}
+
+static void zizhan_hook_AudioPlayAlert(uint32_t soundID) {
+    (void)zizhan_cam_ctl_write(0x103);
+    if (gOrigAudioPlayAlert) gOrigAudioPlayAlert(soundID);
+}
+
+static id zizhan_app_group_url(id self, SEL _cmd, id groupId) {
+    id orig = gOrigAppGroupUrl ? ((id(*)(id, SEL, id))gOrigAppGroupUrl)(self, _cmd, groupId) : nil;
+    if (orig) return orig;
+    const char *gid = groupId ? ((const char *(*)(id, SEL))objc_msgSend)(groupId, sel_registerName("UTF8String")) : NULL;
+    if (!gid || !gid[0]) return nil;
+    char safe[192];
+    size_t j = 0;
+    for (size_t i = 0; gid[i] && j + 1 < sizeof(safe); ++i) {
+        const char c = gid[i];
+        safe[j++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_') ? c : '_';
+    }
+    safe[j] = '\0';
+    (void)mkdir("/private/var/mobile/Containers/Shared", 0755);
+    (void)mkdir("/private/var/mobile/Containers/Shared/AppGroup", 0777);
+    char full[320];
+    snprintf(full, sizeof(full), "/private/var/mobile/Containers/Shared/AppGroup/%s", safe);
+    (void)mkdir(full, 0777);
+    (void)chmod(full, 0777);
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)full, (CFIndex)strlen(full), true);
+    return url ? ((id(*)(id, SEL))objc_msgSend)((id)url, sel_registerName("autorelease")) : nil;
+}
+
+static void zizhan_hap_impact(id self, SEL _cmd) {
+    (void)zizhan_cam_ctl_write(0x102);
+    if (gOrigImpactOccurred) ((void(*)(id, SEL))gOrigImpactOccurred)(self, _cmd);
+}
+static void zizhan_hap_impact_int(id self, SEL _cmd, double intensity) {
+    (void)zizhan_cam_ctl_write(intensity >= 0.7 ? 0x103 : 0x101);
+    if (gOrigImpactIntensity) ((void(*)(id, SEL, double))gOrigImpactIntensity)(self, _cmd, intensity);
+}
+static void zizhan_hap_selection(id self, SEL _cmd) {
+    (void)zizhan_cam_ctl_write(0x104);
+    if (gOrigSelectionChanged) ((void(*)(id, SEL))gOrigSelectionChanged)(self, _cmd);
+}
+static void zizhan_hap_notif(id self, SEL _cmd, long ntype) {
+    int cmd = (ntype == 1) ? 0x106 : (ntype == 2 ? 0x107 : 0x105);
+    (void)zizhan_cam_ctl_write(cmd);
+    if (gOrigNotifOccurred) ((void(*)(id, SEL, long))gOrigNotifOccurred)(self, _cmd, ntype);
+}
+
+static BOOL zizhan_avas_set_mode(id self, SEL _cmd, id mode, id *err) {
+    BOOL ok = gOrigAudioSetMode ? ((BOOL(*)(id, SEL, id, id *))gOrigAudioSetMode)(self, _cmd, mode, err) : YES;
+    const char *m = mode ? ((const char *(*)(id, SEL))objc_msgSend)(mode, sel_registerName("UTF8String")) : NULL;
+    const bool isVoice = (m && !strcmp(m, "AVAudioSessionModeVoiceChat"));
+    gVoiceChatModeActive = isVoice;
+    (void)zizhan_cam_ctl_write(isVoice ? ZIZHAN_CAM_CMD_AUDIO_RECEIVER : ZIZHAN_CAM_CMD_AUDIO_SPEAKER);
+    return ok;
+}
+
+static BOOL zizhan_avas_override_port(id self, SEL _cmd, unsigned long port, id *err) {
+    BOOL ok = gOrigAudioOverridePort ? ((BOOL(*)(id, SEL, unsigned long, id *))gOrigAudioOverridePort)(self, _cmd, port, err) : YES;
+    const bool forceSpk = (port == 0x73706b72ul || port == 1936747378ul); /* 'spkr' */
+    const bool wantRcv = (!forceSpk && gVoiceChatModeActive);
+    (void)zizhan_cam_ctl_write(wantRcv ? ZIZHAN_CAM_CMD_AUDIO_RECEIVER : ZIZHAN_CAM_CMD_AUDIO_SPEAKER);
+    return ok;
+}
+
+static void zizhan_app_win_layout(id self, SEL _cmd) {
+    if (gOrigWinLayout) ((void(*)(id, SEL))gOrigWinLayout)(self, _cmd);
+    if (boot_option("zizhan_outer_app_fit=0")) return;
+    static uint64_t lastQueryNs = 0;
+    static int cachedOuterView = 0;
+    const uint64_t nowNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (nowNs - lastQueryNs >= 500000000ull) {
+        lastQueryNs = nowNs;
+        cachedOuterView = (zizhan_cam_ctl_query() >> 4) & 3;
+    }
+    static char kDidFitKey;
+    const bool fit916 = (cachedOuterView == 3);
+    const bool wasFit = objc_getAssociatedObject(self, &kDidFitKey) != nil;
+    if (!fit916 && !wasFit) return;
+    CGRect f = ((CGRect(*)(id, SEL))objc_msgSend)(self, sel_registerName("frame"));
+    if (fit916 && f.size.width >= 1000.0 && f.size.height >= 900.0) {
+        objc_setAssociatedObject(self, &kDidFitKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_ASSIGN);
+        ((void(*)(id, SEL, CGRect))objc_msgSend)(self, sel_registerName("setFrame:"), CGRectMake(270.0, 0.0, 540.0, 958.0));
+    } else if (!fit916 && wasFit) {
+        objc_setAssociatedObject(self, &kDidFitKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        ((void(*)(id, SEL, CGRect))objc_msgSend)(self, sel_registerName("setFrame:"), CGRectMake(0.0, 0.0, 1080.0, 958.0));
+    }
+}
+
+static void zizhan_rebind_image_got(const struct mach_header *header, intptr_t slide) {
+    if (!header || header->magic != MH_MAGIC_64) return;
+    Dl_info dli = {0};
+    if (!dladdr(header, &dli) || !dli.dli_fname) return;
+    if (strncmp(dli.dli_fname, "/private/var/containers/Bundle/Application/", 43) != 0 &&
+        strncmp(dli.dli_fname, "/var/containers/Bundle/Application/", 35) != 0 &&
+        strncmp(dli.dli_fname, "/Applications/Zizhan", 20) != 0) {
+        return;
+    }
+    const struct mach_header_64 *h = (const struct mach_header_64 *)header;
+    const struct segment_command_64 *linkedit = NULL;
+    const struct symtab_command *symtab_cmd = NULL;
+    const struct dysymtab_command *dysym_cmd = NULL;
+    uintptr_t cur = (uintptr_t)(h + 1);
+    for (uint32_t i = 0; i < h->ncmds; ++i) {
+        const struct load_command *lc = (const struct load_command *)cur;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (!strcmp(seg->segname, "__LINKEDIT")) linkedit = seg;
+        } else if (lc->cmd == LC_SYMTAB) {
+            symtab_cmd = (const struct symtab_command *)lc;
+        } else if (lc->cmd == LC_DYSYMTAB) {
+            dysym_cmd = (const struct dysymtab_command *)lc;
+        }
+        cur += lc->cmdsize;
+    }
+    if (!linkedit || !symtab_cmd || !dysym_cmd || !dysym_cmd->nindirectsyms) return;
+    const uintptr_t linkedit_base = (uintptr_t)slide + (uintptr_t)linkedit->vmaddr - (uintptr_t)linkedit->fileoff;
+    const struct nlist_64 *symtab = (const struct nlist_64 *)(linkedit_base + symtab_cmd->symoff);
+    const char *strtab = (const char *)(linkedit_base + symtab_cmd->stroff);
+    const uint32_t *indirect = (const uint32_t *)(linkedit_base + dysym_cmd->indirectsymoff);
+
+    cur = (uintptr_t)(h + 1);
+    for (uint32_t i = 0; i < h->ncmds; ++i) {
+        const struct load_command *lc = (const struct load_command *)cur;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (!strncmp(seg->segname, "__DATA", 6) || !strncmp(seg->segname, "__AUTH", 6)) {
+                const struct section_64 *sects = (const struct section_64 *)(seg + 1);
+                for (uint32_t s = 0; s < seg->nsects; ++s) {
+                    const uint32_t stype = sects[s].flags & SECTION_TYPE;
+                    if (stype != S_NON_LAZY_SYMBOL_POINTERS && stype != S_LAZY_SYMBOL_POINTERS) continue;
+                    const uint32_t idx0 = sects[s].reserved1;
+                    const size_t count = (size_t)(sects[s].size / sizeof(void *));
+                    void **ptrs = (void **)((uintptr_t)slide + (uintptr_t)sects[s].addr);
+                    for (size_t k = 0; k < count; ++k) {
+                        if (idx0 + k >= dysym_cmd->nindirectsyms) break;
+                        const uint32_t sidx = indirect[idx0 + k];
+                        if ((sidx & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) || sidx >= symtab_cmd->nsyms) continue;
+                        const uint32_t strx = symtab[sidx].n_un.n_strx;
+                        if (strx >= symtab_cmd->strsize) continue;
+                        const char *sname = strtab + strx;
+                        void *repl = NULL;
+                        if (!strcmp(sname, "_SecItemAdd")) repl = (void *)zizhan_hook_SecItemAdd;
+                        else if (!strcmp(sname, "_SecItemCopyMatching")) repl = (void *)zizhan_hook_SecItemCopyMatching;
+                        else if (!strcmp(sname, "_SecItemUpdate")) repl = (void *)zizhan_hook_SecItemUpdate;
+                        else if (!strcmp(sname, "_SecItemDelete")) repl = (void *)zizhan_hook_SecItemDelete;
+                        else if (!strcmp(sname, "_AudioServicesPlaySystemSound")) repl = (void *)zizhan_hook_AudioPlaySys;
+                        else if (!strcmp(sname, "_AudioServicesPlayAlertSound")) repl = (void *)zizhan_hook_AudioPlayAlert;
+                        if (repl) {
+                            const vm_address_t pg = (vm_address_t)(&ptrs[k]) & ~((vm_address_t)vm_page_size - 1u);
+                            if (vm_protect(mach_task_self(), pg, vm_page_size, FALSE,
+                                           VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) == KERN_SUCCESS) {
+                                ptrs[k] = repl;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cur += lc->cmdsize;
+    }
+}
+
+static void zizhan_app_sandbox_compat_policy(void) {
+    if (boot_option("zizhan_app_compat=0")) return;
+    static dispatch_once_t symOnce;
+    dispatch_once(&symOnce, ^{
+        void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+        if (sec) {
+            gOrigSecItemAdd          = dlsym(sec, "SecItemAdd");
+            gOrigSecItemCopyMatching = dlsym(sec, "SecItemCopyMatching");
+            gOrigSecItemUpdate       = dlsym(sec, "SecItemUpdate");
+            gOrigSecItemDelete       = dlsym(sec, "SecItemDelete");
+        }
+        void *atb = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
+        if (atb) {
+            gOrigAudioPlaySys   = dlsym(atb, "AudioServicesPlaySystemSound");
+            gOrigAudioPlayAlert = dlsym(atb, "AudioServicesPlayAlertSound");
+        }
+    });
+
+    if (!gAppCompatObjcInstalled) {
+        Class fmCls = objc_lookUpClass("NSFileManager");
+        Class impCls = objc_lookUpClass("UIImpactFeedbackGenerator");
+        Class selCls = objc_lookUpClass("UISelectionFeedbackGenerator");
+        Class notCls = objc_lookUpClass("UINotificationFeedbackGenerator");
+        Class winCls = objc_lookUpClass("UIWindow");
+        Method m;
+        if (fmCls && !gOrigAppGroupUrl && (m = class_getInstanceMethod(fmCls, sel_registerName("containerURLForSecurityApplicationGroupIdentifier:"))))
+            gOrigAppGroupUrl = method_setImplementation(m, (IMP)zizhan_app_group_url);
+        if (impCls && !gOrigImpactOccurred && (m = class_getInstanceMethod(impCls, sel_registerName("impactOccurred"))))
+            gOrigImpactOccurred = method_setImplementation(m, (IMP)zizhan_hap_impact);
+        if (impCls && !gOrigImpactIntensity && (m = class_getInstanceMethod(impCls, sel_registerName("impactOccurredWithIntensity:"))))
+            gOrigImpactIntensity = method_setImplementation(m, (IMP)zizhan_hap_impact_int);
+        if (selCls && !gOrigSelectionChanged && (m = class_getInstanceMethod(selCls, sel_registerName("selectionChanged"))))
+            gOrigSelectionChanged = method_setImplementation(m, (IMP)zizhan_hap_selection);
+        if (notCls && !gOrigNotifOccurred && (m = class_getInstanceMethod(notCls, sel_registerName("notificationOccurred:"))))
+            gOrigNotifOccurred = method_setImplementation(m, (IMP)zizhan_hap_notif);
+        if (winCls && !gOrigWinLayout && (m = class_getInstanceMethod(winCls, sel_registerName("layoutSubviews"))))
+            gOrigWinLayout = method_setImplementation(m, (IMP)zizhan_app_win_layout);
+        if (gOrigAppGroupUrl && gOrigImpactOccurred && gOrigWinLayout) gAppCompatObjcInstalled = true;
+    }
+    Class avasCls = objc_lookUpClass("AVAudioSession");
+    if (avasCls && !gOrigAudioSetMode) {
+        Method m1 = class_getInstanceMethod(avasCls, sel_registerName("setMode:error:"));
+        Method m2 = class_getInstanceMethod(avasCls, sel_registerName("overrideOutputAudioPort:error:"));
+        if (m1) gOrigAudioSetMode = method_setImplementation(m1, (IMP)zizhan_avas_set_mode);
+        if (m2) gOrigAudioOverridePort = method_setImplementation(m2, (IMP)zizhan_avas_override_port);
+    }
+}
+
+static void zizhan_app_sandbox_image(const struct mach_header *header, intptr_t slide) {
+    zizhan_app_sandbox_compat_policy();
+    zizhan_rebind_image_got(header, slide);
+}
+
 static bool is_core_daemon_or_shell(const char *name)
 {
     static const char *const kCore[]={
@@ -3599,8 +4036,13 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         (void)dup2(2,1);setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);
         zizhan_cllocation_policy();
         zizhan_avcapture_policy();
+        zizhan_camera_app_bridge_init();
+        zizhan_app_sandbox_compat_policy();
+        for(uint32_t i=0,n=_dyld_image_count();i<n;i++)
+            zizhan_rebind_image_got(_dyld_get_image_header(i),_dyld_get_image_vmaddr_slide(i));
         _dyld_register_func_for_add_image(zizhan_cllocation_image);
         _dyld_register_func_for_add_image(zizhan_avcapture_image);
+        _dyld_register_func_for_add_image(zizhan_app_sandbox_image);
         if(boot_option("zizhan_app_diag=1"))app_diag_start(name);
         if(boot_option("zizhan_net_diag=1")) {
             app_network_start(name);

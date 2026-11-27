@@ -104,6 +104,14 @@ static void test_adhoc_4k_sign_and_re_inspect(void) {
     assert(rep.cd_page_shift == 12u && rep.cd_page_bytes == 4096u);
     assert(rep.cd_hash_type == 2u);
     assert(strcmp(rep.signing_id, "com.zizhan.demoapp") == 0);
+    assert(rep.entitlements_len > 64u && rep.entitlements_len < 640u);
+    {
+        char xml_copy[640];
+        memcpy(xml_copy, bin + rep.entitlements_off, rep.entitlements_len);
+        xml_copy[rep.entitlements_len] = '\0';
+        assert(strstr(xml_copy, "keychain-access-groups") != NULL);
+        assert(strstr(xml_copy, "group.com.zizhan.shared") != NULL);
+    }
     int nonzero_cdhash = 0;
     for (unsigned i = 0; i < 20; ++i) nonzero_cdhash |= rep.cdhash[i];
     assert(nonzero_cdhash != 0);

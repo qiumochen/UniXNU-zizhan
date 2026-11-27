@@ -1,19 +1,13 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
-/* ZizhanInstaller.app (/Applications/ZizhanInstaller.app, com.zizhan.installer):
+/* ZizhanInstaller.app v2 (/Applications/ZizhanInstaller.app, com.zizhan.installer):
  * Native iPadOS 18 (22H374) third-party decrypted .ipa installer & manager for Xiaomi MIX Fold 2.
  *
- * Features:
- *  - Scans /private/var/mobile/Documents, /private/var/mobile/Documents/IPAs, and /pong/ipas.
- *  - Uses system libarchive.2.dylib (in 22H374 DSC) to extract .ipa ZIP archives in-process.
- *  - Inspects Mach-O thin/fat executables via zizhan_macho_inspect:
- *      * Rejects FairPlay encrypted App Store IPAs (cryptid != 0) with clear Chinese explanation.
- *      * Accepts 4 KiB & 16 KiB signed decrypted IPAs, and auto-signs unsigned binaries in-place
- *        with zizhan_macho_sign_adhoc_4k.
- *  - Installs via MIInstallerClient + MIAppIdentity XPC to installd (backed by our
- *    installd MICodeSigningVerifier decrypted-adhoc policy in ui_compat18.c), with
- *    LSApplicationWorkspace fallback and user LaunchServices database sync (uicache).
- *  - Hosts an embedded LAN HTTP drag-and-drop .ipa upload server on port 8088 (http://<en0-ip>:8088).
- *  - Supports unattended verification via boot-arg zizhan_ipa_autotest=1.
+ * v2 Upgrades (Tier 2.1 APP-03):
+ *  - Streaming chunked HTTP upload up to 12 GiB (256 KiB socket buffer) + live XHR progress bar (%, MB/MB, MB/s).
+ *  - Recursive Mach-O inspection & Ad-hoc 4K + XML entitlements signing across main executable,
+ *    Frameworks (.dylib / .framework), and PlugIns (.appex)!
+ *  - Installed-app action sheet: Launch / View Bundle & Log Summary / One-Tap Uninstall.
+ *  - Unattended modes: zizhan_ipa_autotest=1 (ZizhanDemoApp-16k.ipa) & zizhan_ipa_autotest=2 (ZizhanCompatSuite-16k.ipa).
  */
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
@@ -28,12 +22,12 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
 #include <uuid/uuid.h>
 #include "../zizhan-ipa-install18.h"
 
-/* --- Dynamic libarchive.2.dylib bindings (present in 22H374 dyld shared cache) --- */
 struct archive;
 struct archive_entry;
 static struct archive *(*p_archive_read_new)(void);
@@ -109,6 +103,16 @@ static NSString *current_lan_ip(void) {
     return best;
 }
 
+static double data_free_gib(double *totalGibOut) {
+    struct statvfs vfs;
+    if (statvfs("/private/var/mobile", &vfs) == 0) {
+        if (totalGibOut) *totalGibOut = ((double)vfs.f_blocks * vfs.f_frsize) / (1024.0 * 1024.0 * 1024.0);
+        return ((double)vfs.f_bavail * vfs.f_frsize) / (1024.0 * 1024.0 * 1024.0);
+    }
+    if (totalGibOut) *totalGibOut = 0.0;
+    return 0.0;
+}
+
 static bool is_safe_zip_relpath(NSString *rel) {
     if (!rel.length || [rel hasPrefix:@"/"]) return false;
     for (NSString *comp in [rel pathComponents]) {
@@ -125,13 +129,14 @@ static bool extract_zip_to_dir(NSString *ipaPath, NSString *destDir, NSString **
     NSFileManager *fm = [NSFileManager defaultManager];
     struct archive *a = p_archive_read_new();
     p_archive_read_support_format_zip(a);
-    if (p_archive_read_open_filename(a, [ipaPath fileSystemRepresentation], 65536) != 0) {
+    if (p_archive_read_open_filename(a, [ipaPath fileSystemRepresentation], 262144) != 0) {
         p_archive_read_free(a);
         if (errOut) *errOut = @"无法打开 .ipa ZIP 压缩包";
         return false;
     }
     struct archive_entry *entry = NULL;
-    uint8_t *chunk = malloc(65536);
+    const size_t kBufSz = 262144;
+    uint8_t *chunk = malloc(kBufSz);
     bool ok = chunk != NULL;
     unsigned extractedFiles = 0;
     while (ok && p_archive_read_next_header(a, &entry) == 0) {
@@ -153,7 +158,7 @@ static bool extract_zip_to_dir(NSString *ipaPath, NSString *destDir, NSString **
         int fd = open([full fileSystemRepresentation], O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { ok = false; break; }
         ssize_t r = 0;
-        while ((r = p_archive_read_data(a, chunk, 65536)) > 0) {
+        while ((r = p_archive_read_data(a, chunk, kBufSz)) > 0) {
             ssize_t off = 0;
             while (off < r) {
                 ssize_t w = write(fd, chunk + off, (size_t)(r - off));
@@ -169,12 +174,12 @@ static bool extract_zip_to_dir(NSString *ipaPath, NSString *destDir, NSString **
     }
     free(chunk);
     p_archive_read_free(a);
-    if ((!ok || extractedFiles == 0) && errOut) *errOut = @"解压 .ipa 文件失败";
+    if ((!ok || extractedFiles == 0) && errOut) *errOut = @"解压 .ipa 文件失败（请确认 Data 空间充足）";
     return ok && extractedFiles > 0;
 }
 
 static int inspect_or_sign_macho_file(NSString *binPath, NSString *bundleId, ZizhanMachoReport *repOut, NSString **errOut) {
-    NSData *data = [NSData dataWithContentsOfFile:binPath];
+    NSData *data = [NSData dataWithContentsOfFile:binPath options:NSDataReadingMappedIfSafe error:nil];
     if (!data || data.length < 64) {
         if (errOut) *errOut = @"可执行文件缺失或过小";
         return ZIZHAN_IPA_ERR_TRUNCATED;
@@ -194,19 +199,45 @@ static int inspect_or_sign_macho_file(NSString *binPath, NSString *bundleId, Ziz
         const char *ident = bundleId.length ? [bundleId UTF8String] : "com.zizhan.adhoc";
         size_t cap = data.length + zizhan_macho_adhoc_blob_bound(data.length, ident);
         NSMutableData *mut = [NSMutableData dataWithLength:cap];
-        memcpy(mut.mutableBytes, data.bytes, data.length);
-        size_t newLen = 0;
-        if (zizhan_macho_sign_adhoc_4k((uint8_t *)mut.mutableBytes, data.length, cap, ident, &newLen) == ZIZHAN_IPA_OK) {
-            mut.length = newLen;
-            if ([mut writeToFile:binPath atomically:YES]) {
-                chmod([binPath fileSystemRepresentation], 0755);
-                (void)zizhan_macho_inspect((const uint8_t *)mut.bytes, mut.length, &rep);
+        if (mut) {
+            memcpy(mut.mutableBytes, data.bytes, data.length);
+            size_t newLen = 0;
+            if (zizhan_macho_sign_adhoc_4k((uint8_t *)mut.mutableBytes, data.length, cap, ident, &newLen) == ZIZHAN_IPA_OK) {
+                mut.length = newLen;
+                if ([mut writeToFile:binPath atomically:YES]) {
+                    chmod([binPath fileSystemRepresentation], 0755);
+                    (void)zizhan_macho_inspect((const uint8_t *)mut.bytes, mut.length, &rep);
+                }
             }
         }
     }
     chmod([binPath fileSystemRepresentation], 0755);
     if (repOut) *repOut = rep;
     return ZIZHAN_IPA_OK;
+}
+
+static void sign_nested_bundles_in_app(NSString *appDir, NSString *fallbackBid) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *containers = @[@"Frameworks", @"PlugIns"];
+    for (NSString *cname in containers) {
+        NSString *dir = [appDir stringByAppendingPathComponent:cname];
+        for (NSString *sub in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+            NSString *p = [dir stringByAppendingPathComponent:sub];
+            if ([sub hasSuffix:@".dylib"]) {
+                chmod([p fileSystemRepresentation], 0755);
+                (void)inspect_or_sign_macho_file(p, fallbackBid, NULL, NULL);
+            } else if ([sub hasSuffix:@".framework"] || [sub hasSuffix:@".appex"] || [sub hasSuffix:@".bundle"]) {
+                NSDictionary *finfo = [NSDictionary dictionaryWithContentsOfFile:[p stringByAppendingPathComponent:@"Info.plist"]];
+                NSString *fbid = finfo[@"CFBundleIdentifier"] ?: fallbackBid;
+                NSString *fexe = finfo[@"CFBundleExecutable"] ?: [sub stringByDeletingPathExtension];
+                NSString *fp = [p stringByAppendingPathComponent:fexe];
+                if ([fm fileExistsAtPath:fp]) {
+                    chmod([fp fileSystemRepresentation], 0755);
+                    (void)inspect_or_sign_macho_file(fp, fbid, NULL, NULL);
+                }
+            }
+        }
+    }
 }
 
 @interface ZizhanIpaItem : NSObject
@@ -226,7 +257,7 @@ static int inspect_or_sign_macho_file(NSString *binPath, NSString *bundleId, Ziz
 
 static ZizhanInstallerController *gMainController;
 
-/* --- Minimal LAN HTTP Drag-and-Drop IPA Upload Server (port 8088) --- */
+/* --- LAN HTTP Streaming IPA Upload Server v2 (port 8088, up to 12 GiB) --- */
 static void handle_http_client(int cfd) {
     char hdr[4096];
     ssize_t n = recv(cfd, hdr, sizeof(hdr) - 1, 0);
@@ -237,18 +268,27 @@ static void handle_http_client(int cfd) {
         const char *html =
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n"
             "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<title>MIX Fold 2 · IPA 局域网安装器</title>"
-            "<style>body{font-family:-apple-system,sans-serif;background:#0f141e;color:#e8eef7;padding:28px;max-width:560px;margin:auto}"
+            "<title>MIX Fold 2 · IPA 局域网安装器 v2</title>"
+            "<style>body{font-family:-apple-system,sans-serif;background:#0f141e;color:#e8eef7;padding:28px;max-width:600px;margin:auto}"
             ".box{border:2px dashed #3b82f6;border-radius:16px;padding:32px;text-align:center;background:#161f30}"
-            "button,input{margin-top:16px;font-size:16px;padding:10px 20px;border-radius:10px}</style></head>"
-            "<body><h2>Xiaomi MIX Fold 2 · 脱壳 IPA 投递</h2>"
-            "<div class='box'><p>选择已脱壳 (cryptid=0) 的 .ipa 文件直接上传至手机安装列表：</p>"
-            "<input id='f' type='file' accept='.ipa'><br><button onclick='up()'>上传到手机</button>"
+            "button,input{margin-top:16px;font-size:16px;padding:10px 20px;border-radius:10px}"
+            "progress{width:100%;height:18px;margin-top:16px;display:none}</style></head>"
+            "<body><h2>Xiaomi MIX Fold 2 · 大体积脱壳 IPA 流式投递 (v2)</h2>"
+            "<div class='box'><p>支持 >2 GB 至 12 GB 已脱壳 (cryptid=0) .ipa 流式直写手机 Data 分区：</p>"
+            "<input id='f' type='file' accept='.ipa'><br><button onclick='up()'>流式上传至手机</button>"
+            "<progress id='pg' max='100' value='0'></progress>"
             "<p id='st'></p></div>"
-            "<script>async function up(){const f=document.getElementById('f').files[0];if(!f)return;"
-            "document.getElementById('st').textContent='正在上传 '+f.name+' ...';"
-            "const r=await fetch('/upload?name='+encodeURIComponent(f.name),{method:'PUT',body:f});"
-            "document.getElementById('st').textContent=await r.text();}</script></body></html>";
+            "<script>function up(){const f=document.getElementById('f').files[0];if(!f)return;"
+            "const pg=document.getElementById('pg'),st=document.getElementById('st');pg.style.display='block';pg.value=0;"
+            "const t0=Date.now(),xhr=new XMLHttpRequest();"
+            "xhr.open('PUT','/upload?name='+encodeURIComponent(f.name),true);"
+            "xhr.upload.onprogress=function(e){if(e.lengthComputable){const pct=(e.loaded*100/e.total).toFixed(1);"
+            "const mb=(e.loaded/1048576).toFixed(1),tot=(e.total/1048576).toFixed(1);"
+            "const spd=(e.loaded/1048576/Math.max(0.1,(Date.now()-t0)/1000)).toFixed(1);"
+            "pg.value=pct;st.textContent='上传中 '+pct+'% ('+mb+' / '+tot+' MB, '+spd+' MB/s)';}};"
+            "xhr.onload=function(){st.textContent=xhr.responseText;};"
+            "xhr.onerror=function(){st.textContent='网络上传中断';};"
+            "xhr.send(f);}</script></body></html>";
         send(cfd, html, strlen(html), 0);
         close(cfd);
         return;
@@ -258,8 +298,8 @@ static void handle_http_client(int cfd) {
         char *hdrEnd = strstr(hdr, "\r\n\r\n");
         long long contentLen = 0;
         const char *cl = strcasestr(hdr, "Content-Length:");
-        if (cl) contentLen = atoll(cl + 15);
-        char fname[128] = "uploaded.ipa";
+        if (cl) contentLen = strtoll(cl + 15, NULL, 10);
+        char fname[160] = "uploaded.ipa";
         const char *np = strstr(hdr, "name=");
         if (np) {
             np += 5;
@@ -276,17 +316,25 @@ static void handle_http_client(int cfd) {
         NSString *dst = [dir stringByAppendingPathComponent:[NSString stringWithUTF8String:fname]];
         int fd = open([dst fileSystemRepresentation], O_WRONLY | O_CREAT | O_TRUNC, 0644);
         long long written = 0;
-        if (fd >= 0 && hdrEnd && contentLen > 0 && contentLen <= (2LL << 30)) {
+        const long long kMaxUpload = (12LL << 30); /* 12 GiB streaming ceiling */
+        if (fd >= 0 && hdrEnd && contentLen > 0 && contentLen <= kMaxUpload) {
             size_t bodyInHdr = (size_t)(n - ((hdrEnd + 4) - hdr));
             if (bodyInHdr > 0) {
                 write(fd, hdrEnd + 4, bodyInHdr);
                 written += (long long)bodyInHdr;
             }
-            char *buf = malloc(65536);
+            const size_t kChunk = 262144;
+            char *buf = malloc(kChunk);
             while (buf && written < contentLen) {
-                ssize_t r = recv(cfd, buf, 65536, 0);
+                ssize_t r = recv(cfd, buf, kChunk, 0);
                 if (r <= 0) break;
-                write(fd, buf, (size_t)r);
+                ssize_t woff = 0;
+                while (woff < r) {
+                    ssize_t w = write(fd, buf + woff, (size_t)(r - woff));
+                    if (w <= 0) { r = -1; break; }
+                    woff += w;
+                }
+                if (r <= 0) break;
                 written += r;
             }
             free(buf);
@@ -294,7 +342,11 @@ static void handle_http_client(int cfd) {
         } else if (fd >= 0) {
             close(fd);
         }
-        const char *resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n上传完成！请在手机「IPA 安装器」点击对应条目安装。";
+        char resp[320];
+        snprintf(resp, sizeof(resp),
+                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"
+                 "上传完成 (%.1f MB)！请在手机「IPA 安装器」点击对应条目一键安装。",
+                 written / 1048576.0);
         send(cfd, resp, strlen(resp), 0);
         close(cfd);
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -319,7 +371,7 @@ static void *http_server_thread(void *unused) {
         close(sfd);
         return NULL;
     }
-    fprintf(stderr, "ZIZHAN_IPA_INSTALLER: HTTP upload server listening on 0.0.0.0:8088\n");
+    fprintf(stderr, "ZIZHAN_IPA_INSTALLER: v2 HTTP streaming upload server listening on 0.0.0.0:8088 (max=12GiB)\n");
     for (;;) {
         int cfd = accept(sfd, NULL, NULL);
         if (cfd >= 0) handle_http_client(cfd);
@@ -331,10 +383,9 @@ static void *http_server_thread(void *unused) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     gMainController = self;
-    self.title = @"MIX Fold 2 · IPA 安装器";
+    self.title = @"MIX Fold 2 · IPA 安装器 v2";
     self.ipas = [NSMutableArray array];
     self.installedApps = [NSMutableArray array];
-    self.statusMessage = [NSString stringWithFormat:@"局域网网页投递: http://%@:8088  |  仅支持已脱壳 (cryptid=0) IPA，自动兼容 4K/16K 签名", current_lan_ip()];
 
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:@"刷新" style:UIBarButtonItemStylePlain target:self action:@selector(reloadAll)];
@@ -345,13 +396,18 @@ static void *http_server_thread(void *unused) {
     if (pthread_create(&th, NULL, http_server_thread, NULL) == 0) pthread_detach(th);
 
     [self reloadAll];
-    fprintf(stderr, "ZIZHAN_IPA_INSTALLER: UI_READY ipas=%lu installed_user=%lu\n",
-            (unsigned long)self.ipas.count, (unsigned long)self.installedApps.count);
+    double totGib = 0.0, freeGib = data_free_gib(&totGib);
+    fprintf(stderr, "ZIZHAN_IPA_INSTALLER: UI_READY v2 ipas=%lu installed_user=%lu data_free_gib=%.2f data_total_gib=%.2f\n",
+            (unsigned long)self.ipas.count, (unsigned long)self.installedApps.count, freeGib, totGib);
     fflush(stderr);
 
-    if (installer_boot_option("zizhan_ipa_autotest=1")) {
+    if (installer_boot_option("zizhan_ipa_autotest=2")) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            [self runAutoTest];
+            [self runAutoTestWithTarget:@"/pong/ipas/ZizhanCompatSuite-16k.ipa"];
+        });
+    } else if (installer_boot_option("zizhan_ipa_autotest=1")) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            [self runAutoTestWithTarget:@"/pong/ipas/ZizhanDemoApp-16k.ipa"];
         });
     }
 }
@@ -392,18 +448,28 @@ static void *http_server_thread(void *unused) {
                 SEL sType = sel_registerName("applicationType");
                 SEL sBid  = sel_registerName("applicationIdentifier");
                 SEL sName = sel_registerName("localizedName");
+                SEL sUrl  = sel_registerName("bundleURL");
+                SEL sData = sel_registerName("dataContainerURL");
                 NSString *atype = [proxy respondsToSelector:sType] ? ((id(*)(id, SEL))objc_msgSend)(proxy, sType) : nil;
                 NSString *bid   = [proxy respondsToSelector:sBid]  ? ((id(*)(id, SEL))objc_msgSend)(proxy, sBid)  : nil;
                 NSString *lname = [proxy respondsToSelector:sName] ? ((id(*)(id, SEL))objc_msgSend)(proxy, sName) : bid;
+                NSURL *burl     = [proxy respondsToSelector:sUrl]  ? ((id(*)(id, SEL))objc_msgSend)(proxy, sUrl)  : nil;
+                NSURL *durl     = [proxy respondsToSelector:sData] ? ((id(*)(id, SEL))objc_msgSend)(proxy, sData) : nil;
                 if ([atype isEqualToString:@"User"] && bid.length > 0 && ![seenBids containsObject:bid]) {
                     [seenBids addObject:bid];
-                    [self.installedApps addObject:@{@"bundleID": bid, @"name": lname ?: bid}];
+                    [self.installedApps addObject:@{
+                        @"bundleID": bid,
+                        @"name": lname ?: bid,
+                        @"bundlePath": burl.path ?: @"",
+                        @"dataPath": durl.path ?: @""
+                    }];
                 }
             });
         }
     }
-    self.statusMessage = [NSString stringWithFormat:@"局域网网页投递: http://%@:8088  |  发现 %lu 个 IPA, 已装 %lu 个第三方应用",
-                          current_lan_ip(), (unsigned long)self.ipas.count, (unsigned long)self.installedApps.count];
+    double totGib = 0.0, freeGib = data_free_gib(&totGib);
+    self.statusMessage = [NSString stringWithFormat:@"网页投递: http://%@:8088 (<=12GB) | Data 可用 %.1f/%.1f GiB | %lu 个 IPA, 已装 %lu 个",
+                          current_lan_ip(), freeGib, totGib, (unsigned long)self.ipas.count, (unsigned long)self.installedApps.count];
     [self.tableView reloadData];
 }
 
@@ -428,6 +494,47 @@ static BOOL launch_bundle_id(NSString *bid) {
         }
     }
     return ok;
+}
+
+- (void)uninstallBundleID:(NSString *)bid {
+    if (!bid.length) return;
+    BOOL miDone = NO;
+    (void)dlopen("/System/Library/PrivateFrameworks/InstalledContentLibrary.framework/InstalledContentLibrary", RTLD_LAZY);
+    (void)dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_LAZY);
+    Class miClientCls = objc_lookUpClass("MIInstallerClient");
+    Class miIdentCls  = objc_lookUpClass("MIAppIdentity");
+    SEL sMakeClient = sel_registerName("installerWithProgressBlock:");
+    SEL sInitBid    = sel_registerName("initWithBundleID:");
+    SEL sUninstId   = sel_registerName("uninstallIdentity:withOptions:completion:");
+    if (miClientCls && miIdentCls && [miClientCls respondsToSelector:sMakeClient]) {
+        id client = ((id(*)(Class, SEL, id))objc_msgSend)(miClientCls, sMakeClient, nil);
+        id ident = [miIdentCls instancesRespondToSelector:sInitBid]
+                   ? ((id(*)(id, SEL, id))objc_msgSend)([miIdentCls alloc], sInitBid, bid) : nil;
+        if (client && ident && [client respondsToSelector:sUninstId]) {
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            __block BOOL uok = NO;
+            ((void(*)(id, SEL, id, id, void (^)(NSError *)))objc_msgSend)(
+                client, sUninstId, ident, @{}, ^(NSError *err) {
+                    uok = (err == nil);
+                    dispatch_semaphore_signal(sem);
+                });
+            (void)dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+            miDone = uok;
+        }
+    }
+    Class wsCls = objc_lookUpClass("LSApplicationWorkspace");
+    id ws = wsCls ? ((id(*)(Class, SEL))objc_msgSend)(wsCls, sel_registerName("defaultWorkspace")) : nil;
+    if (!miDone && ws) {
+        SEL sUninst = sel_registerName("uninstallApplication:withOptions:");
+        if ([ws respondsToSelector:sUninst]) {
+            ((BOOL(*)(id, SEL, id, id))objc_msgSend)(ws, sUninst, bid, nil);
+        }
+    }
+    SEL sRebuild = sel_registerName("_LSPrivateRebuildApplicationDatabasesForSystemApps:internal:user:");
+    if (ws && [ws respondsToSelector:sRebuild]) {
+        ((BOOL(*)(id, SEL, BOOL, BOOL, BOOL))objc_msgSend)(ws, sRebuild, NO, NO, YES);
+    }
+    [self reloadAll];
 }
 
 - (BOOL)installIpaAtPath:(NSString *)ipaPath installedBundleOut:(NSString **)bundleOut errorMessage:(NSString **)errOut {
@@ -487,23 +594,7 @@ static BOOL launch_bundle_id(NSString *bid) {
         return NO;
     }
 
-    // Also ensure any embedded Frameworks dylib or framework binaries are decrypted/signed
-    NSString *fwDir = [appDir stringByAppendingPathComponent:@"Frameworks"];
-    for (NSString *sub in [fm contentsOfDirectoryAtPath:fwDir error:nil]) {
-        NSString *p = [fwDir stringByAppendingPathComponent:sub];
-        if ([sub hasSuffix:@".dylib"]) {
-            chmod([p fileSystemRepresentation], 0755);
-            (void)inspect_or_sign_macho_file(p, bundleID, NULL, NULL);
-        } else if ([sub hasSuffix:@".framework"]) {
-            NSDictionary *finfo = [NSDictionary dictionaryWithContentsOfFile:[p stringByAppendingPathComponent:@"Info.plist"]];
-            NSString *fexe = finfo[@"CFBundleExecutable"] ?: [sub stringByDeletingPathExtension];
-            NSString *fp = [p stringByAppendingPathComponent:fexe];
-            if ([fm fileExistsAtPath:fp]) {
-                chmod([fp fileSystemRepresentation], 0755);
-                (void)inspect_or_sign_macho_file(fp, bundleID, NULL, NULL);
-            }
-        }
-    }
+    sign_nested_bundles_in_app(appDir, bundleID);
 
     Class wsCls = objc_lookUpClass("LSApplicationWorkspace");
     id ws = wsCls ? ((id(*)(Class, SEL))objc_msgSend)(wsCls, sel_registerName("defaultWorkspace")) : nil;
@@ -512,7 +603,6 @@ static BOOL launch_bundle_id(NSString *bid) {
     NSDictionary *resInfo = nil;
     BOOL ok = NO;
 
-    /* 1. Direct iOS 18 MIInstallerClient -> installd XPC (exact 22H374 ObjC ABI, bypasses installcoordinationd) */
     (void)dlopen("/System/Library/PrivateFrameworks/InstalledContentLibrary.framework/InstalledContentLibrary", RTLD_LAZY);
     (void)dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_LAZY);
     Class miClientCls = objc_lookUpClass("MIInstallerClient");
@@ -554,8 +644,8 @@ static BOOL launch_bundle_id(NSString *bid) {
                 dispatch_semaphore_signal(sem);
             };
             ((void(*)(id, SEL, id, id, NSUInteger, id, BOOL, id))objc_msgSend)(
-                client, sInstUrl, appURL, ident, 2u /* User domain */, miOpts, NO, comp);
-            (void)dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC));
+                client, sInstUrl, appURL, ident, 2u, miOpts, NO, comp);
+            (void)dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 45 * NSEC_PER_SEC));
             ok = miOk;
             instErr = miErr;
             if ([miRecs isKindOfClass:[NSDictionary class]]) resInfo = miRecs;
@@ -565,7 +655,6 @@ static BOOL launch_bundle_id(NSString *bid) {
         }
     }
 
-    /* 2. Fallback to LSApplicationWorkspace installApplication:withOptions:error: */
     if (!ok && ws) {
         NSDictionary *opts = @{
             @"CFBundleIdentifier": bundleID,
@@ -579,7 +668,6 @@ static BOOL launch_bundle_id(NSString *bid) {
         }
     }
 
-    /* 3. Synchronize LaunchServices & SpringBoard (uicache user rebuild + registerApplication:) */
     if (ok && ws) {
         if (resInfo) {
             NSArray *arr = resInfo[@"InstalledAppInfoArray"];
@@ -593,10 +681,13 @@ static BOOL launch_bundle_id(NSString *bid) {
                 fprintf(stderr, "ZIZHAN_IPA_INSTALLER: LS registerApplication %s ok=%d\n", [[burl path] UTF8String], (int)rok);
             }
         }
-        SEL sRebuild = sel_registerName("_LSPrivateRebuildApplicationDatabasesForSystemApps:internal:user:");
-        if ([ws respondsToSelector:sRebuild]) {
-            BOOL rb = ((BOOL(*)(id, SEL, BOOL, BOOL, BOOL))objc_msgSend)(ws, sRebuild, NO, NO, YES);
-            fprintf(stderr, "ZIZHAN_IPA_INSTALLER: LS rebuild user database ok=%d\n", (int)rb);
+        /* MIInstallerClient already registers the bundle with lsd; only rebuild the user DB on legacy fallback. */
+        if (!resInfo) {
+            SEL sRebuild = sel_registerName("_LSPrivateRebuildApplicationDatabasesForSystemApps:internal:user:");
+            if ([ws respondsToSelector:sRebuild]) {
+                BOOL rb = ((BOOL(*)(id, SEL, BOOL, BOOL, BOOL))objc_msgSend)(ws, sRebuild, NO, NO, YES);
+                fprintf(stderr, "ZIZHAN_IPA_INSTALLER: LS rebuild user database ok=%d\n", (int)rb);
+            }
         }
         fflush(stderr);
     }
@@ -612,9 +703,8 @@ static BOOL launch_bundle_id(NSString *bid) {
     return ok;
 }
 
-- (void)runAutoTest {
+- (void)runAutoTestWithTarget:(NSString *)targetIpa {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        /* 1. Verify FairPlay encrypted IPA is cleanly rejected */
         NSString *encIpa = @"/pong/ipas/FairPlayEncryptedSample.ipa";
         if ([[NSFileManager defaultManager] fileExistsAtPath:encIpa]) {
             NSString *rejErr = nil;
@@ -623,10 +713,8 @@ static BOOL launch_bundle_id(NSString *bid) {
                     (int)encOk, (int)(!encOk), rejErr ? [rejErr UTF8String] : "none");
             fflush(stderr);
         }
-        /* 2. Install real 16K-signed decrypted third-party ZizhanDemoApp.ipa and launch it! */
-        NSString *demoIpa = @"/pong/ipas/ZizhanDemoApp-16k.ipa";
         NSString *bid = nil, *err = nil;
-        BOOL ok = [self installIpaAtPath:demoIpa installedBundleOut:&bid errorMessage:&err];
+        BOOL ok = [self installIpaAtPath:targetIpa installedBundleOut:&bid errorMessage:&err];
         fprintf(stderr, "ZIZHAN_IPA_INSTALLER: AUTOTEST_RESULT ok=%d bundle=%s err=%s\n",
                 (int)ok, bid ? [bid UTF8String] : "nil", err ? [err UTF8String] : "none");
         fflush(stderr);
@@ -639,7 +727,7 @@ static BOOL launch_bundle_id(NSString *bid) {
             [self.tableView reloadData];
 
             if (ok && bid.length) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
                     BOOL launched = launch_bundle_id(bid);
                     fprintf(stderr, "ZIZHAN_IPA_INSTALLER: AUTOTEST_LAUNCH bundle=%s launched=%d\n",
                             [bid UTF8String], (int)launched);
@@ -659,7 +747,7 @@ static BOOL launch_bundle_id(NSString *bid) {
     (void)tableView;
     return section == 0
         ? [NSString stringWithFormat:@"待安装 IPA 包 — %@", self.statusMessage]
-        : @"已安装第三方应用 (点击启动 / 左滑卸载)";
+        : @"已安装第三方应用 (点击管理：打开 / 查看沙盒信息 / 卸载)";
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -674,13 +762,15 @@ static BOOL launch_bundle_id(NSString *bid) {
     if (indexPath.section == 0) {
         if (self.ipas.count == 0) {
             cell.textLabel.text = @"暂无 .ipa 文件";
-            cell.detailTextLabel.text = @"请通过浏览器访问上方 http://<IP>:8088 投递脱壳 .ipa，或放入 /var/mobile/Documents/IPAs";
+            cell.detailTextLabel.text = @"请通过浏览器访问上方 http://<IP>:8088 流式投递脱壳 .ipa，或放入 /var/mobile/Documents/IPAs";
             cell.accessoryType = UITableViewCellAccessoryNone;
         } else {
             ZizhanIpaItem *it = self.ipas[(NSUInteger)indexPath.row];
             cell.textLabel.text = it.fileName;
-            cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ (%.1f KB) — 点击一键校验并安装",
-                                         it.path, it.fileBytes / 1024.0];
+            double mb = it.fileBytes / 1048576.0;
+            cell.detailTextLabel.text = (mb >= 1.0)
+                ? [NSString stringWithFormat:@"%@ (%.2f MB) — 点击一键校验并安装", it.path, mb]
+                : [NSString stringWithFormat:@"%@ (%.1f KB) — 点击一键校验并安装", it.path, it.fileBytes / 1024.0];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
     } else {
@@ -691,7 +781,7 @@ static BOOL launch_bundle_id(NSString *bid) {
         } else {
             NSDictionary *app = self.installedApps[(NSUInteger)indexPath.row];
             cell.textLabel.text = app[@"name"];
-            cell.detailTextLabel.text = app[@"bundleID"];
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  |  %@", app[@"bundleID"], app[@"bundlePath"] ?: @""];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
     }
@@ -718,8 +808,23 @@ static BOOL launch_bundle_id(NSString *bid) {
         [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:ac animated:YES completion:nil];
     } else if (indexPath.section == 1 && indexPath.row < (NSInteger)self.installedApps.count) {
-        NSString *bid = self.installedApps[(NSUInteger)indexPath.row][@"bundleID"];
-        (void)launch_bundle_id(bid);
+        NSDictionary *app = self.installedApps[(NSUInteger)indexPath.row];
+        NSString *bid = app[@"bundleID"];
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:app[@"name"]
+                             message:[NSString stringWithFormat:@"Bundle ID: %@\nBundle: %@\nData: %@",
+                                      bid, app[@"bundlePath"] ?: @"-", app[@"dataPath"] ?: @"-"]
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"立即打开" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            (void)a;
+            (void)launch_bundle_id(bid);
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"卸载应用" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            (void)a;
+            [self uninstallBundleID:bid];
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:ac animated:YES completion:nil];
     }
 }
 
@@ -732,43 +837,7 @@ static BOOL launch_bundle_id(NSString *bid) {
     (void)tableView;
     if (editingStyle == UITableViewCellEditingStyleDelete && indexPath.section == 1 && indexPath.row < (NSInteger)self.installedApps.count) {
         NSString *bid = self.installedApps[(NSUInteger)indexPath.row][@"bundleID"];
-        BOOL miDone = NO;
-        (void)dlopen("/System/Library/PrivateFrameworks/InstalledContentLibrary.framework/InstalledContentLibrary", RTLD_LAZY);
-        (void)dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_LAZY);
-        Class miClientCls = objc_lookUpClass("MIInstallerClient");
-        Class miIdentCls  = objc_lookUpClass("MIAppIdentity");
-        SEL sMakeClient = sel_registerName("installerWithProgressBlock:");
-        SEL sInitBid    = sel_registerName("initWithBundleID:");
-        SEL sUninstId   = sel_registerName("uninstallIdentity:withOptions:completion:");
-        if (miClientCls && miIdentCls && [miClientCls respondsToSelector:sMakeClient]) {
-            id client = ((id(*)(Class, SEL, id))objc_msgSend)(miClientCls, sMakeClient, nil);
-            id ident = [miIdentCls instancesRespondToSelector:sInitBid]
-                       ? ((id(*)(id, SEL, id))objc_msgSend)([miIdentCls alloc], sInitBid, bid) : nil;
-            if (client && ident && [client respondsToSelector:sUninstId]) {
-                dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-                __block BOOL uok = NO;
-                ((void(*)(id, SEL, id, id, void (^)(NSError *)))objc_msgSend)(
-                    client, sUninstId, ident, @{}, ^(NSError *err) {
-                        uok = (err == nil);
-                        dispatch_semaphore_signal(sem);
-                    });
-                (void)dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
-                miDone = uok;
-            }
-        }
-        Class wsCls = objc_lookUpClass("LSApplicationWorkspace");
-        id ws = wsCls ? ((id(*)(Class, SEL))objc_msgSend)(wsCls, sel_registerName("defaultWorkspace")) : nil;
-        if (!miDone && ws) {
-            SEL sUninst = sel_registerName("uninstallApplication:withOptions:");
-            if ([ws respondsToSelector:sUninst]) {
-                ((BOOL(*)(id, SEL, id, id))objc_msgSend)(ws, sUninst, bid, nil);
-            }
-        }
-        SEL sRebuild = sel_registerName("_LSPrivateRebuildApplicationDatabasesForSystemApps:internal:user:");
-        if (ws && [ws respondsToSelector:sRebuild]) {
-            ((BOOL(*)(id, SEL, BOOL, BOOL, BOOL))objc_msgSend)(ws, sRebuild, NO, NO, YES);
-        }
-        [self reloadAll];
+        [self uninstallBundleID:bid];
     }
 }
 

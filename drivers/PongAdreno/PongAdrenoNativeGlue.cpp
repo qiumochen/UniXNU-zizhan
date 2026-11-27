@@ -43,8 +43,9 @@ bool PongAdrenoConfigureService(IOService *service)
     const bool enabled=PE_parse_boot_argn("pong_metal",&metal,sizeof(metal)) && metal==1;
     #if PONG_GUEST_22H374
     service->setProperty("PongMetal22H374Enabled",enabled);
-    unsigned global=0;
-    if(enabled && PE_parse_boot_argn("pong_metal_global",&global,sizeof(global)) && global==1)
+    unsigned global=1;
+    (void)PE_parse_boot_argn("pong_metal_global",&global,sizeof(global));
+    if(enabled && global==1)
         service->setProperty("PongNativeMetalGlobal",kOSBooleanTrue);
 #else
     service->setProperty("PongMetal20G81Enabled",enabled);

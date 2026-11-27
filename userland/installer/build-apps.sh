@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: BSD-2-Clause-Patent
-# Build ZizhanInstaller.app (4K system app), ZizhanDemoApp-16k.ipa (16K page-signed decrypted IPA),
-# and FairPlayEncryptedSample.ipa (synthetic cryptid=1 negative-test IPA) on macOS with Xcode iPhoneOS SDK.
+# Build ZizhanInstaller.app v2 (4K system app), ZizhanDemoApp-16k.ipa, ZizhanCompatSuite-16k.ipa
+# (16K page-signed decrypted 8-subsystem IPA), and FairPlayEncryptedSample.ipa on macOS.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -27,7 +27,6 @@ def make_icon(path: pathlib.Path, top_rgb, bot_rgb, glyph_rgb):
         bb = int(top_rgb[2] * (1 - t) + bot_rgb[2] * t)
         row = bytearray([0])
         for x in range(w):
-            # Center downward-arrow / camera badge
             in_box = (46 <= x < 134 and 92 <= y < 144)
             in_stem = (78 <= x < 102 and 34 <= y < 96)
             if in_box or in_stem:
@@ -46,59 +45,22 @@ def make_icon(path: pathlib.Path, top_rgb, bot_rgb, glyph_rgb):
     )
     path.write_bytes(png)
 
-inst_app = out / "ZizhanInstaller.app"
-inst_app.mkdir(parents=True, exist_ok=True)
-make_icon(inst_app / "AppIcon60x60@3x.png", (30, 118, 232), (18, 64, 156), (255, 255, 255))
-(inst_app / "Info.plist").write_text("""<?xml version="1.0" encoding="UTF-8"?>
+def write_plist(app_dir: pathlib.Path, disp: str, exe: str, bid: str):
+    (app_dir / "Info.plist").write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleDisplayName</key><string>IPA 安装器</string>
-  <key>CFBundleExecutable</key><string>ZizhanInstaller</string>
+  <key>CFBundleDisplayName</key><string>{disp}</string>
+  <key>CFBundleExecutable</key><string>{exe}</string>
   <key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array>
-  <key>CFBundleIdentifier</key><string>com.zizhan.installer</string>
+  <key>CFBundleIdentifier</key><string>{bid}</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>ZizhanInstaller</string>
+  <key>CFBundleName</key><string>{exe}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>LSRequiresIPhoneOS</key><true/>
-  <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
-  <key>UISupportedInterfaceOrientations</key>
-  <array>
-    <string>UIInterfaceOrientationPortrait</string>
-    <string>UIInterfaceOrientationLandscapeLeft</string>
-    <string>UIInterfaceOrientationLandscapeRight</string>
-  </array>
-  <key>UISupportedInterfaceOrientations~ipad</key>
-  <array>
-    <string>UIInterfaceOrientationPortrait</string>
-    <string>UIInterfaceOrientationPortraitUpsideDown</string>
-    <string>UIInterfaceOrientationLandscapeLeft</string>
-    <string>UIInterfaceOrientationLandscapeRight</string>
-  </array>
-</dict>
-</plist>
-""")
-
-demo_payload = out / "demo_stage/Payload/ZizhanDemoApp.app"
-demo_payload.mkdir(parents=True, exist_ok=True)
-make_icon(demo_payload / "AppIcon60x60@3x.png", (22, 163, 106), (13, 92, 68), (255, 255, 255))
-(demo_payload / "Info.plist").write_text("""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDisplayName</key><string>扫码相机验证</string>
-  <key>CFBundleExecutable</key><string>ZizhanDemoApp</string>
-  <key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array>
-  <key>CFBundleIdentifier</key><string>com.zizhan.demoapp</string>
-  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>ZizhanDemoApp</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>LSRequiresIPhoneOS</key><true/>
-  <key>NSCameraUsageDescription</key><string>验证 MIX Fold 2 系统级 AVCaptureSession 预览、拍照与扫码</string>
+  <key>NSCameraUsageDescription</key><string>验证 MIX Fold 2 系统级三摄预览、对焦与扫码</string>
   <key>NSLocationWhenInUseUsageDescription</key><string>验证 MIX Fold 2 CoreLocation GNSS 定位</string>
   <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
   <key>UISupportedInterfaceOrientations</key>
@@ -117,16 +79,31 @@ make_icon(demo_payload / "AppIcon60x60@3x.png", (22, 163, 106), (13, 92, 68), (2
 </dict>
 </plist>
 """)
+
+inst_app = out / "ZizhanInstaller.app"
+inst_app.mkdir(parents=True, exist_ok=True)
+make_icon(inst_app / "AppIcon60x60@3x.png", (30, 118, 232), (18, 64, 156), (255, 255, 255))
+write_plist(inst_app, "IPA 安装器", "ZizhanInstaller", "com.zizhan.installer")
+
+demo_app = out / "demo_stage/Payload/ZizhanDemoApp.app"
+demo_app.mkdir(parents=True, exist_ok=True)
+make_icon(demo_app / "AppIcon60x60@3x.png", (22, 163, 106), (13, 92, 68), (255, 255, 255))
+write_plist(demo_app, "扫码相机验证", "ZizhanDemoApp", "com.zizhan.demoapp")
+
+suite_app = out / "suite_stage/Payload/ZizhanCompatSuite.app"
+suite_app.mkdir(parents=True, exist_ok=True)
+make_icon(suite_app / "AppIcon60x60@3x.png", (139, 92, 246), (76, 29, 149), (255, 255, 255))
+write_plist(suite_app, "兼容套件验证", "ZizhanCompatSuite", "com.zizhan.compatsuite")
 PY
 
-# 1. Build & 4K-sign ZizhanInstaller.app (/Applications/ZizhanInstaller.app)
+# 1. Build & 4K-sign ZizhanInstaller.app v2 (/Applications/ZizhanInstaller.app)
 "$CC" -arch arm64 -isysroot "$SDK" -miphoneos-version-min=18.0 -fobjc-arc -O2 \
   -framework Foundation -framework UIKit -framework CoreGraphics \
   "$SCRIPT_DIR/ZizhanInstaller.m" -o "$OUT_DIR/ZizhanInstaller.app/ZizhanInstaller"
 cp "$SCRIPT_DIR/installer-entitlements.plist" "$OUT_DIR/installer-ent.plist"
 "$CODESIGN" -f -s - --pagesize 4096 --entitlements "$OUT_DIR/installer-ent.plist" "$OUT_DIR/ZizhanInstaller.app"
 
-# 2. Build & 16K-sign bare third-party ZizhanDemoApp-16k.ipa (NO provisioning profile, 16 KiB CS_CodeDirectory!)
+# 2. Build & 16K-sign bare third-party ZizhanDemoApp-16k.ipa
 "$CC" -arch arm64 -isysroot "$SDK" -miphoneos-version-min=18.0 -fobjc-arc -O2 \
   -framework Foundation -framework UIKit -framework AVFoundation -framework CoreLocation -framework QuartzCore \
   "$SCRIPT_DIR/ZizhanDemoApp.m" -o "$OUT_DIR/demo_stage/Payload/ZizhanDemoApp.app/ZizhanDemoApp"
@@ -134,7 +111,16 @@ cp "$SCRIPT_DIR/installer-entitlements.plist" "$OUT_DIR/installer-ent.plist"
 rm -f "$OUT_DIR/ZizhanDemoApp-16k.ipa"
 (cd "$OUT_DIR/demo_stage" && /usr/bin/zip -qry "$OUT_DIR/ZizhanDemoApp-16k.ipa" Payload)
 
-# 3. Synthesize FairPlay-encrypted negative test IPA (LC_ENCRYPTION_INFO_64 cryptid=1)
+# 3. Build & 16K-sign bare third-party ZizhanCompatSuite-16k.ipa (8-subsystem test: Metal/Keychain/AppGroup/SQLite/WebKit/Periph/Loc/3-Cam)
+"$CC" -arch arm64 -isysroot "$SDK" -miphoneos-version-min=18.0 -fobjc-arc -O2 \
+  -framework Foundation -framework UIKit -framework CoreGraphics -framework Metal -framework Security -framework WebKit \
+  -framework AVFoundation -framework AudioToolbox -framework CoreLocation -framework QuartzCore -lsqlite3 \
+  "$SCRIPT_DIR/ZizhanCompatSuite.m" -o "$OUT_DIR/suite_stage/Payload/ZizhanCompatSuite.app/ZizhanCompatSuite"
+"$CODESIGN" -f -s - --pagesize 16384 "$OUT_DIR/suite_stage/Payload/ZizhanCompatSuite.app"
+rm -f "$OUT_DIR/ZizhanCompatSuite-16k.ipa"
+(cd "$OUT_DIR/suite_stage" && /usr/bin/zip -qry "$OUT_DIR/ZizhanCompatSuite-16k.ipa" Payload)
+
+# 4. Synthesize FairPlay-encrypted negative test IPA (LC_ENCRYPTION_INFO_64 cryptid=1)
 python3 - "$OUT_DIR" << 'PY'
 import pathlib, shutil, struct, subprocess, sys
 
@@ -154,7 +140,6 @@ enc_app.mkdir(parents=True)
 </dict>
 </plist>
 """)
-# Minimal arm64 MH_EXECUTE with LC_ENCRYPTION_INFO_64 (cmd=0x2C, cmdsize=24, cryptoff=4096, cryptsize=4096, cryptid=1)
 lc_enc = struct.pack("<IIIIII", 0x2C, 24, 4096, 4096, 1, 0)
 hdr = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 1, len(lc_enc), 0, 0)
 buf = bytearray(8192)
@@ -177,10 +162,11 @@ chmod -R 755 "$M/Applications/ZizhanInstaller.app"
 chmod 644 "$M/Applications/ZizhanInstaller.app/Info.plist"
 mkdir -p "$M/pong/ipas"
 cp /tmp/zizhan-apps/ZizhanDemoApp-16k.ipa "$M/pong/ipas/ZizhanDemoApp-16k.ipa"
+cp /tmp/zizhan-apps/ZizhanCompatSuite-16k.ipa "$M/pong/ipas/ZizhanCompatSuite-16k.ipa"
 cp /tmp/zizhan-apps/FairPlayEncryptedSample.ipa "$M/pong/ipas/FairPlayEncryptedSample.ipa"
 chown -R 0:0 "$M/pong/ipas"
 chmod 755 "$M/pong/ipas"
 chmod 644 "$M/pong/ipas"/*.ipa
 SNIP
 chmod +x "$OUT_DIR/install-snippet.sh"
-echo "BUILT_ZIZHAN_APPS_OK: $OUT_DIR"
+echo "BUILT_ZIZHAN_APPS_V2_OK: $OUT_DIR"

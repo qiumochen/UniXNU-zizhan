@@ -26,9 +26,9 @@ namespace zizhan_cam_capture {
 
 constexpr uint64_t kCamCarveoutPa   = 0x9f500000ull;
 constexpr uint64_t kCamCarveoutSize = 0x00800000ull; /* 8 MiB no-map camera_region */
-constexpr uint32_t kTpgSlotIova     = 0x9f500000u;
-constexpr uint32_t kOvSlot0Iova     = 0x9f700000u;
-constexpr uint32_t kOvSlot1Iova     = 0x9f900000u;
+constexpr uint32_t kTpgSlotIova     = 0x9f500000u;   /* 256 KiB TPG calibration window */
+constexpr uint32_t kOvSlot0Iova     = 0x9f540000u;   /* 3.875 MiB slot 0 (fits 2048x1536 RAW10 = 3.75 MiB) */
+constexpr uint32_t kOvSlot1Iova     = 0x9f920000u;   /* 3.875 MiB slot 1 (ends cleanly at 0x9fd00000) */
 constexpr uint16_t kCamIfeSidBase   = 0x0800u;
 constexpr uint16_t kCamIfeSidMask   = 0x0460u; /* matches 0x800,820,840,860,c00,c20,c40,c60 */
 constexpr uint16_t kCamAsid         = 0x0800u;
@@ -380,7 +380,7 @@ static void run(uint32_t mode) {
   const uint32_t s_pad0 = pad0.r(0), s_pad1 = pad1.r(0), s_i2c0 = i2c0.r(0), s_i2c1 = i2c1.r(0);
 
   /* Clear frame carveout buffers without DC ZVA */
-  zeroCarveout(carveout.va, 0x600000u);
+  zeroCarveout(carveout.va, kCamCarveoutSize);
 
   /* 1. Enable GCC camera AHB / HF_AXI / SF_AXI / XO clocks */
   gccCam.w(0x004, s_gcc_ahb | 1u);

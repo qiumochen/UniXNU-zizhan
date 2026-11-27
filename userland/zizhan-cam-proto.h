@@ -14,30 +14,37 @@ extern "C" {
 #endif
 
 enum {
-    ZIZHAN_CAM_MAGIC       = 0x5a43414du, /* 'ZCAM' */
-    ZIZHAN_CAM_VERSION     = 1u,
-    ZIZHAN_CAM_CMD_QUERY   = -1,
-    ZIZHAN_CAM_CMD_OFF     = 0,
-    ZIZHAN_CAM_CMD_BACK    = 1, /* OV13B10 rear ultra-wide */
-    ZIZHAN_CAM_CMD_FRONT   = 2, /* IMX596 front selfie */
-    ZIZHAN_CAM_CMD_BACK_QR = 3, /* OV13B10 live optical + corner ISO QR badge (unattended test) */
-    ZIZHAN_CAM_OUT_W       = 640u,
-    ZIZHAN_CAM_OUT_H       = 480u,
-    ZIZHAN_CAM_OUT_STRIDE  = 640u * 4u,
-    ZIZHAN_CAM_OUT_BYTES   = 640u * 480u * 4u, /* 1,228,800 bytes BGRA8888 */
-    ZIZHAN_CAM_TOTAL_BYTES = 64u + (640u * 480u * 4u)
+    ZIZHAN_CAM_MAGIC              = 0x5a43414du, /* 'ZCAM' */
+    ZIZHAN_CAM_VERSION            = 1u,
+    ZIZHAN_CAM_CMD_QUERY          = -1,
+    ZIZHAN_CAM_CMD_OFF            = 0,
+    ZIZHAN_CAM_CMD_BACK           = 1, /* 1x Main IMX766 50MP (with resilient OV13B10 fallback) */
+    ZIZHAN_CAM_CMD_FRONT          = 2, /* Front IMX596 selfie */
+    ZIZHAN_CAM_CMD_BACK_QR        = 3, /* 1x Main / Ultra live optical + corner ISO QR badge */
+    ZIZHAN_CAM_CMD_ULTRA          = 4, /* 0.6x Rear Ultra-Wide OV13B10 */
+    ZIZHAN_CAM_CMD_AF             = 5, /* Trigger closed-loop DW9800V VCM autofocus sweep */
+    ZIZHAN_CAM_CMD_HAPTIC_BASE    = 0x100, /* 0x101..0x107 -> PM8350B LRA haptic patterns 1..7 */
+    ZIZHAN_CAM_CMD_AUDIO_SPEAKER  = 0x200, /* Dual CS35L41 stereo speaker mode */
+    ZIZHAN_CAM_CMD_AUDIO_RECEIVER = 0x201, /* Top CS35L41 0x40 earpiece receiver mode (-12 dB) */
+    ZIZHAN_CAM_OUT_W              = 960u,
+    ZIZHAN_CAM_OUT_H              = 720u,
+    ZIZHAN_CAM_OUT_STRIDE         = 960u * 4u,
+    ZIZHAN_CAM_OUT_BYTES          = 960u * 720u * 4u, /* 2,764,800 bytes BGRA8888 */
+    ZIZHAN_CAM_TOTAL_BYTES        = 64u + (960u * 720u * 4u)
 };
 
 enum {
-    ZIZHAN_CAM_FLAG_OPTICAL  = (1u << 0),
-    ZIZHAN_CAM_FLAG_QR_STAMP = (1u << 1),
-    ZIZHAN_CAM_FLAG_FALLBACK = (1u << 2)
+    ZIZHAN_CAM_FLAG_OPTICAL     = (1u << 0),
+    ZIZHAN_CAM_FLAG_QR_STAMP    = (1u << 1),
+    ZIZHAN_CAM_FLAG_FALLBACK    = (1u << 2),
+    ZIZHAN_CAM_FLAG_MAIN_IMX766 = (1u << 3),
+    ZIZHAN_CAM_FLAG_AF_LOCKED   = (1u << 4)
 };
 
 typedef struct {
     uint32_t magic;
     uint16_t version;
-    uint16_t sensor_pos;     /* 1 = back, 2 = front */
+    uint16_t sensor_pos;     /* 1 = back 1x, 2 = front, 4 = back 0.6x ultra */
     uint16_t width;
     uint16_t height;
     uint32_t stride;         /* width * 4 (BGRA8888, little-endian B,G,R,A) */
@@ -49,7 +56,7 @@ typedef struct {
     uint16_t mean_raw10;     /* 0..1023 pre-gamma Bayer mean */
     uint16_t mean_luma8;     /* 0..255 post-ISP BGRA luma mean */
     uint16_t flags;
-    uint16_t reserved0;
+    uint16_t af_dac;         /* current DW9800V 10-bit VCM DAC code (0 if fixed-focus) */
     uint64_t timestamp_ns;
     uint8_t  reserved[16];
 } ZizhanCamFrameHeader;
@@ -270,6 +277,37 @@ static inline uint16_t zizhan_cam_isp_raw10_to_bgra(
         }
     }
     return (uint16_t)(luma_sum / ((uint32_t)dst_w * (uint32_t)dst_h));
+}
+
+/* Subsampled center-50% ROI Tenengrad/Brenner horizontal + vertical gradient energy on MIPI RAW10
+ * green pixels (for closed-loop DW9800V VCM autofocus). Returns mean squared gradient (0..2093058). */
+static inline uint32_t zizhan_cam_raw10_sharpness(
+    const uint8_t *raw10, uint16_t src_w, uint16_t src_h, uint16_t src_stride)
+{
+    if (!raw10 || src_w < 32u || src_h < 32u || src_stride < (uint32_t)(src_w * 10u / 8u)) return 0u;
+    const uint16_t x0 = (src_w / 4u) & ~3u;
+    const uint16_t x1 = ((src_w * 3u) / 4u) & ~3u;
+    const uint16_t y0 = (src_h / 4u) & ~1u;
+    const uint16_t y1 = ((src_h * 3u) / 4u) & ~1u;
+    uint64_t energy = 0;
+    uint32_t samples = 0;
+    for (uint16_t y = y0; y + 4u < y1; y += 4u) {
+        const uint8_t *r0 = raw10 + (size_t)y * src_stride;
+        const uint8_t *r2 = raw10 + (size_t)(y + 2u) * src_stride;
+        for (uint16_t x = x0; x + 8u < x1; x += 8u) {
+            const uint8_t *b00 = r0 + (size_t)(x / 4u) * 5u;
+            const uint8_t *b04 = r0 + (size_t)((x + 4u) / 4u) * 5u;
+            const uint8_t *b20 = r2 + (size_t)(x / 4u) * 5u;
+            const int32_t g00 = (int32_t)(((uint32_t)b00[1] << 2) | ((b00[4] >> 2) & 3u));
+            const int32_t g04 = (int32_t)(((uint32_t)b04[1] << 2) | ((b04[4] >> 2) & 3u));
+            const int32_t g20 = (int32_t)(((uint32_t)b20[1] << 2) | ((b20[4] >> 2) & 3u));
+            const int32_t dx = (g04 >= g00) ? (g04 - g00) : (g00 - g04);
+            const int32_t dy = (g20 >= g00) ? (g20 - g00) : (g00 - g20);
+            energy += (uint64_t)(dx * dx + dy * dy);
+            ++samples;
+        }
+    }
+    return samples ? (uint32_t)(energy / samples) : 0u;
 }
 
 /* Stamp the CIDetector-verified 31x31 ISO QR matrix ("https://unixnu.org/zizhan-qr-ok") into the

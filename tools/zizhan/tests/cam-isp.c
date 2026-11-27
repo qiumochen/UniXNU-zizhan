@@ -68,7 +68,16 @@ int main(void) {
     zizhan_csiphy_dphy_disable(&phy_ops);
     assert(csiphy.regs[0x1014u / 4] == 0u && csiphy.regs[0x1018u / 4] == 0u);
 
-    /* 3. TPG1 + CSID-lite0 + VFE-lite0 (both direct 680 and shifted gen3 bus modes) */
+    /* 2b. CSIPHY0 3-trio C-PHY v2.1.3 L18 delta table programming (IMX766 1400 Msps profile 1) */
+    assert(zizhan_csiphy_cphy_enable(&phy_ops, 0x18u, 1u) == 0x00020103u);
+    assert(csiphy.regs[0x1000u / 4] == 0x0eu); /* csiphy_reset_exit_reg_2_1_3 3PH CDR enable */
+    assert(csiphy.regs[0x1014u / 4] == 0x2au); /* 3 odd C-PHY trios: (1<<1)|(1<<3)|(1<<5) */
+    assert(csiphy.regs[0x101cu / 4] == 0x7au);
+    assert(csiphy.regs[0x102cu / 4] == 0xffu);
+    assert(csiphy.regs[0x020cu / 4] == 0x18u && csiphy.regs[0x0a0cu / 4] == 0x18u);
+    assert(csiphy.regs[0x0270u / 4] == 0x01u && csiphy.regs[0x0278u / 4] == 0x06u);
+
+    /* 3. TPG1 + CSID-lite0 + VFE-lite0 (both direct 680 and shifted gen3 bus modes + C-PHY bit 24) */
     tpg.regs[0] = 0x20000000u;
     ZizhanCamCcOps tpg_ops = {&tpg, fake_rd, fake_wr, fake_pause, 100};
     assert(zizhan_tpg_start(&tpg_ops, 1364u, 768u, 4u) == 0x20000000u);
@@ -81,6 +90,10 @@ int main(void) {
     zizhan_csid_lite_start_rdi0(&csid_ops, 1u, 4u, 0x3210u, 0);
     assert((csid.regs[0x500u / 4] & 0x80000000u) != 0u);
     assert(((csid.regs[0x200u / 4] >> 20) & 7u) == 2u); /* PHY_NUM_SEL = csiphy1 + 1 = 2 */
+    assert((csid.regs[0x200u / 4] & (1u << 24)) == 0u);
+    zizhan_csid_lite_start_rdi0_ex(&csid_ops, 0u, 3u, 0x0210u, 0, 1);
+    assert(((csid.regs[0x200u / 4] >> 20) & 7u) == 1u); /* PHY_NUM_SEL = csiphy0 + 1 = 1 */
+    assert((csid.regs[0x200u / 4] & (1u << 24)) != 0u); /* CSI2_RX_CFG0_PHY_TYPE_SEL = C-PHY */
     zizhan_csid_lite_stop_rdi0(&csid_ops);
     assert((csid.regs[0x500u / 4] & 0x80000000u) == 0u);
 

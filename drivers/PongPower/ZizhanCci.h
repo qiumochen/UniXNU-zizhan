@@ -99,6 +99,16 @@ static inline int zizhan_cci_read16(const ZizhanCciOps *o, uint8_t addr7, uint16
   return zizhan_cci_read16_m(o, 0, addr7, reg, buf, len);
 }
 
+/* Write a single 8-bit value to an 8-bit register of a 7-bit slave on master m (e.g. DW9800V VCM 0x0c). */
+static inline int zizhan_cci_write8_u8_m(const ZizhanCciOps *o, unsigned m, uint8_t addr7, uint8_t reg, uint8_t val) {
+  if (!o || !o->read || !o->write || !o->pause_us || !o->polls || addr7 > 0x7f || m > 1) return ZizhanCciArgument;
+  const uint32_t q0 = 0x310u + 0x200u * m;
+  o->write(o->context, q0, 1u | ((uint32_t)addr7 << 4));
+  o->write(o->context, q0, 9u | (2u << 4) | ((uint32_t)reg << 8) | ((uint32_t)val << 16));
+  o->write(o->context, q0, 8u | (1u << 8));
+  return zizhan_cci_run_m(o, m, 0, m ? (1u << 16) : (1u << 4));
+}
+
 /* Write a single 8-bit value to a 16-bit register of a 7-bit slave on master m (i2c-qcom-cci.c cci_i2c_write). */
 static inline int zizhan_cci_write16_u8_m(const ZizhanCciOps *o, unsigned m, uint8_t addr7, uint16_t reg, uint8_t val) {
   if (!o || !o->read || !o->write || !o->pause_us || !o->polls || addr7 > 0x7f || m > 1) return ZizhanCciArgument;

@@ -80,29 +80,46 @@ static void test_awb_and_isp_bgra(void) {
     const int diff_rg = (int)bgra[2] - (int)bgra[1];
     assert(diff_rg >= -3 && diff_rg <= 3 && bgra[3] == 255u);
 
-    /* Also test QR stamp bounds + pure-C ISO-18004 QR scanner on noisy optical 640x480 BGRA frame */
-    uint8_t *f640 = (uint8_t *)calloc(1, ZIZHAN_CAM_OUT_BYTES);
-    assert(f640 != NULL);
+    /* Also test QR stamp bounds + pure-C ISO-18004 QR scanner on noisy optical 960x720 BGRA frame */
+    uint8_t *f960 = (uint8_t *)calloc(1, ZIZHAN_CAM_OUT_BYTES);
+    assert(f960 != NULL);
     for (size_t i = 0; i < ZIZHAN_CAM_OUT_BYTES; i += 4u) {
-        f640[i + 0u] = (uint8_t)(40u + ((i * 17u) & 63u));
-        f640[i + 1u] = (uint8_t)(60u + ((i * 31u) & 63u));
-        f640[i + 2u] = (uint8_t)(50u + ((i * 13u) & 63u));
-        f640[i + 3u] = 255u;
+        f960[i + 0u] = (uint8_t)(40u + ((i * 17u) & 63u));
+        f960[i + 1u] = (uint8_t)(60u + ((i * 31u) & 63u));
+        f960[i + 2u] = (uint8_t)(50u + ((i * 13u) & 63u));
+        f960[i + 3u] = 255u;
     }
-    zizhan_cam_stamp_test_qr(f640, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H);
-    /* Bottom-right quiet zone pixel (640-16-1, 480-16-1) must be white (255,255,255,255) */
-    const uint8_t *qz = f640 + ((size_t)(480 - 17) * 640 + (640 - 17)) * 4u;
+    zizhan_cam_stamp_test_qr(f960, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H);
+    /* Bottom-right quiet zone pixel (W-17, H-17) must be white (255,255,255,255) */
+    const uint8_t *qz = f960 + ((size_t)(ZIZHAN_CAM_OUT_H - 17u) * ZIZHAN_CAM_OUT_W + (ZIZHAN_CAM_OUT_W - 17u)) * 4u;
     assert(qz[0] == 255u && qz[1] == 255u && qz[2] == 255u && qz[3] == 255u);
 
     char qr_msg[128] = {0};
     uint16_t qr_box[4] = {0};
-    const int qr_ok = zizhan_qr_scan_bgra(f640, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H,
+    const int qr_ok = zizhan_qr_scan_bgra(f960, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H,
                                           ZIZHAN_CAM_OUT_STRIDE, qr_msg, sizeof(qr_msg), qr_box);
     assert(qr_ok == 1);
     assert(strcmp(qr_msg, "https://unixnu.org/zizhan-qr-ok") == 0);
-    assert(qr_box[0] >= 440u && qr_box[1] >= 280u && qr_box[2] >= 120u && qr_box[3] >= 120u);
+    assert(qr_box[0] >= 740u && qr_box[1] >= 520u && qr_box[2] >= 120u && qr_box[3] >= 120u);
 
-    free(f640);
+    /* Test RAW10 Tenengrad AF sharpness metric: sharp high-frequency checkerboard >> flat blurred frame */
+    memset(raw, 0, (size_t)stride * sh);
+    for (uint16_t y = 0; y < sh; y += 2u) {
+        for (uint16_t x = 0; x < sw; x += 2u) {
+            pack_raw10_quad(raw, stride, x, y, 250u, 252u, 248u, 250u);
+        }
+    }
+    const uint32_t blur_sh = zizhan_cam_raw10_sharpness(raw, sw, sh, stride);
+    for (uint16_t y = 0; y < sh; y += 2u) {
+        for (uint16_t x = 0; x < sw; x += 2u) {
+            const uint16_t hi = (((x >> 2) ^ (y >> 1)) & 1u) ? 780u : 120u;
+            pack_raw10_quad(raw, stride, x, y, hi, hi, hi, hi);
+        }
+    }
+    const uint32_t sharp_sh = zizhan_cam_raw10_sharpness(raw, sw, sh, stride);
+    assert(sharp_sh > 100000u && sharp_sh > blur_sh * 100u);
+
+    free(f960);
     free(bgra);
     free(raw);
 }

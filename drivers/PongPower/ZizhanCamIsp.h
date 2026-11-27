@@ -15,14 +15,22 @@ extern "C" {
 #endif
 
 enum {
-    ZIZHAN_CAM_DT_RAW10      = 0x2bu,
-    ZIZHAN_CAM_DEC_PAYLOAD   = 0x0fu,
-    ZIZHAN_CAM_OV13B10_ADDR7 = 0x36u,
-    ZIZHAN_CAM_OV13B10_W     = 1364u,
-    ZIZHAN_CAM_OV13B10_H     = 768u,
+    ZIZHAN_CAM_DT_RAW10       = 0x2bu,
+    ZIZHAN_CAM_DEC_PAYLOAD    = 0x0fu,
+    ZIZHAN_CAM_OV13B10_ADDR7  = 0x36u,
+    ZIZHAN_CAM_OV13B10_W      = 1364u,
+    ZIZHAN_CAM_OV13B10_H      = 768u,
     /* MIPI RAW10 packed row: ceil(1364 * 10 / 8) = 1705 -> 16-byte aligned stride = 1712 */
     ZIZHAN_CAM_OV13B10_STRIDE = 1712u,
-    ZIZHAN_CAM_OV13B10_BYTES  = 1712u * 768u
+    ZIZHAN_CAM_OV13B10_BYTES  = 1712u * 768u,
+    /* Sony IMX766 50MP 1/1.56" Main Camera (4:1 binned 2048x1536 RAW10 on CSIPHY0 3-trio C-PHY) */
+    ZIZHAN_CAM_IMX766_ADDR7   = 0x1au,
+    ZIZHAN_CAM_DW9800V_ADDR7  = 0x0cu,
+    ZIZHAN_CAM_RUMBAS4H_ADDR7 = 0x24u,
+    ZIZHAN_CAM_IMX766_W       = 2048u,
+    ZIZHAN_CAM_IMX766_H       = 1536u,
+    ZIZHAN_CAM_IMX766_STRIDE  = 2560u,
+    ZIZHAN_CAM_IMX766_BYTES   = 2560u * 1536u
 };
 
 /* Configure & lock SM8475 Lucid OLE CAM_CC_PLL0 at 1200 MHz (OUT_EVEN=600 MHz, OUT_ODD=400 MHz). */
@@ -210,6 +218,84 @@ static inline void zizhan_csiphy_dphy_disable(const ZizhanCamCcOps *phy) {
     phy->write(phy->context, 0x1018u, 0u);
 }
 
+/* CSIPHY 3PH v2.1.3 Gen2 3-trio C-PHY (extracted from Xiaomi MIX Fold 2 L18 camera.ko:
+ * csiphy_3ph_v2_1_3_reg + csiphy_common_reg_2_1_3 + data_rate_delta_table_2_1_3_xiaomi_l18).
+ * rate_profile: 0 = ~700 Msps/trio (bw<=4.79G), 1 = ~1400 Msps/trio (bw<=10.26G),
+ *               2 = ~1000 Msps/trio (bw<=6.84G), 3 = ~333 Msps/trio (bw<=2.28G). */
+static inline uint32_t zizhan_csiphy_cphy_enable(const ZizhanCamCcOps *phy, uint8_t settle, uint8_t rate_profile) {
+    if (!phy || !phy->read || !phy->write || !phy->pause_us) return 0;
+    const uint32_t cmn = 0x1000u;
+    phy->write(phy->context, cmn + 0x18u, 0x02u);
+    const uint32_t hw_ver = (phy->read(phy->context, cmn + 0xb0u + 0x30u) & 0xffu) |
+                            ((phy->read(phy->context, cmn + 0xb0u + 0x34u) & 0xffu) << 8) |
+                            ((phy->read(phy->context, cmn + 0xb0u + 0x38u) & 0xffu) << 16) |
+                            ((phy->read(phy->context, cmn + 0xb0u + 0x3cu) & 0xffu) << 24);
+    /* Common C-PHY 3-trio enable (csiphy_common_reg_2_1_3):
+     * odd bits (1<<1)|(1<<3)|(1<<5) = 0x2a, CTRL6=0x01, CTRL7=0x7a, then hold SW_RESET (0x1000=0x01)
+     * across delta-table and 3PH per-trio programming before csiphy_reset_exit_reg_2_1_3 (0x1000=0x0e). */
+    phy->write(phy->context, cmn + 0x14u, 0x2au);
+    phy->write(phy->context, cmn + 0x84u, 0x00u);
+    phy->write(phy->context, cmn + 0x18u, 0x01u);
+    phy->write(phy->context, cmn + 0x1cu, 0x7au);
+    phy->write(phy->context, cmn + 0x14u, 0x2au);
+    phy->write(phy->context, cmn + 0x00u, 0x01u);
+    phy->pause_us(phy->context, 10);
+
+    /* L18 data_rate_delta_table_2_1_3_xiaomi_l18 overrides for 0x270, 0x274, 0x278, 0x214 */
+    uint8_t r270 = 0x00u, r274 = 0x03u, r278 = 0x20u, r214 = 0x00u; /* 0: ~700 Msps (<=4.79G) */
+    if (rate_profile == 1u)      { r270 = 0x01u; r274 = 0x00u; r278 = 0x06u; r214 = 0x00u; } /* ~1500 Msps (<=10.26G) */
+    else if (rate_profile == 2u) { r270 = 0x01u; r274 = 0x00u; r278 = 0x17u; r214 = 0x00u; } /* ~1000 Msps (<=6.84G) */
+    else if (rate_profile == 3u) { r270 = 0x00u; r274 = 0x03u; r278 = 0x58u; r214 = 0x09u; } /* ~333 Msps  (<=2.28G) */
+    else if (rate_profile == 4u) { r270 = 0x01u; r274 = 0x00u; r278 = 0x02u; r214 = 0x00u; } /* ~1667 Msps (<=11.40G) */
+    else if (rate_profile == 5u) { r270 = 0x01u; r274 = 0x00u; r278 = 0x00u; r214 = 0x00u; } /* ~2000 Msps (<=13.68G) */
+
+    for (unsigned trio = 0; trio < 3u; ++trio) {
+        const uint32_t off = trio * 0x400u;
+        phy->write(phy->context, off + 0x0270u, r270);
+        phy->write(phy->context, off + 0x0274u, r274);
+        phy->write(phy->context, off + 0x0278u, r278);
+        phy->write(phy->context, off + 0x0288u, 0x20u);
+        phy->write(phy->context, off + 0x028cu, 0x30u);
+        phy->write(phy->context, off + 0x026cu, 0x3du);
+        phy->write(phy->context, off + 0x0290u, 0x02u);
+        phy->write(phy->context, off + 0x0214u, r214);
+    }
+    phy->write(phy->context, 0x108cu, 0x00u);
+    phy->pause_us(phy->context, 10);
+
+    /* Base per-trio sequence (csiphy_3ph_v2_1_3_reg: trio 0=0x0200, trio 1=0x0600, trio 2=0x0a00) */
+    static const ZizhanCsiphyReg kTrioTemplate[] = {
+        {0x0268, 0xf1, 100, 0}, {0x0294, 0x09,   0, 0}, {0x02f4, 0x00,   0, 0},
+        {0x02f8, 0x00,   0, 0}, {0x02fc, 0x00,   0, 0}, {0x02f0, 0x00,   2, 0},
+        {0x02f0, 0xef, 100, 0}, {0x0204, 0x00,   0, 0}, {0x020c, 0x10,   0, 1},
+        {0x0208, 0x00,   0, 0}, {0x0210, 0x00,   0, 0}, {0x02e4, 0x00,   0, 0},
+        {0x02e8, 0x7f,   0, 0}, {0x02ec, 0x7f,   0, 0}, {0x0218, 0x3e,   0, 0},
+        {0x021c, 0x41,   0, 0}, {0x0220, 0x41,   0, 0}, {0x0224, 0x7f,   0, 0},
+        {0x0228, 0x00,   0, 0}, {0x022c, 0x00,   0, 0}, {0x0264, 0x01,   0, 0},
+        {0x0284, 0x00,   0, 0}, {0x0244, 0xb2,   0, 0}, {0x0310, 0x35,   0, 0},
+        {0x02bc, 0xd0,   0, 0}, {0x0254, 0x00,   0, 0}, {0x0240, 0x00,   0, 0},
+        {0x0260, 0xa8,   0, 0}
+    };
+    for (unsigned trio = 0; trio < 3u; ++trio) {
+        const uint32_t off = trio * 0x400u;
+        for (unsigned i = 0; i < sizeof(kTrioTemplate) / sizeof(kTrioTemplate[0]); ++i) {
+            phy->write(phy->context, off + kTrioTemplate[i].off,
+                       kTrioTemplate[i].is_settle ? settle : kTrioTemplate[i].val);
+            if (kTrioTemplate[i].delay_us) phy->pause_us(phy->context, kTrioTemplate[i].delay_us);
+        }
+    }
+    phy->pause_us(phy->context, 105);
+
+    /* csiphy_reset_exit_reg_2_1_3 (0x8e080): release SW_RESET, enable 3PH CDR (0x0e) and power up 0x102c=0xff.
+     * Note: on v2.1.3 IRQ regs start at 0x1058 (not v1.x 0x102c), so never zero 0x102c..0x1054! */
+    phy->write(phy->context, cmn + 0x00u, 0x00u);
+    phy->write(phy->context, cmn + 0x00u, 0x0eu);
+    phy->pause_us(phy->context, 3100);
+    phy->write(phy->context, cmn + 0x2cu, 0xffu);
+    for (unsigned i = 0; i < 11; ++i) phy->write(phy->context, cmn + 0x58u + 4u * i, 0u);
+    return hw_ver;
+}
+
 /* TPG1 (0xacf7000, phy_id=1) RAW10 color-bar / incrementing generator (camss-tpg-gen1.c). */
 static inline uint32_t zizhan_tpg_start(const ZizhanCamCcOps *tpg, uint16_t width, uint16_t height, uint8_t lanes) {
     if (!tpg || !tpg->read || !tpg->write) return 0;
@@ -264,10 +350,10 @@ static inline int zizhan_csid_lite_reset(const ZizhanCamCcOps *csid) {
     return -2;
 }
 
-static inline void zizhan_csid_lite_start_rdi0(const ZizhanCamCcOps *csid, uint8_t csiphy_id,
-                                               uint8_t lanes, uint16_t lane_assign, int use_tpg) {
+static inline void zizhan_csid_lite_start_rdi0_ex(const ZizhanCamCcOps *csid, uint8_t csiphy_id,
+                                                  uint8_t lanes, uint16_t lane_assign, int use_tpg, int is_cphy) {
     if (!csid || !csid->read || !csid->write) return;
-    const uint8_t ln = (lanes >= 1u && lanes <= 4u) ? lanes : 4u;
+    const uint8_t ln = (lanes >= 1u && lanes <= 4u) ? lanes : (is_cphy ? 3u : 4u);
     csid->write(csid->context, 0x544u, 0u);         /* FRM_DROP_PERIOD(0) */
     const uint32_t rdi_cfg0 = (1u << 6) | (1u << 8) |
                               (ZIZHAN_CAM_DEC_PAYLOAD << 12) |
@@ -285,12 +371,18 @@ static inline void zizhan_csid_lite_start_rdi0(const ZizhanCamCcOps *csid, uint8
         rx0 |= ((uint32_t)(csiphy_id + 1u) << 28) | (1u << 27);
     } else {
         rx0 |= ((uint32_t)(csiphy_id + 1u) << 20);
+        if (is_cphy) rx0 |= (1u << 24);             /* CSI2_RX_CFG0_PHY_TYPE_SEL = 1 (C-PHY) */
     }
     csid->write(csid->context, 0x200u, rx0);        /* CSI2_RX_CFG0 */
     csid->write(csid->context, 0x204u, 1u);         /* ECC correction enable */
     /* RUP + AUP for RDI0, then resume RDI0 at frame boundary */
     csid->write(csid->context, 0x018u, (1u << 4) | (1u << 20));
     csid->write(csid->context, 0x504u, 1u);
+}
+
+static inline void zizhan_csid_lite_start_rdi0(const ZizhanCamCcOps *csid, uint8_t csiphy_id,
+                                               uint8_t lanes, uint16_t lane_assign, int use_tpg) {
+    zizhan_csid_lite_start_rdi0_ex(csid, csiphy_id, lanes, lane_assign, use_tpg, 0);
 }
 
 static inline void zizhan_csid_lite_stop_rdi0(const ZizhanCamCcOps *csid) {

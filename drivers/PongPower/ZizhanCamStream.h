@@ -1,9 +1,12 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
-/* Track 3A (CAM-02): On-demand continuous MIPI CSI-2 camera streaming service for Xiaomi MIX Fold 2.
- * Supports:
- *  - Rear Ultra-Wide OV13B10 (CSIPHY1 0xace6000, CCI0 m1 0x36, 1364x768 RAW10 -> 640x480 BGRA8888)
- *  - Front Selfie IMX596 (CSIPHY3 0xacea000, CCI0 m1 0x10/0x1a, 1920x1080 RAW10 -> 640x480 BGRA8888)
+/* Tier 2.3 & 2.4 (CAM-03 / PERIPH-01): On-demand continuous MIPI CSI-2 camera streaming &
+ * peripheral control service for Xiaomi MIX Fold 2:
+ *  - 1x Main 50MP IMX766 (CSIPHY0 0xace4000 3-trio C-PHY, CCI0 m0 0x1a, 2048x1536 RAW10 -> 960x720 BGRA)
+ *    + RumbaS4H OIS center-lock (0x24) + DW9800V VCM closed-loop Tenengrad contrast autofocus (0x0c)
+ *  - 0.6x Ultra-Wide OV13B10 (CSIPHY1 0xace6000 4-lane D-PHY, CCI0 m1 0x36, 1364x768 RAW10 -> 960x720 BGRA)
+ *  - Front Selfie IMX596 (CSIPHY3 0xacea000 4-lane D-PHY, CCI0 m1 0x10/0x1a, 1920x1080 RAW10 -> 960x720 BGRA)
  *  - Closed-loop real-time Auto-Exposure (AE) + Gray-World Auto-White-Balance (AWB) + gamma 2.0 ISP
+ *  - Peripheral commands: 0x101..0x107 -> PM8350B X-axis LRA haptics; 0x200/0x201 -> Speaker / Top Earpiece
  *  - Crash-proof 3.5-second userland heartbeat lease: 0 mW full reverse teardown when idle/closed. */
 #pragma once
 #include <IOKit/IOLib.h>
@@ -12,6 +15,9 @@
 #include <sys/errno.h>
 #include "ZizhanCamCapture.h"
 #include "ZizhanImx596Regs.h"
+#include "ZizhanImx766Regs.h"
+#include "ZizhanHaptics.h"
+#include "ZizhanCs35l41.h"
 #include "../../userland/zizhan-cam-proto.h"
 
 extern "C" {
@@ -19,6 +25,7 @@ typedef int (*zizhan_cam_ctrl_fn)(int);
 typedef size_t (*zizhan_cam_frame_fn)(void *, size_t, size_t);
 void zizhan_cam_register(zizhan_cam_ctrl_fn, zizhan_cam_frame_fn);
 int zizhan_cam_sleep_busy(void);
+uint32_t zizhan_outer_active_view(void) __attribute__((weak));
 }
 
 namespace zizhan_cam_stream {
@@ -34,12 +41,15 @@ using zizhan_cam_capture::kOvSlot1Iova;
 
 static IOLock *gLock = nullptr;
 static bool gThreadRunning = false;
-static volatile int gDesiredMode = 0;   /* 0=off, 1=back, 2=front, 3=back+qr */
-static volatile int gActiveSensor = 0;  /* 0=off, 1=back_ov13b10, 2=front_imx596 */
+static volatile int gDesiredMode = 0;   /* 0=off, 1=back_1x, 2=front, 3=back_qr, 4=ultra_0.6x */
+static volatile int gActiveSensor = 0;  /* 0=off, 1=imx766, 2=imx596, 4=ov13b10 */
+static volatile int gAfRequested = 0;
 static volatile uint64_t gLeaseUntilTicks = 0;
 static uint8_t *gPublishedBuf[2] = {nullptr, nullptr};
 static volatile uint32_t gPublishedIdx = 0;
 static volatile uint32_t gPublishedSeq = 0;
+static uint8_t sCachedCphyProf = 0xffu;
+static uint8_t sCachedCphySettle = 0x18u;
 
 static uint64_t readCntvct() {
   uint64_t v = 0;
@@ -50,6 +60,20 @@ static uint64_t readCntfrq() {
   uint64_t f = 0;
   __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
   return f ? f : 19200000ull;
+}
+
+/* Enable/disable CSIPHY0 clocks in CAM_CC (csi0phytimer RCG 0x150e0 / CBCR 0x150f8, csiphy0 CBCR 0x150fc). */
+static int camccCsiphy0(const ZizhanCamCcOps *cc, bool on) {
+  if (on) {
+    if (zizhan_camcc_rcg_cfg(cc, 0x150e0u, 3u, 1u)) return -1;
+    if (zizhan_camcc_branch(cc, 0x150f8u, 1)) return -2;
+    if (zizhan_camcc_branch(cc, 0x150fcu, 1)) return -3;
+    return 0;
+  }
+  (void)zizhan_camcc_branch(cc, 0x150fcu, 0);
+  (void)zizhan_camcc_branch(cc, 0x150f8u, 0);
+  (void)zizhan_camcc_rcg_cfg(cc, 0x150e0u, 0u, 1u);
+  return 0;
 }
 
 /* Enable/disable CSIPHY3 clocks in CAM_CC (csi3phytimer RCG 0x1514c / CBCR 0x15164, csiphy3 CBCR 0x15168). */
@@ -67,8 +91,9 @@ static int camccCsiphy3(const ZizhanCamCcOps *cc, bool on) {
 }
 
 struct StreamSession {
-  int reqPos = 1;       /* 1 = back, 2 = front */
-  int hwPos = 1;        /* actual sensor opened: 1 = OV13B10, 2 = IMX596 */
+  int reqPos = 1;       /* 1 = back 1x, 2 = front, 4 = back 0.6x ultra */
+  int hwPos = 1;        /* actual sensor opened: 1 = IMX766, 2 = IMX596, 4 = OV13B10 */
+  unsigned cciMaster = 1u;
   uint8_t cciAddr = 0x36u;
   uint16_t rawW = ZIZHAN_CAM_OV13B10_W;
   uint16_t rawH = ZIZHAN_CAM_OV13B10_H;
@@ -76,33 +101,145 @@ struct StreamSession {
   int bayerOrder = ZIZHAN_BAYER_GRBG;
   int addrShifted = 0;
   uint8_t csiphyId = 1u;
+  bool isCphy = false;
+  uint8_t cphyLanes = 4u;
+  uint16_t csiLaneAssign = 0x3210u;
 
   MmioWin gccCam, vote, wrap, se, camcc, cci0, csiphy, tpg1, csid, vfe, carveout;
-  MmioWin pm_en, vana, vdig, mclk, rst, pad0, pad1, i2c0, i2c1;
+  MmioWin pm_en, vana, extra, vdig, mclk, rst, pad0, pad1, i2c0, i2c1;
   uint32_t s_gcc_ahb = 0, s_gcc_hf = 0, s_gcc_sf = 0, s_gcc_xo = 0;
-  uint32_t s_pm = 0, s_vana = 0, s_vdig = 0, s_mclk = 0, s_rst = 0, s_pad0 = 0, s_pad1 = 0, s_i2c0 = 0, s_i2c1 = 0;
+  uint32_t s_pm = 0, s_vana = 0, s_extra = 0, s_vdig = 0, s_mclk = 0, s_rst = 0;
+  uint32_t s_pad0 = 0, s_pad1 = 0, s_i2c0 = 0, s_i2c1 = 0;
   SmmuCamCtx smmuCtx;
   PmI2cCtx pmCtx{};
-  bool havePmI2c = false, ispClksOn = false, phy3ClksOn = false, mclkOn = false, cciOn = false, streaming = false;
+  bool havePmI2c = false, ispClksOn = false, phy0ClksOn = false, phy3ClksOn = false;
+  bool mclkOn = false, cciOn = false, streaming = false;
+  bool afLdoOn = false, oisLdoOn = false, haveExtraPin = false;
+  bool haveVcm = false, afLocked = false;
+  uint16_t afDac = 0u;
   uint32_t mclkRcg = 0x1501cu, mclkCbcr = 0x15034u;
   unsigned vdigLdo = 0;
 
   ZizhanCamAeState ae{};
   uint16_t awbR = 256u, awbB = 256u;
 
-  bool openHardware(int wantPos) {
-    reqPos = wantPos;
-    hwPos = wantPos;
-    const bool tryImx = (wantPos == 2);
-    const uint64_t phyBase = tryImx ? 0xacea000ull : 0xace6000ull; /* CSIPHY3 vs CSIPHY1 */
-    csiphyId = tryImx ? 3u : 1u;
-    mclkRcg  = tryImx ? 0x1508cu : 0x1501cu; /* MCLK5 vs MCLK1 */
-    mclkCbcr = tryImx ? 0x150a4u : 0x15034u;
-    vdigLdo  = tryImx ? 2u : 0u;
-    const unsigned vanaPin = tryImx ? 97u : 6u;
-    const unsigned vdigPin = tryImx ? 92u : 92u;
-    const unsigned mclkPin = tryImx ? 105u : 101u;
-    const unsigned rstPin  = tryImx ? 127u : 24u;
+  bool setVcmDac(uint16_t dac) {
+    if (!haveVcm || !cci0.va) return false;
+    if (dac < 64u) dac = 64u;
+    if (dac > 960u) dac = 960u;
+    ZizhanCciOps cciOps = {&cci0, zizhan_cam_capture::mmio_rd, zizhan_cam_capture::mmio_wr, zizhan_cam_capture::mmio_pause, 2000};
+    if (zizhan_cci_write8_u8_m(&cciOps, 0u, ZIZHAN_CAM_DW9800V_ADDR7, 0x03u, uint8_t((dac >> 8) & 3u)) != 0 ||
+        zizhan_cci_write8_u8_m(&cciOps, 0u, ZIZHAN_CAM_DW9800V_ADDR7, 0x04u, uint8_t(dac & 0xffu)) != 0) {
+      (void)zizhan_cci_reset_init_m(&cciOps, 0u);
+      return false;
+    }
+    afDac = dac;
+    return true;
+  }
+
+  void initOisAndVcm(const ZizhanCciOps *cciOps) {
+    /* 1. RumbaS4H OIS (0x24 on CCI0 m0): center-lock floating lens */
+    unsigned oisDone = 0;
+    const int oisRc = zizhan_cci_write16_table_m(
+        cciOps, 0u, ZIZHAN_CAM_RUMBAS4H_ADDR7,
+        kZizhanRumbaS4hCenterRegs,
+        sizeof(kZizhanRumbaS4hCenterRegs) / sizeof(kZizhanRumbaS4hCenterRegs[0]), &oisDone);
+    if (oisRc != 0) {
+      (void)zizhan_cci_reset_init_m(cciOps, 0u);
+    }
+    /* 2. Dongwoon DW9800V VCM (0x0c on CCI0 m0): SAC4 smooth slew mode */
+    int vrc = zizhan_cci_write8_u8_m(cciOps, 0u, ZIZHAN_CAM_DW9800V_ADDR7, 0x02u, 0x01u);
+    if (vrc == 0) vrc = zizhan_cci_write8_u8_m(cciOps, 0u, ZIZHAN_CAM_DW9800V_ADDR7, 0x02u, 0x00u);
+    IOSleep(2);
+    if (vrc == 0) vrc = zizhan_cci_write8_u8_m(cciOps, 0u, ZIZHAN_CAM_DW9800V_ADDR7, 0x02u, 0x02u);
+    if (vrc == 0) vrc = zizhan_cci_write8_u8_m(cciOps, 0u, ZIZHAN_CAM_DW9800V_ADDR7, 0x06u, 0x80u);
+    if (vrc == 0) vrc = zizhan_cci_write8_u8_m(cciOps, 0u, ZIZHAN_CAM_DW9800V_ADDR7, 0x07u, 0x02u);
+    if (vrc == 0) {
+      haveVcm = true;
+      (void)setVcmDac(420u);
+    } else {
+      (void)zizhan_cci_reset_init_m(cciOps, 0u);
+      haveVcm = false;
+    }
+    IOLog("ZIZHAN_CAM_OIS_VCM: ois_rc=%d(done=%u) vcm_rc=%d have_vcm=%u init_dac=%u\n",
+          oisRc, oisDone, vrc, haveVcm ? 1u : 0u, afDac);
+  }
+
+  bool waitNextRawFrame(uint32_t dstIova, unsigned timeoutMs) {
+    ZizhanCamCcOps vfeOps = {&vfe, zizhan_cam_capture::mmio_rd, zizhan_cam_capture::mmio_wr, zizhan_cam_capture::mmio_pause, 2000};
+    zizhan_vfe_lite_wm0_stop(&vfeOps);
+    zizhan_vfe_lite_wm0_start(&vfeOps, dstIova, rawH, rawStride, addrShifted);
+    csid.w(0x94u, 0xffffffffu);
+    csid.w(0x14u, 1u);
+    csid.w(0x018u, (1u << 4) | (1u << 20));
+    csid.w(0x504u, 1u);
+    for (unsigned ms = 0; ms < timeoutMs; ++ms) {
+      IOSleep(1);
+      if (csid.r(0x8cu) & 0x6u) return true;
+    }
+    return false;
+  }
+
+  void runAutofocusSweep() {
+    if (hwPos != 1 || !haveVcm || !streaming) return;
+    static const uint16_t kCoarse[5] = {180u, 320u, 460u, 600u, 740u};
+    uint16_t bestDac = afDac ? afDac : 460u;
+    uint32_t bestSharp = 0u, minSharp = 0xffffffffu;
+    volatile uint8_t *rawVa = carveout.va + (kOvSlot1Iova - kCamCarveoutPa);
+
+    for (unsigned i = 0; i < 5u; ++i) {
+      if (!setVcmDac(kCoarse[i])) break;
+      IOSleep(12);
+      if (!waitNextRawFrame(kOvSlot1Iova, 90u)) continue;
+      const uint32_t sh = zizhan_cam_raw10_sharpness(
+          const_cast<const uint8_t *>(rawVa), rawW, rawH, rawStride);
+      if (sh >= bestSharp) { bestSharp = sh; bestDac = kCoarse[i]; }
+      if (sh < minSharp) minSharp = sh;
+    }
+    /* Fine +-65 DAC step around coarse peak */
+    const uint16_t fine[2] = {
+      uint16_t(bestDac > 130u ? (bestDac - 65u) : 64u),
+      uint16_t(bestDac + 65u < 940u ? (bestDac + 65u) : 940u)
+    };
+    for (unsigned i = 0; i < 2u; ++i) {
+      if (!setVcmDac(fine[i])) break;
+      IOSleep(10);
+      if (!waitNextRawFrame(kOvSlot1Iova, 90u)) continue;
+      const uint32_t sh = zizhan_cam_raw10_sharpness(
+          const_cast<const uint8_t *>(rawVa), rawW, rawH, rawStride);
+      if (sh > bestSharp) { bestSharp = sh; bestDac = fine[i]; }
+      if (sh < minSharp) minSharp = sh;
+    }
+    (void)setVcmDac(bestDac);
+    IOSleep(10);
+    afLocked = true;
+    IOLog("ZIZHAN_CAM_AF: LOCKED dac=%u sharpness=%u min_sharpness=%u\n",
+          bestDac, bestSharp, minSharp == 0xffffffffu ? 0u : minSharp);
+  }
+
+  bool openHardware(int wantHwPos) {
+    hwPos = wantHwPos;
+    const bool isMain766 = (wantHwPos == 1);
+    const bool isFront596 = (wantHwPos == 2);
+
+    const uint64_t phyBase = isMain766 ? 0xace4000ull : (isFront596 ? 0xacea000ull : 0xace6000ull);
+    csiphyId      = isMain766 ? 0u : (isFront596 ? 3u : 1u);
+    isCphy        = isMain766;
+    cphyLanes     = isMain766 ? 3u : 4u;
+    csiLaneAssign = isMain766 ? 0x0210u : 0x3210u;
+    cciMaster     = isMain766 ? 0u : 1u;
+    mclkRcg       = isMain766 ? 0x15038u : (isFront596 ? 0x1508cu : 0x1501cu);
+    mclkCbcr      = isMain766 ? 0x15050u : (isFront596 ? 0x150a4u : 0x15034u);
+    vdigLdo       = isFront596 ? 2u : 0u;
+
+    const unsigned vanaPin  = isMain766 ? 42u  : (isFront596 ? 97u  : 6u);
+    const unsigned extraPin = isMain766 ? 70u  : 0u;
+    const unsigned vdigPin  = isMain766 ? 68u  : 92u;
+    const unsigned mclkPin  = isMain766 ? 102u : (isFront596 ? 105u : 101u);
+    const unsigned rstPin   = isMain766 ? 126u : (isFront596 ? 127u : 24u);
+    const unsigned pad0Pin  = isMain766 ? 110u : 112u;
+    const unsigned pad1Pin  = isMain766 ? 111u : 113u;
+    haveExtraPin = (extraPin != 0u);
 
     if (!gccCam.open(0x136000ull, 0x1000u) || !vote.open(0x162000ull, 0x1000u) ||
         !wrap.open(0x127000ull, 0x1000u) || !se.open(0x994000ull, 0x4000u) ||
@@ -110,23 +247,25 @@ struct StreamSession {
         !csiphy.open(phyBase, 0x2000u) || !tpg1.open(0xacf7000ull, 0x1000u) ||
         !csid.open(0xacc6000ull, 0x1000u) || !vfe.open(0xacc7000ull, 0x1800u) ||
         !carveout.open(kCamCarveoutPa, kCamCarveoutSize, kIOMapWriteCombineCache)) {
-      IOLog("ZIZHAN_CAM_STREAM: FAIL mmio-map pos=%d\n", wantPos);
+      IOLog("ZIZHAN_CAM_STREAM: FAIL mmio-map hw_pos=%d\n", wantHwPos);
       return false;
     }
     auto pin_open = [](MmioWin &w, unsigned n) { return w.open(0xf100000ull + uint64_t(n) * 0x1000ull, 0x1000u); };
     if (!pin_open(pm_en, 11) || !pin_open(vana, vanaPin) || !pin_open(vdig, vdigPin) ||
+        (haveExtraPin && !pin_open(extra, extraPin)) ||
         !pin_open(mclk, mclkPin) || !pin_open(rst, rstPin) ||
-        !pin_open(pad0, 112) || !pin_open(pad1, 113) ||
+        !pin_open(pad0, pad0Pin) || !pin_open(pad1, pad1Pin) ||
         !pin_open(i2c0, 206) || !pin_open(i2c1, 207)) {
-      IOLog("ZIZHAN_CAM_STREAM: FAIL pin-map pos=%d\n", wantPos);
+      IOLog("ZIZHAN_CAM_STREAM: FAIL pin-map hw_pos=%d\n", wantHwPos);
       return false;
     }
 
     s_gcc_ahb = gccCam.r(0x004); s_gcc_hf = gccCam.r(0x010); s_gcc_sf = gccCam.r(0x018); s_gcc_xo = gccCam.r(0x020);
     s_pm = pm_en.r(0); s_vana = vana.r(0); s_vdig = vdig.r(0); s_mclk = mclk.r(0); s_rst = rst.r(0);
+    s_extra = haveExtraPin ? extra.r(0) : 0u;
     s_pad0 = pad0.r(0); s_pad1 = pad1.r(0); s_i2c0 = i2c0.r(0); s_i2c1 = i2c1.r(0);
 
-    zizhan_cam_capture::zeroCarveout(carveout.va, 0x600000u);
+    zizhan_cam_capture::zeroCarveout(carveout.va, kCamCarveoutSize);
     gccCam.w(0x004, s_gcc_ahb | 1u);
     gccCam.w(0x010, s_gcc_hf | 1u);
     gccCam.w(0x018, s_gcc_sf | 1u);
@@ -153,11 +292,11 @@ struct StreamSession {
       return false;
     }
     ispClksOn = true;
-    if (tryImx) {
-      if (camccCsiphy3(&ccOps, true) != 0) {
-        teardown();
-        return false;
-      }
+    if (isMain766) {
+      if (camccCsiphy0(&ccOps, true) != 0) { teardown(); return false; }
+      phy0ClksOn = true;
+    } else if (isFront596) {
+      if (camccCsiphy3(&ccOps, true) != 0) { teardown(); return false; }
       phy3ClksOn = true;
     }
 
@@ -186,7 +325,7 @@ struct StreamSession {
       }
     }
 
-    /* Power up PM8008J + sensor rails + MCLK + CCI0 m1 */
+    /* Power up PM8008J + sensor rails + MCLK + CCI0 master */
     vote.w(0x8, vote.r(0x8) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | (1u << 15));
     if (!(wrap.r(0x62c) & 1u)) {
       wrap.w(0x61c, (wrap.r(0x61c) & ~0x1037ffu) | 1u);
@@ -222,6 +361,7 @@ struct StreamSession {
       return false;
     }
     zizhan_cam_capture::gpio_drive(vana, 1);
+    if (haveExtraPin) zizhan_cam_capture::gpio_drive(extra, 1);
     IOSleep(1);
     if (vdigLdo) {
       const ZizhanPm8008Rail digRail = {vdigLdo, 1152u};
@@ -233,10 +373,14 @@ struct StreamSession {
       zizhan_cam_capture::gpio_drive(vdig, 1);
       IOSleep(1);
     }
+    if (isMain766) {
+      const ZizhanPm8008Rail afOisRails[2] = {{3u, 3104u}, {4u, 3104u}};
+      if (zizhan_pm8008_rails_on(&pmOps, &afOisRails[0], 1, &railsDone) == 0) afLdoOn = true;
+      if (zizhan_pm8008_rails_on(&pmOps, &afOisRails[1], 1, &railsDone) == 0) oisLdoOn = true;
+      IOSleep(2);
+    }
 
-    unsigned mclkStage = 0;
     if (zizhan_camcc_rcg_xo(&ccOps, mclkRcg) != 0 || zizhan_camcc_branch(&ccOps, mclkCbcr, 1) != 0) {
-      (void)mclkStage;
       teardown();
       return false;
     }
@@ -253,12 +397,94 @@ struct StreamSession {
     cciOn = true;
     pad0.w(0, (s_pad0 & ~0x3ffu) | (1u << 2) | 3u);
     pad1.w(0, (s_pad1 & ~0x3ffu) | (1u << 2) | 3u);
-    if (zizhan_cci_reset_init_m(&cciOps, 1u) != 0) {
+    if (zizhan_cci_reset_init_m(&cciOps, cciMaster) != 0) {
       teardown();
       return false;
     }
 
-    if (tryImx) {
+    if (isMain766) {
+      /* Probe Sony IMX766 50MP chip ID 0x0766 on CCI0 master 0 (0x1a / 0x10) */
+      const uint8_t cands[] = {0x1au, 0x10u};
+      bool found766 = false;
+      for (uint8_t a : cands) {
+        uint8_t id[2] = {0, 0};
+        if (zizhan_cci_read16_m(&cciOps, 0u, a, 0x0016u, id, 2u) == 0 && id[0] == 0x07u && id[1] == 0x66u) {
+          cciAddr = a;
+          found766 = true;
+          break;
+        }
+        (void)zizhan_cci_reset_init_m(&cciOps, 0u);
+      }
+      if (!found766) {
+        IOLog("ZIZHAN_CAM_STREAM: IMX766 ID probe miss on CCI0 m0\n");
+        teardown();
+        return false;
+      }
+      initOisAndVcm(&cciOps);
+
+      rawW = ZIZHAN_CAM_IMX766_W;
+      rawH = ZIZHAN_CAM_IMX766_H;
+      rawStride = ZIZHAN_CAM_IMX766_STRIDE;
+      bayerOrder = ZIZHAN_BAYER_RGGB;
+      zizhan_cam_ae_init(&ae, 2200u, 9200u, 512u, 3840u);
+
+      if (zizhan_cci_write16_table_m(&cciOps, 0u, cciAddr, kZizhanImx766InitRegs,
+                                     sizeof(kZizhanImx766InitRegs) / sizeof(kZizhanImx766InitRegs[0]), nullptr) != 0 ||
+          zizhan_cci_write16_table_m(&cciOps, 0u, cciAddr, kZizhanImx766Mode2048x1536,
+                                     sizeof(kZizhanImx766Mode2048x1536) / sizeof(kZizhanImx766Mode2048x1536[0]), nullptr) != 0) {
+        IOLog("ZIZHAN_CAM_STREAM: IMX766 register table write failed\n");
+        teardown();
+        return false;
+      }
+
+      /* Sweep L18 C-PHY (rate_profile, settle) across IMX766 sensormodule bands */
+      struct CphyCand { uint8_t prof; uint8_t settle; uint16_t lanes; };
+      const CphyCand cphyCands[] = {
+        {sCachedCphyProf != 0xffu ? sCachedCphyProf : uint8_t(1u),
+         sCachedCphyProf != 0xffu ? sCachedCphySettle : uint8_t(0x15u), 0x0210u},
+        {2u, 0x12u, 0x0210u},
+        {0u, 0x10u, 0x0210u},
+        {4u, 0x16u, 0x0210u},
+        {5u, 0x1fu, 0x0210u},
+        {3u, 0x0bu, 0x0210u}
+      };
+      bool gotFirst = false;
+      for (unsigned ci = 0; ci < sizeof(cphyCands) / sizeof(cphyCands[0]); ++ci) {
+        (void)zizhan_cci_write16_u8_m(&cciOps, 0u, cciAddr, 0x0100u, 0x00u);
+        zizhan_csid_lite_stop_rdi0(&csidOps);
+        zizhan_vfe_lite_wm0_stop(&vfeOps);
+        zizhan_csiphy_dphy_disable(&phyOps);
+        const uint32_t hwVer = zizhan_csiphy_cphy_enable(&phyOps, cphyCands[ci].settle, cphyCands[ci].prof);
+        (void)hwVer;
+        (void)zizhan_csid_lite_reset(&csidOps);
+        zizhan_vfe_lite_wm0_start(&vfeOps, kOvSlot0Iova, rawH, rawStride, addrShifted);
+        csiLaneAssign = cphyCands[ci].lanes;
+        zizhan_csid_lite_start_rdi0_ex(&csidOps, csiphyId, 3u, csiLaneAssign, 0, 1);
+        (void)zizhan_cci_write16_u8_m(&cciOps, 0u, cciAddr, 0x0100u, 0x01u);
+        streaming = true;
+        for (unsigned ms = 0; ms < 160; ++ms) {
+          IOSleep(1);
+          if (csid.r(0x8cu) & 0x6u) {
+            gotFirst = true;
+            sCachedCphyProf = cphyCands[ci].prof;
+            sCachedCphySettle = cphyCands[ci].settle;
+            IOLog("ZIZHAN_CAM_STREAM: IMX766 C-PHY LOCKED prof=%u settle=0x%x lanes=0x%x rx_irq=0x%x\n",
+                  cphyCands[ci].prof, cphyCands[ci].settle, csiLaneAssign, csid.r(0x9cu));
+            break;
+          }
+        }
+        if (gotFirst) break;
+      }
+      if (!gotFirst) {
+        IOLog("ZIZHAN_CAM_STREAM: IMX766 CSIPHY0 rx_irq=0x%x buf_done=0x%x -> fallback to OV13B10\n",
+              csid.r(0x9cu), csid.r(0x8cu));
+        teardown();
+        return false;
+      }
+      if (haveVcm) {
+        runAutofocusSweep();
+      }
+    } else if (isFront596) {
       /* Probe IMX596 chip ID 0x0596 on CCI0 m1 (0x10 / 0x1a / 0x37) */
       const uint8_t cands[] = {0x10u, 0x1au, 0x37u};
       bool foundImx = false;
@@ -278,14 +504,14 @@ struct StreamSession {
       }
       rawW = 1920u;
       rawH = 1080u;
-      rawStride = 2400u; /* 1920 * 10 / 8 = 2400 (multiple of 16) */
+      rawStride = 2400u;
       bayerOrder = ZIZHAN_BAYER_RGGB;
       zizhan_cam_ae_init(&ae, 900u, 1540u, 512u, 3840u);
 
       if (zizhan_cci_write16_table_m(&cciOps, 1u, cciAddr, kZizhanImx596InitRegs,
-                                   sizeof(kZizhanImx596InitRegs) / sizeof(kZizhanImx596InitRegs[0]), nullptr) != 0 ||
+                                     sizeof(kZizhanImx596InitRegs) / sizeof(kZizhanImx596InitRegs[0]), nullptr) != 0 ||
           zizhan_cci_write16_table_m(&cciOps, 1u, cciAddr, kZizhanImx596Mode1920x1080,
-                                   sizeof(kZizhanImx596Mode1920x1080) / sizeof(kZizhanImx596Mode1920x1080[0]), nullptr) != 0) {
+                                     sizeof(kZizhanImx596Mode1920x1080) / sizeof(kZizhanImx596Mode1920x1080[0]), nullptr) != 0) {
         IOLog("ZIZHAN_CAM_STREAM: IMX596 table write failed\n");
         teardown();
         return false;
@@ -295,7 +521,21 @@ struct StreamSession {
       zizhan_vfe_lite_wm0_start(&vfeOps, kOvSlot0Iova, rawH, rawStride, addrShifted);
       zizhan_csid_lite_start_rdi0(&csidOps, csiphyId, 4u, 0x3210u, 0);
       (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0100u, 0x01u);
+      streaming = true;
+
+      bool gotFirst = false;
+      for (unsigned ms = 0; ms < 250; ++ms) {
+        IOSleep(1);
+        if (csid.r(0x8cu) & 0x6u) { gotFirst = true; break; }
+      }
+      if (!gotFirst) {
+        IOLog("ZIZHAN_CAM_STREAM: IMX596 CSIPHY3 rx_irq=0x%x buf_done=0x%x -> fallback to mirrored OV13B10\n",
+              csid.r(0x9cu), csid.r(0x8cu));
+        teardown();
+        return false;
+      }
     } else {
+      /* Rear 0.6x Ultra-Wide OV13B10 (CSIPHY1, CCI0 m1 0x36) */
       cciAddr = ZIZHAN_CAM_OV13B10_ADDR7;
       uint8_t id[3] = {0, 0, 0};
       if (zizhan_cci_read16_m(&cciOps, 1u, cciAddr, 0x300au, id, 3u) != 0 || id[1] != 0x0du || id[2] != 0x42u) {
@@ -312,9 +552,9 @@ struct StreamSession {
       (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0103u, 0x01u);
       IOSleep(5);
       if (zizhan_cci_write16_table_m(&cciOps, 1u, cciAddr, kZizhanOv13b10Init1120 + 1,
-                                   (sizeof(kZizhanOv13b10Init1120) / sizeof(kZizhanOv13b10Init1120[0])) - 1, nullptr) != 0 ||
+                                     (sizeof(kZizhanOv13b10Init1120) / sizeof(kZizhanOv13b10Init1120[0])) - 1, nullptr) != 0 ||
           zizhan_cci_write16_table_m(&cciOps, 1u, cciAddr, kZizhanOv13b10Mode1364x768,
-                                   sizeof(kZizhanOv13b10Mode1364x768) / sizeof(kZizhanOv13b10Mode1364x768[0]), nullptr) != 0) {
+                                     sizeof(kZizhanOv13b10Mode1364x768) / sizeof(kZizhanOv13b10Mode1364x768[0]), nullptr) != 0) {
         teardown();
         return false;
       }
@@ -324,41 +564,27 @@ struct StreamSession {
       zizhan_vfe_lite_wm0_start(&vfeOps, kOvSlot0Iova, rawH, rawStride, addrShifted);
       zizhan_csid_lite_start_rdi0(&csidOps, csiphyId, 4u, 0x3210u, 0);
       (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0100u, 0x01u);
+      streaming = true;
     }
 
-    streaming = true;
-    /* Verify at least 1 real MIPI CSI-2 frame lands within 250 ms when opening IMX596 so we can fallback if needed */
-    if (tryImx) {
-      bool gotFirst = false;
-      for (unsigned ms = 0; ms < 250; ++ms) {
-        IOSleep(1);
-        if (csid.r(0x8c) & 0x6u) { gotFirst = true; break; }
-      }
-      if (!gotFirst) {
-        IOLog("ZIZHAN_CAM_STREAM: IMX596 CSIPHY3 rx_irq=0x%x buf_done=0x%x -> fallback to mirrored OV13B10\n",
-              csid.r(0x9c), csid.r(0x8c));
-        teardown();
-        return false;
-      }
-    }
-
-    IOLog("ZIZHAN_CAM_STREAM: OPEN PASS req_pos=%d hw_pos=%d res=%ux%u csiphy=%u addr=0x%x\n",
-          reqPos, hwPos, rawW, rawH, csiphyId, cciAddr);
+    IOLog("ZIZHAN_CAM_STREAM: OPEN PASS req_pos=%d hw_pos=%d res=%ux%u->%ux%u csiphy=%u cphy=%u addr=0x%x af_dac=%u\n",
+          reqPos, hwPos, rawW, rawH, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H,
+          csiphyId, isCphy ? 1u : 0u, cciAddr, afDac);
     return true;
   }
 
   void applySensorAe() {
     ZizhanCciOps cciOps = {&cci0, zizhan_cam_capture::mmio_rd, zizhan_cam_capture::mmio_wr, zizhan_cam_capture::mmio_pause, 2000};
-    if (hwPos == 2) {
-      /* IMX596: 0x0202/0x0203 = lines, 0x0204/0x0205 = 1024 - (1024*256 / gain_q8) */
+    if (hwPos == 1 || hwPos == 2) {
+      /* Sony IMX766 (m0) & IMX596 (m1): 0x0202/0x0203 = lines, 0x0204/0x0205 = 1024 - (262144 / gain_q8) */
       const uint32_t ag = (ae.gain_q8 > 256u) ? (1024u - (262144u / ae.gain_q8)) : 0u;
       const uint16_t ag_clamped = (uint16_t)(ag > 960u ? 960u : ag);
-      (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0104u, 1u);
-      (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0202u, uint8_t(ae.exposure_lines >> 8));
-      (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0203u, uint8_t(ae.exposure_lines & 0xffu));
-      (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0204u, uint8_t(ag_clamped >> 8));
-      (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0205u, uint8_t(ag_clamped & 0xffu));
-      (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0104u, 0u);
+      (void)zizhan_cci_write16_u8_m(&cciOps, cciMaster, cciAddr, 0x0104u, 1u);
+      (void)zizhan_cci_write16_u8_m(&cciOps, cciMaster, cciAddr, 0x0202u, uint8_t(ae.exposure_lines >> 8));
+      (void)zizhan_cci_write16_u8_m(&cciOps, cciMaster, cciAddr, 0x0203u, uint8_t(ae.exposure_lines & 0xffu));
+      (void)zizhan_cci_write16_u8_m(&cciOps, cciMaster, cciAddr, 0x0204u, uint8_t(ag_clamped >> 8));
+      (void)zizhan_cci_write16_u8_m(&cciOps, cciMaster, cciAddr, 0x0205u, uint8_t(ag_clamped & 0xffu));
+      (void)zizhan_cci_write16_u8_m(&cciOps, cciMaster, cciAddr, 0x0104u, 0u);
     } else {
       /* OV13B10: 0x3501/0x3502 = lines, 0x3508 = gain_q8 >> 8, 0x3509 = gain_q8 & 0xfe */
       (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x3208u, 0x00u);
@@ -372,40 +598,33 @@ struct StreamSession {
   }
 
   bool captureOneFrame(uint32_t slotIdx, bool stampQr) {
+    if (__atomic_exchange_n(&gAfRequested, 0, __ATOMIC_ACQ_REL) != 0) {
+      if (hwPos == 1 && haveVcm) runAutofocusSweep();
+    }
+
     ZizhanCamCcOps csidOps = {&csid, zizhan_cam_capture::mmio_rd, zizhan_cam_capture::mmio_wr, zizhan_cam_capture::mmio_pause, 2000};
     ZizhanCamCcOps vfeOps  = {&vfe,  zizhan_cam_capture::mmio_rd, zizhan_cam_capture::mmio_wr, zizhan_cam_capture::mmio_pause, 2000};
 
     const uint32_t dstIova = (slotIdx & 1u) ? kOvSlot1Iova : kOvSlot0Iova;
     volatile uint8_t *rawVa = carveout.va + (dstIova - kCamCarveoutPa);
 
-    /* Frame 0 may already have completed during openHardware's sensor check; for subsequent frames
-     * (or if Frame 0 is still in flight), re-arm VFE-lite0 WM0 + CSID RDI0 RUP/AUP cleanly. */
     bool done = (slotIdx == 0u) && ((csid.r(0x8cu) & 0x6u) != 0u);
     if (!done) {
       if (slotIdx > 0u) {
-        zizhan_vfe_lite_wm0_stop(&vfeOps);
-        zizhan_vfe_lite_wm0_start(&vfeOps, dstIova, rawH, rawStride, addrShifted);
-        csid.w(0x94u, 0xffffffffu);
-        csid.w(0x14u, 1u);
-        csid.w(0x018u, (1u << 4) | (1u << 20));
-        csid.w(0x504u, 1u);
-      }
-      for (unsigned ms = 0; ms < 120; ++ms) {
-        IOSleep(1);
-        const uint32_t bd = csid.r(0x8cu);
-        if (bd & 0x6u) {
-          done = true;
-          break;
+        done = waitNextRawFrame(dstIova, 120u);
+      } else {
+        for (unsigned ms = 0; ms < 120; ++ms) {
+          IOSleep(1);
+          if (csid.r(0x8cu) & 0x6u) { done = true; break; }
         }
       }
     }
     if (!done) {
-      /* Reset CSID RDI0 + WM0 cleanly on rare MIPI frame boundary miss */
       zizhan_csid_lite_stop_rdi0(&csidOps);
       zizhan_vfe_lite_wm0_stop(&vfeOps);
       (void)zizhan_csid_lite_reset(&csidOps);
       zizhan_vfe_lite_wm0_start(&vfeOps, dstIova, rawH, rawStride, addrShifted);
-      zizhan_csid_lite_start_rdi0(&csidOps, csiphyId, 4u, 0x3210u, 0);
+      zizhan_csid_lite_start_rdi0_ex(&csidOps, csiphyId, cphyLanes, csiLaneAssign, 0, isCphy ? 1 : 0);
       return false;
     }
 
@@ -415,8 +634,8 @@ struct StreamSession {
 
     uint8_t *bgra = outBuf + sizeof(ZizhanCamFrameHeader);
     uint16_t mean10 = 0, r10 = 0, g10 = 0, b10 = 0;
-    const int mirrorX = (reqPos == 2) ? 1 : 0; /* mirror front selfie naturally; rear stays true-to-world for QR! */
-    const int flipY   = (hwPos == 1) ? 1 : 0;  /* OV13B10 roll=90/yaw=180 orientation adjustment */
+    const int mirrorX = (reqPos == 2) ? 1 : 0;
+    const int flipY   = (hwPos == 4 || hwPos == 1) ? 1 : 0;
 
     const uint16_t meanLuma = zizhan_cam_isp_raw10_to_bgra(
         const_cast<const uint8_t *>(rawVa), rawW, rawH, rawStride,
@@ -426,13 +645,14 @@ struct StreamSession {
         &mean10, &r10, &g10, &b10);
 
     uint16_t flags = ZIZHAN_CAM_FLAG_OPTICAL;
-    if (reqPos == 2 && hwPos == 1) flags |= ZIZHAN_CAM_FLAG_FALLBACK;
+    if (hwPos != reqPos) flags |= ZIZHAN_CAM_FLAG_FALLBACK;
+    if (hwPos == 1) flags |= ZIZHAN_CAM_FLAG_MAIN_IMX766;
+    if (afLocked) flags |= ZIZHAN_CAM_FLAG_AF_LOCKED;
     if (stampQr) {
       zizhan_cam_stamp_test_qr(bgra, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H);
       flags |= ZIZHAN_CAM_FLAG_QR_STAMP;
     }
 
-    /* Closed-loop Gray-World AWB (damped 50%) + AE update every 3rd frame */
     uint16_t tgtR = 256u, tgtB = 256u;
     zizhan_cam_awb_gains(r10, g10, b10, ae.black_level, &tgtR, &tgtB);
     awbR = uint16_t((uint32_t(awbR) * 3u + tgtR) >> 2);
@@ -460,6 +680,7 @@ struct StreamSession {
     hdr.mean_raw10     = mean10;
     hdr.mean_luma8     = meanLuma;
     hdr.flags          = flags;
+    hdr.af_dac         = afDac;
     hdr.timestamp_ns   = tsNs;
 
     IOLockLock(gLock);
@@ -477,7 +698,7 @@ struct StreamSession {
     ZizhanCciOps   cciOps  = {&cci0,   zizhan_cam_capture::mmio_rd, zizhan_cam_capture::mmio_wr, zizhan_cam_capture::mmio_pause, 2000};
 
     if (streaming && cci0.va) {
-      (void)zizhan_cci_write16_u8_m(&cciOps, 1u, cciAddr, 0x0100u, 0x00u);
+      (void)zizhan_cci_write16_u8_m(&cciOps, cciMaster, cciAddr, 0x0100u, 0x00u);
       IOSleep(2);
     }
     if (csid.va) zizhan_csid_lite_stop_rdi0(&csidOps);
@@ -498,6 +719,10 @@ struct StreamSession {
       (void)zizhan_camcc_branch(&ccOps, mclkCbcr, 0);
       mclkOn = false;
     }
+    if (phy0ClksOn && camcc.va) {
+      (void)camccCsiphy0(&ccOps, false);
+      phy0ClksOn = false;
+    }
     if (phy3ClksOn && camcc.va) {
       (void)camccCsiphy3(&ccOps, false);
       phy3ClksOn = false;
@@ -509,8 +734,11 @@ struct StreamSession {
     }
     if (havePmI2c) {
       const ZizhanPm8008Ops pmOps = {&pmCtx, zizhan_cam_capture::pm_rd, zizhan_cam_capture::pm_wr};
+      if (oisLdoOn) { (void)zizhan_pm8008_enable(&pmOps, 4u, 0); oisLdoOn = false; }
+      if (afLdoOn)  { (void)zizhan_pm8008_enable(&pmOps, 3u, 0); afLdoOn = false; }
       if (vdigLdo) (void)zizhan_pm8008_enable(&pmOps, vdigLdo, 0);
       else if (vdig.va) zizhan_cam_capture::gpio_drive(vdig, 0);
+      if (haveExtraPin && extra.va) zizhan_cam_capture::gpio_drive(extra, 0);
       if (vana.va) zizhan_cam_capture::gpio_drive(vana, 0);
       (void)zizhan_pm8008_enable(&pmOps, 5u, 0);
       havePmI2c = false;
@@ -519,6 +747,7 @@ struct StreamSession {
 
     if (pm_en.va) pm_en.w(0, s_pm);
     if (vana.va) vana.w(0, s_vana);
+    if (haveExtraPin && extra.va) extra.w(0, s_extra);
     if (vdig.va) vdig.w(0, s_vdig);
     if (rst.va) rst.w(0, s_rst);
     if (i2c0.va) i2c0.w(0, s_i2c0);
@@ -530,12 +759,20 @@ struct StreamSession {
       gccCam.w(0x004, s_gcc_ahb);
     }
 
-    pm_en.close(); vana.close(); vdig.close(); mclk.close(); rst.close();
+    pm_en.close(); vana.close(); extra.close(); vdig.close(); mclk.close(); rst.close();
     pad0.close(); pad1.close(); i2c0.close(); i2c1.close();
     carveout.close(); vfe.close(); csid.close(); tpg1.close(); csiphy.close();
     cci0.close(); camcc.close(); se.close(); wrap.close(); vote.close(); gccCam.close();
+    haveVcm = false;
+    afLocked = false;
   }
 };
+
+static int modeToWantPos(int mode) {
+  if (mode == ZIZHAN_CAM_CMD_FRONT) return 2;
+  if (mode == ZIZHAN_CAM_CMD_ULTRA) return 4;
+  return 1; /* ZIZHAN_CAM_CMD_BACK or ZIZHAN_CAM_CMD_BACK_QR -> 1x Main IMX766 */
+}
 
 static void streamWorker(void *, wait_result_t) {
   thread_set_thread_name(current_thread(), "zizhan_cam");
@@ -548,7 +785,6 @@ static void streamWorker(void *, wait_result_t) {
       continue;
     }
 
-    /* Allocate double-buffered 1.23 MiB BGRA output slots lazily on first stream */
     if (!gPublishedBuf[0]) gPublishedBuf[0] = static_cast<uint8_t *>(IOMallocData(ZIZHAN_CAM_TOTAL_BYTES));
     if (!gPublishedBuf[1]) gPublishedBuf[1] = static_cast<uint8_t *>(IOMallocData(ZIZHAN_CAM_TOTAL_BYTES));
     if (!gPublishedBuf[0] || !gPublishedBuf[1]) {
@@ -556,14 +792,18 @@ static void streamWorker(void *, wait_result_t) {
       continue;
     }
 
-    const int wantPos = (mode == ZIZHAN_CAM_CMD_FRONT) ? 2 : 1;
+    const int wantPos = modeToWantPos(mode);
+    uint32_t forceUltra = 0;
+    (void)PE_parse_boot_argn("zizhan_cam_force_ultra", &forceUltra, sizeof(forceUltra));
+
     StreamSession sess;
-    bool opened = sess.openHardware(wantPos);
-    if (!opened && wantPos == 2) {
-      /* Automatic resilient fallback to mirrored OV13B10 if front IMX596 didn't stream */
-      sess.reqPos = 2;
-      opened = sess.openHardware(1);
-      sess.reqPos = 2;
+    sess.reqPos = wantPos;
+    bool opened = sess.openHardware((wantPos == 1 && forceUltra == 1u) ? 4 : wantPos);
+    if (!opened && (wantPos == 1 || wantPos == 2)) {
+      /* Resilient fallback to OV13B10 if IMX766 C-PHY or IMX596 didn't stream */
+      sess.reqPos = wantPos;
+      opened = sess.openHardware(4);
+      sess.reqPos = wantPos;
     }
     if (!opened) {
       IOLog("ZIZHAN_CAM_STREAM: open failed want_pos=%d; cooling down 500ms\n", wantPos);
@@ -576,16 +816,15 @@ static void streamWorker(void *, wait_result_t) {
     while (true) {
       const int curMode = __atomic_load_n(&gDesiredMode, __ATOMIC_ACQUIRE);
       const uint64_t curLease = __atomic_load_n(&gLeaseUntilTicks, __ATOMIC_ACQUIRE);
-      const int curWantPos = (curMode == ZIZHAN_CAM_CMD_FRONT) ? 2 : 1;
-      if (curMode <= 0 || readCntvct() >= curLease || curWantPos != wantPos) {
+      if (curMode <= 0 || readCntvct() >= curLease || modeToWantPos(curMode) != wantPos) {
         break;
       }
       uint32_t qrBoot = 0;
       (void)PE_parse_boot_argn("zizhan_cam_qr_overlay", &qrBoot, sizeof(qrBoot));
-      const bool stampQr = (curMode == ZIZHAN_CAM_CMD_BACK_QR) || (qrBoot == 1u && sess.reqPos == 1);
+      const bool stampQr = (curMode == ZIZHAN_CAM_CMD_BACK_QR) || (qrBoot == 1u && sess.reqPos != 2);
       if (sess.captureOneFrame(localLoops++, stampQr)) {
         ++publishedFrames;
-        IOSleep(32); /* pace at ~18-22 fps to keep CPU & power cool */
+        IOSleep(32);
       } else {
         IOSleep(10);
       }
@@ -593,18 +832,32 @@ static void streamWorker(void *, wait_result_t) {
 
     sess.teardown();
     __atomic_store_n(&gActiveSensor, 0, __ATOMIC_RELEASE);
-    IOLog("ZIZHAN_CAM_STREAM: CLOSED want_pos=%d frames=%u loops=%u rails_off=1\n",
-          wantPos, publishedFrames, localLoops);
+    IOLog("ZIZHAN_CAM_STREAM: CLOSED want_pos=%d hw_pos=%d frames=%u loops=%u rails_off=1\n",
+          wantPos, sess.hwPos, publishedFrames, localLoops);
   }
 }
 
 static int camCtrl(int cmd) {
   if (cmd == ZIZHAN_CAM_CMD_QUERY) {
     const uint32_t seq = __atomic_load_n(&gPublishedSeq, __ATOMIC_ACQUIRE);
-    const uint32_t act = uint32_t(__atomic_load_n(&gActiveSensor, __ATOMIC_ACQUIRE)) & 0xffu;
-    return int(((seq & 0x00ffffffu) << 8) | act);
+    const uint32_t act = uint32_t(__atomic_load_n(&gActiveSensor, __ATOMIC_ACQUIRE)) & 0xfu;
+    const uint32_t oview = zizhan_outer_active_view ? (zizhan_outer_active_view() & 3u) : 0u;
+    return int(((seq & 0x00ffffffu) << 8) | (oview << 4) | act);
   }
-  if (cmd < 0 || cmd > 3) return EINVAL;
+  if (cmd == ZIZHAN_CAM_CMD_AF) {
+    __atomic_store_n(&gAfRequested, 1, __ATOMIC_RELEASE);
+    return 0;
+  }
+  if (cmd >= 0x101 && cmd <= 0x107) {
+    return zizhan_haptics::trigger(cmd - 0x100) == 0 ? 0 : EIO;
+  }
+  if (cmd == ZIZHAN_CAM_CMD_AUDIO_SPEAKER || cmd == ZIZHAN_CAM_CMD_AUDIO_RECEIVER) {
+    const int rcv = (cmd == ZIZHAN_CAM_CMD_AUDIO_RECEIVER) ? 1 : 0;
+    zizhan_audio_set_receiver_mode(rcv);
+    IOLog("ZIZHAN_RECEIVER_MODE: mode=%s (%d)\n", rcv ? "earpiece-top-0x40" : "stereo-speaker", rcv);
+    return 0;
+  }
+  if (cmd < 0 || cmd > 4) return EINVAL;
   if (cmd == ZIZHAN_CAM_CMD_OFF) {
     __atomic_store_n(&gDesiredMode, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&gLeaseUntilTicks, 0ull, __ATOMIC_RELEASE);
@@ -652,7 +905,7 @@ static void start() {
   if (!gLock) gLock = IOLockAlloc();
   if (!gLock) return;
   zizhan_cam_register(camCtrl, camFrame);
-  IOLog("ZIZHAN_CAM_STREAM: registered on-demand sysctl service (idle=0mW)\n");
+  IOLog("ZIZHAN_CAM_STREAM: registered 960x720 3-camera + AF + haptics + receiver sysctl service (idle=0mW)\n");
 }
 
 } // namespace zizhan_cam_stream

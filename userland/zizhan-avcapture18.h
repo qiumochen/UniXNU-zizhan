@@ -80,6 +80,7 @@ static Class gZizhanCamQrMetaCls;
 static Class gZizhanPreviewLayerCls;
 static Class gOrigPrevCls;
 static id gBackDeviceSingleton;
+static id gUltraDeviceSingleton;
 static id gFrontDeviceSingleton;
 static IMP gOrigCiInitOpts;
 static int (*p_CIMetalDeviceIsSupported)(void);
@@ -195,6 +196,14 @@ static int zizhan_cam_ctl_write(int cmd) {
     return sysctlbyname("kern.zizhan_cam_ctrl", NULL, NULL, &cmd, sizeof(cmd));
 }
 
+static int zizhan_cam_ctl_query(void) {
+    int cmd = ZIZHAN_CAM_CMD_QUERY;
+    int out = 0;
+    size_t out_sz = sizeof(out);
+    if (sysctlbyname("kern.zizhan_cam_ctrl", &out, &out_sz, &cmd, sizeof(cmd)) == 0) return out;
+    return 0;
+}
+
 static id zcam_nsobj_init(id self, SEL _cmd) {
     return gNsObjectInitImp ? ((id(*)(id, SEL))gNsObjectInitImp)(self, _cmd) : self;
 }
@@ -207,14 +216,18 @@ static void zcam_nsobj_dealloc(id self, SEL _cmd) {
 static id zcam_dev_unique_id(id self, SEL _cmd) {
     (void)_cmd;
     long pos = (long)(intptr_t)objc_getAssociatedObject(self, &kKeyDevPos);
-    return zizhan_nsstr(pos == 2 ? "com.zizhan.camera.front" : "com.zizhan.camera.back");
+    if (pos == 2) return zizhan_nsstr("com.zizhan.camera.front");
+    if (pos == 4) return zizhan_nsstr("com.zizhan.camera.ultrawide");
+    return zizhan_nsstr("com.zizhan.camera.back");
 }
 static id zcam_dev_model_id(id self, SEL _cmd) { (void)self; (void)_cmd; return zizhan_nsstr("Xiaomi MIX Fold 2 Camera"); }
 static id zcam_dev_manufacturer(id self, SEL _cmd) { (void)self; (void)_cmd; return zizhan_nsstr("Xiaomi / UniXNU"); }
 static id zcam_dev_localized_name(id self, SEL _cmd) {
     (void)_cmd;
     long pos = (long)(intptr_t)objc_getAssociatedObject(self, &kKeyDevPos);
-    return zizhan_nsstr(pos == 2 ? "Front Camera (IMX596)" : "Back Camera (OV13B10)");
+    if (pos == 2) return zizhan_nsstr("Front Camera (IMX596)");
+    if (pos == 4) return zizhan_nsstr("Back Ultra-Wide 0.6x (OV13B10)");
+    return zizhan_nsstr("Back Camera 1x (IMX766 50MP)");
 }
 static long zcam_dev_position(id self, SEL _cmd) {
     (void)_cmd;
@@ -222,12 +235,39 @@ static long zcam_dev_position(id self, SEL _cmd) {
     return pos == 2 ? 2 : 1;
 }
 static id zcam_dev_type(id self, SEL _cmd) {
-    (void)self; (void)_cmd;
+    (void)_cmd;
+    long pos = (long)(intptr_t)objc_getAssociatedObject(self, &kKeyDevPos);
+    if (pos == 4) return zizhan_nsstr("AVCaptureDeviceTypeBuiltInUltraWideCamera");
     return zizhan_nsstr("AVCaptureDeviceTypeBuiltInWideAngleCamera");
 }
 static BOOL zcam_dev_yes(id self, SEL _cmd) { (void)self; (void)_cmd; return YES; }
 static BOOL zcam_dev_no(id self, SEL _cmd) { (void)self; (void)_cmd; return NO; }
 static BOOL zcam_dev_no_arg(id self, SEL _cmd, long mode) { (void)self; (void)_cmd; (void)mode; return NO; }
+static BOOL zcam_dev_focus_sup(id self, SEL _cmd, long mode) {
+    (void)_cmd;
+    long pos = (long)(intptr_t)objc_getAssociatedObject(self, &kKeyDevPos);
+    return (pos == 1 && mode >= 0 && mode <= 2) ? YES : (mode == 0 ? YES : NO);
+}
+static BOOL zcam_dev_focus_poi_sup(id self, SEL _cmd) {
+    (void)_cmd;
+    long pos = (long)(intptr_t)objc_getAssociatedObject(self, &kKeyDevPos);
+    return pos == 1 ? YES : NO;
+}
+static long zcam_dev_focus_mode(id self, SEL _cmd) {
+    (void)_cmd;
+    long pos = (long)(intptr_t)objc_getAssociatedObject(self, &kKeyDevPos);
+    return pos == 1 ? 2 : 0;
+}
+static void zcam_dev_set_focus_mode(id self, SEL _cmd, long mode) {
+    (void)_cmd;
+    long pos = (long)(intptr_t)objc_getAssociatedObject(self, &kKeyDevPos);
+    if (pos == 1 && mode != 0) (void)zizhan_cam_ctl_write(ZIZHAN_CAM_CMD_AF);
+}
+static void zcam_dev_set_focus_poi(id self, SEL _cmd, CGPoint pt) {
+    (void)_cmd; (void)pt;
+    long pos = (long)(intptr_t)objc_getAssociatedObject(self, &kKeyDevPos);
+    if (pos == 1) (void)zizhan_cam_ctl_write(ZIZHAN_CAM_CMD_AF);
+}
 static BOOL zcam_dev_has_media(id self, SEL _cmd, id media) { (void)self; (void)_cmd; return zizhan_is_video_media(media); }
 static BOOL zcam_dev_lock_cfg(id self, SEL _cmd, id *err) { (void)self; (void)_cmd; if (err) *err = nil; return YES; }
 static void zcam_dev_noop(id self, SEL _cmd) { (void)self; (void)_cmd; }
@@ -241,13 +281,19 @@ static id zcam_dev_empty_array(id self, SEL _cmd) {
 static double zcam_dev_zoom_one(id self, SEL _cmd) { (void)self; (void)_cmd; return 1.0; }
 
 static void zizhan_ensure_devices(void) {
-    if (gBackDeviceSingleton && gFrontDeviceSingleton) return;
+    if (gBackDeviceSingleton && gUltraDeviceSingleton && gFrontDeviceSingleton) return;
     if (!gZizhanCamDeviceCls || !gNsObjectInitImp) return;
     if (!gBackDeviceSingleton) {
         id b = ((id(*)(Class, SEL))objc_msgSend)(gZizhanCamDeviceCls, sel_registerName("alloc"));
         b = ((id(*)(id, SEL))gNsObjectInitImp)(b, sel_registerName("init"));
         objc_setAssociatedObject(b, &kKeyDevPos, (id)(intptr_t)1, OBJC_ASSOCIATION_ASSIGN);
         gBackDeviceSingleton = b;
+    }
+    if (!gUltraDeviceSingleton) {
+        id u = ((id(*)(Class, SEL))objc_msgSend)(gZizhanCamDeviceCls, sel_registerName("alloc"));
+        u = ((id(*)(id, SEL))gNsObjectInitImp)(u, sel_registerName("init"));
+        objc_setAssociatedObject(u, &kKeyDevPos, (id)(intptr_t)4, OBJC_ASSOCIATION_ASSIGN);
+        gUltraDeviceSingleton = u;
     }
     if (!gFrontDeviceSingleton) {
         id f = ((id(*)(Class, SEL))objc_msgSend)(gZizhanCamDeviceCls, sel_registerName("alloc"));
@@ -272,9 +318,10 @@ static void zcam_cls_req_access(id cls, SEL _cmd, id media, void (^handler)(BOOL
 }
 
 static id zcam_cls_default_dev3(id cls, SEL _cmd, id dtype, id media, long pos) {
-    (void)dtype;
     if (zizhan_is_video_media(media)) {
         zizhan_ensure_devices();
+        const char *dt = dtype ? ((const char *(*)(id, SEL))objc_msgSend)(dtype, sel_registerName("UTF8String")) : NULL;
+        if (dt && strstr(dt, "UltraWide")) return gUltraDeviceSingleton;
         return (pos == 2) ? gFrontDeviceSingleton : gBackDeviceSingleton;
     }
     return gOrigDefaultDev3 ? ((id(*)(id, SEL, id, id, long))gOrigDefaultDev3)(cls, _cmd, dtype, media, pos) : nil;
@@ -292,9 +339,9 @@ static id zcam_cls_devices_media(id cls, SEL _cmd, id media) {
     if (zizhan_is_video_media(media)) {
         zizhan_ensure_devices();
         Class arr = objc_lookUpClass("NSArray");
-        const id objs[2] = {gBackDeviceSingleton, gFrontDeviceSingleton};
+        const id objs[3] = {gBackDeviceSingleton, gUltraDeviceSingleton, gFrontDeviceSingleton};
         return arr ? ((id(*)(Class, SEL, const id *, unsigned long))objc_msgSend)(
-            arr, sel_registerName("arrayWithObjects:count:"), objs, 2ul) : nil;
+            arr, sel_registerName("arrayWithObjects:count:"), objs, 3ul) : nil;
     }
     return gOrigDevicesMedia ? ((id(*)(id, SEL, id))gOrigDevicesMedia)(cls, _cmd, media) : nil;
 }
@@ -303,16 +350,17 @@ static id zcam_cls_devices_all(id cls, SEL _cmd) {
     (void)cls; (void)_cmd;
     zizhan_ensure_devices();
     Class arr = objc_lookUpClass("NSArray");
-    const id objs[2] = {gBackDeviceSingleton, gFrontDeviceSingleton};
+    const id objs[3] = {gBackDeviceSingleton, gUltraDeviceSingleton, gFrontDeviceSingleton};
     return arr ? ((id(*)(Class, SEL, const id *, unsigned long))objc_msgSend)(
-        arr, sel_registerName("arrayWithObjects:count:"), objs, 2ul) : nil;
+        arr, sel_registerName("arrayWithObjects:count:"), objs, 3ul) : nil;
 }
 
 static id zcam_cls_dev_with_uid(id cls, SEL _cmd, id uid) {
     if (uid) {
         const char *u = ((const char *(*)(id, SEL))objc_msgSend)(uid, sel_registerName("UTF8String"));
-        if (u && !strcmp(u, "com.zizhan.camera.front")) { zizhan_ensure_devices(); return gFrontDeviceSingleton; }
-        if (u && !strcmp(u, "com.zizhan.camera.back"))  { zizhan_ensure_devices(); return gBackDeviceSingleton; }
+        if (u && !strcmp(u, "com.zizhan.camera.front"))     { zizhan_ensure_devices(); return gFrontDeviceSingleton; }
+        if (u && !strcmp(u, "com.zizhan.camera.ultrawide")) { zizhan_ensure_devices(); return gUltraDeviceSingleton; }
+        if (u && !strcmp(u, "com.zizhan.camera.back"))      { zizhan_ensure_devices(); return gBackDeviceSingleton; }
     }
     return gOrigDevWithUid ? ((id(*)(id, SEL, id))gOrigDevWithUid)(cls, _cmd, uid) : nil;
 }
@@ -322,9 +370,9 @@ static id zcam_disc_devices(id self, SEL _cmd) {
     if (orig && ((unsigned long(*)(id, SEL))objc_msgSend)(orig, sel_registerName("count")) > 0) return orig;
     zizhan_ensure_devices();
     Class arr = objc_lookUpClass("NSArray");
-    const id objs[2] = {gBackDeviceSingleton, gFrontDeviceSingleton};
+    const id objs[3] = {gBackDeviceSingleton, gUltraDeviceSingleton, gFrontDeviceSingleton};
     return arr ? ((id(*)(Class, SEL, const id *, unsigned long))objc_msgSend)(
-        arr, sel_registerName("arrayWithObjects:count:"), objs, 2ul) : orig;
+        arr, sel_registerName("arrayWithObjects:count:"), objs, 3ul) : orig;
 }
 
 /* --- Virtual AVCaptureDeviceInput subclass --- */
@@ -455,15 +503,19 @@ static id zcam_encode_jpeg_from_cgimage(CGImageRef img) {
     return ((id(*)(id, SEL))objc_msgSend)((id)mdata, sel_registerName("autorelease"));
 }
 
+static int zcam_pos_to_cmd(int pos) {
+    if (pos == 2) return ZIZHAN_CAM_CMD_FRONT;
+    if (pos == 4) return ZIZHAN_CAM_CMD_ULTRA;
+    return boot_option("zizhan_cam_qr_overlay=1") ? ZIZHAN_CAM_CMD_BACK_QR : ZIZHAN_CAM_CMD_BACK;
+}
+
 static void zcam_pump_tick(ZizhanSessionCtx *ctx) {
     if (!ctx || !ctx->running || !ctx->frame_buf) return;
 
     /* Renew kernel camera lease once per second so sensor stays active while running */
     const uint64_t now_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (now_ns - ctx->last_lease_ns >= 900000000ull) {
-        const int qr_opt = boot_option("zizhan_cam_qr_overlay=1") ? 1 : 0;
-        const int cmd = (ctx->position == 2) ? ZIZHAN_CAM_CMD_FRONT
-                        : (qr_opt ? ZIZHAN_CAM_CMD_BACK_QR : ZIZHAN_CAM_CMD_BACK);
+        const int cmd = zcam_pos_to_cmd(ctx->position);
         (void)zizhan_cam_ctl_write(cmd);
         ctx->last_lease_ns = now_ns;
     }
@@ -484,9 +536,9 @@ static void zcam_pump_tick(ZizhanSessionCtx *ctx) {
     if (!cgImg) return;
 
     if (ctx->frames_delivered == 1 || (ctx->frames_delivered % 40u) == 0u) {
-        fprintf(stderr, "Zizhan avcap18: frame#%u seq=%u pos=%u %ux%u luma=%u exp=%u gain_q8=%u flags=0x%x\n",
+        fprintf(stderr, "Zizhan avcap18: frame#%u seq=%u pos=%u %ux%u luma=%u exp=%u gain_q8=%u af_dac=%u flags=0x%x\n",
                 ctx->frames_delivered, hdr->seq, hdr->sensor_pos, hdr->width, hdr->height,
-                hdr->mean_luma8, hdr->exposure_lines, hdr->analog_gain_q8, hdr->flags);
+                hdr->mean_luma8, hdr->exposure_lines, hdr->analog_gain_q8, hdr->af_dac, hdr->flags);
         fflush(stderr);
     }
 
@@ -698,7 +750,11 @@ static void zcam_sess_add_in(id self, SEL _cmd, id inp) {
         CFArrayAppendValue(ctx->inputs, (const void *)inp);
         id dev = objc_getAssociatedObject(inp, &kKeyInputDev);
         long pos = dev ? (long)(intptr_t)objc_getAssociatedObject(dev, &kKeyDevPos) : 1;
-        ctx->position = (pos == 2) ? 2 : 1;
+        ctx->position = (pos == 2) ? 2 : (pos == 4 ? 4 : 1);
+        if (ctx->running) {
+            ctx->last_lease_ns = 0;
+            (void)zizhan_cam_ctl_write(zcam_pos_to_cmd(ctx->position));
+        }
     }
 }
 
@@ -758,9 +814,7 @@ static void zcam_sess_start(id self, SEL _cmd) {
     if (!ctx || ctx->running) return;
     ctx->running = 1;
     ctx->last_lease_ns = 0;
-    const int qr_opt = boot_option("zizhan_cam_qr_overlay=1") ? 1 : 0;
-    const int cmd = (ctx->position == 2) ? ZIZHAN_CAM_CMD_FRONT
-                    : (qr_opt ? ZIZHAN_CAM_CMD_BACK_QR : ZIZHAN_CAM_CMD_BACK);
+    const int cmd = zcam_pos_to_cmd(ctx->position);
     int rc = zizhan_cam_ctl_write(cmd);
     fprintf(stderr, "Zizhan avcap18: startRunning (%s) pos=%d cmd=%d ctl_rc=%d\n",
             getprogname() ? getprogname() : "?", ctx->position, cmd, rc);
@@ -1005,7 +1059,12 @@ static void zizhan_avcapture_policy(void) {
             class_addMethod(c, sel_registerName("formats"), (IMP)zcam_dev_empty_array, "@@:");
             class_addMethod(c, sel_registerName("activeFormat"), (IMP)zcam_input_nil, "@@:");
             class_addMethod(c, sel_registerName("videoZoomFactor"), (IMP)zcam_dev_zoom_one, "d@:");
-            class_addMethod(c, sel_registerName("isFocusModeSupported:"), (IMP)zcam_dev_no_arg, "B@:q");
+            class_addMethod(c, sel_registerName("isFocusModeSupported:"), (IMP)zcam_dev_focus_sup, "B@:q");
+            class_addMethod(c, sel_registerName("isFocusPointOfInterestSupported"), (IMP)zcam_dev_focus_poi_sup, "B@:");
+            class_addMethod(c, sel_registerName("focusMode"), (IMP)zcam_dev_focus_mode, "q@:");
+            class_addMethod(c, sel_registerName("setFocusMode:"), (IMP)zcam_dev_set_focus_mode, "v@:q");
+            class_addMethod(c, sel_registerName("setFocusPointOfInterest:"), (IMP)zcam_dev_set_focus_poi, "v@:{CGPoint=dd}");
+            class_addMethod(c, sel_registerName("isAdjustingFocus"), (IMP)zcam_dev_no, "B@:");
             class_addMethod(c, sel_registerName("isExposureModeSupported:"), (IMP)zcam_dev_no_arg, "B@:q");
             class_addMethod(c, sel_registerName("isWhiteBalanceModeSupported:"), (IMP)zcam_dev_no_arg, "B@:q");
             class_addMethod(c, sel_registerName("isTorchModeSupported:"), (IMP)zcam_dev_no_arg, "B@:q");
@@ -1189,10 +1248,258 @@ static void zizhan_avcapture_policy(void) {
     fflush(stderr);
 }
 
+/* --- Stock Camera.app (/Applications/Camera.app) Live 960x720 3-Camera Viewfinder Overlay --- */
+static bool gCamAppUiInstalled;
+static id gCamAppOverlayView;
+static id gCamAppSession;
+static id gCamAppPhotoOut;
+static id gCamAppHudLabel;
+static id gCamAppDelegateObj;
+static int gCamAppCurPos = 1;
+static unsigned gCamAppShotSeq = 0;
+
+static void zcam_app_update_hud(const char *extra) {
+    if (!gCamAppHudLabel) return;
+    const char *lens = (gCamAppCurPos == 2) ? "前置 IMX596" : (gCamAppCurPos == 4 ? "0.6x 超广角 OV13B10" : "1x 主摄 IMX766 50MP");
+    char msg[256];
+    snprintf(msg, sizeof(msg), "MIX Fold 2 · %s · %ux%u%s%s",
+             lens, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H,
+             (extra && extra[0]) ? " | " : "", (extra && extra[0]) ? extra : "");
+    ((void(*)(id, SEL, id))objc_msgSend)(gCamAppHudLabel, sel_registerName("setText:"), zizhan_nsstr(msg));
+}
+
+static void zcam_app_switch_pos(int newPos) {
+    if (!gCamAppSession) return;
+    zizhan_ensure_devices();
+    id dev = (newPos == 2) ? gFrontDeviceSingleton : (newPos == 4 ? gUltraDeviceSingleton : gBackDeviceSingleton);
+    if (!dev) return;
+    gCamAppCurPos = newPos;
+    id err = nil;
+    id inp = zcam_make_input(dev);
+    if (inp) {
+        ((void(*)(id, SEL, id))objc_msgSend)(gCamAppSession, sel_registerName("addInput:"), inp);
+        ((void(*)(id, SEL))objc_msgSend)(inp, sel_registerName("release"));
+    }
+    (void)err;
+    (void)zizhan_cam_ctl_write(0x104); /* subtle selection haptic (dry-safe) */
+    zcam_app_update_hud("切换镜头");
+}
+
+static void zcam_app_act_1x(id self, SEL _cmd) { (void)self; (void)_cmd; zcam_app_switch_pos(1); }
+static void zcam_app_act_ultra(id self, SEL _cmd) { (void)self; (void)_cmd; zcam_app_switch_pos(4); }
+static void zcam_app_act_front(id self, SEL _cmd) { (void)self; (void)_cmd; zcam_app_switch_pos(2); }
+static void zcam_app_act_af(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    (void)zizhan_cam_ctl_write(ZIZHAN_CAM_CMD_AF);
+    (void)zizhan_cam_ctl_write(0x104);
+    zcam_app_update_hud("DW9800V 自动对焦完成");
+}
+static void zcam_app_act_shutter(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    if (!gCamAppPhotoOut || !gCamAppDelegateObj) return;
+    (void)zizhan_cam_ctl_write(0x102);
+    Class psetCls = objc_lookUpClass("AVCapturePhotoSettings");
+    id set = psetCls ? ((id(*)(Class, SEL))objc_msgSend)(psetCls, sel_registerName("photoSettings")) : nil;
+    ((void(*)(id, SEL, id, id))objc_msgSend)(
+        gCamAppPhotoOut, sel_registerName("capturePhotoWithSettings:delegate:"), set, gCamAppDelegateObj);
+}
+
+static void zcam_app_did_finish_photo(id self, SEL _cmd, id outObj, id photo, id err) {
+    (void)self; (void)_cmd; (void)outObj; (void)err;
+    if (!photo) return;
+    id jpeg = ((id(*)(id, SEL))objc_msgSend)(photo, sel_registerName("fileDataRepresentation"));
+    unsigned long len = jpeg ? ((unsigned long(*)(id, SEL))objc_msgSend)(jpeg, sel_registerName("length")) : 0ul;
+    if (!jpeg || len == 0) return;
+
+    (void)mkdir("/private/var/mobile/Media", 0755);
+    (void)mkdir("/private/var/mobile/Media/DCIM", 0755);
+    (void)mkdir("/private/var/mobile/Media/DCIM/100APPLE", 0755);
+    char path[160];
+    snprintf(path, sizeof(path), "/private/var/mobile/Media/DCIM/100APPLE/IMG_%04u.JPG", ++gCamAppShotSeq);
+    BOOL wrote = ((BOOL(*)(id, SEL, id, BOOL))objc_msgSend)(
+        jpeg, sel_registerName("writeToFile:atomically:"), zizhan_nsstr(path), YES);
+
+    Class imgCls = objc_lookUpClass("UIImage");
+    void (*savePhotos)(id, id, SEL, void *) = (void (*)(id, id, SEL, void *))dlsym(RTLD_DEFAULT, "UIImageWriteToSavedPhotosAlbum");
+    if (imgCls && savePhotos) {
+        id uiImg = ((id(*)(Class, SEL, id))objc_msgSend)(imgCls, sel_registerName("imageWithData:"), jpeg);
+        if (uiImg) savePhotos(uiImg, nil, NULL, NULL);
+    }
+    fprintf(stderr, "ZIZHAN_CAMERA_APP: SHUTTER_SAVED path=%s bytes=%lu dcim_ok=%d\n", path, len, (int)wrote);
+    fflush(stderr);
+    char note[96];
+    snprintf(note, sizeof(note), "已保存照片 (%lu KB)", len / 1024ul);
+    zcam_app_update_hud(note);
+}
+
+static void zcam_app_did_meta(id self, SEL _cmd, id outObj, id objs, id conn) {
+    (void)self; (void)_cmd; (void)outObj; (void)conn;
+    unsigned long n = objs ? ((unsigned long(*)(id, SEL))objc_msgSend)(objs, sel_registerName("count")) : 0ul;
+    if (!n) return;
+    id first = ((id(*)(id, SEL, unsigned long))objc_msgSend)(objs, sel_registerName("objectAtIndex:"), 0ul);
+    id sv = first ? ((id(*)(id, SEL))objc_msgSend)(first, sel_registerName("stringValue")) : nil;
+    const char *s = sv ? ((const char *(*)(id, SEL))objc_msgSend)(sv, sel_registerName("UTF8String")) : NULL;
+    if (s && s[0]) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "QR: %.80s", s);
+        zcam_app_update_hud(buf);
+    }
+}
+
+static id zcam_app_make_btn(Class btnCls, Class colCls, id target, SEL action, const char *title, CGRect frame, double alpha) {
+    id b = ((id(*)(Class, SEL, long))objc_msgSend)(btnCls, sel_registerName("buttonWithType:"), 1l);
+    if (!b) return nil;
+    ((void(*)(id, SEL, CGRect))objc_msgSend)(b, sel_registerName("setFrame:"), frame);
+    ((void(*)(id, SEL, id, unsigned long))objc_msgSend)(b, sel_registerName("setTitle:forState:"), zizhan_nsstr(title), 0ul);
+    id white = ((id(*)(Class, SEL))objc_msgSend)(colCls, sel_registerName("whiteColor"));
+    id bg = ((id(*)(Class, SEL, double, double))objc_msgSend)(colCls, sel_registerName("colorWithWhite:alpha:"), 0.12, alpha);
+    ((void(*)(id, SEL, id, unsigned long))objc_msgSend)(b, sel_registerName("setTitleColor:forState:"), white, 0ul);
+    ((void(*)(id, SEL, id))objc_msgSend)(b, sel_registerName("setBackgroundColor:"), bg);
+    id layer = ((id(*)(id, SEL))objc_msgSend)(b, sel_registerName("layer"));
+    if (layer) ((void(*)(id, SEL, double))objc_msgSend)(layer, sel_registerName("setCornerRadius:"), frame.size.height * 0.5);
+    ((void(*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(b, sel_registerName("addTarget:action:forControlEvents:"), target, action, 1ul << 6);
+    return b;
+}
+
+static void zcam_app_try_attach_window(void *unused) {
+    (void)unused;
+    if (gCamAppOverlayView) return;
+    Class appCls = objc_lookUpClass("UIApplication");
+    Class winCls = objc_lookUpClass("UIWindow");
+    Class viewCls = objc_lookUpClass("UIView");
+    Class lblCls = objc_lookUpClass("UILabel");
+    Class btnCls = objc_lookUpClass("UIButton");
+    Class colCls = objc_lookUpClass("UIColor");
+    if (!appCls || !winCls || !viewCls || !lblCls || !btnCls || !colCls) return;
+
+    id app = ((id(*)(Class, SEL))objc_msgSend)(appCls, sel_registerName("sharedApplication"));
+    SEL sAllW = sel_registerName("allWindowsIncludingInternalWindows:onlyVisibleWindows:");
+    id wins = (app && ((BOOL(*)(Class, SEL, SEL))objc_msgSend)(winCls, sel_registerName("respondsToSelector:"), sAllW))
+              ? ((id(*)(Class, SEL, BOOL, BOOL))objc_msgSend)(winCls, sAllW, NO, YES)
+              : (app ? ((id(*)(id, SEL))objc_msgSend)(app, sel_registerName("windows")) : nil);
+    unsigned long nw = wins ? ((unsigned long(*)(id, SEL))objc_msgSend)(wins, sel_registerName("count")) : 0ul;
+    id targetWin = nil;
+    for (unsigned long i = 0; i < nw; ++i) {
+        id w = ((id(*)(id, SEL, unsigned long))objc_msgSend)(wins, sel_registerName("objectAtIndex:"), i);
+        CGRect b = ((CGRect(*)(id, SEL))objc_msgSend)(w, sel_registerName("bounds"));
+        if (b.size.width >= 320.0 && b.size.height >= 320.0) { targetWin = w; break; }
+    }
+    if (!targetWin) {
+        static unsigned retries;
+        if (++retries < 16) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 800 * NSEC_PER_MSEC),
+                             dispatch_get_main_queue(), NULL, zcam_app_try_attach_window);
+        }
+        return;
+    }
+
+    if (!gCamAppDelegateObj) {
+        Class dcls = objc_allocateClassPair(objc_lookUpClass("NSObject"), "PongZizhanCameraAppHandler18", 0);
+        if (dcls) {
+            class_addMethod(dcls, sel_registerName("act1x"), (IMP)zcam_app_act_1x, "v@:");
+            class_addMethod(dcls, sel_registerName("actUltra"), (IMP)zcam_app_act_ultra, "v@:");
+            class_addMethod(dcls, sel_registerName("actFront"), (IMP)zcam_app_act_front, "v@:");
+            class_addMethod(dcls, sel_registerName("actAf"), (IMP)zcam_app_act_af, "v@:");
+            class_addMethod(dcls, sel_registerName("actShutter"), (IMP)zcam_app_act_shutter, "v@:");
+            class_addMethod(dcls, sel_registerName("captureOutput:didFinishProcessingPhoto:error:"), (IMP)zcam_app_did_finish_photo, "v@:@@@");
+            class_addMethod(dcls, sel_registerName("captureOutput:didOutputMetadataObjects:fromConnection:"), (IMP)zcam_app_did_meta, "v@:@@@");
+            objc_registerClassPair(dcls);
+            gCamAppDelegateObj = ((id(*)(Class, SEL))objc_msgSend)(dcls, sel_registerName("new"));
+        }
+    }
+    if (!gCamAppDelegateObj) return;
+
+    CGRect wb = ((CGRect(*)(id, SEL))objc_msgSend)(targetWin, sel_registerName("bounds"));
+    id root = ((id(*)(id, SEL, CGRect))objc_msgSend)(
+        ((id(*)(Class, SEL))objc_msgSend)(viewCls, sel_registerName("alloc")),
+        sel_registerName("initWithFrame:"), wb);
+    ((void(*)(id, SEL, unsigned long))objc_msgSend)(root, sel_registerName("setAutoresizingMask:"), 18ul); /* W | H */
+    id black = ((id(*)(Class, SEL))objc_msgSend)(colCls, sel_registerName("blackColor"));
+    ((void(*)(id, SEL, id))objc_msgSend)(root, sel_registerName("setBackgroundColor:"), black);
+
+    /* Build AVCaptureSession + 1x IMX766 input + PhotoOutput + MetadataOutput + PreviewLayer */
+    zizhan_ensure_devices();
+    Class sessCls = objc_lookUpClass("AVCaptureSession");
+    Class poutCls = objc_lookUpClass("AVCapturePhotoOutput");
+    Class moutCls = objc_lookUpClass("AVCaptureMetadataOutput");
+    Class prevCls = objc_lookUpClass("AVCaptureVideoPreviewLayer");
+    gCamAppSession = ((id(*)(Class, SEL))objc_msgSend)(sessCls, sel_registerName("new"));
+    id inp = zcam_make_input(gBackDeviceSingleton);
+    if (inp) {
+        ((void(*)(id, SEL, id))objc_msgSend)(gCamAppSession, sel_registerName("addInput:"), inp);
+        ((void(*)(id, SEL))objc_msgSend)(inp, sel_registerName("release"));
+    }
+    gCamAppPhotoOut = poutCls ? ((id(*)(Class, SEL))objc_msgSend)(poutCls, sel_registerName("new")) : nil;
+    if (gCamAppPhotoOut) ((void(*)(id, SEL, id))objc_msgSend)(gCamAppSession, sel_registerName("addOutput:"), gCamAppPhotoOut);
+    id mout = moutCls ? ((id(*)(Class, SEL))objc_msgSend)(moutCls, sel_registerName("new")) : nil;
+    if (mout) {
+        ((void(*)(id, SEL, id, dispatch_queue_t))objc_msgSend)(
+            mout, sel_registerName("setMetadataObjectsDelegate:queue:"), gCamAppDelegateObj, dispatch_get_main_queue());
+        ((void(*)(id, SEL, id))objc_msgSend)(gCamAppSession, sel_registerName("addOutput:"), mout);
+    }
+
+    id prevLayer = ((id(*)(Class, SEL, id))objc_msgSend)(prevCls, sel_registerName("layerWithSession:"), gCamAppSession);
+    if (prevLayer) {
+        CGRect pf = CGRectMake(20.0, 68.0, wb.size.width - 40.0, wb.size.height - 196.0);
+        ((void(*)(id, SEL, CGRect))objc_msgSend)(prevLayer, sel_registerName("setFrame:"), pf);
+        ((void(*)(id, SEL, id))objc_msgSend)(prevLayer, sel_registerName("setContentsGravity:"), zizhan_nsstr("resizeAspect"));
+        id rlayer = ((id(*)(id, SEL))objc_msgSend)(root, sel_registerName("layer"));
+        ((void(*)(id, SEL, id))objc_msgSend)(rlayer, sel_registerName("addSublayer:"), prevLayer);
+    }
+
+    gCamAppHudLabel = ((id(*)(id, SEL, CGRect))objc_msgSend)(
+        ((id(*)(Class, SEL))objc_msgSend)(lblCls, sel_registerName("alloc")),
+        sel_registerName("initWithFrame:"), CGRectMake(24.0, 26.0, wb.size.width - 48.0, 34.0));
+    id white = ((id(*)(Class, SEL))objc_msgSend)(colCls, sel_registerName("whiteColor"));
+    ((void(*)(id, SEL, id))objc_msgSend)(gCamAppHudLabel, sel_registerName("setTextColor:"), white);
+    ((void(*)(id, SEL, long))objc_msgSend)(gCamAppHudLabel, sel_registerName("setTextAlignment:"), 1l);
+    zcam_app_update_hud("实时光学预览就绪");
+    ((void(*)(id, SEL, id))objc_msgSend)(root, sel_registerName("addSubview:"), gCamAppHudLabel);
+
+    const double cy = wb.size.height - 110.0;
+    const double mid = wb.size.width * 0.5;
+    id b06 = zcam_app_make_btn(btnCls, colCls, gCamAppDelegateObj, sel_registerName("actUltra"), "0.6x 超广角", CGRectMake(mid - 230.0, cy, 104.0, 38.0), 0.78);
+    id b1x = zcam_app_make_btn(btnCls, colCls, gCamAppDelegateObj, sel_registerName("act1x"), "1x 主摄", CGRectMake(mid - 116.0, cy, 96.0, 38.0), 0.88);
+    id bfr = zcam_app_make_btn(btnCls, colCls, gCamAppDelegateObj, sel_registerName("actFront"), "前置", CGRectMake(mid - 10.0, cy, 88.0, 38.0), 0.78);
+    id baf = zcam_app_make_btn(btnCls, colCls, gCamAppDelegateObj, sel_registerName("actAf"), "AF 对焦", CGRectMake(mid + 88.0, cy, 108.0, 38.0), 0.78);
+    id bsh = zcam_app_make_btn(btnCls, colCls, gCamAppDelegateObj, sel_registerName("actShutter"), "拍照保存", CGRectMake(mid - 72.0, wb.size.height - 62.0, 144.0, 48.0), 0.92);
+    if (b06) ((void(*)(id, SEL, id))objc_msgSend)(root, sel_registerName("addSubview:"), b06);
+    if (b1x) ((void(*)(id, SEL, id))objc_msgSend)(root, sel_registerName("addSubview:"), b1x);
+    if (bfr) ((void(*)(id, SEL, id))objc_msgSend)(root, sel_registerName("addSubview:"), bfr);
+    if (baf) ((void(*)(id, SEL, id))objc_msgSend)(root, sel_registerName("addSubview:"), baf);
+    if (bsh) ((void(*)(id, SEL, id))objc_msgSend)(root, sel_registerName("addSubview:"), bsh);
+
+    ((void(*)(id, SEL, id))objc_msgSend)(targetWin, sel_registerName("addSubview:"), root);
+    gCamAppOverlayView = root;
+    ((void(*)(id, SEL))objc_msgSend)(gCamAppSession, sel_registerName("startRunning"));
+    fprintf(stderr, "ZIZHAN_CAMERA_APP: READY %ux%u lenses=3 window=%.0fx%.0f\n",
+            ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H, wb.size.width, wb.size.height);
+    fflush(stderr);
+
+    if (boot_option("zizhan_cam_autoshutter=1")) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            zcam_app_act_af(nil, NULL);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 900 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+                zcam_app_act_shutter(nil, NULL);
+            });
+        });
+    }
+}
+
+static void zizhan_camera_app_bridge_init(void) {
+    if (gCamAppUiInstalled || boot_option("zizhan_camera_app_ui=0")) return;
+    const char *prog = getprogname();
+    if (!prog || strcmp(prog, "Camera") != 0) return;
+    gCamAppUiInstalled = true;
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 1200 * NSEC_PER_MSEC),
+                     dispatch_get_main_queue(), NULL, zcam_app_try_attach_window);
+}
+
 static void zizhan_avcapture_image(const struct mach_header *header, intptr_t slide) {
     (void)header; (void)slide;
     zizhan_ci_sw_policy();
     zizhan_avcapture_policy();
+    zizhan_camera_app_bridge_init();
 }
 
 #endif /* ZIZHAN_AVCAPTURE18_H */

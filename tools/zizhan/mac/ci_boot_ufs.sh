@@ -145,6 +145,9 @@ if daily:
 for tok in cli_extra:
     set_kv(args, tok)
 
+if os.environ.get("DEBUGD", "0") == "1" and xnu_uint_arg(args, "zizhan_debugd", None) is None:
+    set_kv(args, "zizhan_debugd=1")
+
 if not attended and os.environ.get("ZIZHAN_ATTENDED_PACKAGE") != "1":
     if (
         xnu_uint_arg(args, "zizhan_audio_attended", 0) != 0
@@ -203,6 +206,16 @@ if bt_ready and bt_probe >= 3:
     cmd += ["--bt-node", os.environ.get("BT_NODE", "02:5a:69:7a:68:01")]
 if slpi_ready and slpi_mode >= 3:
     chosen.append(f"zizhan-sensors-fs={sfs}")
+if xnu_uint_arg(args + moved, "zizhan_debugd", 0) != 0 and not any(c.startswith("zizhan-dbg-token=") for c in chosen):
+    tok_file = Path(os.environ.get("ZIZHAN_DBG_TOKEN_FILE", str(src / "work/.zizhan-dbg-token")))
+    if not tok_file.is_file() or len(tok_file.read_text().strip()) < 16:
+        import secrets
+        tok_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(tok_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as tf:
+            tf.write(secrets.token_hex(32) + "\n")
+    os.chmod(tok_file, 0o600)
+    chosen.append(f"zizhan-dbg-token={tok_file}")
 for spec in chosen:
     cmd += ["--chosen-blob", spec]
 

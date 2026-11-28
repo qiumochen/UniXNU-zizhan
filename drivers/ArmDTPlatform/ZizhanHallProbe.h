@@ -25,6 +25,9 @@ extern "C" int zizhan_outer_direct_desktop(void) __attribute__((weak));
 extern "C" int zizhan_slpi_hinge_closed(void);
 
 namespace zizhan_hall {
+static volatile int32_t gHallOverride = -1;     /* -1 = hardware auto, 0 = forced open, 1 = forced closed */
+static volatile int32_t gLastStableClosed = -1; /* -1 = unknown, 0 = open, 1 = closed */
+
 struct Inputs {
   uint64_t tlmm_base;
   uint32_t tlmm_bytes;
@@ -153,10 +156,15 @@ static void worker(void *arg, wait_result_t) {
       }
       asserted = sim;
     }
+    const int32_t ovr = __atomic_load_n(&gHallOverride, __ATOMIC_ACQUIRE);
+    if (ovr == 0 || ovr == 1) {
+      asserted = (ovr == 1);
+    }
     const auto update = sample(state, asserted, when, debounce_ns);
     ++reads;
     if (update.event == Event::Baseline || update.event == Event::Transition) {
       baseline = true;
+      __atomic_store_n(&gLastStableClosed, update.stable ? 1 : 0, __ATOMIC_RELEASE);
       if (update.event == Event::Transition) { ++changes; }
       if (reports++ < 64) {
         IOLog("ZIZHAN_HALL: %s raw=0x%x level=%s asserted=%u at_ns=%llu\n",
@@ -309,3 +317,13 @@ static void start(IOService *platform) {
   thread_deallocate(thread);
 }
 } // namespace zizhan_hall
+
+extern "C" void zizhan_hall_set_override(int32_t mode) {
+  if (mode < -1 || mode > 1) { mode = -1; }
+  __atomic_store_n(&zizhan_hall::gHallOverride, mode, __ATOMIC_RELEASE);
+}
+
+extern "C" void zizhan_hall_get_state(int32_t *closed_out, int32_t *override_out) {
+  if (closed_out) { *closed_out = __atomic_load_n(&zizhan_hall::gLastStableClosed, __ATOMIC_ACQUIRE); }
+  if (override_out) { *override_out = __atomic_load_n(&zizhan_hall::gHallOverride, __ATOMIC_ACQUIRE); }
+}

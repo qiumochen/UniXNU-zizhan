@@ -53,7 +53,7 @@ static uint64_t smc2(uint64_t fid, uint64_t a1, uint64_t a2, uint64_t *r2) {
   register uint64_t x0 __asm__("x0") = fid, x1 __asm__("x1") = a1, x2 __asm__("x2") = a2, x3 __asm__("x3") = 0;
   __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) :: "memory", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
                    "x12", "x13", "x14", "x15", "x16", "x17");
-  if (r2) *r2 = x2;
+  if (r2) { *r2 = x2; }
   return x0;
 }
 
@@ -62,8 +62,8 @@ static volatile uint32_t *map(uint64_t phys, uint64_t size) {
   return (volatile uint32_t *)ml_io_map_unmappable((vm_offset_t)phys, (vm_size_t)size, 7);
 }
 
-// Writes "bootloader" into the reboot-reason cell and reads it back. 0 = verified.
-static int markBootloader(char *text, unsigned cap) {
+// Writes reboot reason (BR_REBOOT_BOOTLOADER or BR_REBOOT_NORMAL) into the SDAM cell and reads it back. 0 = verified.
+static int markReason(uint8_t reason, char *text, unsigned cap) {
   br_arbiter a = {};
   br_found f = {};
   uint8_t before = 0xff, after = 0xff;
@@ -73,24 +73,28 @@ static int markBootloader(char *text, unsigned cap) {
   a.ee = 0;
   a.core = map(SpmiCore, SpmiCoreSize);
   a.cnfg = map(SpmiCnfg, SpmiCnfgSize);
-  if (!a.core || !a.cnfg) rc = 1;
-  if (!rc && br_find(&a, &f)) rc = 2;
-  if (!rc && f.owner != a.ee) rc = 5;
+  if (!a.core || !a.cnfg) { rc = 1; }
+  if (!rc && br_find(&a, &f)) { rc = 2; }
+  if (!rc && f.owner != a.ee) { rc = 5; }
   if (!rc) {
     obsSize = ((uint64_t)BR_OBS_APID_STRIDE * ((uint64_t)f.apid + 1) + 0xfff) & ~0xfffull;
     chnSize = (uint64_t)BR_CHNL_APID_STRIDE * ((uint64_t)f.apid + 1);
     obs = map(SpmiObsrvr, obsSize);
     chn = map(SpmiChnls, chnSize);
-    if (!obs || !chn) rc = 3;
+    if (!obs || !chn) { rc = 3; }
   }
-  if (!rc) rc = br_set_bootloader(obs, chn, &a, f.apid, &before, &after);
+  if (!rc) { rc = br_set_reason(obs, chn, &a, f.apid, reason, &before, &after); }
   snprintf(text, cap, "spmi v%08x apids=%u apid=%d owner=%d cell %02x -> %02x rc=%d", a.core ? f.version : 0, a.core ? f.apids : 0,
            f.apid, f.owner, before, after, rc);
-  if (a.core) ml_io_unmap((vm_offset_t)a.core, SpmiCoreSize);
-  if (a.cnfg) ml_io_unmap((vm_offset_t)a.cnfg, SpmiCnfgSize);
-  if (obs) ml_io_unmap((vm_offset_t)obs, (vm_size_t)obsSize);
-  if (chn) ml_io_unmap((vm_offset_t)chn, (vm_size_t)chnSize);
+  if (a.core) { ml_io_unmap((vm_offset_t)a.core, SpmiCoreSize); }
+  if (a.cnfg) { ml_io_unmap((vm_offset_t)a.cnfg, SpmiCnfgSize); }
+  if (obs) { ml_io_unmap((vm_offset_t)obs, (vm_size_t)obsSize); }
+  if (chn) { ml_io_unmap((vm_offset_t)chn, (vm_size_t)chnSize); }
   return rc;
+}
+
+static int markBootloader(char *text, unsigned cap) {
+  return markReason(BR_REBOOT_BOOTLOADER, text, cap);
 }
 
 static uint32_t gDeadline, gAfterSpringBoard, gPanicHold = 2, pong_reset_warm = 1, gSampleSeconds, gTraceSeconds, gTraceDelay = 20;
@@ -101,8 +105,12 @@ static uint32_t gDeadline, gAfterSpringBoard, gPanicHold = 2, pong_reset_warm = 
 // IOLog, no klog, no display registers). The DRAM ramoops survives the warm reset for RamoopsDump. pong_autoreset_guard=<s> (0 off).
 static volatile uint64_t gPingerEnd;   // hardware CNTVCT_EL0 tick at which the pinger leaves its loop
 static volatile uint64_t gBootCounter;
+static volatile uint64_t gResetStartedTick;
 static volatile bool gWatchdogPinging;
 static volatile bool gResetting;
+static volatile bool gExternalResetStarted;
+static volatile bool gExtendedByDbg;
+static IOLock *gLeaseLock;
 static uint32_t gGuardGrace = 20;
 static char gSampleProc[32] = "backboardd";
 static volatile uint32_t gPings;
@@ -122,14 +130,17 @@ static uint64_t counterTicks() {
 // SYSTEM_RESET2 it is the bite, 1 s from now; nothing pings after this, so it always comes.
 static int64_t gWarmReset = -99;
 static void resetNow() {
-  if (gWarmReset == -99) gWarmReset = (int64_t)smc2(PsciFeatures, PsciSystemReset2, 0, nullptr);
-  if (gWarmReset == 0 && pong_reset_warm) smc2(PsciSystemReset2, 0, 0, nullptr);   // returns only if refused
+  if (gWarmReset == -99) { gWarmReset = (int64_t)smc2(PsciFeatures, PsciSystemReset2, 0, nullptr); }
+  if (gWarmReset == 0 && pong_reset_warm) { smc2(PsciSystemReset2, 0, 0, nullptr); }   // returns only if refused
   smc2(GunyahWdtControl, GunyahWdtDisable, 0, nullptr);
   smc2(GunyahWdtSetTime, GunyahWdtSoonMs, GunyahWdtSoonMs, nullptr);
   smc2(GunyahWdtControl, GunyahWdtEnable, 0, nullptr);
 }
 static void panicReset() {
-  if (pong_klog_flush) pong_klog_flush(2);
+  __atomic_store_n(&gExternalResetStarted, true, __ATOMIC_RELEASE);
+  __atomic_store_n(&gResetStartedTick, counterTicks(), __ATOMIC_RELEASE);
+  __atomic_store_n(&gResetting, true, __ATOMIC_RELEASE);
+  if (pong_klog_flush) { pong_klog_flush(2); }
   const uint64_t f = counterFrequency(), t = counterTicks();
   while (counterTicks() - t < gPanicHold * f) {}
   resetNow();
@@ -137,7 +148,7 @@ static void panicReset() {
 static int findSpringBoard(struct proc *p, void *found) {
   char name[32] = {};
   proc_name(proc_pid(p), name, sizeof(name));
-  if (!memcmp(name, "SpringBoard", sizeof("SpringBoard"))) *(bool *)found = true;
+  if (!memcmp(name, "SpringBoard", sizeof("SpringBoard"))) { *(bool *)found = true; }
   return 0;   // PROC_RETURNED
 }
 static bool springBoardRunning() {
@@ -148,34 +159,78 @@ static bool springBoardRunning() {
 /* Safe to call from ArmCpu's masked platform-sleep tick: mach_absolute_time() pauses across IOPMrootDomain
  * sleep, so all autoreset deadlines use real wall-clock CNTVCT_EL0 ticks. */
 static void ping_from_sleep() {
-  if (!__atomic_load_n(&gWatchdogPinging, __ATOMIC_ACQUIRE) || __atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) return;
+  if (!__atomic_load_n(&gWatchdogPinging, __ATOMIC_ACQUIRE) || __atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) { return; }
   const uint64_t end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
-  if (end && counterTicks() >= end) return;
+  if (end && counterTicks() >= end) { return; }
   smc2(GunyahWdtPing, 0, 0, nullptr);
   gPings = gPings + 1;
 }
 static bool deadline_due_soon(uint32_t margin_s) {
-  if (!__atomic_load_n(&gWatchdogPinging, __ATOMIC_ACQUIRE) || __atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) return false;
+  if (!__atomic_load_n(&gWatchdogPinging, __ATOMIC_ACQUIRE) || __atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) { return false; }
   const uint64_t end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
-  if (!end) return false;
+  if (!end) { return false; }
   const uint64_t now = counterTicks(), margin = (uint64_t)margin_s * counterFrequency();
   return now >= end || (end - now) <= margin;
 }
 
 static void pinger(void *, wait_result_t) {
   const uint64_t f = counterFrequency(), start = gBootCounter ? gBootCounter : counterTicks();
-  uint64_t end = (uint64_t)gDeadline * f;
   bool seen = false, sampled = false, traced = false;
   uint64_t seenAt = 0;
   __atomic_store_n(&gWatchdogPinging, true, __ATOMIC_RELEASE);
-  for (uint64_t now = counterTicks() - start; now < end; now = counterTicks() - start) {
+  for (;;) {
+    if (__atomic_load_n(&gExternalResetStarted, __ATOMIC_ACQUIRE)) {
+      __atomic_store_n(&gWatchdogPinging, false, __ATOMIC_RELEASE);
+      thread_terminate(current_thread());
+      thread_block(THREAD_CONTINUE_NULL);
+      return;
+    }
+    const uint64_t cur = counterTicks();
+    bool expired = false;
+    if (gLeaseLock) {
+      IOLockLock(gLeaseLock);
+      if (__atomic_load_n(&gExternalResetStarted, __ATOMIC_ACQUIRE)) {
+        IOLockUnlock(gLeaseLock);
+        __atomic_store_n(&gWatchdogPinging, false, __ATOMIC_RELEASE);
+        thread_terminate(current_thread());
+        thread_block(THREAD_CONTINUE_NULL);
+        return;
+      }
+      const uint64_t abs_end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
+      if (abs_end && cur >= abs_end) {
+        __atomic_store_n(&gWatchdogPinging, false, __ATOMIC_RELEASE);
+        __atomic_store_n(&gResetStartedTick, cur, __ATOMIC_RELEASE);
+        __atomic_store_n(&gResetting, true, __ATOMIC_RELEASE);
+        expired = true;
+      }
+      IOLockUnlock(gLeaseLock);
+    } else {
+      const uint64_t abs_end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
+      if (abs_end && cur >= abs_end) {
+        __atomic_store_n(&gWatchdogPinging, false, __ATOMIC_RELEASE);
+        __atomic_store_n(&gResetStartedTick, cur, __ATOMIC_RELEASE);
+        __atomic_store_n(&gResetting, true, __ATOMIC_RELEASE);
+        expired = true;
+      }
+    }
+    if (expired) {
+      break;
+    }
+    const uint64_t now = cur >= start ? (cur - start) : 0;
     smc2(GunyahWdtPing, 0, 0, nullptr);
     gPings = gPings + 1;
     if (gAfterSpringBoard && !seen && springBoardRunning()) {
       seen = true;
       seenAt = now;
-      if (now + (uint64_t)gAfterSpringBoard * f < end) end = now + (uint64_t)gAfterSpringBoard * f;
-      __atomic_store_n(&gPingerEnd, start + end, __ATOMIC_RELEASE);
+      if (gLeaseLock) { IOLockLock(gLeaseLock); }
+      if (!__atomic_load_n(&gExtendedByDbg, __ATOMIC_ACQUIRE)) {
+        const uint64_t cur_end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
+        const uint64_t sb_end = cur + (uint64_t)gAfterSpringBoard * f;
+        if (!cur_end || sb_end < cur_end) {
+          __atomic_store_n(&gPingerEnd, sb_end, __ATOMIC_RELEASE);
+        }
+      }
+      if (gLeaseLock) { IOLockUnlock(gLeaseLock); }
       IOLog("PONG_AUTORESET: SpringBoard up at %llus; resetting %us later\n", now / f, gAfterSpringBoard);
     }
     // pong_tsample=<s>: sample pong_tsample_proc's threads for <s> seconds from 20 s after SpringBoard (with the synthetic swipes).
@@ -189,28 +244,36 @@ static void pinger(void *, wait_result_t) {
     }
     IOSleep(1000);
   }
-  __atomic_store_n(&gWatchdogPinging, false, __ATOMIC_RELEASE);
   __atomic_store_n(&gPingerEnd, counterTicks(), __ATOMIC_RELEASE);
   pong_scanout_summary();
   IOLog("PONG_AUTORESET: deadline reached after %u pings; watchdog bites in 1 s\n", gPings);
-  __atomic_store_n(&gResetting, true, __ATOMIC_RELEASE);
   IOSleep(200);
-  if (pong_klog_flush) pong_klog_flush(1);
+  if (pong_klog_flush) { pong_klog_flush(1); }
   resetNow();
 }
 
 static uint32_t gKlogPeriod, gGuardTicks;   // pong_klog_period=<s>: copy the console to the UFS klog every <s> seconds (reason 5)
 static void guard(void *, wait_result_t) {
   const uint64_t f = counterFrequency(), start = gBootCounter ? gBootCounter : counterTicks();
-  const uint64_t grace = (uint64_t)gGuardGrace * f, cap = start + (uint64_t)gDeadline * f + grace;
+  const uint64_t grace = (uint64_t)gGuardGrace * f, fallback_cap = start + (uint64_t)gDeadline * f + grace;
+  const uint64_t reset_hang_cap = 6ULL * f;
   for (;;) {
     IOSleep(1000);
     // Rounds that die without reaching the warm reset (pinger stuck, cold watchdog bite, DRAM console garbled: g152l/o/p)
     // still leave their console this way. Diagnostics only: each copy is ~1 MB of UFS writes.
-    if (gKlogPeriod && pong_klog_flush && ++gGuardTicks % gKlogPeriod == 0 && !gResetting) pong_klog_flush(5);
-    if (__atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) return;   // the pinger is resetting: its watchdog bite (1 s) is on the way
-    const uint64_t now = counterTicks(), end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
-    if ((end && now > end + grace) || now > cap) break;
+    if (gKlogPeriod && pong_klog_flush && ++gGuardTicks % gKlogPeriod == 0 && !__atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) {
+      pong_klog_flush(5);
+    }
+    const uint64_t now = counterTicks();
+    if (__atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) {
+      const uint64_t rstart = __atomic_load_n(&gResetStartedTick, __ATOMIC_ACQUIRE);
+      if (rstart && now > rstart + reset_hang_cap) {
+        break;   // reset owner hung in pong_scanout_summary or pong_klog_flush -> force pure-SMC resetNow()!
+      }
+      continue;
+    }
+    const uint64_t end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
+    if (end ? (now > end + grace) : (now > fallback_cap)) { break; }
   }
   __atomic_store_n(&gResetting, true, __ATOMIC_RELEASE);
   resetNow();   // PSCI SYSTEM_RESET2 (warm, keeps DRAM) and the 1 s watchdog bite behind it
@@ -218,17 +281,18 @@ static void guard(void *, wait_result_t) {
 static int armWatchdog(uint32_t deadline, char *text, unsigned cap) {
   uint64_t since = 0;
   const int64_t status = (int64_t)smc2(GunyahWdtStatus, 0, 0, &since);
-  if (status != 0) {snprintf(text, cap, "watchdog status %lld, not armed", (long long)status); return 1;}
+  if (status != 0) { snprintf(text, cap, "watchdog status %lld, not armed", (long long)status); return 1; }
   smc2(GunyahWdtControl, GunyahWdtDisable, 0, nullptr);
   const int64_t set = (int64_t)smc2(GunyahWdtSetTime, GunyahWdtTimeoutMs, GunyahWdtTimeoutMs, nullptr);
-  if (set) {snprintf(text, cap, "watchdog set-time %lld, not armed", (long long)set); return 2;}
+  if (set) { snprintf(text, cap, "watchdog set-time %lld, not armed", (long long)set); return 2; }
+  if (!gLeaseLock) { gLeaseLock = IOLockAlloc(); }
   gDeadline = deadline;
   gBootCounter = counterTicks();
   __atomic_store_n(&gPingerEnd, gBootCounter + (uint64_t)deadline * counterFrequency(), __ATOMIC_RELEASE);
   thread_t thread;
-  if (kernel_thread_start(pinger, nullptr, &thread) != KERN_SUCCESS) {snprintf(text, cap, "watchdog: no thread"); return 3;}
+  if (kernel_thread_start(pinger, nullptr, &thread) != KERN_SUCCESS) { snprintf(text, cap, "watchdog: no thread"); return 3; }
   thread_deallocate(thread);
-  if (gGuardGrace && kernel_thread_start(guard, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
+  if (gGuardGrace && kernel_thread_start(guard, nullptr, &thread) == KERN_SUCCESS) { thread_deallocate(thread); }
   const int64_t on = (int64_t)smc2(GunyahWdtControl, GunyahWdtEnable, 0, nullptr);
   snprintf(text, cap, "watchdog enable=%lld, pings until %us, bite 60 s later (last ping %llu ms ago)", (long long)on, deadline,
            (unsigned long long)since);
@@ -242,8 +306,10 @@ static int armWatchdog(uint32_t deadline, char *text, unsigned cap) {
 static bool gMarked;
 static void buttonReset() {
   char text[200];
-  if (gResetting) return;
-  gResetting = true;
+  bool expected = false;
+  if (!__atomic_compare_exchange_n(&gResetting, &expected, true, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { return; }
+  __atomic_store_n(&gExternalResetStarted, true, __ATOMIC_RELEASE);
+  __atomic_store_n(&gResetStartedTick, counterTicks(), __ATOMIC_RELEASE);
   if (!gMarked) {   // pong_autoreset=0: the cell was never written; without it the reset boots Android
     gMarked = markBootloader(text, sizeof(text)) == 0;
     IOLog("PONG_AUTORESET: mark bootloader (power key): %s\n", text);
@@ -251,7 +317,7 @@ static void buttonReset() {
   IOLog("PONG_AUTORESET: power key held: resetting into fastboot now\n");
   pong_scanout_summary();
   IOSleep(200);
-  if (pong_klog_flush) pong_klog_flush(4);
+  if (pong_klog_flush) { pong_klog_flush(4); }
   resetNow();
 }
 
@@ -262,16 +328,17 @@ enum : uint32_t {DefaultDeadline = 300};
 static void start(void) {
   uint32_t deadline = DefaultDeadline;
   char text[200];
-  if (&pong_button_reset_hook) pong_button_reset_hook = buttonReset;
+  if (!gLeaseLock) { gLeaseLock = IOLockAlloc(); }
+  if (&pong_button_reset_hook) { pong_button_reset_hook = buttonReset; }
   const bool given = PE_parse_boot_argn("pong_autoreset", &deadline, sizeof(deadline));
   if (!deadline) {
     IOLog("PONG_AUTORESET: off (pong_autoreset=0); power key held %s still resets\n", &pong_button_reset_hook ? "3 s" : "(no hook in this kernel)");
     return;
   }
-  if (!given) IOLog("PONG_AUTORESET: no pong_autoreset boot-arg: using the default %us\n", deadline);
+  if (!given) { IOLog("PONG_AUTORESET: no pong_autoreset boot-arg: using the default %us\n", deadline); }
   int rc = markBootloader(text, sizeof(text));
   IOLog("PONG_AUTORESET: mark bootloader: %s\n", text);
-  if (rc) return;   // without the cell a watchdog reset would boot Android and overwrite the ramoops console
+  if (rc) { return; }   // without the cell a watchdog reset would boot Android and overwrite the ramoops console
   gMarked = true;
   PE_parse_boot_argn("pong_autoreset_sb", &gAfterSpringBoard, sizeof(gAfterSpringBoard));
   PE_parse_boot_argn("pong_panic_hold", &gPanicHold, sizeof(gPanicHold));
@@ -283,8 +350,84 @@ static void start(void) {
   PE_parse_boot_argn("pong_gtrace", &gTraceSeconds, sizeof(gTraceSeconds));
   PE_parse_boot_argn("pong_gtrace_delay", &gTraceDelay, sizeof(gTraceDelay));
   gWarmReset = (int64_t)smc2(PsciFeatures, PsciSystemReset2, 0, nullptr);
-  if (armWatchdog(deadline, text, sizeof(text)) == 0) pong_panic_reset_hook = panicReset;
+  if (armWatchdog(deadline, text, sizeof(text)) == 0) { pong_panic_reset_hook = panicReset; }
   IOLog("PONG_AUTORESET: %s; after SpringBoard %us, panic reset after %us; PSCI SYSTEM_RESET2 %s (%lld), warm reset %s\n", text,
         gAfterSpringBoard, gPanicHold, gWarmReset == 0 ? "supported" : "absent", (long long)gWarmReset, pong_reset_warm ? "on" : "off");
+}
+
+static int32_t remainingSeconds(uint32_t *pings_out) {
+  if (pings_out) { *pings_out = gPings; }
+  if (!__atomic_load_n(&gWatchdogPinging, __ATOMIC_ACQUIRE) || __atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) {
+    return -1;
+  }
+  const uint64_t end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE), now = counterTicks(), f = counterFrequency();
+  if (!end || now >= end) { return 0; }
+  const uint64_t rem = (end - now) / f;
+  return rem > 0x7fffffffULL ? 0x7fffffff : static_cast<int32_t>(rem);
+}
+
+static int32_t extendLease(uint32_t lease_s, bool exact) {
+  if (!gLeaseLock) {
+    return -1;
+  }
+  if (lease_s < 30u) { lease_s = 30u; }
+  if (lease_s > 3600u) { lease_s = 3600u; }
+  IOLockLock(gLeaseLock);
+  if (!__atomic_load_n(&gWatchdogPinging, __ATOMIC_ACQUIRE) ||
+      __atomic_load_n(&gResetting, __ATOMIC_ACQUIRE) ||
+      __atomic_load_n(&gExternalResetStarted, __ATOMIC_ACQUIRE)) {
+    IOLockUnlock(gLeaseLock);
+    return -1;
+  }
+  const uint64_t f = counterFrequency(), now = counterTicks(), want = now + uint64_t(lease_s) * f;
+  const uint64_t cur = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
+  if (cur && now >= cur) {
+    IOLockUnlock(gLeaseLock);
+    return -1;
+  }
+  const uint64_t next = (exact || want > cur) ? want : cur;
+  __atomic_store_n(&gExtendedByDbg, true, __ATOMIC_RELEASE);
+  __atomic_store_n(&gPingerEnd, next, __ATOMIC_RELEASE);
+  IOLockUnlock(gLeaseLock);
+  return next > now ? static_cast<int32_t>((next - now) / f) : 0;
+}
+
+static void remoteRebootWorker(void *arg, wait_result_t) {
+  const bool to_android = reinterpret_cast<uintptr_t>(arg) == 1u;
+  char text[200];
+  /* Write target SDAM reboot reason immediately (< 0.5 ms) BEFORE sleeping! */
+  const uint8_t reason = to_android ? BR_REBOOT_NORMAL : BR_REBOOT_BOOTLOADER;
+  const int rc = markReason(reason, text, sizeof(text));
+  IOLog("PONG_AUTORESET: remote reboot target=%s (%s)\n", to_android ? "android" : "fastboot", text);
+  (void)rc;
+  IOSleep(250);   // let HTTP 200 JSON flush to client socket before warm reset
+  __atomic_store_n(&gResetStartedTick, counterTicks(), __ATOMIC_RELEASE);
+  pong_scanout_summary();
+  IOSleep(80);
+  if (pong_klog_flush) { pong_klog_flush(1); }
+  resetNow();
+  thread_terminate(current_thread());
+  thread_block(THREAD_CONTINUE_NULL);
+}
+
+static int triggerRemoteReboot(bool to_android) {
+  if (gLeaseLock) { IOLockLock(gLeaseLock); }
+  bool expected = false;
+  if (!__atomic_compare_exchange_n(&gResetting, &expected, true, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    if (gLeaseLock) { IOLockUnlock(gLeaseLock); }
+    return -1;
+  }
+  __atomic_store_n(&gExternalResetStarted, true, __ATOMIC_RELEASE);
+  __atomic_store_n(&gResetStartedTick, counterTicks(), __ATOMIC_RELEASE);
+  if (gLeaseLock) { IOLockUnlock(gLeaseLock); }
+  thread_t th = THREAD_NULL;
+  void *arg = reinterpret_cast<void *>(static_cast<uintptr_t>(to_android ? 1u : 0u));
+  if (kernel_thread_start(remoteRebootWorker, arg, &th) != KERN_SUCCESS) {
+    __atomic_store_n(&gExternalResetStarted, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&gResetting, false, __ATOMIC_RELEASE);
+    return -2;
+  }
+  thread_deallocate(th);
+  return 0;
 }
 }  // namespace pong_boot_reset

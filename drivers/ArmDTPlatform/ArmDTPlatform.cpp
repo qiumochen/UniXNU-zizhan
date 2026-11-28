@@ -33,6 +33,7 @@
 #include "ZizhanPowerAudit.h"
 #include "ZizhanDisplayPowerService.h"
 #include "ZizhanSleep.h"
+#include "ZizhanDebugBridge.h"
 
 extern "C" bool pong_cpu_start(IOService *platform);
 
@@ -291,6 +292,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   zizhan_cpu_offline::start();  // daily default: CPU 2..7 offline while the display is off (zizhan_cpu_offline=0 disables)
   zizhan_sleep::start(provider); // POWER-02: IOPMrootDomain platform sleep (zizhan_sleep=1 / platform-sleep=1)
   zizhan_outer_probe::start();
+  zizhan_debug_bridge::start();
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack
 #endif

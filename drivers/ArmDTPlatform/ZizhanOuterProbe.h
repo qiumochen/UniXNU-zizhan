@@ -396,17 +396,32 @@ static volatile uint8_t *map_once(uint64_t base, uint64_t bytes, IOOptionBits ca
 static uint32_t ir(uint32_t at) { const uint32_t v = *reinterpret_cast<volatile uint32_t *>(intf_va + at); __asm__ volatile("dmb oshld" ::: "memory"); return v; }
 static void iw(uint32_t at, uint32_t v) { *reinterpret_cast<volatile uint32_t *>(intf_va + at) = v; __asm__ volatile("dsb sy" ::: "memory"); }
 static bool ensure_dsi1_ready();
+static IOLock *fb_dram_lock;
+static bool ensure_fb_dram_only() {
+  if (__atomic_load_n(&fb_va, __ATOMIC_ACQUIRE) != nullptr) { return true; }
+  if (!fb_dram_lock) { return false; }
+  IOLockLock(fb_dram_lock);
+  if (__atomic_load_n(&fb_va, __ATOMIC_RELAXED) == nullptr) {
+    const uint64_t base = 0xb8fc9900ull, page = base & ~0xfffull, skew = base - page;
+    volatile uint8_t *mapped = map_once(page, ((skew + 2520ull * 4320) + 0xfff) & ~0xfffull,
+                                        kIOMapWriteCombineCache, &fb_map);
+    __atomic_store_n(&fb_va, mapped, __ATOMIC_RELEASE);
+  }
+  const bool ok = (__atomic_load_n(&fb_va, __ATOMIC_RELAXED) != nullptr);
+  IOLockUnlock(fb_dram_lock);
+  return ok;
+}
 static bool init() {
   if (ready) { return true; }
   if (!ensure_dsi1_ready()) { return false; }
-  const uint64_t base = 0xb8fc9900ull, page = base & ~0xfffull, skew = base - page;
+  const uint64_t base = 0xb8fc9900ull;
   {
     Rw mdss;
     if (!mdss.open(0xae00000, 0x84000, kIOMapInhibitCache)) { return false; }
     if (mdss.r(0x9000 + 0x14) != uint32_t(base)) { IOLog("ZIZHAN_OUTER_FOLD: SKIP vig2 not on the outer buffer\n"); return false; }
   }
-  fb_va = map_once(page, ((skew + 2520ull * 4320) + 0xfff) & ~0xfffull, kIOMapWriteCombineCache, &fb_map);
-  intf_va = map_once(0xae37000, 0x1000, kIOMapInhibitCache, &intf_map);
+  (void)ensure_fb_dram_only();
+  if (!intf_va) { intf_va = map_once(0xae37000, 0x1000, kIOMapInhibitCache, &intf_map); }
   ready = fb_va && intf_va;
   return ready;
 }
@@ -1288,6 +1303,16 @@ extern "C" void zizhan_outer_fold_show(int closed) {
 }
 
 #if XNU_PONG_WIFI || XNU_PONG_POWER
+struct OuterInjEvent {
+  uint8_t opcode;
+  uint32_t px;
+  uint32_t py;
+};
+enum : unsigned { kOuterInjCap = 32 };
+static IOLock *outer_inj_lock;
+static OuterInjEvent outer_inj_ring[kOuterInjCap];
+static uint32_t outer_inj_head, outer_inj_tail;
+static volatile uint32_t outer_touch_live_up;
 static uint32_t outer_touch_synth;
 static void outer_touch_worker(void *, wait_result_t) {
   thread_set_thread_name(current_thread(), "zizhan_outer_touch");
@@ -1581,6 +1606,7 @@ static void outer_touch_worker(void *, wait_result_t) {
     const uint64_t up_ms = fold::mono_ms();
     bool synth_done = false;
     unsigned synth_stage = 0;
+    __atomic_store_n(&outer_touch_live_up, 1u, __ATOMIC_RELEASE);
     while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) {
       if (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 0u ||
           __atomic_load_n(&fold::system_asleep, __ATOMIC_ACQUIRE) != 0u) {
@@ -1600,6 +1626,27 @@ static void outer_touch_worker(void *, wait_result_t) {
           const uint64_t ev_ms = fold::mono_ms();
           const auto sr = zizhan_outer_touch::step(tracker, &r2[2], cur_map_mode(), ev_ms, toggle_ok, pocket_now());
           dispatch_step(sr);
+        }
+      }
+      if (outer_inj_lock) {
+        OuterInjEvent ev{};
+        for (unsigned drained = 0; drained < 16u; ++drained) {
+          bool have = false;
+          IOLockLock(outer_inj_lock);
+          if (outer_inj_head != outer_inj_tail) {
+            ev = outer_inj_ring[outer_inj_head % kOuterInjCap];
+            ++outer_inj_head;
+            have = true;
+          }
+          IOLockUnlock(outer_inj_lock);
+          if (!have) { break; }
+          const uint32_t px = ev.px < zizhan_outer_touch::kPanelW ? ev.px : (zizhan_outer_touch::kPanelW - 1u);
+          const uint32_t py = ev.py < zizhan_outer_touch::kPanelH ? ev.py : (zizhan_outer_touch::kPanelH - 1u);
+          const uint32_t rx = uint32_t((uint64_t(px) * tracker.max_x) / zizhan_outer_touch::kPanelW);
+          const uint32_t ry = uint32_t((uint64_t(py) * tracker.max_y) / zizhan_outer_touch::kPanelH);
+          uint8_t raw[8];
+          encode_pt(ev.opcode, rx, ry, raw);
+          dispatch_step(zizhan_outer_touch::step(tracker, raw, cur_map_mode(), fold::mono_ms(), toggle_ok, false));
         }
       }
       const uint64_t elapsed_ms = fold::mono_ms() - up_ms;
@@ -1824,6 +1871,7 @@ static void outer_touch_worker(void *, wait_result_t) {
       }
       IOSleep(8);
     }
+    __atomic_store_n(&outer_touch_live_up, 0u, __ATOMIC_RELEASE);
     zizhan_outer_touch::StepResult rel{};
     zizhan_outer_touch::release_all(tracker, rel);
     for (uint8_t k = 0; k < rel.count; ++k) {
@@ -1894,6 +1942,9 @@ static void start() {
   if (!fold::power_lock) {
     fold::power_lock = IOLockAlloc();
   }
+  if (!fold::fb_dram_lock) {
+    fold::fb_dram_lock = IOLockAlloc();
+  }
   uint32_t opwr = 0;
   if (zizhan_daily::arg("zizhan_outer_power", &opwr, zizhan_daily::kOuterPower)) {
     fold::outer_power_en = (have_probe ? 0u : (opwr ? 1u : 0u));
@@ -1952,6 +2003,9 @@ static void start() {
           fold::direct_desktop_on_fold, fold::clock_hold_s, fold::outer_power_en);
   }
 #if XNU_PONG_WIFI || XNU_PONG_POWER
+  if (!outer_inj_lock) {
+    outer_inj_lock = IOLockAlloc();
+  }
   uint32_t touch_on = 0;
   if ((!have_probe || mode < 4u) &&
       zizhan_daily::arg("zizhan_outer_touch", &touch_on, zizhan_daily::kOuterTouch) && touch_on == 1u) {
@@ -1970,3 +2024,47 @@ static void start() {
   IOLog("ZIZHAN_OUTER_PROBE: RUNNING mode=%u readonly=%u\n", mode, (mode == 1 || mode == 3) ? 1u : 0u);
 }
 } // namespace zizhan_outer_probe
+
+extern "C" uint32_t zizhan_outer_fb_snapshot(const volatile uint8_t **va_out, uint32_t *w_out,
+                                             uint32_t *h_out, uint32_t *stride_out, uint32_t *view_out) {
+  const uint32_t view = __atomic_load_n(&zizhan_outer_probe::fold::active_view, __ATOMIC_ACQUIRE);
+  if (view_out) { *view_out = view; }
+  if (w_out) { *w_out = 1080u; }
+  if (h_out) { *h_out = 2520u; }
+  if (stride_out) { *stride_out = 4320u; }
+  if (!va_out) {
+    return view ? view : 1u;
+  }
+  const bool ok = zizhan_outer_probe::fold::ensure_fb_dram_only();
+  const volatile uint8_t *fv = __atomic_load_n(&zizhan_outer_probe::fold::fb_va, __ATOMIC_ACQUIRE);
+  const volatile uint8_t *base = (ok && fv) ? (fv + (0xb8fc9900ull & 0xfffull)) : nullptr;
+  *va_out = base;
+  return base ? (view ? view : 1u) : 0u;
+}
+
+extern "C" int zizhan_outer_inject_touch(uint8_t opcode, uint32_t px, uint32_t py) {
+#if XNU_PONG_WIFI || XNU_PONG_POWER
+  if (!__atomic_load_n(&zizhan_outer_probe::fold::lid_closed, __ATOMIC_ACQUIRE) ||
+      !__atomic_load_n(&zizhan_outer_probe::outer_touch_live_up, __ATOMIC_ACQUIRE) ||
+      __atomic_load_n(&zizhan_outer_probe::fold::active_view, __ATOMIC_ACQUIRE) == 0u ||
+      !zizhan_outer_probe::outer_inj_lock) {
+    return EAGAIN;
+  }
+  int rc = 0;
+  IOLockLock(zizhan_outer_probe::outer_inj_lock);
+  if (zizhan_outer_probe::outer_inj_tail - zizhan_outer_probe::outer_inj_head >= zizhan_outer_probe::kOuterInjCap) {
+    rc = ENOBUFS;
+  } else {
+    zizhan_outer_probe::outer_inj_ring[zizhan_outer_probe::outer_inj_tail % zizhan_outer_probe::kOuterInjCap] =
+        {opcode, px, py};
+    ++zizhan_outer_probe::outer_inj_tail;
+  }
+  IOLockUnlock(zizhan_outer_probe::outer_inj_lock);
+  return rc;
+#else
+  (void)opcode;
+  (void)px;
+  (void)py;
+  return ENXIO;
+#endif
+}

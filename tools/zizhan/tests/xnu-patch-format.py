@@ -11,6 +11,7 @@ PATCH_0045 = Path(__file__).resolve().parents[3] / "patches/xnu-ipados18/0045-zi
 PATCH_0046 = Path(__file__).resolve().parents[3] / "patches/xnu-ipados18/0046-zizhan-platform-sleep.patch"
 PATCH_0047 = Path(__file__).resolve().parents[3] / "patches/xnu-ipados18/0047-zizhan-app-inject-and-cam-sysctl.patch"
 PATCH_0048 = Path(__file__).resolve().parents[3] / "patches/xnu-ipados18/0048-zizhan-cover-power-key.patch"
+PATCH_0049 = Path(__file__).resolve().parents[3] / "patches/xnu-ipados18/0049-zizhan-live-debug-bridge.patch"
 
 
 class XnuPatchFormatTests(unittest.TestCase):
@@ -148,6 +149,34 @@ class XnuPatchFormatTests(unittest.TestCase):
                 p.write_text(content)
             for flags in (["--check"], [], ["--reverse", "--check"], ["--reverse"]):
                 subprocess.run(["git", "apply", *flags, str(PATCH_0048)], cwd=td, check=True,
+                               capture_output=True, timeout=10)
+            for rel, content in originals.items():
+                self.assertEqual((Path(td) / rel).read_text(), content)
+
+    def test_live_debug_bridge_patch_roundtrip(self):
+        text = PATCH_0049.read_text()
+        files = {}
+        cur = None
+        for line in text.splitlines():
+            if line.startswith("--- a/"):
+                cur = line[6:]
+                files[cur] = []
+            elif line.startswith("+++ b/"):
+                continue
+            elif line.startswith("@@ ") and cur:
+                start = int(re.match(r"@@ -(\d+)", line)[1])
+                while len(files[cur]) < start - 1:
+                    files[cur].append(f"/* unused context {len(files[cur])} */")
+            elif cur and line.startswith((" ", "-")):
+                files[cur].append(line[1:])
+        originals = {rel: "\n".join(src) + "\n" for rel, src in files.items()}
+        with tempfile.TemporaryDirectory(prefix="zizhan-dbg-patch-") as td:
+            for rel, content in originals.items():
+                p = Path(td) / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(content)
+            for flags in (["--check"], [], ["--reverse", "--check"], ["--reverse"]):
+                subprocess.run(["git", "apply", *flags, str(PATCH_0049)], cwd=td, check=True,
                                capture_output=True, timeout=10)
             for rel, content in originals.items():
                 self.assertEqual((Path(td) / rel).read_text(), content)

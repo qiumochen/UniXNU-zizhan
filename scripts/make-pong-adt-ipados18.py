@@ -280,10 +280,12 @@ def main():
         name,_,path=spec.partition('=')
         # zizhan-boot-args: boot-args beyond DarwinBoot's 1024-byte command line (XNU patch 0035, pexpert/arm/pe_bootargs.c)
         # zizhan-sensors-fs: the sensor DSP's apps_std files (tools/zizhan/mac/sensors-fs-pack.py, drivers/PongPower/ZizhanSlpiStd.h)
-        if not (name.startswith('zizhan-bt-') or name in ('zizhan-boot-args','zizhan-sensors-fs')) or not path:
-            parser.error('--chosen-blob needs zizhan-bt-NAME=PATH, zizhan-boot-args=PATH or zizhan-sensors-fs=PATH')
+        # zizhan-dbg-token: private LAN debug bearer token (XNU patch 0049, never exposed in kern.bootargs/IOLog)
+        if not (name.startswith('zizhan-bt-') or name in ('zizhan-boot-args','zizhan-sensors-fs','zizhan-dbg-token')) or not path:
+            parser.error('--chosen-blob needs zizhan-bt-NAME=PATH, zizhan-boot-args=PATH, zizhan-sensors-fs=PATH or zizhan-dbg-token=PATH')
         data=Path(path).read_bytes()
-        if not data or len(data)>(1024*1024 if name=='zizhan-sensors-fs' else 256*1024):parser.error('--chosen-blob size out of range: '+name)
+        max_blob = 1024*1024 if name=='zizhan-sensors-fs' else (256 if name=='zizhan-dbg-token' else 256*1024)
+        if not data or len(data)>max_blob:parser.error('--chosen-blob size out of range: '+name)
         chosen.append((name,data))
     bt_nodes=[]
     if args.bt_node:

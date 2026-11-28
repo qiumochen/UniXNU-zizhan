@@ -33,33 +33,44 @@
 ### 1.4 M3 启动菜单标题更新（`scripts/build-ipados18-bootimg-local.py`）
 - 当 `--identity` 为 `ipad*` 时，将 UniXNU/DarwinBoot 启动菜单项标题从 `"Pong iOS 18 - iPhone 16 Pro"` 更新为 **`"iPadOS 18 (zizhan)"`**。
 
+### 1.5 `DBG-01`：免重启局域网实时调试桥、双屏高清截图、Web 远程控制台与 UI 热重载（默认关闭，`zizhan_debugd=1` 按需开启）
+- **内核无锁日志流与双面板实时帧缓冲快照**（`patches/xnu-ipados18/0049-zizhan-live-debug-bridge.patch`、`drivers/ArmDTPlatform/ZizhanDebugBridge.h`、`drivers/ArmDTPlatform/ZizhanOuterProbe.h`、`drivers/PongAdreno/PongAdrenoScanout.cpp`）：
+  - 在 `pong_ramoops_console.h` 新增原子单调 64 位字节游标 `pong_ramoops_total` 与无锁 `pong_ramoops_read_console` / `pong_ramoops_read_pmsg`（不争抢 `pong_ramoops_busy`），经 `kern.zizhan_dbg_klog` 毫秒级增量拉取 console 与诊断区日志；在 `osfmk/kern/thread.c` 新增可重复触发的 `pong_thread_sampler_trigger`（`pong_ts_active` 原子 CAS + 采样表清零）。
+  - `kern.zizhan_dbg_fb` 支持内屏（`2160×1916`，经 `pong_scanout_cover_snapshot` 无锁序列快照）与外屏（`1080×2520`，经 `fb_dram_lock` 串行化的纯 DRAM `0xb8fc9900` 只读映射，展开态绝不触碰已断电 `DSI1`/`DISP_CC` MMIO）`1x/2x/4x` 盒式滤波实时截图。
+- **动态看门狗续租、远程干净重启与触控/霍尔开合注入**（`drivers/ArmDTPlatform/BootResetCore.h`、`PongBootReset.h`、`ZizhanHallProbe.h`）：
+  - 保留开机 `pong_autoreset` 硬件防变砖底线，同时支持 `extendLease`（`gLeaseLock` 保护）动态续租看门狗窗口，以及通过 PMIC SDAM `0x48` 单元远程切换 `reboot fastboot`（`BR_REBOOT_BOOTLOADER = 2`）与 `reboot android`（`BR_REBOOT_NORMAL = 0`），并在 `guard()` 保留 6 秒纯 SMC 挂死硬兜底。
+  - 支持专用第 8 指内屏触控/滑动、外屏触控/滑动、电源/音量/Home 键及 `zizhan_hall_set_override(-1|0|1)` 远程模拟开合盖。
+- **`backboardd` 内置守护服务（`:8089`）、零依赖 Web 远程控制台、`zctl.py` 与安全 5 秒试用 UI 热重载**（`userland/zizhan-debug-proto.h`、`userland/zizhan-debugd18.h`、`userland/ui_compat18.c`、`tools/zizhan/mac/zctl.py`）：
+  - 默认严格关闭（`DEBUGD=0` / `ARM_DEBUGD=0`）；显式传入 `zizhan_debugd=1` 时自动通过 ADT `/chosen/zizhan-dbg-token` 注入 256-bit 随机令牌（永不写入 `boot-args` 或日志，常量时间比对；`zizhan_dbg_notoken=1` 强制仅绑 `127.0.0.1`），内核 `stage_ui`/`token`/`fb`/`klog` 严格仅对 `uid=0`（`backboardd`）放行，`uid=501` `MNT_ROOTFS` `SpringBoard` 仅允许发送 `HOT_UI` `CONFIRM`/`QUERY`，无人值守态封闭拦截一切音频/马达/闪光灯 `sysctl` 写入。
+  - `kern.zizhan_dbg_stage_ui` 先 `unlink1(..., VNODE_REMOVE_NOFOLLOW_ANY)` 再以 `FWRITE | O_CREAT | O_EXCL` + `VNODE_LOOKUP_NOFOLLOW_ANY` 在非活跃槽位 `/private/var/db/zizhan-hot-ui-{0,1}.dylib` 创建全新 `root:wheel` inode（不原地 `O_TRUNC` 破坏已映射进程或 UBC `cs_blobs`），经 `HOT_UI_ARM` 原子切入 `TRIAL` 态重启 `SpringBoard`（绝不覆盖 `backboardd` 或核心系统守护进程）；5 秒主队列健康确认后晋升 `CONFIRMED`，若未确认崩溃、12 秒主线程卡死或 `<15 s` 异常连崩则自动回退至 `/pong/libpong-ui18.dylib`。
+
 ---
 
 ## 2. 独立上下文代码审查与闭环记录
 
-在首轮实现与双配置内核编译通过后，拉起独立只读子代理对全量 `git diff` 与 XNU 补丁链做了对抗性审查，共检出并当场闭环修复以下问题：
-1. **`CRITICAL-1`（深睡长按 3 秒强制复位失效）**：原 `0046` 在 `keys_thread` 中于按键松开前将 `pdown` 置 `false` 会阻塞 `keys[0].down` 置位；已在 `0048` 中改为在 `look()` 内更新 `k->down = down` 后再按 `swallow_power` 吞掉唤醒边沿，并在 `tools/zizhan/tests/zizhan-sleep.c` 增加连续按住 `>=3000 ms` 的回归断言。
-2. **`CRITICAL-2`（展开内屏 `wori=1/2` 预览旋转反了 `180°`）**：修正 `zizhan_cam_preview_quarter_turns_cw` 为 `wori=1 -> 3`、`wori=2 -> 1`，并在 `tools/zizhan/tests/avcapture18.c` 增加全部四向 `saf * R(turns)` 复合矩阵恒等断言。
-3. **`HIGH-1` & `HIGH-2` & `MEDIUM-1`（合盖内屏静音竞态、`DSI1` 唤醒时钟序与合盖冷启动基线）**：收口为 `ensure_inner_asleep_while_folded()` 与 `draw_after_power()`，确保任何合盖非桌面态先置 `cover_mute(1)`、先唤醒 `DSI1` 后读 `INTF_2` MISR、清零跨睡眠 `cover_power_swallowed_down`、合盖唤醒不拉起内屏 `lightDisplayAfterWake`，并在 `ZizhanHallProbe` 处理合盖冷启动 `Baseline`。
-4. **`HIGH-3` & `MEDIUM-2` & `MEDIUM-3` & `LOW-1`**：补齐 `PongZizhanPreviewLayer18` `setFrame:` 子区域保持、`zizhan_cam_ctl_query` 只读单次 `sysctl` 查询、前后切镜 `sensor_pos` 过滤、AF 后重置 `temporalValid`，以及新增 C/C++ 单行 `if` 花括号规范。
+在首轮实现与双配置内核编译通过后，先后拉起独立只读子代理对 `OUTER-04`/`05`/`CAM-04` 及 `DBG-01` 全量 `git diff` 与 XNU 补丁链做了多轮对抗性审查，检出并全部闭环修复：
+1. **`OUTER-04`/`05` & `CAM-04` 审查闭环**：修复 `0048` 深睡 3 秒长按复位守卫、内屏 `wori=1/2` 预览旋转符号、合盖内屏静音与 `DSI1` 唤醒时钟序、`PongZizhanPreviewLayer18` 子区域保持及前后切镜 `sensor_pos` 过滤。
+2. **`DBG-01` Round 1 审查闭环（13 项）**：修复 `zizhan_dbg_find_sb_cb` `PROC_RETURNED_DONE` 引用泄漏、`PongBootReset` `gLeaseLock`/`gExternalResetStarted`/6s `guard` 竞态、`MNT_ROOTFS` + `vn_getpath` 鉴权、无人值守 `cam_ctrl >= 0x100` 拦截、`package-arm.py` 默认关闭、`pong_thread_sampler_trigger` 可重复触发、Hot-UI `CONFIRM` 时间戳保留与 `NOTE_RESTART`、`IOLockTryLock` + `fb_dram_lock`、`#token=` URL fragment 与 `.zizhan-dbg-host` 测试隔离。
+3. **`DBG-01` Round 2 增量复核闭环（VFS/UBC 与权限最小化）**：移除与 `VNODE_LOOKUP_NOFOLLOW_ANY` 互斥导致 XNU `vn_open_auth` 返回 `EINVAL` 的 `O_NOFOLLOW`；补齐 `vnode_close(..., FWRITE | FWASWRITTEN, ...)` 消除 `v_writecount` 泄漏；改为先 `unlink1(..., VNODE_REMOVE_NOFOLLOW_ANY)` 再 `O_CREAT | O_EXCL` 写入非活跃槽位并在 `HOT_UI_ARM` 时原子切槽（消除原地 `O_TRUNC` 导致的已运行进程页失效与 `ubc_cs_blob_add` `EALREADY`）；收紧 `uid=501` `SpringBoard` 仅可调用 `HOT_UI` `CONFIRM`/`QUERY`；强制 `zizhan_dbg_notoken=1` 永远绑定 `127.0.0.1`；并通过 `CTL_SYSCTL` `OIDFMT` 区分字符串与整型 `sysctl` 写入。
 
 ---
 
 ## 3. 主机侧验证结果与离线待测产物（手机未连接）
 
 - **主机回归套件**：
-  - `python3 tools/zizhan/tests/xnu-patch-format.py`：`6/6 OK`（含 `0048` 正反向 `git apply` 往返校验）。
+  - `python3 tools/zizhan/tests/xnu-patch-format.py`：`7/7 OK`（含 `0048`、`0049` 正反向 `git apply` 往返校验）。
+  - `python3 tools/zizhan/tests/zizhan-debugd.py`：ASan/UBSan 单元与本地 HTTP 守护进程 + `zctl.py` 端到端全链路回归 `PASS`。
   - `python3 tools/zizhan/mac/check-daily-use-host.py`：全套 ASan/UBSan 与 Python 回归 `PASS`。
   - `python3 tools/zizhan/mac/check-display-host.py`：全项 `PASS`。
   - `python3 tools/zizhan/mac/check-wifi-host.py --shared <sheng>/drivers/Ath12kWifi`：`11/11 PASS`。
 - **双配置内核与用户态编译（`JOBS=4`）**：
   - `DEFCONFIG=pong_ipados18_ci_defconfig`：编译链接 `PASS`。
-  - `DEFCONFIG=zizhan_ipados18_gpu_defconfig`（`build-play206`）：编译链接 `PASS`，内核 SHA-256 为 `8c401674031f530d1ac98ac23c181a826fb413d61a7cda12fa6bd3a385408a9b`。
-  - `libpong-ui18.dylib`（`-Wall -Wextra -Werror` + 4K 页签名）：编译 `PASS`，SHA-256 为 `2e792d459da0d11e4e1bbd2844fd8ffdf24d10460576c6d0dc31cc3ba499ffff`；`build-apps.sh` 三款应用编译 `PASS`。
+  - `DEFCONFIG=zizhan_ipados18_gpu_defconfig`（`build-play206`）：编译链接 `PASS`，内核 SHA-256 为 `34c079dec9834e85c93a3d339d4d5d002b93a057c4b1a4afe6d5aa564186a2c0`。
+  - `libpong-ui18.dylib`（`-Wall -Wextra -Werror` + 4K 页签名，保持原有 `LC_LOAD_DYLIB` 不变）：编译 `PASS`，SHA-256 为 `f6d839f17fdd96fd81eb4a853feb6e8353ddb80b4450ec88a6adbbdc88ecdc72`；`build-apps.sh` 三款应用编译 `PASS`。
 - **离线打包与 M3 双启动镜像校验（零设备接触）**：
-  - 静默无人值守镜像 `out/daily-1129`（命令行 `992 B < 1024 B`，菜单标题 `"iPadOS 18 (zizhan)"`）：`51926823163ecc92786e4da09cab0b7b379ca838c508f08e54bd6531fd9bbdfb`。
-  - 在场 10 分钟验收镜像 `out/video-8`（命令行 `992 B < 1024 B`）：`6a2b2aa0d0031be3631b00c1007e79f936f867e95c1bc9a24ac6983fb2961b58`。
-  - M3 独立双启动包 `work/m3-standalone-1129/pong-xnu-aprime.img`（默认项 `Android`，第二项 `"iPadOS 18 (zizhan)"`）：SHA-256 `66dca0358229b0a24a2e2a2929febecc489c48e7fa9b64727bcbc303b5a1bfc3`，通过 `check-m3-standalone.py` 全项与原厂 `boot_b.img.gz` 备份校验（`M3_STANDALONE_PREFLIGHT: PASS, backup_verified: true`）。
+  - 静默无人值守镜像 `out/daily-1129`（命令行 `992 B < 1024 B`，菜单标题 `"iPadOS 18 (zizhan)"`，默认关闭 `debugd`）：`c6fd7eb567e3f952791e17e8d3ffada50ffc98dab70a8821ed5163bc74b74f08`。
+  - 在场 10 分钟验收镜像 `out/video-8`（命令行 `992 B < 1024 B`，含 `zizhan_debugd=1` 与 `/chosen/zizhan-dbg-token`）：`b586aa1916b2b3bf142efab0252eab1ca77aa09f697ef5bfb879ec761d9c1ae5`。
+  - M3 独立双启动包 `work/m3-standalone-1129/pong-xnu-aprime.img`（默认项 `Android`，第二项 `"iPadOS 18 (zizhan)"`）：SHA-256 `ed20335e238d0d4afddfb13bd69c4879b335f3efb1f3251ab688f61e6b5d9a70`，通过 `check-m3-standalone.py` 全项与原厂 `boot_b.img.gz` 备份校验（`M3_STANDALONE_PREFLIGHT: PASS, backup_verified: true`）。
 - **待手机接回后的下一步操作**：
-  1. 将手机通过后置 USB-A 接入 Mac（Android 态），运行 `ZIZHAN_USER_PRESENT=yes bash work/m1-firstsound/run-video-8.sh`（自动执行 `os-trial-edit.py sens-hal-v27-64g --ui --activate` 增量写入 UI 适配器并整盘 SHA-256 回读校验，随后 `fastboot boot` 启动 `out/video-8` 实测 `OUTER-04`、`OUTER-05`、`CAM-04`）。
+  1. 将手机通过后置 USB-A 接入 Mac（Android 态），运行 `ZIZHAN_USER_PRESENT=yes bash work/m1-firstsound/run-video-8.sh`（自动执行 `os-trial-edit.py sens-hal-v27-64g --ui --activate` 增量写入 UI 适配器并整盘 SHA-256 回读校验，随后 `fastboot boot` 启动 `out/video-8` 实测 `OUTER-04`、`OUTER-05`、`CAM-04` 及 `DBG-01` `zctl.py` / `:8089` Web 远程控制台与热重载）。
   2. 在场运行 `ZIZHAN_USER_PRESENT=yes bash work/m3-standalone-1129/run-m3-ram-test.sh` 验证 M3 双启动菜单与直跳 Android/iPadOS。

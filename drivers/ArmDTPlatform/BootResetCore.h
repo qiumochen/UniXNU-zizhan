@@ -21,7 +21,7 @@ enum {
   BR_OP_EXT_WRITEL = 0, BR_OP_EXT_READL = 1,
   BR_STATUS_DONE = 1u << 0, BR_STATUS_ERRORS = 0xeu,      // bits 1..3: failed, denied, dropped
   BR_SDAM_PPID = 0x071, BR_REBOOT_CELL = 0x48,
-  BR_REBOOT_MASK = 0xfe, BR_REBOOT_SHIFT = 1, BR_REBOOT_BOOTLOADER = 2,
+  BR_REBOOT_MASK = 0xfe, BR_REBOOT_SHIFT = 1, BR_REBOOT_NORMAL = 0, BR_REBOOT_BOOTLOADER = 2,
   BR_POLLS = 100000
 };
 struct br_arbiter {
@@ -36,21 +36,21 @@ static inline uint32_t br_cmd(uint8_t op, uint8_t byte_addr, uint8_t bc) {return
 // Version, APID count and the APID that serves the SDAM peripheral for this EE. 0 on success; every refusal has its own code.
 static inline int br_find(const struct br_arbiter *a, struct br_found *f) {
   f->version = a->core[0]; f->apids = a->core[BR_FEATURES / 4] & BR_FEATURES_APIDS_MASK; f->apid = -1; f->owner = -1;
-  if (f->version < BR_VERSION_V7_MIN || f->version >= BR_VERSION_V8_MIN) return 1;   // not the layout this code knows
-  if (!f->apids || f->apids > 1024) return 2;
+  if (f->version < BR_VERSION_V7_MIN || f->version >= BR_VERSION_V8_MIN) { return 1; }   // not the layout this code knows
+  if (!f->apids || f->apids > 1024) { return 2; }
   for (uint32_t i = 0; i < f->apids; ++i) {
     uint32_t map = a->core[(BR_APID_MAP + 4 * i) / 4];
-    if (!map || ((map >> 8) & 0xfff) != BR_SDAM_PPID) continue;
+    if (!map || ((map >> 8) & 0xfff) != BR_SDAM_PPID) { continue; }
     int owner = (int)(a->cnfg[(BR_CNFG_OWNER + 4 * i) / 4] & 7u);
     // As the mainline driver picks it: the first mapping, replaced by one this EE owns.
-    if (f->apid < 0 || owner == a->ee) {f->apid = (int)i; f->owner = owner;}
+    if (f->apid < 0 || owner == a->ee) { f->apid = (int)i; f->owner = owner; }
   }
   return f->apid < 0 ? 3 : 0;
 }
 static inline int br_wait(volatile uint32_t *base) {
   for (unsigned n = 0; n < BR_POLLS; ++n) {
     uint32_t s = base[BR_STATUS / 4];
-    if (s & BR_STATUS_DONE) return (s & BR_STATUS_ERRORS) ? 2 : 0;
+    if (s & BR_STATUS_DONE) { return (s & BR_STATUS_ERRORS) ? 2 : 0; }
   }
   return 1;
 }
@@ -59,7 +59,7 @@ static inline int br_read8(volatile uint32_t *obs, const struct br_arbiter *a, i
   volatile uint32_t *ch = obs + (BR_OBS_EE_STRIDE * a->ee + BR_OBS_APID_STRIDE * (uint32_t)apid) / 4;
   ch[BR_CMD / 4] = br_cmd(BR_OP_EXT_READL, byte_addr, 0);
   int rc = br_wait(ch);
-  if (rc) return rc;
+  if (rc) { return rc; }
   *value = (uint8_t)ch[BR_RDATA0 / 4];
   return 0;
 }
@@ -69,16 +69,21 @@ static inline int br_write8(volatile uint32_t *chn, int apid, uint8_t byte_addr,
   ch[BR_CMD / 4] = br_cmd(BR_OP_EXT_WRITEL, byte_addr, 0);
   return br_wait(ch);
 }
+// Sets the reboot-reason cell (e.g. BR_REBOOT_BOOTLOADER = 2 or BR_REBOOT_NORMAL = 0), leaving bit 0, and reads it back.
+static inline int br_set_reason(volatile uint32_t *obs, volatile uint32_t *chn, const struct br_arbiter *a, int apid,
+                                uint8_t reason, uint8_t *before, uint8_t *after) {
+  int rc = br_read8(obs, a, apid, BR_REBOOT_CELL, before);
+  if (rc) { return 10 + rc; }
+  uint8_t next = (uint8_t)((*before & ~BR_REBOOT_MASK) | ((reason << BR_REBOOT_SHIFT) & BR_REBOOT_MASK));
+  rc = br_write8(chn, apid, BR_REBOOT_CELL, next);
+  if (rc) { return 20 + rc; }
+  rc = br_read8(obs, a, apid, BR_REBOOT_CELL, after);
+  if (rc) { return 30 + rc; }
+  return *after == next ? 0 : 40;
+}
 // Sets the reboot-reason cell to "bootloader", leaving bit 0, and reads it back. 0 = written and verified.
 static inline int br_set_bootloader(volatile uint32_t *obs, volatile uint32_t *chn, const struct br_arbiter *a, int apid, uint8_t *before,
                                     uint8_t *after) {
-  int rc = br_read8(obs, a, apid, BR_REBOOT_CELL, before);
-  if (rc) return 10 + rc;
-  uint8_t next = (uint8_t)((*before & ~BR_REBOOT_MASK) | (BR_REBOOT_BOOTLOADER << BR_REBOOT_SHIFT));
-  rc = br_write8(chn, apid, BR_REBOOT_CELL, next);
-  if (rc) return 20 + rc;
-  rc = br_read8(obs, a, apid, BR_REBOOT_CELL, after);
-  if (rc) return 30 + rc;
-  return *after == next ? 0 : 40;
+  return br_set_reason(obs, chn, a, apid, BR_REBOOT_BOOTLOADER, before, after);
 }
 #endif

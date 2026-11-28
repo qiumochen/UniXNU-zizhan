@@ -1426,6 +1426,18 @@ extern "C" uint32_t pong_scanout_cover_snapshot(const uint8_t **va_out, uint64_t
             return s0 >> 1;
         }
     }
+    if (dbPoolMapping && mode.width && mode.height && mode.stride >= mode.width * 4 &&
+        uint64_t(mode.stride) * uint64_t(mode.height) <= dbPoolBytes) {
+        const uint8_t *va = reinterpret_cast<const uint8_t *>(dbPoolMapping->getVirtualAddress());
+        if (va) {
+            if (va_out) { *va_out = va; }
+            if (phys_out) { *phys_out = dbN ? db[0].phys : 0ull; }
+            if (w_out) { *w_out = uint32_t(mode.width); }
+            if (h_out) { *h_out = uint32_t(mode.height); }
+            if (stride_out) { *stride_out = uint32_t(mode.stride); }
+            return 1u;
+        }
+    }
     return 0;
 }
 extern "C" void pong_scanout_set_tag(uint32_t tag) { zcTag = tag; }

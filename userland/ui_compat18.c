@@ -42,6 +42,7 @@
 #include "zizhan-scene-orient18.h"
 #include "zizhan-cllocation18.h"
 #include "zizhan-ipa-install18.h"
+#include "zizhan-debugd18.h"
 
 static bool software_composition;
 static bool scanout_format;
@@ -1789,7 +1790,8 @@ static void open_pane(void *unused)
  * URL opens Safari, so an unattended round can load a real page without
  * tapping a home-screen icon whose position it would otherwise have to guess.
  * The value cannot contain spaces (boot arguments are space separated). */
-static char pending_open_url[192];
+static char pending_open_url[256];
+static unsigned pending_bundle_retries;
 /* App launch must start on SpringBoard's main run loop: the same calls made
  * from a global queue returned 0 in the v14 device round, while pong_url's
  * prefs: URL (handled inside SpringBoard) still worked there. */
@@ -1812,13 +1814,12 @@ static void open_url_on_main(void *unused)
             if(sb && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(sb,sel_registerName("respondsToSelector:"),sLaunch))
                 ok=((BOOL(*)(id,SEL,id,BOOL))objc_msgSend)(sb,sLaunch,(id)identifier,NO);
         }
-        static unsigned bundle_retries;
-        if(!ok && bundle_retries<2) {
-            bundle_retries++;
+        if(!ok && pending_bundle_retries<2) {
+            pending_bundle_retries++;
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,6*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,open_url_on_main);
         }
         fprintf(stderr,"Pong UI18: open-bundle %s returned=%d retry=%u (workspace %d)\n",
-            pending_open_url+7,(int)ok,bundle_retries,ws!=nil);
+            pending_open_url+7,(int)ok,pending_bundle_retries,ws!=nil);
         if(identifier)CFRelease(identifier);
         return;
     }
@@ -1855,7 +1856,57 @@ static void open_url_on_main(void *unused)
 static void open_pending_url(void *unused)
 {
     (void)unused;
+    pending_bundle_retries=0;
     dispatch_async_f(dispatch_get_main_queue(),NULL,open_url_on_main);
+}
+
+static bool zizhan_boot_uint_nonzero(const char *key_eq)
+{
+    char vbuf[24]={0};
+    if(!boot_value(key_eq,vbuf,sizeof(vbuf)) || !vbuf[0]) {
+        return false;
+    }
+    char *end=NULL;
+    unsigned long long v=strtoull(vbuf,&end,0);
+    return end!=vbuf && *end=='\0' && v!=0ull;
+}
+
+static void zizhan_debugd_sb_handle_cmd(void)
+{
+    int dfd=open(ZIZHAN_DBG_CMD_DIR,O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
+    if(dfd<0) {
+        return;
+    }
+    int fd=openat(dfd,ZIZHAN_DBG_CMD_NAME,O_RDONLY|O_NOFOLLOW);
+    if(fd<0) {
+        close(dfd);
+        return;
+    }
+    char cmd[240]={0};
+    ssize_t n=read(fd,cmd,sizeof(cmd)-1);
+    close(fd);
+    (void)unlinkat(dfd,ZIZHAN_DBG_CMD_NAME,0);
+    close(dfd);
+    if(n<=0) {
+        return;
+    }
+    while(n>0 && (cmd[n-1]=='\n' || cmd[n-1]=='\r' || cmd[n-1]==' ')) {
+        cmd[--n]='\0';
+    }
+    if(!cmd[0]) {
+        return;
+    }
+    if(!strcmp(cmd,"wake") || !strcmp(cmd,"unlock")) {
+        wake_home(NULL);
+        return;
+    }
+    pending_bundle_retries=0;
+    if(!strncmp(cmd,"pane:",5) && cmd[5]) {
+        snprintf(pending_open_url,sizeof(pending_open_url),"prefs:root=%s",cmd+5);
+    } else {
+        snprintf(pending_open_url,sizeof(pending_open_url),"%s",cmd);
+    }
+    open_url_on_main(NULL);
 }
 
 static bool own_directory(const char *path)
@@ -4171,6 +4222,15 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     }
     if(strcmp(name,"SpringBoard")==0) {
         springboard_process=true;
+        if(zizhan_boot_uint_nonzero("zizhan_debugd=")) {
+            static int zdbg_sb_tok;
+            (void)notify_register_dispatch(ZIZHAN_DBG_DARWIN_NOTIFY,&zdbg_sb_tok,dispatch_get_main_queue(),^(int t){
+                (void)t;
+                zizhan_debugd_sb_handle_cmd();
+            });
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),
+                NULL,zizhan_debugd_confirm_springboard);
+        }
         display_link_rates();
         /* zizhan SENS-03 diagnostic: the device and interface orientation SpringBoard has, said when either changes */
         if(boot_value("zizhan_accel_test=",(char[16]){0},16))
@@ -4250,6 +4310,18 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         scanout_format=true;
         backboard_container();
         pong_touch_start();
+        if(zizhan_boot_uint_nonzero("zizhan_debugd=")) {
+            char pbuf[16]={0};
+            uint16_t dport=ZIZHAN_DBG_DEFAULT_PORT;
+            if(boot_value("zizhan_debugd_port=",pbuf,sizeof(pbuf))) {
+                long pv=strtol(pbuf,NULL,0);
+                if(pv>=1024 && pv<=65535) {
+                    dport=(uint16_t)pv;
+                }
+            }
+            zizhan_debugd_start_backboard(zizhan_boot_uint_nonzero("zizhan_user_present="),
+                zizhan_boot_uint_nonzero("zizhan_dbg_notoken="),dport);
+        }
         if(boot_option("pong_surface_probe=1"))
             for(unsigned seconds=90;seconds<=130;seconds+=20)
                 dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)seconds*NSEC_PER_SEC),

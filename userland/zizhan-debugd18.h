@@ -1435,9 +1435,15 @@ static void *zdbg_client_worker(void *arg) {
         if (plen >= sizeof(path)) { plen = sizeof(path) - 1u; }
         memcpy(path, url, plen);
         path[plen] = '\0';
-        snprintf(query, sizeof(query), "%s", qmark + 1);
+        size_t qlen = strlen(qmark + 1);
+        if (qlen >= sizeof(query)) { qlen = sizeof(query) - 1u; }
+        memcpy(query, qmark + 1, qlen);
+        query[qlen] = '\0';
     } else {
-        snprintf(path, sizeof(path), "%s", url);
+        size_t plen = strlen(url);
+        if (plen >= sizeof(path)) { plen = sizeof(path) - 1u; }
+        memcpy(path, url, plen);
+        path[plen] = '\0';
     }
 
     char cl_str[32] = "";

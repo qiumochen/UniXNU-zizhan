@@ -363,14 +363,11 @@ static void run_unit_tests(void) {
     assert(png[0] == 0x89u && png[1] == 'P' && png[2] == 'N' && png[3] == 'G');
 
     /* 5. BootResetCore normal vs bootloader SDAM reason */
-    uint32_t core[0x3000 / 4] = {0}, cnfg[0x4000 / 4] = {0}, obs[0x100] = {0}, chn[0x2000] = {0};
+    uint32_t core[0x3000 / 4] = {0}, cnfg[0x4000 / 4] = {0};
     core[0] = BR_VERSION_V7_MIN;
     core[BR_FEATURES / 4] = 4u;
     core[(BR_APID_MAP + 4 * 1) / 4] = (uint32_t)BR_SDAM_PPID << 8;
     cnfg[(BR_CNFG_OWNER + 4 * 1) / 4] = 0u;
-    obs[(BR_OBS_APID_STRIDE * 1 + BR_STATUS) / 4] = BR_STATUS_DONE;
-    obs[(BR_OBS_APID_STRIDE * 1 + BR_RDATA0) / 4] = 0x05u; /* bit0 = 1, reason = 2 (bootloader) */
-    chn[(BR_CHNL_APID_STRIDE * 1 + BR_STATUS) / 4] = BR_STATUS_DONE;
     struct br_arbiter arb = { core, cnfg, 0 };
     struct br_found fnd;
     assert(br_find(&arb, &fnd) == 0 && fnd.apid == 1);

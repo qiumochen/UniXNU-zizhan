@@ -11,6 +11,15 @@
  *                    until `POST /api/reboot` or stdin EOF so `zizhan-debugd.py` can test
  *                    `zctl.py` end-to-end against the real C daemon under ASan/UBSan.
  */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #define ZIZHAN_DEBUGD_HOST_TEST 1
 
 #include <assert.h>
@@ -473,7 +482,7 @@ int main(int argc, char **argv) {
         close(g_zdbg_listen_fd);
         /* Wait briefly for detached response worker to finish closing client socket */
         for (int i = 0; i < 50 && __atomic_load_n(&g_zdbg_active_clients, __ATOMIC_ACQUIRE) != 0u; ++i) {
-            usleep(10 * 1000);
+            zdbg_sleep_ms(10u);
         }
         return 0;
     }

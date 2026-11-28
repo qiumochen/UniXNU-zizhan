@@ -59,7 +59,7 @@
 
 - **主机回归套件**：
   - `python3 tools/zizhan/tests/xnu-patch-format.py`：`7/7 OK`（含 `0048`、`0049` 正反向 `git apply` 往返校验）。
-  - `python3 tools/zizhan/tests/zizhan-debugd.py`：ASan/UBSan 单元与本地 HTTP 守护进程 + `zctl.py` 端到端全链路回归 `PASS`。
+  - `python3 tools/zizhan/tests/zizhan-debugd.py`：ASan/UBSan 单元与本地 HTTP 守护进程 + `zctl.py` 端到端全链路回归 `PASS`（针对首轮 Linux CI `46142512863` `-std=c11` 下 glibc 隐藏 POSIX.1-2008 `openat`/`unlinkat`/`renameat`/`O_NOFOLLOW` 及移除 `usleep` 的问题，已补齐 `_POSIX_C_SOURCE=200809L` / `_DEFAULT_SOURCE` 并统一改用 `nanosleep`）。
   - `python3 tools/zizhan/mac/check-daily-use-host.py`：全套 ASan/UBSan 与 Python 回归 `PASS`。
   - `python3 tools/zizhan/mac/check-display-host.py`：全项 `PASS`。
   - `python3 tools/zizhan/mac/check-wifi-host.py --shared <sheng>/drivers/Ath12kWifi`：`11/11 PASS`。

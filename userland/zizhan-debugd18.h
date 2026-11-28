@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef ZIZHAN_DEBUGD_HOST_TEST
@@ -64,6 +65,13 @@ static volatile int g_zdbg_stop_flag;
 static volatile uint32_t g_zdbg_active_clients;
 static volatile uint64_t g_zdbg_trial_gen;
 static pthread_mutex_t g_zdbg_reload_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static inline void zdbg_sleep_ms(uint32_t ms) {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000u);
+    ts.tv_nsec = (long)(ms % 1000u) * 1000000L;
+    (void)nanosleep(&ts, NULL);
+}
 
 static int zdbg_send_all(int fd, const void *buf, size_t len) {
     const uint8_t *p = (const uint8_t *)buf;
@@ -654,7 +662,7 @@ static void *zdbg_hot_ui_watchdog_thread(void *arg) {
     const uint64_t my_gen = wa->gen;
     free(wa);
 #ifdef ZIZHAN_DEBUGD_HOST_TEST
-    usleep(120 * 1000); /* 120 ms in fast host unit tests */
+    zdbg_sleep_ms(120u); /* 120 ms in fast host unit tests */
 #else
     sleep(12);
 #endif
@@ -1505,7 +1513,7 @@ static void *zdbg_accept_loop(void *unused) {
             if (__atomic_load_n(&g_zdbg_stop_flag, __ATOMIC_ACQUIRE)) {
                 break;
             }
-            usleep(50 * 1000);
+            zdbg_sleep_ms(50u);
             continue;
         }
         if (__atomic_load_n(&g_zdbg_stop_flag, __ATOMIC_ACQUIRE)) {

@@ -10,8 +10,8 @@ namespace zizhan_daily {
 constexpr uint32_t kThermalMode = 2, kThermalCpuC = 90, kThermalGpuC = 85;
 constexpr uint32_t kDisplayPower = 1, kPowerObserve = 1, kHallObserve = 2, kOuterFold = 1, kOuterTouch = 1, kOuterPower = 1;
 // POWER-04 (power-6/7): CPU 2..7 offline while the display is off; needs processor_exit (on by default with patch 0028).
-// POWER-02 (sleep-smoke-1 / sleep-ab-batt-1 / sleep-stress-1): true IOPMrootDomain + PSCI CPU_OFF screen-off platform sleep.
-constexpr uint32_t kCpuOffline = 1, kPlatformSleep = 1;
+// POWER-02/08 (sleep-ab-batt-2 / tier2-verify-4): screen-off platform sleep + APSS DRV2 MM0/SN2/SN7/MC0/SH0 floor votes.
+constexpr uint32_t kCpuOffline = 1, kPlatformSleep = 1, kStandbyBw = 3;
 
 static inline bool profile_on(void) {
   uint32_t value = 1;

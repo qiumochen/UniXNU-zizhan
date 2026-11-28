@@ -12,9 +12,9 @@ cd ${ZIZHAN_SRC:-$HOME/zizhan} || exit 1
 L=${ZIZHAN_SRC:-$HOME/zizhan}/logs; mkdir -p $L
 t0=$(date +%s); st() { echo "$(date +%T) +$(( $(date +%s) - t0 ))s $*"; }
 st kernel build
-DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh > ci_kernel-$RUN.log 2>&1 || { st KERNEL_FAIL; grep -m20 -E "error|Error" ci_kernel-$RUN.log; tail -20 ci_kernel-$RUN.log; exit 1; }
+JOBS=${JOBS:-4} DEFCONFIG=zizhan_ipados18_gpu_defconfig bash ci_kernel.sh > ci_kernel-$RUN.log 2>&1 || { st KERNEL_FAIL; grep -m20 -E "error|Error" ci_kernel-$RUN.log; tail -20 ci_kernel-$RUN.log; exit 1; }
 st package
-PROFILE=zizhan_ipados18_gpu bash ci_boot_ufs.sh boot-$RUN ${ZIZHAN_ROOT_4K:-14452736} pong_touch=1 "$@" > $L/$RUN.build.out 2>&1 || { st PACKAGE_FAIL; tail -20 $L/$RUN.build.out; exit 1; }
+PROFILE=zizhan_ipados18_gpu bash ci_boot_ufs.sh boot-$RUN ${ZIZHAN_ROOT_4K:-87919104} pong_touch=1 "$@" > $L/$RUN.build.out 2>&1 || { st PACKAGE_FAIL; tail -20 $L/$RUN.build.out; exit 1; }
 # Wait for the autoreset deadline plus boot and slack (11-01 v10: pong_autoreset_sb=600 outlived the fixed 420 s and the log needed
 # cycle-resume.sh).
 DEADLINE=$(printf '%s\n' "$@" | sed -n 's/^pong_autoreset=\([0-9]*\)$/\1/p' | head -1)

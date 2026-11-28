@@ -13,29 +13,29 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 源码 | `main`（`dac504b`）保持稳定基线；`wip/2026-11-17-audio-sensors` 在 `<1 W` 深睡、`64 GiB` 根卷 + `IPA 安装器` v2、三摄 `AVCapture`、X 轴马达/听筒与外屏 `1:1` 桌面基础上，**已完成 `OUTER-04`（合盖必进锁屏时钟 + 默认解锁 `1:1` 满高桌面 + 合盖强制竖屏锁）、`OUTER-05`（合盖外屏物理电源键亮灭屏与深睡联动，保留 3s 强制回 fastboot）、`CAM-04`（前后摄 `90°/270°` 贴装旋转 + 原生 Bayer 解马赛克/时域降噪/sRGB CCM + 四向预览对齐）及 M3 菜单标题 `"iPadOS 18 (zizhan)"` 的主机实现、独立审查修复与双配置编译（`HOST_VERIFIED`）**。 |
-| 启动方式 | Mac 后部 USB-A `fastboot boot` 临时启动（默认自动返回、电源键 3 s 回 fastboot）；新内核 `build-play206`（`8c401674031f…`）离线启动包 `out/video-8` / `out/daily-1129` 与 M3 双启动包 `m3-standalone-1129`（`66dca0358229…`）均已通过离线校验，待手机接回实测。 |
+| 源码 | **`main`（`a05159d`）已合入截至 `9488efa` 的全部真机验证能力并提升为仓库默认配置**（`<1 W` 深睡 `kStandbyBw=3`、`64 GiB` 根卷 + `IPA 安装器` v2、`ci_boot_ufs.sh` 默认装入音频/主麦/听筒/马达静音保护、`3 Mbps` 蓝牙、SLPI 7 传感器、`iPad7,12` 与北京时间）；`wip/2026-11-17-audio-sensors` 在此基础上**已完成 `OUTER-04`、`OUTER-05`、`CAM-04` 的主机实现、独立审查修复与双配置编译（`HOST_VERIFIED`）**。 |
+| 启动方式 | Mac 后部 USB-A `fastboot boot` 临时启动（默认菜单标题 `iPadOS 18 (zizhan)`、自动返回、电源键 3 s 回 fastboot）；新内核 `build-play206` 离线启动包 `out/video-8` / `out/daily-1129` 与 M3 双启动包 `m3-standalone-1129` 均通过离线与原厂备份校验，待手机接回实测。 |
 | 手机安装 | 本轮手机未接电脑，机内 `/data/hackios/root-64g.img` 仍为 **`sens-hal-v26-64g`**（UI `a370df9c8804…`），`19.4 GiB` 回退卷 `/data/hackios/root.img`（`sens-hal-v22`）与 10-28 全分区备份 `100%` 原样保留；新 UI 库（`2e792d459da0…`）已在主机编好，接回手机后由 `run-video-8.sh` 自动增量派生写入 `sens-hal-v27-64g` 并整盘回读校验。 |
-| 默认能用（已实机验证） | 内屏 120 Hz + GPU 零拷贝、`<1 W` 熄屏深睡（`-219 mA / 952 mW`）、`48 GiB` Data + 主屏第 1 页三枚预置应用（`IPA 安装器` v2 / `扫码相机验证` / `兼容套件验证` 9 按钮台 + X 轴马达 + 听筒/双扬试音）、Wi-Fi、`3 Mbps` 蓝牙、双开关电池页、北京时间、温控、1 Hz GPS。 |
-| 主机已修待上机终验（`HOST_VERIFIED`） | 1. **`CAM-04`**：前后摄 `90°/270°` 物理旋转、原生偶对齐 Bayer 解马赛克、高增益降噪 + sRGB CCM + 时域 IIR 及预览层四向自适应；<br>2. **`OUTER-04`**：合盖必进锁屏时钟、上滑默认进 `1:1` 满高桌面、合盖期间 SLPI 重力与 SpringBoard 双重竖屏锁止（展开恢复自由旋转）；<br>3. **`OUTER-05`**：XNU 补丁 `0048` 接入合盖外屏物理电源键亮灭 `DSI1` 与 `<1 W` 深睡唤醒（3s 长按复位不受影响）。 |
-| 不能用 | 未脱壳 App Store 加密 IPA（`cryptid=1`，安装器已拦截提示）、原厂系统 `Camera.app`（`FigCapture` 私有 C 层未桩）、蜂窝数据（MPSS 锁定离线仅跑 GPS）、天气预报（卡 FairPlay）。 |
+| 默认能用（`main` 已实机验证） | 内屏 120 Hz + 四向 GPU 零拷贝、`<1 W` 熄屏深睡（`-219 mA / 952 mW`）、`48 GiB` Data + 主屏第 1 页三枚预置应用（`IPA 安装器` v2 / `扫码相机验证` / `兼容套件验证` 9 按钮台 + X 轴马达 + 听筒/双扬/主麦，`ZIZHAN_USER_PRESENT=yes` 出声）、Wi-Fi、`3 Mbps` 蓝牙、SLPI 7 传感器 + 自动调光、双开关电池页、北京时间、温控。 |
+| 主机已修待上机终验（`wip` `HOST_VERIFIED`） | 1. **`CAM-04`**：前后摄 `90°/270°` 物理旋转、原生偶对齐 Bayer 解马赛克、高增益降噪 + sRGB CCM + 时域 IIR 及预览层四向自适应；<br>2. **`OUTER-04`**：合盖必进锁屏时钟、上滑默认进 `1:1` 满高桌面、合盖期间 SLPI 重力与 SpringBoard 双重竖屏锁止（展开恢复自由旋转）；<br>3. **`OUTER-05`**：XNU 补丁 `0048` 接入合盖外屏物理电源键亮灭 `DSI1` 与 `<1 W` 深睡唤醒（3s 长按复位不受影响）。 |
+| 不能用 | 未脱壳 App Store 加密 IPA（`cryptid=1`，安装器已拦截提示）、原厂系统 `Camera.app`（`FigCapture` 私有 C 层未桩）、蜂窝数据（MPSS 锁定离线，仅可选 `zizhan_gnss=2` 跑 1 Hz GPS）、天气预报（卡 FairPlay）。 |
 
 ## 当前里程碑
 
 | ID | 里程碑 | 状态 | 验收 | 下一动作 |
 | --- | --- | --- | --- | --- |
-| M0 | 收口 | DONE（11-17） | 未提交工作按主题提交并推 wip 分支；CI 全绿；本页一页 | 已完成。 |
-| M1 | 能出声 + 麦克风 + 听筒/触感 | DOING（待在场终验） | 双扬外放响亮、主麦录音清晰、VoiceChat 切顶部听筒、线性马达清脆 | 已补齐顶部听筒路由与 PM8350B X 轴线性马达；接回手机后随 `run-video-8.sh` 一并终验。 |
-| M2 | 外屏 + 深睡 `<1 W` + 64G 应用生态 | `HOST_VERIFIED`（待接手机实测） | 深睡 `<1 W`、`48 GiB` 安装正常；`OUTER-04`/`OUTER-05`/`CAM-04` 实机闭环 | 主机单测、独立审查修复与 `build-play206` 已就绪；接回手机运行 `run-video-8.sh` 写入 `sens-hal-v27-64g` 并上机验收。 |
-| M3 | 离开电脑启动 | `HOST_VERIFIED`（需在场） | 不接电脑开机：默认进安卓，菜单可选 `"iPadOS 18 (zizhan)"`（挂载 `64 GiB` 根卷）；回退保留 | `m3-standalone-1129`（`66dca0358229…`，`build-play206`）已通过离线全项与原厂备份校验；接回手机后先跑 RAM 预演。 |
+| M0 | 收口与默认化 | DONE（11-28） | 已真机验证能力合入 `main` 默认配置；CI 全绿；本页一页 | `main`（`a05159d`）已合入并同步回 `wip`。 |
+| M1 | 能出声 + 麦克风 + 听筒/触感 | DOING（待在场终验） | 双扬外放响亮、主麦录音清晰、VoiceChat 切顶部听筒、线性马达清脆 | 默认打包已就绪；接回手机后随 `run-video-8.sh` 一并终验。 |
+| M2 | 外屏 + 深睡 `<1 W` + 64G 应用生态 | `HOST_VERIFIED`（待接手机实测） | 深睡 `<1 W`、`48 GiB` 安装已进 `main`；`OUTER-04`/`OUTER-05`/`CAM-04` 实机闭环 | 接回手机运行 `run-video-8.sh` 写入 `sens-hal-v27-64g` 并上机验收，通过后合入 `main`。 |
+| M3 | 离开电脑启动 | `HOST_VERIFIED`（需在场） | 不接电脑开机：默认进安卓，菜单可选 `"iPadOS 18 (zizhan)"`（挂载 `64 GiB` 根卷）；回退保留 | `m3-standalone-1129` 已通过离线全项与原厂备份校验；接回手机后先跑 RAM 预演。 |
 
 ## 挂起与边界（用户点名才恢复，详见对应记录）
 
 | ID | 当前状态与停点 | 记录 |
 | --- | --- | --- |
-| POWER-08 深睡功耗 | 外屏 `DSI1` 断电 + GMU DDR 释放 + `SN7` 压降 + GPS 暂停后纯电池深睡 **`-219 mA / 952 mW`**（稳态 `730 mW`），`25+` 轮唤醒 `0` panic | [11-27 二期战役](2026-11-27-tier2-campaign.md) |
-| CAM-04 / OUTER-04 / OUTER-05 | 主机侧源码修复、独立上下文对抗性审查修复、ASan/UBSan 矩阵与状态机回归、双 defconfig 内核及离线包均已完成；待接回手机上机验证 | [11-28 主机修复与审查](2026-11-28-outer-cover-and-cam04-host.md) |
-| GNSS-01 / BT-02 | 离线 `QMI_LOC` 1 Hz GPS → `CoreLocation`（深睡自动暂停省电）与 `3 Mbps` 蓝牙已就绪；待在场窗边/户外验搜星定位及手动试蓝牙配对 | [11-26 晚间](2026-11-26-evening-unattended.md) |
+| POWER-08 深睡功耗 | 外屏 `DSI1` 断电 + GMU DDR 释放 + `kStandbyBw=3`（`MM0/SN2/SN7/MC0/SH0`）+ GPS 暂停后纯电池深睡 **`-219 mA / 952 mW`**（稳态 `730 mW`），已提升为 `main` 默认 | [11-27 二期战役](2026-11-27-tier2-campaign.md) |
+| CAM-04 / OUTER-04 / OUTER-05 | 主机侧源码修复、独立上下文审查修复、ASan/UBSan 矩阵与状态机回归、双 defconfig 内核及离线包均已完成；待接回手机上机验证 | [11-28 主机修复与审查](2026-11-28-outer-cover-and-cam04-host.md) |
+| GNSS-01 / BT-02 | `3 Mbps` 蓝牙已设为默认，离线 `QMI_LOC` 1 Hz GPS → `CoreLocation` 保持可选 `zizhan_gnss=2`；待在场窗边/户外验搜星定位及手动试蓝牙配对 | [11-26 晚间](2026-11-26-evening-unattended.md) |
 
 ## 待用户接回手机后验收（集中 ≤12 分钟）
 
@@ -46,6 +46,6 @@
 
 ## 近期分日记录索引
 
-- **2026-11-28 下午（主机侧修复与独立审查闭环）**：`OUTER-04` 合盖时钟/`1:1` 默认与竖屏锁、`OUTER-05` 外屏物理电源键、`CAM-04` `90°/270°` 原生 Bayer 软 ISP/时域降噪/CCM 及 M3 菜单标题更新 → [11-28 主机修复与审查](2026-11-28-outer-cover-and-cam04-host.md)。
+- **2026-11-28 下午（`main` 默认化收口 + `wip` 主机修复）**：`main` 合入已验证默认配置；`wip` 完成 `OUTER-04`、`OUTER-05`、`CAM-04` 与 M3 菜单标题主机修复及独立审查闭环 → [11-28 主机修复与审查](2026-11-28-outer-cover-and-cam04-host.md)。
 - **2026-11-27 下午（第二/三梯队专项战役）**：深睡破 `1 W`（`952 mW`）、非破坏性 `64 GiB` 根卷 + `IPA 安装器` v2 + 第三方沙盒 `8/8` 兼容、`960×720` 三摄 + OIS/AF、线性马达/听筒路由与外屏 `1:1` 满高模式 → [11-27 二期战役](2026-11-27-tier2-campaign.md)。
 - **2026-11-27 凌晨及更早**：平台级熄屏深睡、原生 `IPA 安装器` v1、双摄扫码与前期无线/音频/传感器进展 → [11-27 凌晨 P0](2026-11-27-unattended-sleep-ipa-camera.md)、[11-26 晚间](2026-11-26-evening-unattended.md)。

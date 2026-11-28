@@ -9,7 +9,10 @@
 #import <objc/runtime.h>
 #include <dlfcn.h>
 #include <initializer_list>
+#include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -119,6 +122,124 @@ static bool backend(unsigned port,uint64_t *registryID)
     }
     return registry(port,registryID)==KERN_SUCCESS && *registryID;
 }
+static bool readAllBootArgs(char *buf,size_t cap)
+{
+    if(!buf || cap<2)return false;
+    size_t len=cap-1;
+    if(sysctlbyname("kern.zizhan_bootargs",buf,&len,nullptr,0) &&
+       (len=cap-1,sysctlbyname("kern.bootargs",buf,&len,nullptr,0))) {
+        buf[0]=0;return false;
+    }
+    buf[len<cap?len:cap-1]=0;
+    return true;
+}
+#if PONG_GUEST_22H374
+static bool hasBootToken(const char *token)
+{
+    char args[4096]={};
+    if(!readAllBootArgs(args,sizeof(args)))return false;
+    const size_t n=strlen(token);
+    for(const char *p=args;(p=strstr(p,token));p+=n) {
+        if((p==args || p[-1]==' ' || p[-1]=='\t') &&
+           (p[n]==0 || p[n]==' ' || p[n]=='\t'))return true;
+    }
+    return false;
+}
+static bool executableImageRange(const struct mach_header_64 *header,intptr_t slide,
+                                 uintptr_t target,size_t bytes)
+{
+    if(!bytes || (uintptr_t)(header+1)>UINTPTR_MAX-header->sizeofcmds)return false;
+    const struct load_command *lc=(const struct load_command *)(header+1);
+    const char *end=(const char *)lc+header->sizeofcmds;
+    for(uint32_t i=0;i<header->ncmds;i++) {
+        if((const char *)lc+sizeof(*lc)>end || lc->cmdsize<sizeof(*lc) ||
+           lc->cmdsize>(size_t)(end-(const char *)lc))return false;
+        if(lc->cmd==LC_SEGMENT_64 && lc->cmdsize>=sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *seg=(const struct segment_command_64 *)lc;
+            const vm_prot_t needed=VM_PROT_READ|VM_PROT_EXECUTE;
+            if((seg->initprot&needed)==needed) {
+                uintptr_t start=0;
+                if(slide>=0) {
+                    if(seg->vmaddr>UINTPTR_MAX-(uintptr_t)slide)return false;
+                    start=(uintptr_t)seg->vmaddr+(uintptr_t)slide;
+                } else {
+                    uintptr_t amount=0-(uintptr_t)slide;
+                    if(seg->vmaddr<amount)return false;
+                    start=(uintptr_t)seg->vmaddr-amount;
+                }
+                if(seg->vmsize<=UINTPTR_MAX-start && target>=start &&
+                   target-start<=seg->vmsize && bytes<=seg->vmsize-(target-start))return true;
+            }
+        }
+        lc=(const struct load_command *)((const char *)lc+lc->cmdsize);
+    }
+    return false;
+}
+static bool patchQuartzCoreSite(const struct mach_header_64 *header,intptr_t slide,uintptr_t offset,
+                                const uint32_t expected[2],const uint32_t replacement[2])
+{
+    const size_t bytes=2*sizeof(uint32_t);
+    if(offset>UINTPTR_MAX-(uintptr_t)header)return false;
+    const uintptr_t target=(uintptr_t)header+offset;
+    if(!executableImageRange(header,slide,target,bytes))return false;
+    if(!memcmp((const void *)target,replacement,bytes))return true;
+    if(memcmp((const void *)target,expected,bytes))return false;
+    const vm_address_t page=target&~((vm_address_t)vm_page_size-1);
+    if(target-page>vm_page_size-bytes)return false;
+    if(vm_protect(mach_task_self(),page,vm_page_size,FALSE,
+                  VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY)!=KERN_SUCCESS)return false;
+    memcpy((void *)target,replacement,bytes);
+    sys_icache_invalidate((void *)target,bytes);
+    if(vm_protect(mach_task_self(),page,vm_page_size,FALSE,
+                  VM_PROT_READ|VM_PROT_EXECUTE)!=KERN_SUCCESS) {
+        memcpy((void *)target,expected,bytes);
+        sys_icache_invalidate((void *)target,bytes);
+        (void)vm_protect(mach_task_self(),page,vm_page_size,FALSE,VM_PROT_READ|VM_PROT_EXECUTE);
+        return false;
+    }
+    return true;
+}
+/* 22H374 QuartzCore (UUID FAF7D7EA-18F0-3C2D-816C-AC56D16C40A3):
+ * When framebuffer compression is disabled, both CA::OGL::MetalContext::get_surface
+ * (0x184399410) and CAMetalLayerPrivateNextDrawableLocked (0x18444e7e0) assume an
+ * uncompressed Apple AGX GPU with hardware 90/270-degree MTLTextureDescriptor.rotation
+ * support, swapping IOSurface width/height at 90/270 degrees and failing buffer-bounds
+ * validation on Turnip/metal2vulkan (PastBuffer). Route both sites to QuartzCore's own
+ * unrotated-drawable path so WindowServer rotates 90/270-degree layers via standard GPU
+ * vertex transforms. Boot-arg zizhan_agx_texrot=1 restores stock behavior. */
+static void quartzCoreImage(const struct mach_header *mh,intptr_t slide)
+{
+    if(!mh || mh->magic!=MH_MAGIC_64)return;
+    const struct mach_header_64 *h=(const struct mach_header_64 *)mh;
+    static const uint8_t expectedUuid[16]={
+        0xfa,0xf7,0xd7,0xea,0x18,0xf0,0x3c,0x2d,0x81,0x6c,0xac,0x56,0xd1,0x6c,0x40,0xa3};
+    const struct load_command *lc=(const struct load_command *)(h+1);
+    const char *end=(const char *)lc+h->sizeofcmds;
+    bool matched=false;
+    for(uint32_t i=0;i<h->ncmds;i++) {
+        if((const char *)lc+sizeof(*lc)>end || lc->cmdsize<sizeof(*lc) ||
+           lc->cmdsize>(size_t)(end-(const char *)lc))return;
+        if(lc->cmd==LC_UUID && lc->cmdsize==sizeof(struct uuid_command)) {
+            matched=memcmp(((const struct uuid_command *)lc)->uuid,expectedUuid,16)==0;
+        }
+        lc=(const struct load_command *)((const char *)lc+lc->cmdsize);
+    }
+    if(!matched)return;
+    static const uint32_t surfExpected[2]={0xb4000200u,0x370001f3u};
+    static const uint32_t surfUnrotated[2]={0xb4000200u,0x1400000fu};
+    static const uint32_t layerExpected[2]={0xb90037ffu,0x36300488u};
+    static const uint32_t layerUnrotated[2]={0xb90037ffu,0x14000024u};
+    const bool okSurf=patchQuartzCoreSite(h,slide,0x18439940cULL-0x184339000ULL,surfExpected,surfUnrotated);
+    const bool okLayer=patchQuartzCoreSite(h,slide,0x18444e7dcULL-0x184339000ULL,layerExpected,layerUnrotated);
+    const char *proc=getprogname();
+    if(proc && (!strcmp(proc,"backboardd") || !strcmp(proc,"SpringBoard") || !strcmp(proc,"Preferences"))) {
+        char text[128];
+        snprintf(text,sizeof(text),"22H374 unrotated Metal surfaces surf=%d layer=%d in %.40s",
+                 okSurf?1:0,okLayer?1:0,proc);
+        report(text,okSurf && okLayer?0:-1);
+    }
+}
+#endif
 static id openDevice(unsigned port)
 {
     uint64_t registryID=0;if(!backend(port,&registryID))return nil;
@@ -188,6 +309,14 @@ static id openDevice(unsigned port)
     // the key ji56BO1mUeT7Qg9RO7Er9w in QuartzCore 22H374) is true; otherwise ImageIO's ATXReadPlugin decodes them on the CPU, as the
     // g168-g170 SpringBoard profiles showed during app-open zooms. Reported once per process.
     if(result) {
+#if PONG_GUEST_22H374
+        static dispatch_once_t qcOnce;
+        dispatch_once(&qcOnce,^{
+            if(!hasBootToken("zizhan_agx_texrot=1")) {
+                _dyld_register_func_for_add_image(quartzCoreImage);
+            }
+        });
+#endif
         void *gestalt=dlopen("/usr/lib/libMobileGestalt.dylib",RTLD_LAZY);
         auto answer=gestalt?(bool(*)(CFStringRef))dlsym(gestalt,"MGGetBoolAnswer"):nullptr;
         if(answer) {

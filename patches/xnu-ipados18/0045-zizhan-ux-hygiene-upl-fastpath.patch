@@ -1,0 +1,101 @@
+zizhan UX-08: disable DEVELOPMENT sched-hygiene static keys and UPL btref tracking by default (zizhan_sched_hygiene=1, zizhan_upl_debug=1).
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -2180,6 +2180,16 @@
+ 	if (serverperfmode) {
+ 		kern_feature_overrides |= KF_SERVER_PERF_MODE_OVRD;
+ 	}
++#if SCHED_HYGIENE_DEBUG
++	{
++		uint32_t zizhan_sched_hygiene = 0;
++		if (!PE_parse_boot_argn("zizhan_sched_hygiene", &zizhan_sched_hygiene, sizeof(zizhan_sched_hygiene)) ||
++		    !zizhan_sched_hygiene) {
++			kern_feature_overrides |= (KF_SCHED_HYGIENE_DEBUG_PMC_OVRD |
++			    KF_PREEMPTION_DISABLED_DEBUG_OVRD | KF_INTERRUPT_MASKED_DEBUG_OVRD);
++		}
++	}
++#endif /* SCHED_HYGIENE_DEBUG */
+ }
+ STARTUP(TUNABLES, STARTUP_RANK_LAST, kern_feature_override_init);
+ 
+@@ -2207,6 +2217,12 @@
+ 	if (static_if_boot_arg_uint64(args, "serverperfmode", 0)) {
+ 		kf_ovrd |= KF_SERVER_PERF_MODE_OVRD;
+ 	}
++#if SCHED_HYGIENE_DEBUG
++	if (!static_if_boot_arg_uint64(args, "zizhan_sched_hygiene", 0)) {
++		kf_ovrd |= (KF_SCHED_HYGIENE_DEBUG_PMC_OVRD |
++		    KF_PREEMPTION_DISABLED_DEBUG_OVRD | KF_INTERRUPT_MASKED_DEBUG_OVRD);
++	}
++#endif /* SCHED_HYGIENE_DEBUG */
+ 
+ #if DEBUG_RW
+ 	lck_rw_assert_init(args, kf_ovrd);
+--- a/osfmk/vm/vm_pageout.c
++++ b/osfmk/vm/vm_pageout.c
+@@ -5526,7 +5526,7 @@
+ #endif /* CONFIG_IOSCHED */
+ 
+ #if UPL_DEBUG
+-int     upl_debug_enabled = 1;
++TUNABLE_WRITEABLE(int, upl_debug_enabled, "zizhan_upl_debug", 0);
+ #else
+ int     upl_debug_enabled = 0;
+ #endif
+@@ -5587,7 +5587,9 @@
+ #endif
+ 
+ #if UPL_DEBUG
+-	upl->upl_create_btref = btref_get(__builtin_frame_address(0), 0);
++	if (__improbable(upl_debug_enabled)) {
++		upl->upl_create_btref = btref_get(__builtin_frame_address(0), 0);
++	}
+ #endif /* UPL_DEBUG */
+ 
+ 	return upl;
+@@ -5658,9 +5660,13 @@
+ 
+ #if UPL_DEBUG
+ 	for (int i = 0; i < upl->upl_commit_index; i++) {
+-		btref_put(upl->upl_commit_records[i].c_btref);
++		if (upl->upl_commit_records[i].c_btref) {
++			btref_put(upl->upl_commit_records[i].c_btref);
++		}
++	}
++	if (upl->upl_create_btref) {
++		btref_put(upl->upl_create_btref);
+ 	}
+-	btref_put(upl->upl_create_btref);
+ #endif /* UPL_DEBUG */
+ 
+ 	if ((upl->flags & UPL_LITE) && pages) {
+--- a/osfmk/vm/vm_upl.c
++++ b/osfmk/vm/vm_upl.c
+@@ -37,6 +37,9 @@
+ #include <vm/vm_ubc.h>
+ 
+ extern boolean_t hibernate_cleaning_in_progress;
++#if UPL_DEBUG
++extern int upl_debug_enabled;
++#endif
+ 
+ /* map a (whole) upl into an address space */
+ kern_return_t
+@@ -235,7 +238,7 @@
+ 	*empty = FALSE;
+ 
+ #if UPL_DEBUG
+-	if (upl->upl_commit_index < UPL_DEBUG_COMMIT_RECORDS) {
++	if (__improbable(upl_debug_enabled) && upl->upl_commit_index < UPL_DEBUG_COMMIT_RECORDS) {
+ 		upl->upl_commit_records[upl->upl_commit_index].c_btref = btref_get(__builtin_frame_address(0), 0);
+ 		upl->upl_commit_records[upl->upl_commit_index].c_beg = offset;
+ 		upl->upl_commit_records[upl->upl_commit_index].c_end = (offset + size);
+@@ -672,7 +675,7 @@
+ 	}
+ 
+ #if UPL_DEBUG
+-	if (upl->upl_commit_index < UPL_DEBUG_COMMIT_RECORDS) {
++	if (__improbable(upl_debug_enabled) && upl->upl_commit_index < UPL_DEBUG_COMMIT_RECORDS) {
+ 		upl->upl_commit_records[upl->upl_commit_index].c_btref = btref_get(__builtin_frame_address(0), 0);
+ 		upl->upl_commit_records[upl->upl_commit_index].c_beg = offset;
+ 		upl->upl_commit_records[upl->upl_commit_index].c_end = (offset + size);

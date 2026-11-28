@@ -191,6 +191,7 @@ void unlockSmem() {
 // ... and its AOSS load_state goes through this worker, the mailbox's only user: 1 = on, 2 = off is posted in gSlpiLoad and the
 // event loop sends it (ZizhanDspResources.h LoadStateOwner); the result comes back in gSlpiLoadResult.
 volatile int gSlpiLoad, gSlpiLoadResult;
+volatile int gModemLoad, gModemLoadResult;
 volatile int gSharedReady;
 int allocItem(uint16_t item, uint32_t size) {
     return zizhan_dsp::allocate(gSmem, gPart, item, size, lockSmem, unlockSmem);
@@ -673,6 +674,13 @@ void adspThread(void *, wait_result_t) {
             __atomic_store_n(&gSlpiLoadResult, rc, __ATOMIC_RELEASE);
             __atomic_store_n(&gSlpiLoad, 0, __ATOMIC_RELEASE);
         }
+        if (const int mwant = __atomic_load_n(&gModemLoad, __ATOMIC_ACQUIRE)) {
+            const int rc = gLoadStateOwner.send(gQmp, zizhan_dsp::Processor::Modem, mwant == 1,
+                [](uint32_t ms, auto done) { return waitUntil(ms, done); });
+            IOLog("PongAdsp: modem load_state %s -> %d\n", mwant == 1 ? "on" : "off", rc);
+            __atomic_store_n(&gModemLoadResult, rc, __ATOMIC_RELEASE);
+            __atomic_store_n(&gModemLoad, 0, __ATOMIC_RELEASE);
+        }
         bool pending = false;
         IOLockLock(gClientLock);
         const unsigned count = __atomic_load_n(&gClientCount, __ATOMIC_ACQUIRE);
@@ -752,6 +760,16 @@ extern "C" int pong_adsp_slpi_load_state(int on) {
     for (unsigned i = 0; i < 400 && __atomic_load_n(&gSlpiLoad, __ATOMIC_ACQUIRE); ++i) IOSleep(10);
     if (__atomic_load_n(&gSlpiLoad, __ATOMIC_ACQUIRE)) return zizhan_dsp::AckTimeout;
     return __atomic_load_n(&gSlpiLoadResult, __ATOMIC_ACQUIRE);
+}
+extern "C" int pong_adsp_modem_load_state(int on) {
+    if (!pong_adsp_shared_ready()) return zizhan_dsp::MailboxUnavailable;
+    for (unsigned i = 0; i < 300 && __atomic_load_n(&gModemLoad, __ATOMIC_ACQUIRE); ++i) IOSleep(10);
+    if (__atomic_load_n(&gModemLoad, __ATOMIC_ACQUIRE)) return zizhan_dsp::AckTimeout;
+    __atomic_store_n(&gModemLoad, on ? 1 : 2, __ATOMIC_RELEASE);
+    wake(kEvSend);
+    for (unsigned i = 0; i < 400 && __atomic_load_n(&gModemLoad, __ATOMIC_ACQUIRE); ++i) IOSleep(10);
+    if (__atomic_load_n(&gModemLoad, __ATOMIC_ACQUIRE)) return zizhan_dsp::AckTimeout;
+    return __atomic_load_n(&gModemLoadResult, __ATOMIC_ACQUIRE);
 }
 
 extern "C" void sheng_adsp_probe(void) {

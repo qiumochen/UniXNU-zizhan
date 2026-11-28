@@ -27,10 +27,12 @@
 #include "ZizhanCpuOffline.h"
 #include "ZizhanOuterProbe.h"
 #include "ZizhanPowerInject.h"
+#include "ZizhanVolumeInject.h"
 #include "ZizhanTsensProbe.h"
 #include "ZizhanThermalService.h"
 #include "ZizhanPowerAudit.h"
 #include "ZizhanDisplayPowerService.h"
+#include "ZizhanSleep.h"
 
 extern "C" bool pong_cpu_start(IOService *platform);
 
@@ -41,12 +43,30 @@ extern "C" bool pong_cpu_start(IOService *platform);
 extern "C" {
 volatile uint32_t pong_zc_flipped_tag = 0;
 int zizhan_dsi_power_sequence(const uint8_t *, const uint16_t *, uint32_t, int) { return -1; }
+void pong_scanout_set_cover_redirect(int) {}
+uint32_t pong_scanout_cover_snapshot(const uint8_t **, uint64_t *, uint32_t *, uint32_t *, uint32_t *) { return 0; }
 }
+#endif
+#if !XNU_PONG_WIFI
+extern "C" void pong_wifi_set_system_sleep(int) {}
 #endif
 #if !(XNU_PONG_WIFI || XNU_PONG_POWER)
 extern "C" {
 int pong_backlight_level(uint32_t *) { return -1; }
 int pong_backlight_set(uint32_t, uint32_t) { return -1; }
+int zizhan_slpi_proximity_near(void) { return 0; }
+int32_t zizhan_slpi_ambient_lux_milli(void) { return -1; }
+void zizhan_slpi_set_prox_sim(int) {}
+int zizhan_slpi_hinge_closed(void) { return -1; }
+int32_t zizhan_slpi_hinge_deg_milli(void) { return -1; }
+void zizhan_slpi_set_hinge_sim(int) {}
+volatile int32_t native_battery_stats[16] = {};
+void zizhan_standby_rpmh_sleep(int) {}
+void zizhan_mpss_set_system_sleep(int) {}
+int pong_battery_request_refresh(int) { return -1; }
+int pong_battery_gauge_snapshot(int32_t *, int32_t *, int32_t *, uint32_t *) { return -1; }
+int zizhan_audio_sleep_busy(void) { return 0; }
+int zizhan_cam_sleep_busy(void) { return 0; }
 }
 #endif
 #if XNU_PONG_WIFI
@@ -257,16 +277,19 @@ bool ArmDTPlatform::configure (IOService *provider)
     return false;
   }
   armdt_platform_configured = 1;
-  IOLog("ZIZHAN_DAILY: profile=%u (thermal=2 cpu90 gpu85, display_power=1, power_observe=1, hall_observe=2, outer_fold=1, cpu_offline=1 unless set; zizhan_daily=0 disables)\n",
+  zizhan_display_power_service::init();
+  IOLog("ZIZHAN_DAILY: profile=%u (thermal=2 cpu90 gpu85, display_power=1, power_observe=1, hall_observe=2, outer_fold=1, outer_touch=1, cpu_offline=1 unless set; zizhan_daily=0 disables)\n",
         zizhan_daily::profile_on() ? 1u : 0u);
   zizhan_tsens::start(provider);
   zizhan_thermal::start(provider);
   zizhan_hall::start(provider);
   zizhan_power_audit::start(provider);
   zizhan_power_inject::start();
+  zizhan_vol_inject::start();
   zizhan_bt_probe::start();
   zizhan_top::start();          // default off; zizhan_top=1 logs the busiest processes every 30 s (POWER-03)
   zizhan_cpu_offline::start();  // daily default: CPU 2..7 offline while the display is off (zizhan_cpu_offline=0 disables)
+  zizhan_sleep::start(provider); // POWER-02: IOPMrootDomain platform sleep (zizhan_sleep=1 / platform-sleep=1)
   zizhan_outer_probe::start();
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   pong_power_start_optional();   // ADSP and battery (pong_adsp), independent of the Wi-Fi stack

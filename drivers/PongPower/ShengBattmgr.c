@@ -47,6 +47,8 @@ static const struct {uint8_t opcode, property, slow;} kFields[BmFields] = {
     [BmAuthentic] = {SHENG_BATTMGR_OP_BOARD_GET, 0x03, 1},
     [BmSlaveAuthentic] = {SHENG_BATTMGR_OP_BOARD_GET, 0xa5, 1},
     [BmInputSuspend] = {SHENG_BATTMGR_OP_BOARD_GET, 0x2a, 0},
+    [BmHealth] = {SHENG_BATTMGR_OP_BATTERY_GET, 1, 1},
+    [BmSoh] = {SHENG_BATTMGR_OP_BATTERY_GET, 5, 1},
 };
 #define NO_CYCLE 0xff
 
@@ -80,10 +82,9 @@ uint32_t sheng_battmgr_enable_request(uint8_t out[SHENG_BATTMGR_ENABLE_BYTES])
 
 static void skip_to_wanted(ShengBattmgr *b)
 {
-    // Nothing's single battery does not implement Xiaomi BOARD_GET fields.
+    // Nothing's single battery does not implement Xiaomi BOARD_GET fields; zizhan opts in via b->board_get.
     while(b->cursor<BmFields &&
-       (kFields[b->cursor].opcode==SHENG_BATTMGR_OP_BOARD_GET ||
-        b->cursor==BmChargeCurrent ||
+       ((!b->board_get && (kFields[b->cursor].opcode==SHENG_BATTMGR_OP_BOARD_GET || b->cursor==BmChargeCurrent)) ||
         (kFields[b->cursor].slow&&!b->slow_due)))b->cursor++;
 }
 
@@ -97,7 +98,7 @@ static void advance(ShengBattmgr *b)
 void sheng_battmgr_refresh(ShengBattmgr *b, int slow)
 {
     if (b->cursor != NO_CYCLE) {b->refresh_wanted = 1 + (slow != 0); return;}
-    b->slow_due = slow || !(b->valid & (1u << BmFull));
+    b->slow_due = slow || !(b->valid & (1ull << BmFull));
     b->cursor = 0;
     b->in_flight = 0;
     skip_to_wanted(b);
@@ -129,7 +130,10 @@ uint32_t sheng_battmgr_next(ShengBattmgr *b, uint8_t out[SHENG_BATTMGR_REQUEST_B
  * (CDP 3) its 1.5 A; others (dedicated chargers, Type-C current, PD contracts) are the firmware's own. */
 static uint32_t wanted_limit(const ShengBattmgr *b, int port)
 {
-    (void)b;(void)port;return 0; /* Charging limits remain firmware-owned. */
+    if (!b || !b->sdp_limit_ua) return 0;
+    if (port == 1) return b->sdp_limit_ua;
+    if (port == 3) return b->sdp_limit_ua > 1500000u ? b->sdp_limit_ua : 1500000u;
+    return 0; /* Dedicated chargers, Type-C, PD, and PPS contracts stay 100% firmware/JEITA-owned. */
 }
 
 /* After a cycle: a set is due when the port wants a higher limit than the firmware reports, at most three tries per port type. */
@@ -164,7 +168,7 @@ void sheng_battmgr_timeout(ShengBattmgr *b)
     if (b->cursor == NO_CYCLE || !b->in_flight) return;
     b->timeouts++;
     b->last_timeout = b->cursor;
-    b->valid &= ~(1u << b->cursor);
+    b->valid &= ~(1ull << b->cursor);
     advance(b);
     finish(b);
 }
@@ -194,11 +198,11 @@ int sheng_battmgr_receive(ShengBattmgr *b, const uint8_t *data, uint32_t length)
     b->responses++;
     if (result) {
         b->errors++;
-        b->valid &= ~(1u << b->cursor);
+        b->valid &= ~(1ull << b->cursor);
     } else {
         /* zizhan: property 13 is already hundredths of a degree (Pong's tenths took * 10, which put 34.1 C at 34100, out of range) */
         b->value[b->cursor] = (int32_t)value;
-        b->valid |= 1u << b->cursor;
+        b->valid |= 1ull << b->cursor;
     }
     advance(b);
     return finish(b) ? BmCycleDone : BmAnswer;
@@ -220,14 +224,23 @@ static uint32_t family(int type)
 
 void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s)
 {
-#define HAS(f) ((b->valid >> (f)) & 1u)
+#define HAS(f) ((b->valid >> (f)) & 1ull)
 #define V(f) (b->value[(f)])
     const int status = HAS(BmStatus) ? V(BmStatus) : 0;  /* POWER_SUPPLY_STATUS: 1 charging, 2 discharging, 3 not charging, 4 full */
     s->present = HAS(BmPresent) ? V(BmPresent) != 0 : HAS(BmCapacity);
     s->external = HAS(BmUsbOnline) && V(BmUsbOnline) != 0;
-    const int gauges = HAS(BmGauge1Remaining) && HAS(BmGauge1Full) && HAS(BmGauge2Remaining) && HAS(BmGauge2Full);
+    const int gauges = HAS(BmGauge1Remaining) && HAS(BmGauge1Full) && HAS(BmGauge2Remaining) && HAS(BmGauge2Full) &&
+                       V(BmGauge1Full) >= 500 && V(BmGauge1Full) <= 4000 &&
+                       V(BmGauge2Full) >= 500 && V(BmGauge2Full) <= 4000 &&
+                       V(BmGauge1Remaining) >= 0 && V(BmGauge1Remaining) <= V(BmGauge1Full) + 200 &&
+                       V(BmGauge2Remaining) >= 0 && V(BmGauge2Remaining) <= V(BmGauge2Full) + 200;
     const int64_t remaining = gauges ? (int64_t)(uint32_t)V(BmGauge1Remaining) + (uint32_t)V(BmGauge2Remaining) : 0;
     const int64_t full = gauges ? (int64_t)(uint32_t)V(BmGauge1Full) + (uint32_t)V(BmGauge2Full) : 0;
+    s->gauge_cells = gauges ? 2 : 0;
+    s->gauge1_rem_mah = HAS(BmGauge1Remaining) ? V(BmGauge1Remaining) : 0;
+    s->gauge1_full_mah = HAS(BmGauge1Full) ? V(BmGauge1Full) : 0;
+    s->gauge2_rem_mah = HAS(BmGauge2Remaining) ? V(BmGauge2Remaining) : 0;
+    s->gauge2_full_mah = HAS(BmGauge2Full) ? V(BmGauge2Full) : 0;
     int percent = full > 0 ? (int)((remaining * 100 + full / 2) / full) : HAS(BmCapacity) ? (V(BmCapacity) + 50) / 100 : 0;
     s->percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
     s->charge_known = full > 0 || HAS(BmCapacity);
@@ -243,6 +256,8 @@ void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s)
     s->full_mah = HAS(BmFull) ? V(BmFull) / 1000 : 0;
     s->design_mah = HAS(BmDesign) ? V(BmDesign) / 1000 : 0;
     s->cycles = HAS(BmCycles) ? V(BmCycles) : 0;
+    s->health = HAS(BmHealth) && V(BmHealth) > 0 && V(BmHealth) <= 16 ? V(BmHealth) : 0;
+    s->soh = HAS(BmSoh) && V(BmSoh) >= 1 && V(BmSoh) <= 150 ? V(BmSoh) : 0;
     /* The gauge reports times in seconds, and a negative or huge value when it has none. */
     s->time_to_empty_min = HAS(BmTimeToEmpty) && V(BmTimeToEmpty) > 0 && V(BmTimeToEmpty) < 100 * 3600 ? V(BmTimeToEmpty) / 60 : -1;
     s->time_to_full_min = HAS(BmTimeToFull) && V(BmTimeToFull) > 0 && V(BmTimeToFull) < 100 * 3600 ? V(BmTimeToFull) / 60 : -1;
@@ -253,6 +268,9 @@ void sheng_battmgr_snapshot(const ShengBattmgr *b, ShengBatterySnapshot *s)
         if (s->adapter_mv < 0) s->adapter_mv = 0;
         if (s->adapter_ma < 0) s->adapter_ma = -s->adapter_ma;
         s->adapter_watts = (int)(((int64_t)s->adapter_mv * s->adapter_ma + 500000) / 1000000);
+        if (HAS(BmPowerMax) && V(BmPowerMax) > s->adapter_watts && V(BmPowerMax) <= 150) {
+            s->adapter_watts = V(BmPowerMax);
+        }
     } else {
         s->adapter_family = 0;
         s->adapter_mv = s->adapter_ma = s->adapter_watts = 0;

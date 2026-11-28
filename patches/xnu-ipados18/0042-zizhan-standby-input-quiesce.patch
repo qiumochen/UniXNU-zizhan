@@ -1,0 +1,108 @@
+zizhan POWER-03/04: quiesce FST2 SPI scan and relax button polling while display is off (boot-arg zizhan_touch_standby_ms, default 100).
+--- a/bsd/dev/pong_fts.c
++++ b/bsd/dev/pong_fts.c
+@@ -33,6 +33,13 @@
+ /* POWER-02 S4: while the display is off the FIFO is still drained, but touches are not posted.
+  * pong_touch_set_paused() only records the request; the touch thread performs the transition. */
+ static volatile uint32_t touch_pause_request, touch_paused, touch_suppressed;
++static uint32_t standby_ms = 100;
++int pong_touch_standby_active(void);
++int
++pong_touch_standby_active(void)
++{
++	return (touch_paused && standby_ms > 0) ? 1 : 0;
++}
+ void pong_touch_set_paused(int paused);
+ void
+ pong_touch_set_paused(int paused)
+@@ -1007,15 +1014,41 @@
+ 		if (want && !touch_paused) {
+ 			fts_release_all();
+ 			touch_suppressed = 0;
++			bool scan_off = false;
++			if (standby_ms > 0) {
++				scan_off = fts_fw_write8(FTS_FW_SCAN_MODE, 0x00);
++			}
+ 			touch_paused = 1;
+-			printf("ZIZHAN_TOUCH_PAUSE: paused touches=%u\n", seen.touches);
++			printf("ZIZHAN_TOUCH_PAUSE: paused touches=%u standby_ms=%u scan_off=%u\n",
++			    seen.touches, standby_ms, scan_off ? 1u : 0u);
+ 		} else if (!want && touch_paused) {
++			if (standby_ms > 0) {
++				if (!fts_scan_on()) {
++					if (fts_system_reset()) {
++						(void)fts_scan_on();
++					}
++				}
++				fts_poll();
++				idle = 0;
++			}
+ 			touch_paused = 0;
+ 			printf("ZIZHAN_TOUCH_PAUSE: resumed suppressed=%u touches=%u\n", touch_suppressed, seen.touches);
+ 		}
+-		if (!gpio_get(PIN_INT) || ++idle >= 10) { idle = 0; fts_poll(); }
++		if (touch_paused && standby_ms > 0) {
++			sleep_ms(standby_ms);
++			if ((minute += standby_ms) >= 60000) {
++				minute = 0;
++				printf("fts: %u polls, %u events, %u touches (last raw %u, %u), %u errors\n", seen.polls, seen.events,
++				    seen.touches, seen.last_x, seen.last_y, seen.errors);
++			}
++			continue;
++		}
++		if (!gpio_get(PIN_INT) || ++idle >= 10) {
++			idle = 0;
++			fts_poll();
++		}
+ 		sleep_ms(8);
+-		if (++minute >= 7500) {
++		if ((minute += 8) >= 60000) {
+ 			minute = 0;
+ 			printf("fts: %u polls, %u events, %u touches (last raw %u, %u), %u errors\n", seen.polls, seen.events,
+ 			    seen.touches, seen.last_x, seen.last_y, seen.errors);
+@@ -1193,6 +1226,10 @@
+ 	if (!configuration()) { return; }       /* not the zizhan FST2 node: Pong's Goodix driver owns it */
+ 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
+ 	PE_parse_boot_argn("touch_lat", &touch_lat, sizeof(touch_lat));
++	PE_parse_boot_argn("zizhan_touch_standby_ms", &standby_ms, sizeof(standby_ms));
++	if (standby_ms > 1000) {
++		standby_ms = 1000;
++	}
+ 	if (kernel_thread_start(touch_thread, NULL, &thread) == KERN_SUCCESS) thread_deallocate(thread);
+ 	uint32_t synth = 0;
+ 	if (PE_parse_boot_argn("pong_touch_synth", &synth, sizeof(synth)) && synth &&
+--- a/bsd/dev/pong_buttons.c
++++ b/bsd/dev/pong_buttons.c
+@@ -13,6 +13,7 @@
+ #include <sys/systm.h>
+ extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
++extern int pong_touch_standby_active(void);
+ /* Power key held for pong_button_reset ms (default 3000, 0 = off): call the hook the platform kext installs
+  * (ArmDTPlatform/PongBootReset.h buttonReset): a warm reset into fastboot with DRAM and klog intact. The only
+  * way back from a running iOS besides the autoreset deadline: no USB device stack, no network. */
+@@ -146,8 +147,22 @@
+                 pong_touch_post(PONG_BUTTON_UP,keys[i].code,0,0);
+             printf("Pong keys: repeated observer read failure; stop optional polling\n");break;
+         }
+-        uint64_t deadline;clock_interval_to_deadline(16,NSEC_PER_MSEC,&deadline);
+-        assert_wait_deadline((event_t)keys,THREAD_UNINT,deadline);thread_block(THREAD_CONTINUE_NULL);
++        uint32_t poll_ms=16;
++        if (pong_touch_standby_active()) {
++            bool idle_keys=true;
++            for (unsigned i=0;i<3;i++) {
++                if (keys[i].usable && (keys[i].down || keys[i].last!=keys[i].down)) {
++                    idle_keys=false;
++                }
++            }
++            if (idle_keys) {
++                poll_ms=64;
++            }
++        }
++        uint64_t deadline;
++        clock_interval_to_deadline(poll_ms,NSEC_PER_MSEC,&deadline);
++        assert_wait_deadline((event_t)keys,THREAD_UNINT,deadline);
++        thread_block(THREAD_CONTINUE_NULL);
+     }
+ out:
+     thread_terminate(current_thread());

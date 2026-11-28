@@ -71,9 +71,9 @@ typedef struct {
     uint8_t address, phase, reading, hold;
     uint8_t reg, value, error, data;
     uint8_t tx_words, rx_length;
-    uint32_t tx[2], length;
+    uint32_t tx[13], length;         /* up to 52 bytes (4 addr + 48 data = 13 FIFO words <= 16) */
     uint32_t rx;                     /* the bytes read, first byte in bits 7:0 */
-    uint32_t rx_block[5];            /* opt-in bounded read burst, FIFO lane order */
+    uint32_t rx_block[12];           /* opt-in bounded read burst, up to 48 bytes (12 FIFO words) */
     uint32_t error_status;           /* the M_IRQ status of the last failure */
     uint32_t done, failed, timeouts, stray;
 } GeniI2c;
@@ -94,6 +94,10 @@ int geni_i2c_start_read_bytes(GeniI2c *g, const uint8_t *bytes, uint32_t length,
  * qualified depth16 FIFO. Old read_bytes remains limited to4 bytes.
  * Completion requires all requested FIFO words; short FIFO is an error. */
 int geni_i2c_start_read_block(GeniI2c *,const uint8_t *,uint32_t,uint32_t);
+/* Bounded multi-tuple burst API for 16-word FIFO (M1-FASTBOOT): write 4-byte register + 12/20/24/36/40/48
+ * payload bytes (16..52 wire bytes = 4..13 FIFO words), or read 12/20/24/36/40/48 bytes after a 4-byte register. */
+int geni_i2c_start_write_burst(GeniI2c *g, const uint8_t *bytes, uint32_t length);
+int geni_i2c_start_read_burst(GeniI2c *g, const uint8_t *bytes, uint32_t length, uint32_t read_length);
 /* Feeds M_IRQ status bits (already cleared by whoever read them). Returns GeniPending, GeniDone (read value in g->data) or GeniFailed. */
 int geni_i2c_event(GeniI2c *g, uint32_t status);
 /* Reads and clears the status itself, then as geni_i2c_event (for a timer poll; the interrupt handler does the same in its context). */

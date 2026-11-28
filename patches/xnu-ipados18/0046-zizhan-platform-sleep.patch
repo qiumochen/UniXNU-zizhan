@@ -1,0 +1,225 @@
+diff --git a/bsd/dev/pong_buttons.c b/bsd/dev/pong_buttons.c
+index cbe0c0c..dfc4734 100644
+--- a/bsd/dev/pong_buttons.c
++++ b/bsd/dev/pong_buttons.c
+@@ -23,6 +23,7 @@ static uint64_t power_down_at;
+ static bool reset_fired;
+ static uint32_t vol_pace=1;
+ static struct {uint32_t held_ms;uint8_t down;} vol_state[2];
++static volatile int swallow_power;
+ static vm_offset_t core,cnfg,observer;
+ static bool v7;
+ static uint32_t channels;
+@@ -165,7 +166,12 @@ static void keys_thread(__unused void *arg,__unused wait_result_t result)
+         bool was_vol_down[3]={false,keys[1].down,keys[2].down};
+         if (keys[0].usable) {
+             if (read_registers(&pon,0x10,&state,1)) {
+-                look(&keys[0],(state&0x80)!=0);look(&keys[2],(state&0x40)!=0);
++                bool pdown=(state&0x80)!=0;
++                if (__atomic_load_n(&swallow_power,__ATOMIC_ACQUIRE)) {
++                    if (!pdown) __atomic_store_n(&swallow_power,0,__ATOMIC_RELEASE);
++                    pdown=false;
++                }
++                look(&keys[0],pdown);look(&keys[2],(state&0x40)!=0);
+             } else good=false;
+         }
+         if (keys[1].usable) {
+@@ -234,4 +240,40 @@ void pong_buttons_init(void)
+     PE_parse_boot_argn("zizhan_vol_pace",&vol_pace,sizeof(vol_pace));
+     if (kernel_thread_start(keys_thread,NULL,&t)==KERN_SUCCESS) thread_deallocate(t);
+ }
++
++int pong_buttons_ready(void);
++int
++pong_buttons_ready(void)
++{
++    return keys[0].usable ? 1 : 0;
++}
++
++/* Called on the boot core with interrupts masked during platform sleep (ZizhanSleep.h).
++ * Uses raw CNTVCT_EL0 ticks (2 ms timeout) instead of Mach deadlines so it is safe while
++ * rtclock is quiesced. Read-only SPMI observer access to PMK8350 PON RT_STS (0x10). */
++int pong_buttons_sleep_check(void);
++int
++pong_buttons_sleep_check(void)
++{
++    if (!keys[0].usable || !pon.found || !observer) return 0;
++    vm_offset_t ch=observer+(v7?0x20UL:0x80UL)*pon.channel;
++    uint64_t hz=0,start=0,now=0;
++    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(hz));
++    if (!hz) hz=19200000ULL;
++    __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(start));
++    const uint64_t budget=hz/500ULL; /* 2 ms */
++    wr(ch,(1u<<27)|(0x10u<<4)|0u);
++    uint32_t status=0;
++    do {
++        status=rd(ch+8);
++        __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(now));
++    } while (!(status&1u) && (now-start)<budget);
++    if ((status&0xfu)!=1u) return 0;
++    const uint8_t rt=(uint8_t)(rd(ch+0x18)&0xffu);
++    if ((rt&0x80u)!=0u) {
++        __atomic_store_n(&swallow_power,1,__ATOMIC_RELEASE);
++        return 1;
++    }
++    return 0;
++}
+ #endif
+diff --git a/iokit/Kernel/IOPMrootDomain.cpp b/iokit/Kernel/IOPMrootDomain.cpp
+index 9fecd7e..49dea52 100644
+--- a/iokit/Kernel/IOPMrootDomain.cpp
++++ b/iokit/Kernel/IOPMrootDomain.cpp
+@@ -568,6 +568,9 @@ static uint32_t         gDarkWakeFlags = kDarkWakeFlagPromotionEarly;
+ 
+ static uint32_t         gNoIdleFlag = 0;
+ static uint32_t         gSleepDisabledFlag = 0;
++#if defined(__arm64__)
++extern "C" void (*arm64_platform_sleep_hook)(boolean_t boot_cpu);
++#endif
+ static uint32_t         gSwdPanic = 1;
+ static uint32_t         gSwdSleepTimeout = 0;
+ static uint32_t         gSwdWakeTimeout = 0;
+@@ -8105,6 +8108,13 @@ IOPMrootDomain::dispatchPowerEvent(
+ 				}
+ 			}
+ 
++#if defined(__arm64__)
++			if (gSleepDisabledFlag && arm64_platform_sleep_hook != NULL) {
++				gSleepDisabledFlag = 0;
++				IOLog("PMRD: sleep enabled by platform-sleep hook\n");
++			}
++#endif
++
+ 			if (lowBatteryCondition || thermalEmergencyState) {
+ 				if (lowBatteryCondition) {
+ 					privateSleepSystem(kIOPMSleepReasonLowPower);
+@@ -8384,6 +8394,13 @@ IOPMrootDomain::receivePowerNotification( UInt32 msg )
+ IOPMrootDomain::receivePowerNotification( UInt32 msg )
+ {
++#if defined(__arm64__)
++	if (msg == 0x5a495a42u) {
++		pmPowerStateQueue->submitPowerEvent(kPowerEventSystemBootCompleted);
++		return kIOReturnSuccess;
++	}
++#endif
++
+ 	if (msg & kIOPMPowerButton) {
+ 		uint32_t currentPhase = pmTracer->getTracePhase();
+ 		if (currentPhase != kIOPMTracePointSystemUp && currentPhase > kIOPMTracePointSystemSleep) {
+ 			DEBUG_LOG("power button pressed during wake. phase = %u\n", currentPhase);
+@@ -12969,3 +12986,42 @@ IOPMrootDomain::sleepWakeDebugSaveFile(const char *name, char *buf, int len)
+ 
+ #endif /* defined(__i386__) || defined(__x86_64__) */
+ 
++#if defined(__arm64__)
++extern "C" int
++zizhan_pmrd_boot_complete(void)
++{
++	if (!gRootDomain) {
++		return -1;
++	}
++	return (gRootDomain->receivePowerNotification(0x5a495a42u) == kIOReturnSuccess) ? 0 : -2;
++}
++
++extern "C" int
++zizhan_pmrd_request_sleep(void)
++{
++	if (!gRootDomain) {
++		return -1;
++	}
++	if (gSleepDisabledFlag) {
++		IOLog("PMRD: zizhan_pmrd_request_sleep refused (sleep_disabled=%u)\n", gSleepDisabledFlag);
++		return -2;
++	}
++	gRootDomain->receivePowerNotification(kIOPMSleepNow);
++	return 0;
++}
++
++extern "C" void
++zizhan_pmrd_claim_wake(const char *reason, int user_active)
++{
++	if (!gRootDomain) {
++		return;
++	}
++	const char *why = reason ? reason : "zizhan wake";
++	gRootDomain->claimSystemWakeEvent(gRootDomain, kIOPMWakeEventSource, why);
++	if (user_active) {
++		gRootDomain->requestUserActive(gRootDomain, why);
++	}
++}
++#endif /* defined(__arm64__) */
++
++
+diff --git a/osfmk/arm/cpu_common.c b/osfmk/arm/cpu_common.c
+index 1955f09..af9f099 100644
+--- a/osfmk/arm/cpu_common.c
++++ b/osfmk/arm/cpu_common.c
+@@ -850,6 +850,29 @@ ml_wait_for_cpu_signal_to_enable(void)
+ 	assert(ml_get_interrupts_enabled());
+ 	cpu_data_t *cpu_data_ptr = getCpuDatap();
+ 
++#if defined(__arm64__)
++	/*
++	 * zizhan POWER-02: with platform sleep installed, the boot core resumes alone before secondary cores are
++	 * started; if a self-IPI races, clear SIGPdisabled after 100 ms once InitState|StartedState & cpu_running hold.
++	 */
++	extern void (*arm64_platform_sleep_hook)(boolean_t boot_cpu);
++	if (arm64_platform_sleep_hook != NULL) {
++		uint64_t deadline;
++		nanoseconds_to_absolutetime(100 * NSEC_PER_MSEC, &deadline);
++		deadline += mach_absolute_time();
++		while (os_atomic_load(&cpu_data_ptr->cpu_signal, acquire) == SIGPdisabled) {
++			if (mach_absolute_time() > deadline) {
++				if ((os_atomic_load(&cpu_data_ptr->cpu_flags, relaxed) & (InitState | StartedState)) ==
++				    (InitState | StartedState) &&
++				    os_atomic_load(&cpu_data_ptr->cpu_running, relaxed)) {
++					os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdisabled, acq_rel);
++				}
++				break;
++			}
++		}
++		return;
++	}
++#endif /* defined(__arm64__) */
+ 	hw_wait_while_equals32(__DEVOLATILE(uint32_t*, &cpu_data_ptr->cpu_signal), SIGPdisabled);
+ }
+ 
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index 8ab199b..f241b4d 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -103,6 +103,13 @@ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sle
+ #else
+ extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sleep);
+ #endif
++/*
++ * zizhan POWER-02 (adapted from UniXNU-sheng): platform sleep hook for boards without Apple's sleep hardware.
++ * Non-boot cores call arm64_platform_sleep_hook(FALSE) and turn off via PSCI CPU_OFF; the boot core calls
++ * arm64_platform_sleep_hook(TRUE) with interrupts masked, waits for a registered wake source or timer, and
++ * resumes through arm_init_cpu(cpu_data_ptr, 0).
++ */
++void (*arm64_platform_sleep_hook)(boolean_t boot_cpu) = NULL;
+ extern void arm64_force_wfi_clock_gate(void);
+ #if defined(APPLETYPHOON)
+ // <rdar://problem/15827409>
+@@ -1098,6 +1105,10 @@ ml_arm_sleep(void)
+ #if CONFIG_CPU_COUNTERS
+ 		mt_sleep();
+ #endif /* CONFIG_CPU_COUNTERS */
++		if (arm64_platform_sleep_hook != NULL) {
++			arm64_platform_sleep_hook(TRUE);
++			arm_init_cpu(cpu_data_ptr, 0);
++		}
+ 		/* ARM64-specific preparation */
+ #if APPLEVIRTUALPLATFORM
+ 		extern bool test_sleep_in_vm;
+@@ -1140,6 +1151,9 @@ ml_arm_sleep(void)
+ 			*(volatile uint32_t *)(cpu_data_ptr->coresight_base[CORESIGHT_ED] + ARM_DEBUG_OFFSET_DBGPRCR) = 0;
+ 		}
+ 
++		if (arm64_platform_sleep_hook != NULL) {
++			arm64_platform_sleep_hook(FALSE);
++		}
+ 		/* ARM64-specific preparation */
+ #if APPLEVIRTUALPLATFORM
+ 		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys(reset_vector_vaddr));

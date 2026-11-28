@@ -10,6 +10,7 @@
 #include <libkern/c++/OSSymbol.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+#include "ArmCpuSleep.h"
 #if PONG_DARWIN_MAJOR >= 24
 #include "PongCpuPolicy.h"
 #endif
@@ -20,6 +21,9 @@ extern "C" kern_return_t psci_smp_start_cpu(int);
 extern "C" void psci_smp_cpu_running(void);
 extern "C" void psci_smp_cpu_off(void) __attribute__((noreturn));
 extern "C" void pong_cpu_startup_finished(IOCPUInterruptController *);
+extern "C" void (*arm64_platform_sleep_hook)(boolean_t boot_cpu) __attribute__((weak_import));
+extern "C" void ml_arm_sleep(void) __attribute__((noreturn));
+extern "C" boolean_t ml_is_quiescing(void);
 #if PONG_DARWIN_MAJOR >= 24
 extern "C" void pong_cpu_first_boot(processor_t);
 extern "C" void pong_cpu_first_boot_wait(processor_t);
@@ -30,18 +34,26 @@ volatile uint64_t armcpu_timer_interrupts, armcpu_ipi_interrupts;
 volatile uint32_t armcpu_gic_boot[8], armcpu_gic_typer_probe[2], armcpu_gic_stride;
 volatile uint32_t armcpu_controller_attached, armcpu_controller_published;
 volatile uint64_t armcpu_cntv_state[5];
+volatile struct armcpu_sleep_stats armcpu_sleep_stats;
 }
 
 static uint64_t gRedistStride;
 static const uint32_t kSgiPpiEnable = 1U | (1U << 27);
+static const uint32_t kVirtualTimerPpi = 27U;
 static IOCPUInterruptController *gController;
 /* Published SPI owners, following Sheng's GIC integration. CPU topology,
  * PSCI and timer setup stay on the existing Pong path. */
 struct SpiOwner {uint32_t id;void (*handler)(void *);void *context;uint64_t count;};
 static SpiOwner gSpi[64];
 static uint32_t gSpiUsed,gSpiRegistering;
+static uint32_t gOwnedSpis[ARMCPU_SLEEP_SPI_WORDS];
 static uintptr_t gDist;
 static uint64_t gBootAffinity;
+static uint64_t gCounterHz = 19200000ULL;
+static bool gSleepEnabled = false;
+static volatile uint32_t gSleepWakeAfterS = 0;
+static const struct armcpu_sleep_board *volatile gSleepBoard = nullptr;
+static void armcpuPlatformSleep(boolean_t bootCpu);
 
 class ArmCpu : public IOCPU {
  OSDeclareDefaultStructors(ArmCpu)
@@ -69,14 +81,42 @@ public:
 OSDefineMetaClassAndStructors(ArmCpu,IOCPU)
 static ArmCpu *gCpus[8];
 
+/* Gunyah hypervisor traps and emulates GICv3 distributor/redistributor MMIO and requires single-register
+ * loads/stores without writeback or register pairs (ESR ISV=1). */
+static uint8_t read8(uintptr_t base, unsigned offset)
+{
+  uint32_t value;
+  __asm__ volatile("ldrb %w0, [%1]" : "=r"(value) : "r"(base + offset) : "memory");
+  return static_cast<uint8_t>(value);
+}
+
+static void write8(uintptr_t base, unsigned offset, uint8_t value)
+{
+  __asm__ volatile("strb %w0, [%1]" :: "r"(static_cast<uint32_t>(value)), "r"(base + offset) : "memory");
+}
+
 static uint32_t read32(uintptr_t base, unsigned offset)
 {
-  return *reinterpret_cast<volatile uint32_t *>(base + offset);
+  uint32_t value;
+  __asm__ volatile("ldr %w0, [%1]" : "=r"(value) : "r"(base + offset) : "memory");
+  return value;
 }
 
 static void write32(uintptr_t base, unsigned offset, uint32_t value)
 {
-  *reinterpret_cast<volatile uint32_t *>(base + offset) = value;
+  __asm__ volatile("str %w0, [%1]" :: "r"(value), "r"(base + offset) : "memory");
+}
+
+static uint64_t read64(uintptr_t base, unsigned offset)
+{
+  uint64_t value;
+  __asm__ volatile("ldr %0, [%1]" : "=r"(value) : "r"(base + offset) : "memory");
+  return value;
+}
+
+static void write64(uintptr_t base, unsigned offset, uint64_t value)
+{
+  __asm__ volatile("str %0, [%1]" :: "r"(value), "r"(base + offset) : "memory");
 }
 
 static uint64_t counter(void)
@@ -166,7 +206,7 @@ bool ArmCpu::wakeRedistributor(bool local)
   redist = 0;
   for (uint64_t offset = 0; offset + 0x20000 <= redistSize;) {
     armcpu_gic_typer_probe[0] = static_cast<uint32_t>(offset);
-    uint64_t typer = *reinterpret_cast<volatile uint64_t *>(redistBase + offset + 8);
+    uint64_t typer = read64(redistBase, static_cast<unsigned>(offset + 8));
     armcpu_gic_typer_probe[1] = static_cast<uint32_t>(typer);
     if (static_cast<uint32_t>(typer >> 32) == target) {
       redist = redistBase + offset;
@@ -269,6 +309,25 @@ bool ArmCpu::start(IOService *provider)
   if (isBoot) {
     IOLog("ArmCpu: start boot CPU\n");
     if (!prepareGic()) return false;
+    uint64_t hz = 0;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(hz));
+    if (hz) gCounterHz = hz;
+    uint32_t daily = 1;
+    (void)PE_parse_boot_argn("zizhan_daily", &daily, sizeof(daily));
+    uint32_t psleep = 0, zsleep = (daily != 0) ? 1u : 0u, wakeAfter = 0;
+    const bool havePsleep = PE_parse_boot_argn("platform-sleep", &psleep, sizeof(psleep));
+    (void)PE_parse_boot_argn("zizhan_sleep", &zsleep, sizeof(zsleep));
+    if (!PE_parse_boot_argn("platform-sleep-wake-after", &wakeAfter, sizeof(wakeAfter))) {
+      (void)PE_parse_boot_argn("zizhan_sleep_wake_s", &wakeAfter, sizeof(wakeAfter));
+    }
+    __atomic_store_n(&gSleepWakeAfterS, wakeAfter, __ATOMIC_RELEASE);
+    const bool wantSleep = havePsleep ? (psleep != 0) : (zsleep != 0);
+    if (wantSleep && &arm64_platform_sleep_hook) {
+      gSleepEnabled = true;
+      arm64_platform_sleep_hook = &armcpuPlatformSleep;
+      IOLog("ArmCpu: platform sleep hook installed (wake_after=%us, cntfrq=%llu)\n",
+            wakeAfter, static_cast<unsigned long long>(gCounterHz));
+    }
   } else {
     ArmCpu *boot = gCpus[ml_get_boot_cpu_number()];
     if (!boot) return false;
@@ -387,8 +446,15 @@ bool ArmCpu::start(IOService *provider)
 
 void ArmCpu::initCPU(bool boot)
 {
-  (void)boot; // XNU passes true for the first initialization of each CPU.
-  if (logicalId != static_cast<uint32_t>(ml_get_boot_cpu_number())) {
+  const bool isBootCore = logicalId == static_cast<uint32_t>(ml_get_boot_cpu_number());
+  if (!boot && isBootCore) {
+    enableGic();
+    enableCPUTimeBase(true);
+    setCPUState(kIOCPUStateRunning);
+    signalCPU(this); // lifts SIGPdisabled on boot-core wake before secondaries start
+    return;
+  }
+  if (!isBootCore) {
     if (!wakeRedistributor(true)) panic("ArmCpu: CPU %u redistributor did not wake", logicalId);
   }
   if (!interruptInstalled) {
@@ -465,19 +531,20 @@ extern "C" IOReturn armcpu_spi_attach(uint32_t intid,bool edge,void (*handler)(v
     if(!waitClear(gDist,0,1u<<31))result=kIOReturnTimeout;
     if(!result) {
       write32(gDist,0x80+word,read32(gDist,0x80+word)|bit);
-      *reinterpret_cast<volatile uint8_t *>(gDist+0x400+intid)=0xa0;
+      write8(gDist,0x400+intid,0xa0);
       const unsigned cfg=0xc00+(intid/16)*4,shift=(intid%16)*2+1;
       write32(gDist,cfg,(read32(gDist,cfg)&~(1u<<shift))|(uint32_t(edge)<<shift));
-      *reinterpret_cast<volatile uint64_t *>(gDist+0x6000+8*intid)=gBootAffinity;
+      write64(gDist,0x6000+8*intid,gBootAffinity);
       __asm__ volatile("dsb sy":::"memory");
       if(!waitClear(gDist,0,1u<<31) || !(read32(gDist,0x80+word)&bit))result=kIOReturnNotPermitted;
       if(!result) {
         gSpi[used]={intid,handler,context,0};
         __atomic_store_n(&gSpiUsed,used+1,__ATOMIC_RELEASE);
+        __atomic_fetch_or(&gOwnedSpis[intid/32],bit,__ATOMIC_RELEASE);
         write32(gDist,0x100+word,bit);
         __asm__ volatile("dsb sy":::"memory");
         if(readback)*readback=1u|((read32(gDist,0x100+word)&bit)?2u:0u)|(uint32_t(edge)<<2)|0xa000;
-        if(router)*router=*reinterpret_cast<volatile uint64_t *>(gDist+0x6000+8*intid);
+        if(router)*router=read64(gDist,0x6000+8*intid);
       }
     }
   }
@@ -501,12 +568,200 @@ void ArmCpu::enableCPUTimeBase(bool enabled)
   __asm__ volatile("msr cntv_ctl_el0, %0\n\tisb" :: "r"(value) : "memory");
 }
 
+extern "C" void armcpu_spi_set_awake_enable(uint32_t intid, bool enable)
+{
+  if (!gDist || intid < 32 || intid >= 1020) return;
+  const uint32_t word = (intid / 32) * 4, bit = 1u << (intid % 32);
+  if (!(__atomic_load_n(&gOwnedSpis[intid / 32], __ATOMIC_ACQUIRE) & bit)) return;
+  write32(gDist, (enable ? 0x100u : 0x180u) + word, bit);
+  (void)waitClear(gDist, 0, 1u << 31);
+  __asm__ volatile("dsb sy" ::: "memory");
+}
+
+extern "C" int armcpu_sleep_enabled(void)
+{
+  return gSleepEnabled ? 1 : 0;
+}
+
+extern "C" void armcpu_sleep_set_wake_after(uint32_t seconds)
+{
+  __atomic_store_n(&gSleepWakeAfterS, seconds, __ATOMIC_RELEASE);
+}
+
+extern "C" int armcpu_sleep_register(const struct armcpu_sleep_board *board)
+{
+  if (!gSleepEnabled) return KERN_NOT_SUPPORTED;
+  __atomic_store_n(&gSleepBoard, board, __ATOMIC_RELEASE);
+  return 0;
+}
+
+static bool sleepIsWakeSource(const struct armcpu_sleep_board *board, uint32_t intid)
+{
+  for (uint32_t i = 0; board != nullptr && i < board->wake_spi_count; ++i) {
+    if (board->wake_spis[i] == intid) return true;
+  }
+  return false;
+}
+
+static void sleepArmTimer(uint64_t at)
+{
+  uint64_t value = 2;
+  if (at != ARMCPU_SLEEP_NEVER) {
+    __asm__ volatile("msr cntv_cval_el0, %0" :: "r"(at) : "memory");
+    value = 1;
+  }
+  __asm__ volatile("msr cntv_ctl_el0, %0\n\tisb" :: "r"(value) : "memory");
+}
+
+static void sleepAcknowledge(void)
+{
+  uint64_t id;
+  __asm__ volatile("mrs %0, icc_iar1_el1" : "=r"(id));
+  id &= 0xffffff;
+  if (id < 1020) {
+    __asm__ volatile("msr icc_eoir1_el1, %0\n\tisb" :: "r"(id) : "memory");
+  }
+}
+
+static void sleepBootWait(void)
+{
+  volatile struct armcpu_sleep_stats &st = armcpu_sleep_stats;
+  __asm__ volatile("msr daifset, #15" ::: "memory");
+  const struct armcpu_sleep_board *board = __atomic_load_n(&gSleepBoard, __ATOMIC_ACQUIRE);
+  st.phase = 2;
+  if (gDist == 0) {
+    st.unarmed = st.unarmed + 1;
+    st.last_reason = ArmcpuWakeNone;
+    st.phase = 5;
+    return;
+  }
+  const unsigned lines = ((read32(gDist, 4) & 31) + 1) * 32;
+  const unsigned words = lines / 32 < ARMCPU_SLEEP_SPI_WORDS ? lines / 32 : ARMCPU_SLEEP_SPI_WORDS;
+  uint32_t saved[ARMCPU_SLEEP_SPI_WORDS] = {}, owned[ARMCPU_SLEEP_SPI_WORDS] = {}, keep[ARMCPU_SLEEP_SPI_WORDS] = {};
+  for (unsigned w = 1; w < words; ++w) {
+    saved[w] = read32(gDist, 0x100 + 4 * w);
+    owned[w] = __atomic_load_n(&gOwnedSpis[w], __ATOMIC_ACQUIRE);
+  }
+  armcpu_sleep_keep_owned(owned, board ? board->wake_spis : nullptr, board ? board->wake_spi_count : 0, keep);
+  const uint64_t start = counter();
+  const uint32_t wakeAfterS = __atomic_load_n(&gSleepWakeAfterS, __ATOMIC_ACQUIRE);
+  const uint64_t wakeAt = armcpu_sleep_deadline(start, wakeAfterS, gCounterHz);
+  const uint64_t tickTicks = (board && board->tick && board->tick_ms) ? armcpu_sleep_tick_interval(board->tick_ms, gCounterHz) : 0;
+  uint64_t tickAt = tickTicks ? (start + tickTicks) : ARMCPU_SLEEP_NEVER;
+  if (!armcpu_sleep_armed(keep) && wakeAt == ARMCPU_SLEEP_NEVER && tickAt == ARMCPU_SLEEP_NEVER) {
+    st.unarmed = st.unarmed + 1;
+    st.last_reason = ArmcpuWakeNone;
+    st.phase = 5;
+    return;
+  }
+  for (unsigned w = 1; w < words; ++w) write32(gDist, 0x180 + 4 * w, 0xffffffffu);
+  (void)waitClear(gDist, 0, 1u << 31);
+  for (unsigned w = 1; w < words; ++w) {
+    if (keep[w]) write32(gDist, 0x100 + 4 * w, keep[w]);
+  }
+  if (board && board->prepare) board->prepare();
+  sleepArmTimer(armcpu_sleep_next(wakeAt, tickAt));
+  uint64_t value = 1;
+  __asm__ volatile("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r"(value) : "memory");
+  st.phase = 3;
+  struct armcpu_sleep_storm storm = {};
+  uint32_t intid = ARMCPU_SLEEP_SPURIOUS;
+  enum armcpu_wake_reason reason = ArmcpuWakeNone;
+  for (;;) {
+    __asm__ volatile("dsb sy\n\twfi\n\tisb" ::: "memory");
+    uint64_t hppir = 0;
+    __asm__ volatile("mrs %0, icc_hppir1_el1" : "=r"(hppir));
+    intid = static_cast<uint32_t>(hppir & 0xffffff);
+    if (intid >= 1020) continue;
+    if (intid == kVirtualTimerPpi) {
+      uint32_t pending[ARMCPU_SLEEP_SPI_WORDS] = {};
+      for (unsigned w = 1; w < words; ++w) pending[w] = read32(gDist, 0x200 + 4 * w);
+      const uint32_t source = armcpu_sleep_pending_source(pending, keep);
+      if (source != ARMCPU_SLEEP_SPURIOUS && board && board->should_wake && board->should_wake(source)) {
+        intid = source;
+        reason = ArmcpuWakeSource;
+        break;
+      }
+      const enum armcpu_timer_event event = armcpu_sleep_timer(counter(), wakeAt, &tickAt, tickTicks);
+      int board_wake = 0;
+      if (event == ArmcpuTimerTick) {
+        board_wake = board->tick();
+        st.ticks = st.ticks + 1;
+      }
+      const bool done = (event == ArmcpuTimerWake) || (board_wake != 0);
+      sleepArmTimer(done ? ARMCPU_SLEEP_NEVER : armcpu_sleep_next(wakeAt, tickAt));
+      sleepAcknowledge();
+      if (board_wake != 0) {
+        reason = ArmcpuWakeSource;
+        break;
+      }
+      if (event == ArmcpuTimerWake) {
+        reason = ArmcpuWakeTimer;
+        break;
+      }
+      continue;
+    }
+    int says = 0;
+    if (board && board->should_wake && sleepIsWakeSource(board, intid)) {
+      says = board->should_wake(intid);
+    }
+    reason = armcpu_sleep_decide(intid, says, ARMCPU_SLEEP_NO_TIMER);
+    if (reason != ArmcpuWakeNone) break;
+    sleepAcknowledge();
+    st.spurious = st.spurious + 1;
+    if (!armcpu_sleep_storm(&storm, intid, counter(), gCounterHz / 1000)) continue;
+    const uint32_t bit = 1u << (intid % 32);
+    if (intid >= 32 && (keep[intid / 32] & bit)) {
+      keep[intid / 32] &= ~bit;
+      write32(gDist, 0x180 + 4 * (intid / 32), bit);
+      (void)waitClear(gDist, 0, 1u << 31);
+      st.masked = st.masked + 1;
+      if (armcpu_sleep_armed(keep) || wakeAt != ARMCPU_SLEEP_NEVER || tickAt != ARMCPU_SLEEP_NEVER) continue;
+    }
+    reason = ArmcpuWakeStorm;
+    break;
+  }
+  st.phase = 4;
+  value = 0;
+  __asm__ volatile("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r"(value) : "memory");
+  sleepArmTimer(ARMCPU_SLEEP_NEVER);
+  if (board && board->restore) board->restore();
+  for (unsigned w = 1; w < words; ++w) write32(gDist, 0x180 + 4 * w, 0xffffffffu);
+  (void)waitClear(gDist, 0, 1u << 31);
+  for (unsigned w = 1; w < words; ++w) {
+    if (saved[w]) write32(gDist, 0x100 + 4 * w, saved[w]);
+  }
+  st.last_intid = intid;
+  st.last_reason = reason;
+  st.asleep_ticks = counter() - start;
+  st.entries = st.entries + 1;
+  st.phase = 5;
+}
+
+static void armcpuPlatformSleep(boolean_t bootCpu)
+{
+  if (!bootCpu) {
+    uint64_t ctl = 2, grp = 0;
+    __asm__ volatile("msr cntv_ctl_el0, %0\n\tisb" :: "r"(ctl) : "memory");
+    __asm__ volatile("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r"(grp) : "memory");
+    psci_smp_cpu_off();
+  }
+  armcpu_sleep_stats.phase = 1;
+  sleepBootWait();
+}
+
 void ArmCpu::quiesceCPU(void)
 {
   // zizhan POWER-02: PE_cpu_machine_quiesce is a *local* shutdown
   // continuation. Never disable the caller's timer/GIC for another IOCPU.
   if (static_cast<uint32_t>(cpu_number()) != logicalId)
     panic("ArmCpu: quiesce target %u called on CPU %d", logicalId, cpu_number());
+  if (gSleepEnabled && ml_is_quiescing()) {
+    enableCPUTimeBase(false);
+    uint64_t value = 0;
+    __asm__ volatile("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r"(value) : "memory");
+    ml_arm_sleep();
+  }
   enableCPUTimeBase(false);
   uint64_t value = 0;
   __asm__ volatile("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r"(value) : "memory");
@@ -518,13 +773,9 @@ void ArmCpu::quiesceCPU(void)
 
 void ArmCpu::haltCPU(void)
 {
-  // zizhan POWER-02: IOCPUSleepKernel calls haltCPU on each target object
-  // from the boot CPU, then processor_sleep(target->getMachProcessor()).
-  // The latter schedules the target's own shutdown continuation, eventually
-  // reaching quiesceCPU locally. Hardware shutdown here would CPU_OFF the
-  // boot CPU while processing a secondary's object and never return.
-  // There is no remote platform action needed before processor_sleep.
-  // This fixes the target/caller contract only; it enables no suspend state.
+  if (gSleepEnabled) {
+    setCPUState(kIOCPUStateStopped);
+  }
 }
 
 kern_return_t ArmCpu::startCPU(vm_offset_t, vm_offset_t)

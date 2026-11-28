@@ -1,6 +1,6 @@
 # 当前进度与接续入口
 
-更新：2026-11-24（UTC+8）。本页只保留**当前**状态，限一页。11-17 之前的完整台账原文在 [2026-11-17-status-archive.md](2026-11-17-status-archive.md)；规划依据见 [接手梳理与重新规划](../plan/2026-11-17-takeover-replan.md)。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机操作细节在仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
+更新：2026-11-27 下午（UTC+8）。本页只保留**当前**状态，限一页。11-17 之前的完整台账原文在 [2026-11-17-status-archive.md](2026-11-17-status-archive.md)；规划依据见 [接手梳理与重新规划](../plan/2026-11-17-takeover-replan.md)。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机操作细节在仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
 
 ## 推进规则（11-17 起）
 
@@ -13,184 +13,39 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 源码 | `main` 已合入截至 2026-11-24 的全部稳定日用、缩放动画栅栏快照、6 零拷贝槽位与沙盒修复；实验分支 `feature/native22g100-arm64e` 挂起。 |
-| 启动方式 | Mac 上 `fastboot boot` 临时启动（后部 USB-A），默认 300 s 自动返回、电源键 3 s 回 fastboot。离开 Mac 不能进 iPadOS。 |
-| 手机安装 | iPadOS 18.7.10 / 22H374 用户态 `statusbar-work-v1`（OS `5c0912…`、UI `f2d639…`）；回退链和 10-28 全分区备份保留。 |
-| 能用 | 内屏桌面、触摸、GPU + 120 Hz + 零拷贝、Wi-Fi（选网/自动加入/2.4↔5 GHz）、手动亮度、电量和充电显示、设置、状态栏电池在右上角。 |
-| 不能用 | 声音（数据已到功放，待试听）、外屏触控、传感器/定位、蓝牙射频、相机出图、蜂窝；应用内容只部分可用。熄屏/亮屏、合盖跟随、外屏显示、温控已有实现与无人值守证据，默认关闭。 |
+| 源码 | `main`（`dac504b`）保持稳定基线；`wip/2026-11-17-audio-sensors` 在三大 P0 基础上再完成第二梯队 1–4 与第三梯队 2：**熄屏纯电池深睡破 1 W（`-219 mA / 952 mW`，稳态底噪 `730 mW`）**、**非破坏性 `64 GiB` 根卷（`48 GiB` Data）+ `IPA 安装器` v2（`<=12 GiB` 流式上传 + 第三方容器 Metal/Keychain/AppGroup/`9:16` 视口 `8/8 PASS`）**、**`960×720` 三摄 `AVCaptureSession`（`1x/0.6x/前置` 热切 + `DW9800V` 对焦 + `RumbaS4H` OIS）**、**PM8350B X 轴线性马达 + 顶部听筒路由** 与 **外屏 `1:1` 满高视网膜桌面（`1080×1916` + `ZOOM` 胶囊）**。 |
+| 启动方式 | Mac 后部 USB-A `fastboot boot` 临时启动（默认自动返回、电源键 3 s 回 fastboot）；M3 双启动包 `m3-standalone-1128`（`43fbb97bf71d…`，`build-play205`）已通过离线全项与原厂备份校验，待在场 RAM 预演。 |
+| 手机安装 | iPadOS 18.7.10 / 22H374（默认 `iPad7,12`），新增单段连续 `64 GiB` **`sens-hal-v26-64g`**（`/data/hackios/root-64g.img`，`Data` 空余 `46.8 GiB`，UI `a370df9c8804…`，主屏幕第 1 页已预置 `IPA 安装器` / `扫码相机验证` / `兼容套件验证` 三枚图标），并 `100%` 原样保留 `19.4 GiB` `sens-hal-v22`（`/data/hackios/root.img`）及 10-28 全分区备份。 |
+| 默认能用 | 内屏 120 Hz + GPU 零拷贝、`<1 W` 熄屏深睡（内屏电源键唤醒）、**`48 GiB` Data + 主屏第 1 页置顶 `IPA 安装器` v2 / `扫码相机验证` / `兼容套件验证`（9 按钮交互台 + X 轴线性马达 + 听筒/双扬试音）**、Wi-Fi、`3 Mbps` 蓝牙、双开关电池页、北京时间、温控、1 Hz GPS。 |
+| 待修问题（`video-7` 实测记录，暂挂起不修） | 1. **相机图像质量与方向**：前后各摄像头已出流可切，但**画面方向不对、噪点明显且色彩偏色**（`flipY` 改变 Bayer 行相位 + 缺 `90°/270°` 转置与降噪/CCM，扫码暂未验）；<br>2. **合盖外屏状态与旋转**：合上手机后**外屏未先进锁屏态，框内仍呈横屏并随重力旋转**（需在合盖态强制竖屏锁止并复位锁屏态）；<br>3. **外屏电源键无响应**：**合盖外屏状态下按电源键无反应**（外屏 `DSI1` 未联动电源键亮灭屏）。 |
+| 不能用 | 未脱壳 App Store 加密 IPA（`cryptid=1`，安装器已拦截提示）、原厂系统 `Camera.app`（`FigCapture` 私有 C 层未桩）、蜂窝数据（MPSS 锁定离线仅跑 GPS）、天气预报（卡 FairPlay）。 |
 
 ## 当前里程碑
 
 | ID | 里程碑 | 状态 | 验收 | 下一动作 |
 | --- | --- | --- | --- | --- |
-| M0 | 收口 | DONE（11-17） | 8 天未提交工作按主题提交并推到 wip 分支；本页一页；20 h 无人值守窗口关闭 | 已完成：分支 `wip/2026-11-17-audio-sensors`，`a044488` 的 Porting record 44075853448、Daily-use 44075853465、Display 44075853503、Wi-Fi 44075853551 全部 SUCCESS（macOS 云端内核为手动触发，本次未运行）。中途修了 GCC 才报的告警（只加括号/类型转换，无行为变化）。 |
-| M1 | 能出声 | DOING（主线） | 用户在场：系统提示音能听到、一个 App 播放能听到、音量键能调 | 11-17 晚在场轮的间歇整机挂死已查清并修复：根因是音频 PRM 工作线程 16 KiB 内核栈溢出（功放回执大帧 + IOLog 深调用链），不是 ADSP/SMMU。修复后无人值守静音验证 18/18 轮 0 挂（修复前约 50% 挂），60 条 WRITE 全部 10–27 ms 回执。11-19 用引脚电平采样证实数据已到功放（GPIO124 有数据、功放回传 GPIO122 有数据）；之前听不到最可能是电平太低（增益 5.5 dB vs Android 18.5 dB、音量更低、左右反相）。`zizhan_amp_lvl=1`（Android 增益/音量 + 同相）空跑通过。下一步（需在场，约 5 分钟）：试听 `loud-1`（1 kHz、−18 dBFS、1 s） |
-| M2 | 外屏 + 折叠 + 熄屏/亮屏 | DOING（11-18 用户定为 M1 之后第一优先） | 外屏能显示与触控、开合自动切屏；熄屏/亮屏 10 次循环可触控 | 已有：Hall 只读观察、S1 观测；**S3 熄屏/亮屏执行器 11-19 无人值守 10 轮开/关全部 PASS**（[证据](2026-11-19-power-s3-device.md)），待人工看屏与触控。11-19 新增 `zizhan_hall_observe=2`：合上内屏按一次电源键熄屏、打开再按一次亮屏（无人值守 0 误触发），待在场折叠验证；外屏资料与只读探针已备（[外屏](../research/2026-11-19-outer-panel.md)）。11-19 晚：模拟合盖全链路闭环（fold-2），外屏能显示（MISR），外屏触控芯片 FTM5 已应答；剩真实折叠（fold-3）与外屏触控事件协议 |
-| M3 | 离开电脑启动 | DOING（11-18 用户授权写一次 boot、先做好备份、默认进安卓） | 不接电脑开机：默认 10 s 进安卓，菜单可选 iPadOS；安卓数据与撤销路径保留 | A′（mi8-dualboot-lab 式 magic + warm reset 交接，见 docs/research/2026-11-18-m3-warm-reset-handoff.md）：今天只读备份 + 主机构建测试镜像；写 boot_a 并切槽在用户在场时做，boot_b 原样回退 |
+| M0 | 收口 | DONE（11-17） | 未提交工作按主题提交并推 wip 分支；CI 全绿；本页一页 | 已完成。 |
+| M1 | 能出声 + 麦克风 + 听筒/触感 | DOING（待在场终验） | 双扬外放响亮、主麦录音清晰、VoiceChat 切顶部听筒、线性马达清脆 | 已补齐顶部听筒路由与 PM8350B X 轴线性马达；下一步：在场跑 `run-video-5.sh` 一次终验。 |
+| M2 | 外屏 + 深睡 `<1 W` + 64G 应用生态 | DOING（待修 `video-7` 三项） | 深睡 `<1 W`、`48 GiB` 应用安装正常；相机方向/色彩与外屏锁屏/旋转/电源键待修 | `video-7` 已记下 3 项实机问题并按指示暂挂起，待用户点名恢复修复。 |
+| M3 | 离开电脑启动 | DOING（需在场） | 不接电脑开机：默认进安卓，菜单可选 iPadOS（挂载 `64 GiB` 根卷）；回退保留 | `m3-standalone-1128`（`43fbb97bf71d…`）已刷新至 `build-play205` 并通过校验；仅在用户在场时先跑 RAM 测试。 |
 
-## 后续优先级（用户 2026-11-18 定）
+## 挂起与边界（用户点名才恢复，详见对应记录）
 
-M1 声音 → M3 离开电脑启动（并行，需在场写 boot）→ **外屏 + 折叠 + 熄屏/亮屏** → **天气 App** → **相机** → **温控与调度** → **蓝牙**。温控 THERM-01 已有默认关闭的实现与设备证据（封顶/恢复成立），排到第 4 位前保持默认关闭。
-
-## 挂起（用户点名才恢复，恢复时从对应记录续）
-
-| ID | 停在哪里 | 记录 |
+| ID | 当前状态与停点 | 记录 |
 | --- | --- | --- |
-| APP-01 天气 | 有城市名，无温度/预报；卡在时区、定位、fairplayd、WeatherKit 认证 | [11-09 交接](2026-11-09-weather-handoff.md) |
-| 22G100 原生迁移 | 两次早期内核启动；544 个导入缺口 | `feature/native22g100-arm64e` |
-| SENS-01 / GNSS-01 | SLPI 固件/IPCC/cmd-db 已就绪，六项带宽基线未知，未启动 SLPI | [11-16 记录](2026-11-16-slpi-transport-resume.md) |
-| HALL-01 / FOLD-01 | Hall 静态只读基线通过；外屏未实现 | [Hall](2026-11-15-hall-observer.md) |
-| THERM-01 | g396 两组 TSENS 读数有效；无热策略（M2 恢复） | [TSENS](2026-11-07-tsens-readonly.md) |
-| POWER-02 | 设计和只读审计完成；无真实熄屏（M2 恢复） | [方案](../plan/2026-11-07-lockscreen-suspend-design.md) |
-| NET-01 / NET-02 | 同网 28 分钟有界窗口通过；换网、自然 T1、MSI 未验 | [11-06](2026-11-06-overnight.md) |
-| POWER-01 | 电池健康页仍转圈（缺 thermalmonitord / powerd 状态） | [11-06](2026-11-06-daytime-input-power.md) |
-| UX-01 | 主屏静止首帧约 80 ms | [11-06](2026-11-06-overnight.md) |
-| BOOT-01 / GPU-01 | 罕见 CS4K 分配失败与画布映射失败，未复现 | [11-06](2026-11-06-boot-release-followup.md) |
-| BT-01 / CAM-01 / MODEM-01 / RELEASE-01 / REF-01 / BASE-01 / PERSIST-01 | 未开始或只有调研；PERSIST-01 并入 M3 | 归档台账 |
+| POWER-08 深睡功耗 | 外屏 `DSI1` 断电 + GMU DDR 释放 + `SN7` 压降 + GPS 暂停后纯电池深睡降至 **`-219 mA / 952 mW`**（稳态 `730 mW`），`25+` 轮唤醒 `0` panic；已达日用长续航目标 | [11-27 二期战役](2026-11-27-tier2-campaign.md) |
+| CAM-03 / VPU-01 / USB-01 | 第三方容器三摄 `960×720` + `DW9800V` AF + `RumbaS4H` OIS 已跑通，`IMX766` C-PHY 包头已锁定（像素落盘待迁完整 `IFE_0`）；`PAS 9` VPU 支持已确认（`video_region` 受 Stage-2 XPU 保护）；`USB3_GDSC` 激活已确认 | [11-27 二期战役](2026-11-27-tier2-campaign.md) |
+| GNSS-01 / BT-02 | 离线 `QMI_LOC` 1 Hz GPS → `CoreLocation`（深睡自动暂停省电）与 `3 Mbps` 蓝牙已就绪；待在场窗边/户外验搜星定位及手动试蓝牙配对 | [11-26 晚间](2026-11-26-evening-unattended.md) |
 
-## 待用户验收 / 需要用户
+## 待用户验收（集中 ≤12 分钟）
 
-| 事项 | 时长 | 前置 |
+| 事项 | 时长 | 操作入口 |
 | --- | --- | --- |
-| M1：试听 loud-1（Android 电平、同相 1 kHz、1 s） | 约 5 分钟 | 已打包，`ZIZHAN_USER_PRESENT=yes bash work/m1-firstsound/run-loud-1.sh` |
-| M2：真实折叠一次：合上应内屏熄灭、外屏出大号时钟，打开恢复 | 约 5 分钟 | 模拟合盖已闭环（fold-2）；已打包，`bash work/m1-firstsound/run-fold-3.sh` |
-| M3：写 boot_a 并切到 a 槽（内存启动测试 11-19 已通过：选 Android 后 49 s 自动回到 Android，不再卡菜单） | 约 5 分钟，需要手在机器旁 | 若 magic 不保留会在菜单与重启间循环，需按音量键进 fastboot 后 `fastboot set_active b` |
-| 外屏触控：在场摸外屏，验证触点坐标（事件协议 11-19 已闭环） | 约 5 分钟 | 需先把外屏触点接进触摸输入 |
-| 蜂窝阶段 2：插 SIM 后是否让基带注册网络 | 决策 + 插卡 | 阶段 1b 基带已能启动到 ready（modem-6），[可行性](../research/2026-11-19-cellular-feasibility.md) |
-| IO-01 音量键实体按键 | 并入 M1 末验收 | M1 服务就绪 |
+| 全功能主验收（`<1 W` 深睡 + `48 GiB` 大包 IPA 网页流式直装 + 第三方 `960×720` 三摄扫码/拍照 + X 轴线性马达 + 听筒/外放 + 外屏 `1:1` 满高桌面 + 户外 GPS） | ~10 分钟 | `ZIZHAN_USER_PRESENT=yes bash work/m1-firstsound/run-video-5.sh`，详见 [待人工清单](HUMAN_CHECKLIST.md) |
+| M3 不复位直跳独立双启动 RAM 预演（零分区写入，直进 `64 GiB` 根卷） | ~3 分钟 | `ZIZHAN_USER_PRESENT=yes bash work/m3-standalone-1128/run-m3-ram-test.sh` |
 
-## 2026-11-19 夜间无人值守小结（全部静音）
+## 近期分日记录索引
 
-- **声音（M1）仍无声**，但已逐段排除：音频处理器数据（静音回环 loop-d1/n1/m2 逐帧正确）、功放 228 个配置寄存器（与 Android 播放时一致）、引脚、TDM 时钟（端点自己出 BCLK）。修正了 DACPCM1 源与 96 kHz GLOBAL_FS。剩余嫌疑在 TDM 输出端到数据线之间；下一步需在场读 LPASS TDM 寄存器，或补齐 Android 设备子图里的 0x07001011 / 0x07001098。
-- **熄屏/亮屏 S3 + 触控暂停 S4**：无人值守 10 轮 x3 全部 PASS（[证据](2026-11-19-power-s3-device.md)），待人工看屏。
-- **M3**：切换程序改为直接 PSCI 重启 + 看门狗兜底（uefi-zizhan `claude/2026-11-19-m3-handoff-reset`），镜像自检 48/48，待在场 RAM 测试。
-- 温控 + 熄屏 8 分钟长测通过；[相机](../research/2026-11-19-camera-feasibility.md)、[蓝牙](../research/2026-11-19-bluetooth-feasibility.md)可行性文档；Wi-Fi 上网正常（天气只差定位授权）。
-
-## 2026-11-19 白天无人值守小结（全部静音，未写分区，未推送）
-
-- **声音**：数据一路送到功放已证实（引脚采样：时钟、同步、GPIO124 数据都在跳；功放把收到的数据回传到 GPIO122 也在跳）。"功放之前断了"的判断撤回。修了上午引入的 mode 40 `else` 串接 bug（2437122）。`loud-1` 已打包未运行。录音通路按 ACDB 改成 2 声道后仍拿不到数据。
-- **天气**：小组件定位询问已点"允许"，日期与时间"自动设置"已打开，但时区仍为洛杉矶；真正卡住的是 FairPlay（[结论](../research/2026-11-19-weather-fairplay.md)）。
-- **折叠/外屏**：合盖跟随模式（c4827a6）；外屏 L18 secondary（DSI1）资料与只读探针。
-- **温控**：GPU 封顶与逐级释放实机成立（therm-g1/g2）；日用阈值 CPU 90 / GPU 85 °C 的 10 分钟长测通过（soak-4）。
-- **蓝牙**：SE20 串口握手、HCI Reset、rampatch + NVM 下载成功（BT 5.3、Qualcomm）；bluetoothd 走串口 + 设备树节点，节点试验后它读到地址、随后因缺串口崩溃（[蓝牙](../research/2026-11-19-bluetooth-feasibility.md)）。未开射频。
-- **相机**：PM8008、CAM_CC MCLK3、CCI 读芯片 ID 的逻辑（宿主机测试）和默认关闭的内核探针（未运行）（[相机](../research/2026-11-19-camera-feasibility.md)）。
-- **稳定性**：daily-5/6、soak-3/4 共 80 次熄屏/亮屏全部成功，0 崩溃，Wi-Fi 正常。
-
-## 2026-11-19 下午（用户要求尽量自己闭环；全部静音，未写分区）
-
-- **折叠链路自测**：`zizhan_hall_simulate` 模拟合盖 → 按键熄屏 → 内屏 TE（GPIO86）0 次跳变；开盖 → 亮屏 → TE 44 次/100 ms。面板侧确认真的停帧/出帧。只差真实霍尔一次折叠。
-- **外屏显示**：启动程序已把外屏（DSI1/INTF_2）点亮并让 VIG2 从 0xb8fc9900 取帧；写入彩条后 INTF_2 的输出签名（MISR）从恒定的 0x0c3d2ca8 变为恒定的 0xbe2dceaf——**外屏显示我们写的画面已闭环确认**（[外屏](../research/2026-11-19-outer-panel.md)）。
-- **外屏触控**：WL2866D 给触控上电（1.8/3.0 V）后，FTS 在复位释放 7 ms 拉低中断——芯片活着；SPI 读芯片 ID 的轮次已备，等电量回升。
-- **相机**：四颗传感器全部在 iPadOS 下应答芯片 ID：主摄 IMX766 0x0766、前置 IMX596 0x0596、超广角 OV13B10 0x560d42、长焦 IMX663 0x0663（[相机](../research/2026-11-19-camera-feasibility.md)）。
-- **M3**：内存启动测试通过（选 Android 后 49 s 回到 Android，不再卡菜单）；写 boot_a 仍留到你手在机器旁时。
-
-## 2026-11-19 晚间收尾（全部静音，未写分区，未推送）
-
-- **外屏触控**：SPI 读到芯片 ID 0x3640，是 ST FTM5（Android 模块 `fts_touch_spi_sec.ko`）；读事件的协议还没打通（中断一直不来，读回全 0），下一步对照 FTM5 驱动。
-- **折叠 fold-2**：模拟合盖时内屏熄灭（TE 0）、外屏画出时钟（MISR 1dcbd31f）；开盖时内屏恢复（TE 44）、外屏清黑（MISR ad495edf）。真实折叠用的包 `fold-3` 已备好。
-- **最终稳定性 daily-9**（最新内核 build-play45，日用配置 + 外屏跟随合盖）：熄屏/亮屏 20/20 PASS；温控 mode 2 最高 CPU 77.3 °C / GPU 58.4 °C，未触发封顶；按计划的截止时间重置后回到 Android。为了不超过 1024 字节的启动参数上限，这一轮去掉了 `pong_touch_synth`（S4 之前已 10 轮 ×3 通过）。
-- 手机留在 Android 待机充电。需要你在场的事见上方「待用户验收」：真实折叠 `fold-3`、试听 `loud-1`、写 boot_a，以及天气数据源、日用配置是否默认两项决定。
-
-## 2026-11-19 晚（用户 19:30 的五项要求；全部静音，未写分区）
-
-- **推送**：两个仓库已推送，CI 四项全部通过（UniXNU-zizhan `0e88e3e`）。
-- **日用配置已改为默认**（`zizhan_daily`，`=0` 关闭）：daily-11 不带任何日用参数，熄屏/亮屏 20/20 PASS，温控与合盖跟随自动运行；命令行 1023 → 864 字节。
-- **天气**：其他项目都没有让 fairplayd 在非苹果硬件上工作；静态确认天气的认证要 FairPlay（Mescal）签名。按用户决定暂不接数据源，保持挂起。
-- **外屏触控**：FTM5 的 SPI 事件协议打通（读命令应为 0x87），控制器就绪与扫描状态事件都读到，中断线随之释放。
-- **蓝牙**：`/dev/cu.bluetooth` tty（XNU 补丁 0023）与 UART 桥已编译，默认关闭，等用户同意开射频。
-- **首帧 UX-01**：慢在 CPU 侧渲染准备（约 39 ms）；内屏触控 8 ms 轮询另加约 4 ms；本轮只分析不改。
-- **蜂窝**：QcomBaseband（SC7180 + iOS 17）已做到 LTE 数据，本机可复用 ADSP 的启动方式；阶段 1 不发射可无人值守。
-- 详情：[晚间记录](2026-11-19-evening-daily-default.md)。
-
-## 2026-11-19 深夜（用户 20:30：蓝牙可开射频、首帧找优化、蜂窝先做无 SIM 部分；全部静音，未写分区，本批未推送）
-
-- **蓝牙**：bluetoothd 崩溃的根因查清并绕过（MobileGestalt 缺 `product-id`，补丁 0025 只对蓝牙进程给 J171 的值），bluetoothd 现在常驻；BlueTool 还需要 `AppleBluetoothModule` 服务，是下一步。
-- **首帧**：基线 83.6/82.2 ms 可复现；`fb_swapwait=0`、一直满频两个候选都否决；慢在 CPU 侧渲染准备，下一步细分 SpringBoard→backboardd。
-- **蜂窝**：固件和 EFS 只读可达（modem-1）；**基带在 iPadOS 下第一次启动到 ready+handover**（modem-6，元数据须在 4 GiB 以下）；随后显示路径 panic，待补 `rproc_ddr` 带宽票。未发 QMI、未上线、无发射。
-- 详情：[晚间记录 · 深夜](2026-11-19-evening-daily-default.md)。
-
-## 2026-11-20 凌晨（无人值守计划执行；全部静音，未写分区）
-
-- **蜂窝**：基带在 iPadOS 下**完整初始化**。GLINK + QRTR + 最小 pd-mapper + 内存影子 rmtfs 后，公布 45 个 QMI 服务，60 s 无看门狗，可正常停止。只读 DMS 读出固件 `MPSS.DE.2.0.c1-00108-WAIPIO_GEN_PACK…`，工作模式 OFFLINE（无射频）。阶段 2 需插 SIM 并经你同意。
-- **温控**：逐级压频（每次 4 档，超阈值 10 °C 才一步到底），设备上持续负载下停在 10 档、65–67 °C，不再一下压死。
-- **蓝牙**：已加 `/dev/btreset|btwake|btpoweroff`，nub 已注册；BlueTool 仍不打开设备，按规则挂起（下一步：拿 BlueTool 的 os_log、反推 bluetoothd↔BlueTool 的 mach 命令）。
-- **首帧**：本轮没做细分测量（需给 CoreAnimation 加测量点），留待下一轮。
-- **稳定性**：daily-13（play67，日用默认）熄屏/亮屏 20/20，无 panic。
-- 详情：[晚间记录 · 凌晨](2026-11-19-evening-daily-default.md)。
-
-## 2026-11-20 第二轮无人值守（全部静音，未写分区）
-
-- **蜂窝**：基带改为等桌面第一帧后再启动，modem-6 那个 panic 根治；正常内核参数下基带连续 8 分钟 ready、可正常停止、CPU 最高 55 °C。
-- **蓝牙**：查清 iOS 18 串口蓝牙走内核控制 `com.apple.uart.bluetooth`（已实现，并对博通厂商命令做了应答垫片）；系统调用跟踪证明 BlueTool 和 bluetoothd 根本没碰传输层，卡在更上层的平台选择（可能来自 MobileGestalt 缓存）。仍挂起。
-- **首帧**：GPU 时间线对齐后拆分：慢在 CPU 侧（约 20 / 43 ms 交替，随翻页方向），GPU 只占 2–12 ms；不是内核开关能解决的。
-- **稳定性**：daily-14（play71）熄屏/亮屏 20/20，无 panic。
-- 详情：[晚间记录](2026-11-19-evening-daily-default.md)末尾两节。
-
-## 2026-11-20 第三轮无人值守（用户同意蓝牙发射；静音，未写分区，基带离线）
-
-- **蜂窝**：未插卡时 SIM 卡状态查询正常应答；基带关闭按 Linux 的方式重试后干净完成（modem-19）。同次开机二次启动会整机复位，挂起。
-- **蓝牙**：卡点定位到 BlueTool 的固件表需要 Wi-Fi 模组厂商（MobileGestalt `WifiVendor`，来自博通 WLAN HAL），本板是高通 Wi-Fi，没有这个值；三种绕法都无效，挂起。
-- **首帧**：慢的是翻到下一页的方向（约 43 ms，翻回约 20 ms），已在最高频率和大核上跑；没有内核侧候选，A/B 不做。
-- 详情：[第三轮记录](2026-11-20-round3.md)。
-
-
-## 2026-11-20 持续无人值守（用户目标：面向日常使用，直到手动停止）
-
-- **传感器 SENS-01**：SLPI 能离线启动，传感器服务协议（QMI 400 + protobuf）已打通；FastRPC 的根 PD 和传感器 PD 都能 attach，listener 也能挂上，但 DSP 一直没来要配置文件，注册表为空。挂起。
-- **Wi-Fi NET-03**：跨 10 次熄屏/亮屏不断线，iPadOS 运行期间零丢包。通过。
-- **待机 POWER-03/04**：熄屏整机约 2 W，原因是核心没有掉电、系统不睡眠，而不是软件负载。熄屏时 CPU 2–7 下线已设为日常默认，省约 15%，20 次切换稳定。下一步是平台睡眠。
-- **显示**：静止主屏 10 fps 合成来自时钟图标秒针，属 iOS 正常行为；`pong_astc=1` 已不再全黑，正在逐个应用验证后考虑默认开启。
-- **工具**：`zlog.py`（整轮日志汇总）、`shot.py --diff`（截图差分）、Mac `zround.sh`（一条命令完成一轮上机）、Linux `tools/mrun`（无引号问题地在 Mac 上执行脚本）。
-- 详情：[第三轮记录](2026-11-20-round3.md) 第四轮起各节。
-
-## 2026-11-21 持续无人值守（用户亲测之后）
-
-- **输入法修好**：根因是 DeviceClass=iPhone，TextInputUI 去找 `KBLayouts_iPhone.dat`，而 iPadOS 根卷里没有这个文件。OS trial 加了一个指向 iPad 布局的符号链接；kb-4 截图里拼音键盘完整，kbd 不再崩。
-- **退出/打开应用卡顿减轻**：GPU BO 池默认 768 MiB。256 MiB 时池满后改为零散分配，单次分配/释放要 40～77 ms；改后动画最大帧间隔 p90 从 283 ms 降到约 67 ms。
-- **待机功耗**（只用电池实测）：熄屏从 -555 降到 **-505 mA**。熄屏时开 802.11 省电，Wi-Fi 中断按 MSI 触发，ASPM L1 默认开。网卡仍停在 MHI M0，L1 子状态暂缓。
-- **控制中心偏大**：SpringBoard 以 iPhone 屏幕类型布局，缩放钩子会把控制中心弄空，已删除；暂缓。
-- **25 min 浸泡测试通过**：无 panic、无 jetsam、无 Wi-Fi 中断。
-- **工具**：
-  - `os-trial-edit.py`：基于当前 trial 修改系统镜像，支持 `--ui`，只写有变化的分块并整卷回读校验。
-  - `dscsym.py`：符号化用户态崩溃，配合 boot-arg `pong_crash_name=<进程名>`。
-  - `zround.sh`：门槛等待时长、八进制参数检查、自动重建、只用电池测量（`ZIZHAN_USB_OFF_AT`）。
-  - `zlog.py`：输出系统功率和按窗口/段的统计。
-  - `cycle.sh`：iOS 运行期间不再给 USB 口断电重启。
-- 详情：[第三轮记录](2026-11-20-round3.md) 第十轮起各节。
-
-## 2026-11-21 晚：用户亲测通过，iPad7,12 为默认身份
-
-- **亲测**：iPad 布局、输入法、设置、应用、熄屏后上网正常；ADT 默认身份改为 iPad7,12。
-- **百度黑屏修复**：WebKit 的 GPU 进程分到的 GPU 地址窗口太小，纹理申请被拒；改为优先分配 256 MiB 窗口，gpu-web-1 百度正常显示。
-- **时区**：init 新增 `pong_tz=<Area/City>`，tz-2 验证为北京时间。
-- **锁屏日期与时钟重叠**：已定位，未修。
-- **蓝牙**：IBS、BlueTool 高通脚本，bluetoothd 开始自行打开传输（默认关闭）。
-- **M3**：写 boot_b 后 A′ 交接失败，已回退原厂；不能切到 a 槽，下一版改为不复位的直接跳转。
-- 详情：[第四轮记录](2026-11-21-round4.md)。
-
-## 2026-11-23 下午：传感器协处理器出数据；开应用卡顿重新定位
-
-- **传感器 SENS-02**：`zizhan_slpi=3 pong_adsp=0` 下，SLPI 启动约 54 秒后能查到加速度计、环境光和注册表传感器，加速度计以约 52 Hz 持续出数（平放时 z≈9.74 m/s²）。补了四处：登记默认监听者；监听调用用独立线程号；内存文件系统实现 `apps_std`（种子文件经 ADT `/chosen zizhan-sensors-fs` 带入，来自本机安卓，不进仓库）；QRTR 流控应答 `RESUME_TX`。当时尚未接到 iPadOS，且与音频 DSP 互斥（当晚已解决，见下一条）。
-- **开应用卡顿 UX-07**：新采样（补丁 0036，跨核中断取真实 PC）显示每次点开约 103～136 ms 在用户态、2～36 ms 在内核，上一轮"一半在系统调用"是采样方法造成的假象。时间分布平坦，是 SpringBoard 自身的启动工作。把界面线程迁到 X2 的补丁 0037 无可测收益（183 对 166 ms），默认关闭。
-- **卡顿二次确认**（11-24 凌晨）：暂停线程取栈后全部样本都能还原到根，61% 在点击触发的启动转场（其中 39% 是 iPad 切换器布置转场），适配库只占约 1.3%；关内核调试计时、新旧频率上限都测不出差别（175/175/183 ms）。结论：是 SpringBoard 自身的 iPad 启动路径，没有已知的大头可改，搁置。
-- **CPU 频率上限**改为本机值 2016/2745.6/2995.2 MHz（原先沿用 Nothing Phone (2) 的 1804.8/2496），对卡顿的影响未测到。
-- **GPU 栅栏超时**全部是零等待的状态查询（18199/18199），无需修。
-- **蓝牙**探针改为 Wi-Fi 固件起来 2 秒后开始，比固定 30 秒早约 26 秒。
-- **传感器进 iPadOS SENS-03**（当晚补充）：传感器协处理器已能和 ADSP 同时运行（`zizhan_slpi=4`）；加速度计经 `/dev/zizhan-sensors` 和 backboardd 里的两个虚拟 HID 服务进入系统，CoreMotion、backboardd、SpringBoard 都跟着上报的方向变化，倒置时画面确实转了 180°。横屏时截图里画面不变，原因未明，方向与屏幕是否对应也要真机转动确认，所以仍默认关闭，见[待人工清单](HUMAN_CHECKLIST.md)。新诊断 `zizhan_oslog=<关键词>` 可把系统日志打到控制台。
-- **M3 回安卓绕圈**再次出现（至少 14 分钟，丢了一轮），双份标记镜像仍待在场写入。
-- 详情：[第六轮记录](2026-11-23-round6.md)。
-
-## 2026-11-24 下午：开应用与退出缩放动画卡顿、MobileNotes 崩溃与零拷贝槽位修复
-
-- **根因定位（`zoom-cadence.py` 四阶段拆分）**：原单一最大帧间隔指标掩盖了缩放动画期的三项独立问题：
-  1. `PongAdrenoScanout.cpp::zcFlip()` 在 100 µs 轮询循环内反复重读全局 `gGtRing->lastSubmitted()`，追逐下一帧或前台应用新提交的 GPU 栅栏（单次最长达 42.7 ms），导致打开/退出缩放动画出现 `[42～50 ms, 8.3 ms]` 成对卡顿（`>33 ms` 帧占 21～25%）。
-  2. `minisandbox` 请求 5（`__sandbox_extension_issue`）返回 0 却未写入用户态 `malloc_type_malloc(2048)` 未初始化缓冲区，22H374 `Foundation`（`LocalizedStringResource.encode(to:)`）因非 UTF-8 脏字节抛异常，导致 `MobileNotes` 每次启动约 6.3 s 后 `SIGABRT`（每轮崩 11～12 次），下一次点开被迫走冷启动。
-  3. 128 MiB 面板池默认 `2` 拷贝缓冲 + `5` 零拷贝槽位，双应用切换时槽位耗尽（`NONE FREE` 每轮 8～11 次）。
-- **修复与实机单变量验证（`uxz-1..uxz-5`，`play158..160`，对比 `ux-p4/ux-p5/uxt-2`）**：
-  - 补丁 `0039` + `ZizhanZcFence.h` 按帧快照 `backboardd` 合成栅栏并固定轮询目标（每轮拦截 665～1371 次跨帧追逐，栅栏等待峰值 42.7 → **20.8～22.4 ms**）；
-  - 补丁 `0040` 为 `minisandbox` 请求 5 写入 `libsystem_sandbox` 标准占位令牌 `"invalid"`（`MobileNotes` `SIGABRT` 11～12 → **0**，`open_blank` 中位数降至 **141.5～149.7 ms** / 抬手后约 **82～90 ms**，p90 从 208～216 ms 降至 **158～166 ms**）；
-  - 零拷贝模式默认 `pong_dpu_bufs=1`（`1` 拷贝缓冲 + **`6` 零拷贝槽位**，`NONE FREE` 8～11 → **0**）；
-  - 对照轮 `uxz-4`（`pong_zc_async=1`）因脱离 TE 垂直同步节拍导致相位漂移（`>25 ms` 升至 31～33%），予以排除并保持默认关闭；
-  - 默认出厂配置轮 `uxz-5`（`play160`）：`open_zoom` **58.6 fps**（`>33 ms` 22% → **5%**），`exit_zoom` **54.3 fps**（`>33 ms` 22% → **11%**），`home_settle` **95.7 fps**（`>25 ms` **0%**），`NONE FREE = 0`，`SIGABRT = 0`。
-- **工具**：新增 `zoom-cadence.py`、`zc-fence-target` 双平台单测；`cycle.sh` 限制回安卓阶段 USB 重置次数并支持 `ZIZHAN_ANDROID_RETURN_IMG` 内存直启回安卓。
-- 详情：[11-24 记录](2026-11-24-zoom-cadence-and-sandbox.md)。
+- **2026-11-27 下午（第二/三梯队专项战役）**：深睡破 `1 W`（`952 mW`）、非破坏性 `64 GiB` 根卷 + `IPA 安装器` v2 + 第三方沙盒 `8/8` 兼容、`960×720` 三摄 + OIS/AF、线性马达/听筒路由与外屏 `1:1` 满高模式 → [11-27 二期战役](2026-11-27-tier2-campaign.md)。
+- **2026-11-27 凌晨（三大 P0 攻坚）**：平台级熄屏深睡、巨魔/签名边界调研与原生 `IPA 安装器` v1、前后双摄 `AVCaptureSession` 扫码与拍照 → [11-27 凌晨 P0](2026-11-27-unattended-sleep-ipa-camera.md)。
+- **2026-11-26 及更早**：Wi-Fi/音频 SMMU 并发、增响麦/扬、双开关电池页、`QMI_LOC` 1 Hz GPS、外屏防误触四胶囊与 `minisandbox` → [11-26 晚间](2026-11-26-evening-unattended.md)、[11-26 白天](2026-11-26-daytime-unattended.md)、[11-25 夜间](2026-11-25-evening-unattended.md)。

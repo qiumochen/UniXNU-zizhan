@@ -16,6 +16,7 @@
 #include <string.h>
 #include <kern/clock.h>
 #include <mach/mach_time.h>
+#include "ZizhanBtProtocol.h"
 
 extern "C" struct vnode *rootvnode;
 /* BT-01 step 3 (zizhan_bt_probe=4): bsd/dev/zizhan_bt_uart.c, the tty half of /dev/cu.bluetooth. Weak so this header
@@ -86,12 +87,37 @@ static bool tx_bytes(Window &se, const uint8_t *data, unsigned len) {
     while ((se.read(0x800) & 0x0fffffffu) >= 14 && now_us() < room) IODelay(20);   // TX_FIFO_STATUS word count
     se.write(0x700, w);                           // TX_FIFOn
   }
+  for (unsigned fast = 0; fast < 25; ++fast) {
+    if (se.read(0x610) & 1u) { se.write(0x618, 1u); return true; }   // M_CMD_DONE (~180 us at 3 Mbps)
+    IODelay(20);
+  }
   const uint64_t end = now_us() + 200000;
   while (now_us() < end) {
     if (se.read(0x610) & 1u) { se.write(0x618, 1u); return true; }   // M_CMD_DONE
     IOSleep(1);
   }
   return false;
+}
+/* Linux qcom_geni_serial_stop_rx_fifo(): cancel secondary sequencer, wait for S_CMD_CANCEL_EN (BIT(4)),
+ * flush any residual RX FIFO words, and fall back to S_CMD_ABORT if S_GENI_CMD_ACTIVE (BIT(12)) persists. */
+static void stop_rx_fifo(Window &se) {
+  if (!(se.read(0x40) & ZIZHAN_GENI_STATUS_S_ACTIVE)) return;
+  se.write(0x634, ZIZHAN_GENI_S_CMD_CANCEL);
+  const uint64_t end = now_us() + 50000;
+  while (now_us() < end && !(se.read(0x640) & ZIZHAN_GENI_S_IRQ_CMD_CANCEL)) IODelay(50);
+  for (unsigned guard = 0; guard < 32; ++guard) {
+    const uint32_t words = se.read(0x804) & 0x1ffffffu;
+    if (!words) break;
+    for (uint32_t w = 0; w < words; ++w) (void)se.read(0x780);
+  }
+  se.write(0x648, 0xffffffffu);
+  if (se.read(0x40) & ZIZHAN_GENI_STATUS_S_ACTIVE) {
+    se.write(0x634, ZIZHAN_GENI_S_CMD_ABORT);
+    const uint64_t aend = now_us() + 50000;
+    while (now_us() < aend && !(se.read(0x640) & ZIZHAN_GENI_S_IRQ_CMD_ABORT)) IODelay(50);
+    se.write(0x648, 0xffffffffu);
+  }
+  se.write(0x618, 0xffffffffu);
 }
 static void log_bytes(const char *what, const uint8_t *b, unsigned n) {
   char text[3 * 40 + 1] = {};
@@ -157,31 +183,22 @@ static bool download(Window &se, const char *what, const uint8_t *data, unsigned
   IOLog("ZIZHAN_BT_PROBE: %s done bytes=%u segments=%u acks=%u mode=%u\n", what, size, segments, acks, mode);
   return true;
 }
-/* NVM for this polled host: 115200 (QCA_BAUDRATE_115200 = 0), no in-band sleep, no deep sleep. */
-static void nvm_fixup(uint8_t *d, unsigned size) {
-  if (size < 4) return;
-  unsigned off = 0;
-  uint32_t tl = d[0] | d[1] << 8 | d[2] << 16 | uint32_t(d[3]) << 24;
-  if ((tl & 0xff) == 4 && size >= 8) { off = 4; tl = d[4] | d[5] << 8 | d[6] << 16 | uint32_t(d[7]) << 24; }
-  if ((tl & 0xff) != 2) { IOLog("ZIZHAN_BT_PROBE: nvm type=%u untouched\n", tl & 0xff); return; }
-  const unsigned length = tl >> 8, base = off + 4;
-  unsigned idx = 0, hci = 0, sleep = 0;
-  while (idx + 12 <= length && base + idx + 12 <= size) {
-    uint8_t *t = d + base + idx;
-    const unsigned id = t[0] | t[1] << 8, len = t[2] | t[3] << 8;
-    if (base + idx + 12 + len > size) break;
-    if (id == 17 && len >= 3) { t[12] &= ~0x80u; t[13] = 0; ++hci; }
-    if (id == 27 && len >= 1) { t[12] &= ~0x01u; ++sleep; }
-    idx += 12 + len;
+/* NVM for this polled host: configured baud (3000000 default or 115200 fallback), no in-band sleep, no deep sleep. */
+static void nvm_fixup(uint8_t *d, unsigned size, uint32_t baud) {
+  unsigned hci = 0, sleep = 0;
+  if (!zizhan_bt_nvm_fixup(d, size, baud, &hci, &sleep)) {
+    const uint32_t tl = size >= 4 ? (d[0] | (d[1] << 8) | (d[2] << 16) | (uint32_t(d[3]) << 24)) : 0u;
+    IOLog("ZIZHAN_BT_PROBE: nvm type=%u untouched\n", tl & 0xffu);
+    return;
   }
-  IOLog("ZIZHAN_BT_PROBE: nvm fixup hci=%u deep_sleep=%u baud=115200 ibs=0\n", hci, sleep);
+  IOLog("ZIZHAN_BT_PROBE: nvm fixup hci=%u deep_sleep=%u baud=%u ibs=0\n", hci, sleep, baud);
 }
 
 /* Mode 4: the tty's t_oproc copies into this single-producer ring (the tty lock serializes producers); the worker below
  * is the only consumer. tx(nullptr, 0) reports the free space, so the tty only dequeues what fits; after a full ring
  * drains, the worker kicks the tty with zizhan_bt_uart_input(nullptr, 0). */
 static bool tx_was_full;
-static uint8_t tx_ring[4096];
+static uint8_t tx_ring[8192];
 static uint32_t tx_head, tx_tail;
 static int uart_tx_hook(const uint8_t *b, uint32_t n) {
   uint32_t head = __atomic_load_n(&tx_head, __ATOMIC_RELAXED);
@@ -200,146 +217,38 @@ static int uart_tx_hook(const uint8_t *b, uint32_t n) {
   __atomic_store_n(&tx_head, head, __ATOMIC_RELEASE);
   return int(i);
 }
-/* Host-to-controller H4 framing for the vendor-command shim. BlueTool's builtin scripts are written for Broadcom
- * controllers and send Broadcom vendor commands (OGF 0x3f: firmware download, baud change, ...). The QCA6490 already has
- * its firmware from the kernel and would reject them, so vendor commands are answered here with Command Complete
- * (status 0) and never reach the chip; standard HCI commands and ACL/SCO data pass through unchanged. */
-struct H4Tx { uint8_t pkt[1100]; unsigned have, need; unsigned logged, shimmed, forwarded; };
-static H4Tx h4;
-static void h4_complete(Window &se) {
-  const uint8_t type = h4.pkt[0];
-  if (type == 0x01 && h4.have >= 4) {
-    const uint16_t op = uint16_t(h4.pkt[1] | (h4.pkt[2] << 8));
-    const bool vendor = (op >> 10) == 0x3f;
-    if (h4.logged < 48) {
-      ++h4.logged;
-      IOLog("ZIZHAN_BT_HCI: cmd op=%04x ogf=%x ocf=%03x plen=%u %s\n", op, op >> 10, op & 0x3ff, h4.pkt[3], vendor ? "shimmed" : "forwarded");
-    }
-    if (vendor) {
-      // bt-43: the Broadcom VSC parsers in bluetoothd read return parameters after the status (AssertFail bcm_vsc
-      // 0x33b "ByteStream_NumReadBytesAvail(*pBs) >= 1" on op fd48, then SIGABRT). Answer status 0 plus 31 zero bytes.
-      // bt-45: zero return data made LE_META_ENA_FEATURES (fd3c, an 8-byte feature mask) restart with 0xe12; return the
-      // command's own parameters after the status, as a "set" command reports the applied value.
-      uint8_t cc[7 + 31] = {0x04, 0x0e, uint8_t(4 + 31), 0x01, uint8_t(op), uint8_t(op >> 8), 0x00};
-      for (unsigned i = 0; i < h4.pkt[3] && i < 31 && 4 + i < h4.have; ++i) {
-        cc[7 + i] = h4.pkt[4 + i];
-      }
-      zizhan_bt_uart_input(cc, sizeof cc);
-      ++h4.shimmed;
-      return;
-    }
-    // bt-42: bluetoothd's HCI init needs Read/Write Default Erroneous Data Reporting (0x0c5a/0x0c5b), which the QCA6490
-    // does not support (supported-commands octet 18 = 0x83): OI fails it locally (0x6c, "HCI initialization failed").
-    // The supported-commands event is patched in rx_patch(); both commands are answered here (reporting disabled).
-    // bt-47/48: after LE Read Periodic Advertiser List Size (0x204a), an "extended advertising command" in Core 5.x, the
-    // QCA6490 rejects every legacy advertising/scan command with Command Disallowed (0x2007 tx power, 0x200b scan
-    // parameters), as the spec requires, and bluetoothd restarts (0x2c8). Broadcom tolerates the mix. Answer 0x204a
-    // here with the list size the controller reported (3) so it never sees an extended command.
-    if (op == 0x204a) {
-      const uint8_t cc[8] = {0x04, 0x0e, 0x05, 0x01, 0x4a, 0x20, 0x00, 0x03};
-      zizhan_bt_uart_input(cc, sizeof cc);
-      ++h4.shimmed;
-      return;
-    }
-    if (op == 0x0c5b || op == 0x0c5a) {
-      const uint8_t cc[8] = {0x04, 0x0e, uint8_t(op == 0x0c5a ? 0x05 : 0x04), 0x01, uint8_t(op), uint8_t(op >> 8), 0x00, 0x00};
-      zizhan_bt_uart_input(cc, op == 0x0c5a ? 8u : 7u);
-      ++h4.shimmed;
-      return;
-    }
+/* Host-to-controller H4 framing + vendor/extended-advertising shim (pure-C state machine in ZizhanBtProtocol.h). */
+static ZizhanBtH4Tx h4;
+static int h4_uart_tx_cb(void *ctx, const uint8_t *data, unsigned len) {
+  auto &se = *static_cast<Window *>(ctx);
+  if (!tx_bytes(se, data, len)) {
+    IOLog("ZIZHAN_BT_PROBE: bridge tx-timeout bytes=%u\n", len);
+    return 0;
   }
-  ++h4.forwarded;
-  if (!tx_bytes(se, h4.pkt, h4.have)) IOLog("ZIZHAN_BT_PROBE: bridge tx-timeout bytes=%u\n", h4.have);
+  return 1;
+}
+static void h4_host_rx_cb(void *, const uint8_t *data, unsigned len) {
+  zizhan_bt_uart_input(data, len);
+}
+static void h4_log_cmd_cb(void *, uint16_t op, uint8_t plen, int shimmed) {
+  IOLog("ZIZHAN_BT_HCI: cmd op=%04x ogf=%x ocf=%03x plen=%u %s\n",
+        op, op >> 10, op & 0x3ff, plen, shimmed ? "shimmed" : "forwarded");
 }
 static void h4_feed(Window &se, const uint8_t *b, unsigned n) {
-  for (unsigned i = 0; i < n; ++i) {
-    if (h4.have == 0) {
-      const uint8_t t = b[i];
-      if (t != 0x01 && t != 0x02 && t != 0x03) { const uint8_t one = t; tx_bytes(se, &one, 1); continue; }   // unknown: pass through
-      h4.need = t == 0x02 ? 5 : 4;   // type + header
-    }
-    h4.pkt[h4.have++] = b[i];
-    if (h4.have == h4.need) {
-      const uint8_t t = h4.pkt[0];
-      const unsigned body = t == 0x01 ? h4.pkt[3] : t == 0x02 ? unsigned(h4.pkt[3] | (h4.pkt[4] << 8)) : h4.pkt[3];
-      if (h4.need == (t == 0x02 ? 5u : 4u)) h4.need += body;
-      if (h4.need > sizeof h4.pkt) { tx_bytes(se, h4.pkt, h4.have); h4.have = 0; continue; }   // oversize: give up framing
-    }
-    if (h4.have == h4.need && h4.have >= (h4.pkt[0] == 0x02 ? 5u : 4u)) { h4_complete(se); h4.have = 0; }
-  }
+  const ZizhanBtH4Ops ops = {&se, h4_uart_tx_cb, h4_host_rx_cb, h4_log_cmd_cb};
+  zizhan_bt_h4_feed(&h4, &ops, b, n);
 }
 
-/* Controller-to-host fixup: in the Command Complete of Read Local Supported Commands (04 0e 44 01 02 10 00, then 64
- * octets) advertise Read/Write Default Erroneous Data Reporting (octet 18 bits 2 and 3), which h4_complete() answers. */
-struct RxPatch { unsigned state, param; uint32_t patched; };
-static RxPatch rxp;
-static void rx_patch(uint8_t *b, unsigned n) {
-  static const uint8_t head[7] = {0x04, 0x0e, 0x44, 0x01, 0x02, 0x10, 0x00};
-  for (unsigned i = 0; i < n; ++i) {
-    if (rxp.state < sizeof head) {
-      if (b[i] == head[rxp.state]) { ++rxp.state; } else { rxp.state = b[i] == head[0] ? 1u : 0u; }
-      rxp.param = 0;
-      continue;
-    }
-    if (rxp.param == 18) { b[i] = uint8_t(b[i] | 0x0c); ++rxp.patched; }
-    if (++rxp.param >= 64) { rxp.state = 0; }
-  }
-}
-
-/* Qualcomm in-band sleep (IBS), host side as in Linux hci_qca.c. Even with the NVM fixup the QCA6490 sleeps when idle:
- * it sends SLEEP_IND (0xfe), and before it sends anything it sends WAKE_IND (0xfd) every ~10 ms until the host answers
- * WAKE_ACK (0xfc). The host must also wake it with WAKE_IND before sending after a SLEEP_IND, or the first bytes are lost.
- * IBS bytes only appear between H4 packets, so the receive side keeps H4 framing to tell them from payload bytes. */
-struct IbsRx { uint8_t hdr[5]; unsigned have, hdr_len, need; bool asleep, acked; uint32_t wake_ind, wake_ack, sleep_ind, wakes, wake_fail; };
-static IbsRx ibs;
-static unsigned ibs_rx(Window &se, const uint8_t *in, unsigned n, uint8_t *out) {
-  unsigned k = 0;
-  for (unsigned i = 0; i < n; ++i) {
-    const uint8_t b = in[i];
-    if (ibs.hdr_len == 0) {   // between packets
-      if (b == 0xfd) {
-        ++ibs.wake_ind;
-        const uint8_t ack = 0xfc;
-        tx_bytes(se, &ack, 1);
-        ibs.asleep = false;
-        continue;
-      }
-      if (b == 0xfe) { ++ibs.sleep_ind; ibs.asleep = true; continue; }
-      if (b == 0xfc) { ++ibs.wake_ack; ibs.acked = true; ibs.asleep = false; continue; }
-      const unsigned hl = b == 0x04 ? 3u : b == 0x02 ? 5u : b == 0x03 ? 4u : b == 0x05 ? 5u : 0u;
-      out[k++] = b;
-      if (!hl) {
-        continue;             // not H4: pass through unframed
-      }
-      ibs.hdr[0] = b;
-      ibs.have = 1;
-      ibs.hdr_len = hl;
-      ibs.need = hl;
-      ibs.asleep = false;
-      continue;
-    }
-    out[k++] = b;
-    if (ibs.have < ibs.hdr_len) {
-      ibs.hdr[ibs.have] = b;
-    }
-    ++ibs.have;
-    if (ibs.have == ibs.hdr_len) {
-      const uint8_t *h = ibs.hdr;
-      const unsigned body = h[0] == 0x04 ? h[2] : h[0] == 0x03 ? h[3] : h[0] == 0x02 ? unsigned(h[3] | (h[4] << 8))
-                                                                                    : unsigned((h[3] | (h[4] << 8)) & 0x3fff);
-      ibs.need = ibs.hdr_len + body;
-    }
-    if (ibs.have >= ibs.hdr_len && ibs.have == ibs.need) {
-      ibs.hdr_len = 0;
-      ibs.have = 0;
-    }
-  }
-  return k;
+/* Controller-to-host Supported Commands octet 18 fixup + Qualcomm in-band sleep (IBS) framing. */
+static ZizhanBtRxPatch rxp;
+static ZizhanBtIbs ibs;
+static int ibs_uart_tx_cb(void *ctx, const uint8_t *data, unsigned len) {
+  return tx_bytes(*static_cast<Window *>(ctx), data, len) ? 1 : 0;
 }
 /* After a SLEEP_IND: WAKE_IND, wait up to 3 x 30 ms for WAKE_ACK (or the controller's own WAKE_IND), passing RX through. */
 static void ibs_wake(Window &se) {
   uint8_t in[256], out[256];
-  ibs.acked = false;
+  ibs.acked = 0;
   ++ibs.wakes;
   for (unsigned tries = 0; tries < 3 && ibs.asleep; ++tries) {
     const uint8_t wake = 0xfd;
@@ -347,8 +256,9 @@ static void ibs_wake(Window &se) {
     const uint64_t end = now_us() + 30000;
     while (now_us() < end && !ibs.acked && ibs.asleep) {
       const unsigned got = rx_bytes(se, in, sizeof in, 2);
-      const unsigned k = got ? ibs_rx(se, in, got, out) : 0;
+      const unsigned k = got ? zizhan_bt_ibs_rx(&ibs, ibs_uart_tx_cb, &se, in, got, out) : 0;
       if (k) {
+        zizhan_bt_rx_patch(&rxp, out, k);
         zizhan_bt_uart_input(out, k);
       }
     }
@@ -357,11 +267,11 @@ static void ibs_wake(Window &se) {
     if (ibs.wake_fail++ < 4) {
       IOLog("ZIZHAN_BT_PROBE: ibs wake-timeout (sending anyway)\n");
     }
-    ibs.asleep = false;
+    ibs.asleep = 0;
   }
 }
 
-/* Never returns while the bridge runs: TX ring -> GENI TX FIFO, GENI RX FIFO -> tty, polled every 2 ms. */
+/* Never returns while the bridge runs: TX ring -> GENI TX FIFO, GENI RX FIFO -> tty, polled every 2 ms when idle. */
 static void serve(Window &se) {
   if (!zizhan_bt_uart_attach || !zizhan_bt_uart_input) {
     IOLog("ZIZHAN_BT_PROBE: SKIP bridge kernel-without-bt-uart\n");
@@ -376,7 +286,7 @@ static void serve(Window &se) {
     zizhan_bt_uart_input(ev_buf, ev_have);
     ev_have = 0;
   }
-  uint8_t in[256], out[64];
+  uint8_t in[512], out[128];
   uint64_t rx_total = 0, tx_total = 0, last_log = now_us();
   unsigned tx_logged = 0, rx_logged = 0;
   for (;;) {
@@ -406,9 +316,9 @@ static void serve(Window &se) {
     if (got) {
       if (rx_logged < 24) { ++rx_logged; log_bytes("bridge-rx", in, got < 32 ? got : 32); }
       uint8_t h4rx[sizeof in];
-      const unsigned k = ibs_rx(se, in, got, h4rx);
+      const unsigned k = zizhan_bt_ibs_rx(&ibs, ibs_uart_tx_cb, &se, in, got, h4rx);
       if (k) {
-        rx_patch(h4rx, k);
+        zizhan_bt_rx_patch(&rxp, h4rx, k);
         zizhan_bt_uart_input(h4rx, k);
       }
       rx_total += got;
@@ -433,37 +343,43 @@ static void active() {
   uint32_t saved_cfg[6], saved_io[6];
   for (unsigned i = 0; i < 6; ++i) { saved_cfg[i] = pins[i].read(0); saved_io[i] = pins[i].read(4); }
   if ((saved_cfg[4] & 0x3c) || (saved_io[4] & 2)) { IOLog("ZIZHAN_BT_PROBE: SKIP bt_en-not-idle cfg=%x io=%x\n", saved_cfg[4], saved_io[4]); return; }
-  // 1. Clock rate. QUP RCGs run in DFS mode (bootloader table, the SE picks a level with SE_GENI_CLK_SEL):
-  // never reprogram the RCG then; pick the table level that divides 115200 x oversampling exactly.
-  // Without DFS, program 7.3728 MHz like Linux (GPLL0_OUT_EVEN, M 384 / N 15625, dual edge).
+  // 1. Initial ROM handshake clock rate (115200 baud). QUP RCGs in DFS mode select a bootloader table entry;
+  // without DFS, program 7.3728 MHz (GPLL0_OUT_EVEN 300 MHz, M=384 / N=15625, dual edge).
+  auto apply_rcg = [](Window &w, const ZizhanBtRcgPlan &plan) -> bool {
+    if (plan.dfs_enabled) {
+      return true;
+    }
+    w.write(0x620, plan.rcg_m);
+    w.write(0x624, plan.rcg_n);
+    w.write(0x628, plan.rcg_d);
+    w.write(0x61c, plan.rcg_cfg);
+    w.write(0x618, w.read(0x618) | 1u);   // CMD_UPDATE
+    bool ok = false;
+    for (unsigned i = 0; i < 500 && !ok; ++i) {
+      ok = !(w.read(0x618) & 1u);
+      if (!ok) IODelay(10);
+    }
+    return ok;
+  };
   const uint32_t dfsr = wrap.read(0x62c);
-  int level = -1;
-  uint32_t level_rate = 0;
-  bool updated = false;
   const uint32_t hw_early = wrapper.read(0x4);
   const unsigned sampling_early = hw_early >= 0x20050000u ? 16u : 32u;
+  uint32_t dfs_perf[8] = {}, dfs_m[8] = {}, dfs_n[8] = {};
   if (dfsr & 1u) {
     for (unsigned l = 0; l < 8; ++l) {
-      const uint32_t perf = wrap.read(0x634 + 4 * l), mreg = wrap.read(0x674 + 4 * l), nreg = wrap.read(0x6b4 + 4 * l);
-      const uint32_t src = (perf >> 8) & 7, pre = perf & 31, mode = (perf >> 12) & 3;
-      uint64_t parent = src == 0 ? 19200000ull : src == 1 ? 600000000ull : src == 6 ? 300000000ull : 0;
-      uint64_t rate = pre ? parent * 2 / (pre + 1) : parent;
-      if (mode == 2 && mreg) { const uint32_t n = ((~nreg) & 0xffff) + mreg; rate = n ? rate * mreg / n : 0; }
-      IOLog("ZIZHAN_BT_PROBE: dfs level=%u perf=%x m=%x n=%x rate=%llu\n", l, perf, mreg, nreg, (unsigned long long)rate);
-      const uint64_t unit = 115200ull * sampling_early;
-      if (rate && rate % unit == 0 && rate / unit <= 4095 && (level < 0 || rate < level_rate)) { level = int(l); level_rate = uint32_t(rate); }
+      dfs_perf[l] = wrap.read(0x634 + 4 * l);
+      dfs_m[l] = wrap.read(0x674 + 4 * l);
+      dfs_n[l] = wrap.read(0x6b4 + 4 * l);
     }
-  } else {
-    wrap.write(0x620, 384);
-    wrap.write(0x624, ~uint32_t(15625 - 384) & 0xffff);
-    wrap.write(0x628, ~uint32_t(15625) & 0xffff);
-    wrap.write(0x61c, (wrap.read(0x61c) & ~0x1037ffu) | 1u | (6u << 8) | (2u << 12));
-    wrap.write(0x618, wrap.read(0x618) | 1u);       // CMD_UPDATE
-    for (unsigned i = 0; i < 500 && !updated; ++i) { updated = !(wrap.read(0x618) & 1u); if (!updated) IODelay(10); }
-    level = 0; level_rate = 7372800;
   }
+  ZizhanBtRcgPlan init_plan = {};
+  const bool have_init = zizhan_bt_plan_rcg(dfsr, dfs_perf, dfs_m, dfs_n, wrap.read(0x61c),
+                                            sampling_early, ZIZHAN_BT_BAUD_INIT, &init_plan) != 0;
+  const bool updated = have_init ? apply_rcg(wrap, init_plan) : false;
+  const int level = have_init ? init_plan.level : -1;
+  const uint32_t level_rate = have_init ? init_plan.rate_hz : 0u;
   IOLog("ZIZHAN_BT_PROBE: rate dfs=%u level=%d rate=%u rcg_written=%u\n", dfsr & 1u, level, level_rate, (dfsr & 1u) ? 0u : 1u);
-  if (level < 0) { IOLog("ZIZHAN_BT_PROBE: SKIP no-exact-uart-rate writes_gcc=0\n"); return; }
+  if (!have_init || level < 0) { IOLog("ZIZHAN_BT_PROBE: SKIP no-exact-uart-rate writes_gcc=0\n"); return; }
   // 2. Branch votes: wrap2 core, S AHB, M AHB, core2x, S5 (add only).
   const uint32_t before = vote.read(0x10);
   vote.write(0x10, before | 0x20fu);
@@ -541,10 +457,59 @@ static void active() {
     const bool have = chosen_blob("zizhan-bt-rampatch", patch, patch_size) && chosen_blob("zizhan-bt-nvm", nvm, nvm_size);
     IOLog("ZIZHAN_BT_PROBE: firmware chosen=%u rampatch=%u nvm=%u\n", have ? 1u : 0u, patch_size, nvm_size);
     if (have && patch_size > 16) {
+      uint32_t want_baud = ZIZHAN_BT_BAUD_OPER;
+      if (PE_parse_boot_argn("zizhan_bt_baud", &want_baud, sizeof want_baud) &&
+          want_baud != ZIZHAN_BT_BAUD_INIT && want_baud != ZIZHAN_BT_BAUD_OPER) {
+        want_baud = ZIZHAN_BT_BAUD_OPER;
+      }
+      uint32_t oper_baud = ZIZHAN_BT_BAUD_INIT;
+      if (want_baud == ZIZHAN_BT_BAUD_OPER) {
+        ZizhanBtRcgPlan oper_plan = {};
+        uint8_t edl_baud[5] = {};
+        if (zizhan_bt_plan_rcg(dfsr, dfs_perf, dfs_m, dfs_n, wrap.read(0x61c), sampling, ZIZHAN_BT_BAUD_OPER, &oper_plan) &&
+            zizhan_bt_edl_set_baud_pkt(ZIZHAN_BT_BAUD_OPER, edl_baud) == 5u) {
+          /* Linux hci_qca.c qca_set_speed(QCA_WCN6855) + qcom_geni_serial_set_termios():
+           * 1) Hold host RFR NOT_READY (0x80000002) + mask CTS while RX remains active at 115200.
+           * 2) Transmit EDL_CHANGE_BAUDRATE at 115200, drain TX shift register, let QCA6490 switch.
+           * 3) Cancel 115200 RX via stop_rx_fifo() (waiting for S_CMD_CANCEL_EN so S_GENI_CMD_ACTIVE=0),
+           *    program 48 MHz RCG + clk_div=1, restart UART_START_READ, then release manual RFR. */
+          se.write(0x25c, ZIZHAN_GENI_TX_CTS_MASK);
+          se.write(0x2ac, ZIZHAN_GENI_MANUAL_RFR_NOT_READY);
+          IODelay(100);
+          const bool baud_sent = tx_bytes(se, edl_baud, sizeof edl_baud);
+          for (unsigned i = 0; i < 200 && ((se.read(0x800) & 0x0fffffffu) || (se.read(0x40) & ZIZHAN_GENI_STATUS_M_ACTIVE)); ++i) IODelay(20);
+          IODelay(200);
+          IOSleep(10);
+          stop_rx_fifo(se);
+          const bool rcg_ok = baud_sent && apply_rcg(wrap, oper_plan);
+          if (rcg_ok) {
+            se.write(0x7c, uint32_t(oper_plan.level));
+            se.write(0x48, 1u | (oper_plan.clk_div << 4));
+            se.write(0x4c, 1u | (oper_plan.clk_div << 4));
+            oper_baud = ZIZHAN_BT_BAUD_OPER;
+          }
+          se.write(0x25c, 0u);
+          se.write(0x618, 0xffffffffu);
+          se.write(0x648, 0xffffffffu);
+          se.write(0x630, 1u << 27);
+          IODelay(50);
+          se.write(0x2ac, 0u);
+          const unsigned drained = rx_bytes(se, rx, sizeof rx, 20);
+          if (drained) log_bytes("baud-switch-rx", rx, drained);
+          ev_have = 0;
+          IOLog("ZIZHAN_BT_PROBE: baud switch want=%u active=%u rate=%u div=%u rcg_ok=%u m_clk=%x s_status=%x ios=%x\n",
+                want_baud, oper_baud, oper_plan.rate_hz, oper_plan.clk_div, rcg_ok ? 1u : 0u, se.read(0x48), se.read(0x40), se.read(0x908));
+        } else {
+          IOLog("ZIZHAN_BT_PROBE: baud switch fallback=115200 (no exact 3Mbps RCG/DFS entry)\n");
+        }
+      }
       const unsigned mode = patch[14];              // tlv_type_patch.download_mode
+      const uint64_t t_patch = now_us();
       bool ok = download(se, "rampatch", patch, patch_size, mode);
+      const uint64_t rampatch_ms = (now_us() - t_patch) / 1000ull;
+      IOLog("ZIZHAN_BT_PROBE: rampatch timing baud=%u elapsed_ms=%llu ok=%u\n", oper_baud, (unsigned long long)rampatch_ms, ok ? 1u : 0u);
       IOSleep(10);
-      if (ok) { nvm_fixup(nvm, nvm_size); ok = download(se, "nvm", nvm, nvm_size, 0); }
+      if (ok) { nvm_fixup(nvm, nvm_size, oper_baud); ok = download(se, "nvm", nvm, nvm_size, 0); }
       if (ok) {
         sent = tx_bytes(se, reset, sizeof reset);
         n = read_event(se, rx, sizeof rx, 1000);
@@ -569,8 +534,7 @@ static void active() {
     serve(se);   // returns only when the bridge could not attach; then fall through to the normal cleanup
   }
   // 6. Cleanup: stop RX, BT_EN low, pins back. Clock votes stay (never removed, as SE15).
-  se.write(0x634, 4u);                            // S_CMD_CTRL cancel
-  IOSleep(5);
+  stop_rx_fifo(se);
   pins[4].write(4, saved_io[4] & ~2u);
   pins[4].write(0, saved_cfg[4]);
   for (unsigned i = 0; i < 4; ++i) pins[i].write(0, saved_cfg[i]);

@@ -221,7 +221,11 @@ prepare_runtime_paths(void)
          * system-group containers. Create only those roots; MCM still owns
          * UUID allocation, metadata and each container's contents. */
         {"/private/var/containers/Data/System", 0755},
-        {"/private/var/containers/Shared/SystemGroup", 0755}
+        {"/private/var/containers/Shared/SystemGroup", 0755},
+        {"/private/var/root", 0755},
+        {"/private/var/root/Library", 0700},
+        {"/private/var/root/Library/Preferences", 0700},
+        {"/private/var/root/Library/Preferences/Bluetooth", 0700}
     };
     for (unsigned i=0;i<sizeof(root_dirs)/sizeof(root_dirs[0]);i++) {
         if (lstat(root_dirs[i].path,&st)==0) continue;
@@ -248,6 +252,21 @@ prepare_runtime_paths(void)
         if (lstat(p,&st)==0) continue;
         if (mkdir(p,0700)!=0 || chown(p,501,501)!=0 || chmod(p,0700)!=0)
             printf("Pong init: mobile database parent unavailable %s errno=%d\n",p,errno);
+    }
+    /* PerfPowerServices (CurrentPowerlog.PLSQL) and bluetoothd (OI_LinkKeyStorage + LE pairing DB)
+     * run as mobile (uid 501) and perform single-level mkdir/open under these parents. */
+    static const char *mobile_shared_dirs[]={
+        "/private/var/MobileBluetooth",
+        "/private/var/mobile/Library/BatteryLife",
+        "/private/var/mobile/Library/BatteryLife/Archives",
+        "/private/var/mobile/Library/Preferences",
+        "/private/var/mobile/Library/Preferences/Bluetooth"
+    };
+    for (unsigned i=0;i<sizeof(mobile_shared_dirs)/sizeof(mobile_shared_dirs[0]);i++) {
+        const char *p=mobile_shared_dirs[i];
+        if (lstat(p,&st)==0) continue;
+        if (mkdir(p,0755)!=0 || chown(p,501,501)!=0 || chmod(p,0755)!=0)
+            printf("Pong init: mobile service parent unavailable %s errno=%d\n",p,errno);
     }
     /* 22H374 passwd: _installd uid/gid 33, home /var/installd. Root
      * creates missing parents before the original daemon drops privileges.

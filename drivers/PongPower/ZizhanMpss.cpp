@@ -22,10 +22,18 @@
 #include "QcomScm.h"
 #include "QcomSmem.h"
 #include "QcomSmp2p.h"
+#include "ZizhanQmiLoc.h"
 
 extern "C" int pong_ufs_read_lun(uint8_t lun, uint64_t byte, void *dst, uint32_t length);
 extern "C" bool pong_ufs_ready(void);
 extern "C" bool pong_rpmh_vote(uint32_t address, uint32_t value);
+extern "C" int pong_adsp_shared_ready(void);
+extern "C" int pong_adsp_smem_lock(void);
+extern "C" void pong_adsp_smem_unlock(void);
+extern "C" int pong_adsp_modem_load_state(int on);
+extern "C" void zizhan_sensor_post(uint32_t kind, int32_t a, int32_t b, int32_t c);
+extern "C" bool zizhan_sensors_device_ready(void);
+extern "C" int zizhan_display_power_state(void);
 extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 
 namespace {
@@ -33,8 +41,8 @@ constexpr uint64_t kSmem = 0x80900000, kSmemSize = 0x200000, kMutex = 0x1f40000 
 constexpr uint64_t kCmdDb = 0x80860000, kCmdDbSize = 0x20000;
 constexpr uint64_t kMpssBase = 0x8bc00000, kMpssSize = 0x13200000;
 /* Android gives the modem PAS device the linux,cma pool (alloc-ranges below 4 GiB) for its metadata; our contiguous
- * sub-4 GiB allocation fails, so the metadata goes into the unused, no-map CVP carveout instead (iPadOS never runs CVP). */
-constexpr uint64_t kMetaBase = 0x9ee00000, kMetaSize = 0x10000;
+ * sub-4 GiB allocation fails, so the metadata goes into the unused, no-map CVP carveout at +0x20000 (SLPI uses +0x0). */
+constexpr uint64_t kMetaBase = 0x9ee20000, kMetaSize = 0x10000;
 constexpr uint32_t kPas = 4, kRemote = 1, kItemIn = 435, kItemOut = 428, kItemCrash = 421, kIpccMpss = 2;
 constexpr uint32_t kFatal = 1u << 0, kReady = 1u << 1, kHandover = 1u << 2, kStopAck = 1u << 3;
 constexpr unsigned kPieces = 40;
@@ -132,10 +140,16 @@ void qrtrSendHello() {
  * instance 180, services tms/servreg and gps/gps_service. Anything else gets an empty list. */
 constexpr uint32_t kPdmPort = 0x4000, kModemNode = 0, kDmsClientPort = 0x4002;
 /* Stage 1d: two read-only QMI DMS requests (service 2): Get Revision (0x23) and Get Operating Mode (0x2d). Nothing that
- * changes state (no Set Operating Mode, no NAS/WDS), and no identifiers (no IMEI/serial request). */
-uint32_t gDmsPort, gUimPort;
-bool gDmsAsked;
-constexpr uint32_t kUimClientPort = 0x4003;
+ * changes state unless opt-in zizhan_gnss_lpm=1 transitions OFFLINE(3) -> LOW_POWER(1) Airplane Mode (never ONLINE(0)). */
+uint32_t gDmsPort, gUimPort, gLocPort;
+uint8_t gModemOpMode = 0xffu;
+bool gDmsAsked, gShared, gGnssPausedForStandby;
+uint32_t gGnssMode, gGnssLpm, gLocRxLogged, gGnssStandbyPause = 1;
+volatile int gMpssSystemAsleep;
+uint64_t gDispOffSinceMs;
+ZizhanQmiLoc gLoc;
+constexpr uint32_t kUimClientPort = 0x4003, kLocClientPort = 0x4004;
+constexpr uint32_t kSensorGnssSv = 23, kSensorGnssPos = 24, kSensorGnssAlt = 25;
 
 unsigned gPdmRequests;
 void qrtrSend(uint32_t type, uint32_t dstNode, uint32_t dstPort, uint32_t srcPort, const uint8_t *payload, uint32_t len) {
@@ -212,8 +226,68 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
   memcpy(h, d, sizeof h);
   if (h[0] != 1) { IOLog("ZIZHAN_MPSS: qrtr version %u len=%u\n", h[0], n); return; }
   const uint32_t type = h[1];
+  if (h[4]) {   // QRTR confirm_rx flow control: reply RESUME_TX (7) so continuous QMI_LOC indications never stall
+    const uint32_t resume[5] = {7, h[6], h[7], 0, 0};
+    qrtrSend(7, h[2], h[3], h[7], reinterpret_cast<const uint8_t *>(resume), sizeof resume);
+    static unsigned resumes;
+    if (resumes++ < 8) IOLog("ZIZHAN_MPSS: qrtr resume_tx to %u:%x for port %x\n", h[2], h[3], h[7]);
+  }
   if (type == 1) {   // DATA (QMI)
     if (h[7] == kPdmPort && h[5] <= n - 32) { pdmHandle(h[2], h[3], d + 32, h[5]); return; }
+    if (h[7] == kLocClientPort && h[5] >= 7 && h[5] <= n - 32) {
+      const uint8_t *q = d + 32;
+      const uint8_t ctl = q[0];
+      const uint16_t txn = zizhan_qmi_loc_get_u16(q + 1), msg = zizhan_qmi_loc_get_u16(q + 3);
+      const uint32_t ev = zizhan_qmi_loc_on_packet(&gLoc, q, h[5]);
+      if (msg != ZIZHAN_QMI_LOC_POS_REPORT_IND &&
+          (gLocRxLogged < 16u || (ctl == 0x02u && gLoc.last_resp_result != 0u))) {
+        char hex[3 * 16 + 1] = "";
+        if (msg != ZIZHAN_QMI_LOC_SV_INFO_IND) {
+          unsigned k = 0;
+          for (unsigned i = 7; i < h[5] && i < 7 + 16; ++i) k += snprintf(hex + k, sizeof hex - k, "%02x ", q[i]);
+        }
+        IOLog("ZIZHAN_GNSS: rx ctl=0x%x txn=%u msg=0x%x len=%u res=%u err=%u ind_st=%u eng=%u sess=%u tlv=[%s]\n",
+              ctl, txn, msg, h[5], gLoc.last_resp_result, gLoc.last_resp_error, gLoc.last_ind_status,
+              gLoc.engine_state, gLoc.fix_session_state, hex);
+        ++gLocRxLogged;
+      }
+      if ((ev & 2u) || ((ev & 1u) && (msg == ZIZHAN_QMI_LOC_ENGINE_STATE_IND || msg == ZIZHAN_QMI_LOC_FIX_SESSION_STATE_IND))) {
+        (void)zizhan_sensors_device_ready();
+        const int32_t a = int32_t(uint32_t(gLoc.engine_state) | (uint32_t(gLoc.fix_status) << 8) |
+                                  (uint32_t(gLoc.sv_visible) << 16) | (uint32_t(gLoc.sv_tracking) << 24));
+        const int32_t b = int32_t(uint32_t(gLoc.max_cn0_tenths) | (uint32_t(gLoc.sv_used) << 16));
+        zizhan_sensor_post(kSensorGnssSv, a, b, int32_t(gLoc.constellation_mask));
+        if ((ev & 2u) && (gLoc.sv_ind_count <= 6 || (gLoc.sv_ind_count % 10u) == 0u)) {
+          IOLog("ZIZHAN_GNSS: sv_ind=%u engine=%u vis=%u trk=%u srch=%u max_cn0=%u.%u sys=0x%x fix=%u\n",
+                gLoc.sv_ind_count, gLoc.engine_state, gLoc.sv_visible, gLoc.sv_tracking, gLoc.sv_searching,
+                gLoc.max_cn0_tenths / 10u, gLoc.max_cn0_tenths % 10u, gLoc.constellation_mask, gLoc.fix_status);
+        }
+      }
+      if (ev & 4u) {
+        (void)zizhan_sensors_device_ready();
+        if (gLoc.fix_status >= 1u) {
+          zizhan_sensor_post(kSensorGnssPos, gLoc.lat_e7, gLoc.lon_e7, gLoc.hor_unc_dm);
+          zizhan_sensor_post(kSensorGnssAlt, gLoc.alt_dm, gLoc.speed_cms, gLoc.heading_ddeg);
+          const int32_t a = int32_t(uint32_t(gLoc.engine_state) | (uint32_t(gLoc.fix_status) << 8) |
+                                    (uint32_t(gLoc.sv_visible) << 16) | (uint32_t(gLoc.sv_tracking) << 24));
+          const int32_t b = int32_t(uint32_t(gLoc.max_cn0_tenths) | (uint32_t(gLoc.sv_used) << 16));
+          zizhan_sensor_post(kSensorGnssSv, a, b, int32_t(gLoc.constellation_mask));
+        }
+        if (gLoc.pos_ind_count <= 8 || (gLoc.pos_ind_count % 10u) == 0u) {
+          /* Privacy rule (AGENTS.md): log only sanitized status/accuracy/SV counts, NEVER raw lat/lon. */
+          IOLog("ZIZHAN_GNSS: pos_ind=%u status=%u fix=%u fixes=%u h_unc=%u.%um sv_used=%u tech=0x%x\n",
+                gLoc.pos_ind_count, gLoc.session_status, gLoc.fix_status, gLoc.valid_fix_count,
+                uint32_t(gLoc.hor_unc_dm >= 0 ? gLoc.hor_unc_dm : 0) / 10u,
+                uint32_t(gLoc.hor_unc_dm >= 0 ? gLoc.hor_unc_dm : 0) % 10u,
+                gLoc.sv_used, gLoc.tech_mask);
+        }
+      }
+      if ((ev & 1u) && gLoc.phone_offline) {
+        IOLog("ZIZHAN_GNSS: ind_status=%u resp_err=%u (phone_offline=1 lpm_policy=%u)\n",
+              gLoc.last_ind_status, gLoc.last_resp_error, gGnssLpm);
+      }
+      return;
+    }
     if (h[7] == kUimClientPort && h[5] >= 7 && h[5] <= n - 32) {   // UIM Get Card Status: result + first bytes only
       const uint8_t *q = d + 32;
       uint16_t result = 0xffff, error = 0xffff;
@@ -240,6 +314,7 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
         at += 3 + l;
       }
       for (char *c = text; *c; ++c) if (*c < 32 || *c > 126) *c = '.';
+      if (msg == 0x2d && result == 0 && mode != 0xffu) gModemOpMode = mode;
       IOLog("ZIZHAN_MPSS: dms resp msg=0x%x result=%u error=%u revision='%s' operating_mode=%u\n", msg, result, error, text, mode);
       return;
     }
@@ -256,6 +331,10 @@ void ipcrtrReceive(void *, QcomGlinkChannel *, const uint8_t *d, uint32_t n) {
   memcpy(c, d + 32, n - 32 < sizeof c ? n - 32 : sizeof c);
   if (type == 4 && c[0] == 4 && c[1] == 2 && c[3] == kModemNode) gDmsPort = c[4];
   if (type == 4 && c[0] == 4 && c[1] == 11 && c[3] == kModemNode) gUimPort = c[4];
+  if (type == 4 && c[0] == 4 && c[1] == ZIZHAN_QMI_LOC_SERVICE && c[3] == kModemNode) {
+    gLocPort = c[4];
+    IOLog("ZIZHAN_GNSS: QMI_LOC server ready instance=0x%x port=0x%x\n", c[2], c[4]);
+  }
   if (gCtlLogged++ < 60)
     IOLog("ZIZHAN_MPSS: qrtr ctrl type=%u from %u:%x cmd=%u service=%u instance=%x node=%u port=%x\n", type, h[2], h[3], c[0], c[1],
           c[2], c[3], c[4]);
@@ -291,6 +370,7 @@ void glinkService() {
 }
 
 bool lockSmem() {
+  if (gShared) return pong_adsp_smem_lock() != 0;
   for (unsigned i = 0; i < 1000; ++i) {
     wr(gMutex, 0, 1);
     if (rd(gMutex, 0) == 1) return true;
@@ -298,7 +378,10 @@ bool lockSmem() {
   }
   return false;
 }
-void unlockSmem() { wr(gMutex, 0, 0); }
+void unlockSmem() {
+  if (gShared) { pong_adsp_smem_unlock(); return; }
+  wr(gMutex, 0, 0);
+}
 volatile uint8_t *smemItem(uint16_t id, uint32_t *size) {
   uint32_t at = 0, bytes = 0;
   if (qcom_smem_find(&gSmem, &gPart, id, &at, &bytes)) return nullptr;
@@ -347,6 +430,11 @@ bool slaveBits(uint32_t *bits) {
 }
 
 bool qmpLoadState(bool on) {
+  if (gShared) {
+    const int rc = pong_adsp_modem_load_state(on ? 1 : 0);
+    if (rc) IOLog("ZIZHAN_MPSS: shared load_state %s -> %d\n", on ? "on" : "off", rc);
+    return rc == 0;
+  }
   const char *cmd = on ? "{class: image, res: load_state, name: modem, val: on}" : "{class: image, res: load_state, name: modem, val: off}";
   if (gQmp.state != QcomQmpOpen) return false;
   if (qcom_qmp_send(&gQmp, cmd) != QcomQmpSending) return false;
@@ -363,6 +451,13 @@ void worker(void *, wait_result_t) {
   for (unsigned i = 0; i < 1200 && !(&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)); ++i) IOSleep(100);
   IOLog("ZIZHAN_MPSS: desktop frame seen=%u, starting in 10 s\n", (&pong_zc_flipped_tag && pong_zc_flipped_tag) ? 1u : 0u);
   IOSleep(10000);
+  if (gShared) {
+    unsigned waited = 0;
+    for (; waited < 600 && !pong_adsp_shared_ready(); ++waited) IOSleep(100);
+    IOLog("ZIZHAN_MPSS: shared with the ADSP worker: ready=%d after %u ms\n", pong_adsp_shared_ready(), waited * 100);
+    if (!pong_adsp_shared_ready()) { thread_terminate(current_thread()); thread_block(THREAD_CONTINUE_NULL); }
+  }
+  zizhan_qmi_loc_init(&gLoc);
   uint64_t t0 = nowMs(), nextReport = 0;
   uint32_t watchS = 60;
   (void)PE_parse_boot_argn("zizhan_modem_watch_s", &watchS, sizeof watchS);
@@ -414,9 +509,11 @@ void worker(void *, wait_result_t) {
     STEP(13, stopEntry >= 0);
     ring(kIpccMpss, QCOM_IPCC_SIGNAL_SMP2P);
   }
-  qcom_qmp_init(&gQmp, reinterpret_cast<volatile uint32_t *>(gAoss.va), 0x400, kickAop, nullptr);
-  for (unsigned i = 0; i < 2000 && gQmp.state != QcomQmpOpen && gQmp.state >= 0; ++i) { qcom_qmp_step(&gQmp); IOSleep(1); }
-  STEP(14, gQmp.state == QcomQmpOpen);
+  if (!gShared) {
+    qcom_qmp_init(&gQmp, reinterpret_cast<volatile uint32_t *>(gAoss.va), 0x400, kickAop, nullptr);
+    for (unsigned i = 0; i < 2000 && gQmp.state != QcomQmpOpen && gQmp.state >= 0; ++i) { qcom_qmp_step(&gQmp); IOSleep(1); }
+  }
+  STEP(14, gShared || gQmp.state == QcomQmpOpen);
   STEP(15, qmpLoadState(true));
   {
     Win db = {};
@@ -499,25 +596,72 @@ again:
   }
   t0 = nowMs();
   nextReport = t0 + 10000;
-  for (uint64_t now = t0; now - t0 < uint64_t(cycle ? 30 : watchS) * 1000; now = nowMs()) {   // up to 10 s for ready, then watch
-    if (!cycle && gDmsPort && !gDmsAsked && gIpcrtr && gIpcrtr->up && now - t0 > 20000) {
+  for (uint64_t now = t0; (gGnssMode == 1u && !cycle) || now - t0 < uint64_t(cycle ? 30 : watchS) * 1000; now = nowMs()) {
+    if (!cycle && gDmsPort && !gDmsAsked && gIpcrtr && gIpcrtr->up && now - t0 > 5000) {
       gDmsAsked = true;
       static const uint8_t rev[7] = {0, 1, 0, 0x23, 0, 0, 0}, opmode[7] = {0, 2, 0, 0x2d, 0, 0, 0};
       qrtrSend(1, kModemNode, gDmsPort, kDmsClientPort, rev, sizeof rev);
       qrtrSend(1, kModemNode, gDmsPort, kDmsClientPort, opmode, sizeof opmode);
       IOLog("ZIZHAN_MPSS: dms requests sent to 0:%x (get revision, get operating mode)\n", gDmsPort);
-      if (gUimPort) {
+      if (gUimPort && !gGnssMode) {
         static const uint8_t card[7] = {0, 3, 0, 0x2f, 0, 0, 0};
         qrtrSend(1, kModemNode, gUimPort, kUimClientPort, card, sizeof card);
         IOLog("ZIZHAN_MPSS: uim get card status sent to 0:%x\n", gUimPort);
       }
     }
+    const bool dispOff = (zizhan_display_power_state() == 0);
+    if (!dispOff) {
+      gDispOffSinceMs = 0;
+    } else if (!gDispOffSinceMs) {
+      gDispOffSinceMs = now;
+    }
+    const bool wantGnssPause = gGnssStandbyPause != 0u &&
+        (__atomic_load_n(&gMpssSystemAsleep, __ATOMIC_ACQUIRE) != 0 ||
+         (gGnssMode == 2u && dispOff && gDispOffSinceMs && now - gDispOffSinceMs >= 3000ull));
+    if (!cycle && gGnssMode && gLocPort && gIpcrtr && gIpcrtr->up) {
+      if (wantGnssPause && !gGnssPausedForStandby && gLoc.stage == ZIZHAN_QMI_LOC_STAGE_RUNNING) {
+        uint8_t stopPkt[16];
+        const uint32_t slen = zizhan_qmi_loc_build_stop(gLoc.next_txn++, gLoc.session_id, stopPkt, sizeof stopPkt);
+        if (slen) {
+          qrtrSend(1, kModemNode, gLocPort, kLocClientPort, stopPkt, slen);
+          gGnssPausedForStandby = true;
+          IOLog("ZIZHAN_GNSS: standby pause -> QMI_LOC stop sent (asleep=%d disp_off=%d)\n",
+                __atomic_load_n(&gMpssSystemAsleep, __ATOMIC_ACQUIRE), dispOff ? 1 : 0);
+        }
+      } else if (!wantGnssPause && gGnssPausedForStandby) {
+        uint8_t startPkt[64];
+        const uint32_t slen = zizhan_qmi_loc_build_start(gLoc.next_txn++, gLoc.session_id, 1000u, startPkt, sizeof startPkt);
+        if (slen) {
+          qrtrSend(1, kModemNode, gLocPort, kLocClientPort, startPkt, slen);
+          gGnssPausedForStandby = false;
+          IOLog("ZIZHAN_GNSS: standby resume -> QMI_LOC start sent\n");
+        }
+      }
+    }
+    /* QMI_LOC (service 16, instance 2) runs natively while MPSS remains in boot operating_mode=3 (OFFLINE, zero RF). */
+    if (!cycle && gGnssMode && !wantGnssPause && gLocPort && gIpcrtr && gIpcrtr->up && gDmsAsked && now - t0 > 6000) {
+      uint8_t locTx[64];
+      uint32_t locLen = 0;
+      if (zizhan_qmi_loc_step(&gLoc, now, locTx, sizeof locTx, &locLen) && locLen > 0) {
+        const uint16_t msg = zizhan_qmi_loc_get_u16(locTx + 3);
+        qrtrSend(1, kModemNode, gLocPort, kLocClientPort, locTx, locLen);
+        IOLog("ZIZHAN_GNSS: sent QMI_LOC msg=0x%x stage=%u len=%u opmode=%u\n", msg, gLoc.stage, locLen, gModemOpMode);
+      }
+    }
     if (now >= nextReport) {
-      nextReport += 10000;
+      nextReport += (gGnssMode == 1u && now - t0 > 120000ull) ? 60000ull : 10000ull;
       IOLog("ZIZHAN_MPSS: glink version=%u rx=%u tx=%u unknown_opens=%u '%s' ipcrtr_up=%u ctrl=%u data=%u pdm=%u rmtfs req=%u rd=%u/%llu wr=%u/%llu fail=%u\n", gGlink.version_agreed,
             gGlink.rx_messages, gGlink.tx_messages, gGlink.unknown_opens, gGlink.unknown_names, (gIpcrtr && gIpcrtr->up) ? 1u : 0u,
             gCtlLogged, gDataSeen, gPdmRequests, zizhan_rmtfs::gReqs, zizhan_rmtfs::gReads, zizhan_rmtfs::gReadBytes,
             zizhan_rmtfs::gWrites, zizhan_rmtfs::gWriteBytes, zizhan_rmtfs::gFailures);
+      if (gGnssMode) {
+        IOLog("ZIZHAN_GNSS: summary stage=%u rev=%u reg=%u/%u mode=%u start=%u/%u op=%u resp=0x%x:%u/%u ind=0x%x:%u eng=%u sess=%u vis=%u trk=%u cn0=%u.%u fix=%u fixes=%u pos_ind=%u sv_ind=%u offline=%u\n",
+              gLoc.stage, gLoc.rev_done, gLoc.reg_ok, gLoc.reg_retries, gLoc.mode_ok, gLoc.start_ok, gLoc.start_retries,
+              gModemOpMode, gLoc.last_resp_msg, gLoc.last_resp_result, gLoc.last_resp_error,
+              gLoc.last_ind_msg, gLoc.last_ind_status, gLoc.engine_state, gLoc.fix_session_state,
+              gLoc.sv_visible, gLoc.sv_tracking, gLoc.max_cn0_tenths / 10u, gLoc.max_cn0_tenths % 10u,
+              gLoc.fix_status, gLoc.valid_fix_count, gLoc.pos_ind_count, gLoc.sv_ind_count, gLoc.phone_offline);
+      }
       uint32_t d = 0, tx = 0, rx = 0;
       const bool hd = smemItem(478, &d) != nullptr, ht = smemItem(479, &tx) != nullptr, hr = smemItem(480, &rx) != nullptr;
       IOLog("ZIZHAN_MPSS: t=%llums bits=%x glink_desc=%u/%u fifo_tx=%u/%u fifo_rx=%u/%u\n", now - t0, lastBits, hd ? 1u : 0u, d,
@@ -533,11 +677,17 @@ again:
     }
     if (!cycle) glinkService();
     if (now - t0 > 10000 && !(lastBits != 0xffffffffu && (lastBits & kReady))) break;
-    IOSleep(10);
+    IOSleep((dispOff && now - t0 > 15000ull) ? 100 : 10);
   }
   stage = 27;
 out:
   IOLog("ZIZHAN_MPSS: stage=%d rc=%d bits=%x pas_started=%u\n", stage, rc, lastBits == 0xffffffffu ? 0u : lastBits, pasStarted ? 1u : 0u);
+  if (pasStarted && gGnssMode && gLocPort && gIpcrtr && gIpcrtr->up && gLoc.stage >= ZIZHAN_QMI_LOC_STAGE_WAIT_START) {
+    uint8_t stopPkt[16];
+    const uint32_t slen = zizhan_qmi_loc_build_stop(gLoc.next_txn++, gLoc.session_id, stopPkt, sizeof stopPkt);
+    if (slen) qrtrSend(1, kModemNode, gLocPort, kLocClientPort, stopPkt, slen);
+    for (uint64_t s0 = nowMs(); nowMs() - s0 < 300;) { glinkService(); IOSleep(10); }
+  }
   if (pasStarted) {
     if (stopEntry >= 0) {
       qcom_smp2p_update(&gP2p, stopEntry, 1, 1);
@@ -572,23 +722,35 @@ out:
       goto again;
     }
   }
-  if (gQmp.state == QcomQmpOpen) qmpLoadState(false);
+  if (gShared || gQmp.state == QcomQmpOpen) qmpLoadState(false);
   if (bounce) IOFreeData(bounce, 256 * 1024);
   unmapWin(region);
   if (meta) meta->release();
-  IOLog("ZIZHAN_MPSS: DONE radio=0 qmi=0 (rails stay voted until reboot)\n");
+  IOLog("ZIZHAN_MPSS: DONE radio=0 gnss=%u (rails stay voted until reboot)\n", gGnssMode);
 #undef STEP
   thread_terminate(current_thread());
   thread_block(THREAD_CONTINUE_NULL);
 }
 }  // namespace
 
+extern "C" void zizhan_mpss_set_system_sleep(int asleep) {
+  __atomic_store_n(&gMpssSystemAsleep, asleep ? 1 : 0, __ATOMIC_RELEASE);
+}
+
 extern "C" void zizhan_mpss_start(void) {
-  uint32_t mode = 0, adsp = 0;
-  if (!PE_parse_boot_argn("zizhan_modem", &mode, sizeof mode) || mode != 2) return;
-  if (PE_parse_boot_argn("pong_adsp", &adsp, sizeof adsp) && adsp) { IOLog("ZIZHAN_MPSS: SKIP needs pong_adsp=0 (AOSS/SMEM owner)\n"); return; }
+  uint32_t mode = 0, gnss = 0, adsp = 0;
+  (void)PE_parse_boot_argn("zizhan_modem", &mode, sizeof mode);
+  (void)PE_parse_boot_argn("zizhan_gnss", &gnss, sizeof gnss);
+  if (mode != 2 && (gnss < 1 || gnss > 2)) return;
+  gGnssMode = gnss;
+  (void)PE_parse_boot_argn("zizhan_gnss_lpm", &gGnssLpm, sizeof gGnssLpm);
+  (void)PE_parse_boot_argn("zizhan_gnss_standby_pause", &gGnssStandbyPause, sizeof gGnssStandbyPause);
+  (void)PE_parse_boot_argn("pong_adsp", &adsp, sizeof adsp);
+  if (adsp == 1) { IOLog("ZIZHAN_MPSS: SKIP pong_adsp=1 (survey) leaves the AOSS mailbox without an owner\n"); return; }
+  gShared = adsp >= 2;
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &t) != KERN_SUCCESS) { IOLog("ZIZHAN_MPSS: FAIL worker\n"); return; }
   thread_deallocate(t);
-  IOLog("ZIZHAN_MPSS: RUNNING mode=2 pas=%u region=%llx+%llx\n", kPas, kMpssBase, kMpssSize);
+  IOLog("ZIZHAN_MPSS: RUNNING mode=%u gnss=%u shared=%u pas=%u region=%llx+%llx\n",
+        mode, gGnssMode, gShared ? 1u : 0u, kPas, kMpssBase, kMpssSize);
 }

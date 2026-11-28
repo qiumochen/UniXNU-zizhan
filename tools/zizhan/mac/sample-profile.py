@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause-Patent
-"""Profile of the app-open stall from a ZIZHAN_SAMPLE round (XNU patch 0036, boot-args zizhan_sample=400 zizhan_sample_ipi=1
-zizhan_sample_us=1000 with pong_touch_synth and tsa=). Host only (macOS: nm and atos).
+"""Profile of a ZIZHAN_SAMPLE round (XNU patches 0036/0043, boot-args zizhan_sample=400 zizhan_sample_ipi=1
+[zizhan_sample_proc=backboardd zizhan_sample_oncpu=1] with pong_touch_synth and tsa=). Host only (macOS: nm and atos).
 
-Usage: sample-profile.py LOG KERNEL [DSC_DIR] [--stacks]
+Usage: sample-profile.py LOG KERNEL [DSC_DIR] [--stacks] [--odd | --all-tags]
 
-Per tap: milliseconds in user mode, in the kernel, queued and waiting. Then the user samples by library and function (leaf and
+Per window: milliseconds in user mode, in the kernel, queued and waiting. Then the user samples by library and function (leaf and
 inclusive over the first frames), the kernel samples by the user call that entered the kernel and by kernel function, and, for
 the taps that carry deep frames, a root-first call tree. KERNEL is the unstripped mach.development binary of that round; DSC_DIR
-an extracted dyld shared cache (see dscsym.py). --stacks also lists the kernel backtraces.
+an extracted dyld shared cache (see dscsym.py). --stacks also lists the kernel backtraces; --odd selects swipe-home windows.
 """
 import bisect, collections, importlib.util, os, re, subprocess, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
-if len(sys.argv) < 3:
+pos = [x for x in sys.argv[1:] if not x.startswith("--")]
+if len(pos) < 2:
     sys.exit(__doc__)
-log, kernel = sys.argv[1], sys.argv[2]
-dsc = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "work/dsc-22H374"
+log, kernel = pos[0], pos[1]
+dsc = pos[2] if len(pos) > 2 else "work/dsc-22H374"
+odd_only = "--odd" in sys.argv
+all_tags = "--all-tags" in sys.argv
+def want_tag(tag):
+    if all_tags: return True
+    return (tag % 2 == 1) if odd_only else (tag % 2 == 0)
+
 spec = importlib.util.spec_from_file_location("dscsym", os.path.join(here, "dscsym.py"))
 d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
 t = open(log, "rb").read().decode("latin1")
@@ -55,12 +62,12 @@ tot = collections.Counter()
 for tag in sorted(modes):
     s = "".join(modes[tag][k] for k in sorted(modes[tag]))
     c = collections.Counter(s)
-    if tag % 2 == 0:
+    if want_tag(tag):
         tot.update(c)
-        first = next((i for i, ch in enumerate(s) if ch in "UKqx" and i > 60000 // step), None)
-        print("tap %2d: U %3d K %3d q %3d x %3d w %3d  (ms: user %.0f kernel %.0f)  %s" % (tag, c["U"], c["K"], c["q"], c["x"], c["w"], c["U"] * step / 1000, c["K"] * step / 1000, ""))
+        kind = "exit" if (tag % 2) else "tap "
+        print("%s %2d: U %3d K %3d q %3d x %3d w %3d  (ms: user %.0f kernel %.0f)" % (kind, tag, c["U"], c["K"], c["q"], c["x"], c["w"], c["U"] * step / 1000, c["K"] * step / 1000))
 n = sum(tot.values()) or 1
-print("ALL TAPS: " + "  ".join("%s %d (%.0f%%)" % (k, tot[k], 100 * tot[k] / n) for k in "UKqxw"))
+print("SELECTED WINDOWS: " + "  ".join("%s %d (%.0f%%)" % (k, tot[k], 100 * tot[k] / n) for k in "UKqxw"))
 rows = d.index(dsc)
 alluser = sorted({a - slide for (_, st) in ust.values() for a in st if a})
 names = d.symbolize(dsc, rows, alluser)
@@ -70,14 +77,14 @@ def ufn(a):
     return re.sub(r" \(in [^)]*\) \+ \d+$", "", nme)
 def top(c, k, width=150):
     for name, cnt in c.most_common(k): print("  %4d %5.1f%%  %s" % (cnt, 100 * cnt / max(1, sum_total[0]), name[:width]))
-sum_total = [tot["U"] + tot["K"]]
+sum_total = [sum(1 for key, (m, _) in ust.items() if want_tag(key[0]) and m in ("U", "K")) or (tot["U"] + tot["K"])]
 uex = collections.Counter(); uin = collections.Counter(); ulib = collections.Counter()
 kex = collections.Counter(); kin = collections.Counter(); kentry = collections.Counter(); kentry_fn = collections.defaultdict(collections.Counter)
 for key, (mode, st) in ust.items():
-    if key[0] % 2: continue
+    if not want_tag(key[0]): continue
     st = [a for a in st if a]
     if mode == "U" and st:
-        f = ufn(st[0]); uex[f] += 1; ulib[f.split(":")[0] if ":" in f else f[:4]] += 1
+        f = ufn(st[0]); uex[f] += 1; ulib[f.split(":")[0] if ":" in f else f[:12]] += 1
         for g in set(ufn(a) for a in st): uin[g] += 1
     elif mode == "K":
         ent = ufn(st[0]) if st else "?"
@@ -99,7 +106,7 @@ for ent, _ in kentry.most_common(6):
 if "--stacks" in sys.argv:
     c = collections.Counter()
     for key, ks in kst.items():
-        if key[0] % 2 == 0: c[" < ".join(ksym(a) for a in ks if a)] += 1
+        if want_tag(key[0]): c[" < ".join(ksym(a) for a in ks if a)] += 1
     print("== kernel stacks")
     for name, cnt in c.most_common(40): print("  %4d %s" % (cnt, name[:300]))
 
@@ -109,7 +116,7 @@ if dst:
     total = 0
     for key, (mode, st) in ust.items():
         if mode != "U" or key not in dst and len([a for a in st if a]) >= 9: continue
-        if key[0] % 2 or not (2 <= key[0] <= 8): continue
+        if not want_tag(key[0]) or not (2 <= key[0] <= 9): continue
         frames = [ufn(a).split(": ", 1)[-1] for a in st if a][::-1]
         total += 1
         node = tree

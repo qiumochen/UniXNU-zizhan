@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>application-identifier</key><string>ZIZHAN0000.com.zizhan.installer</string>
+  <key>platform-application</key><true/>
+  <key>com.apple.private.security.system-application</key><true/>
+  <key>com.apple.private.security.no-container</key><true/>
+  <key>com.apple.private.installcoordinationd.daemon</key><true/>
+  <key>com.apple.private.coreservices.lsaw</key><true/>
+  <key>com.apple.private.mobileinstall.allowedSPI</key>
+  <array>
+    <string>Install</string>
+    <string>InstallForLaunchServices</string>
+    <string>InstallForInstallCoordination</string>
+    <string>InstallLocalProvisioned</string>
+    <string>InstallStagedUpdate</string>
+    <string>Stage</string>
+    <string>StageUpdate</string>
+    <string>Uninstall</string>
+    <string>UninstallForLaunchServices</string>
+    <string>UninstallForInstallCoordination</string>
+    <string>UninstallPlaceholdersOnly</string>
+    <string>RevertForInstallCoordination</string>
+    <string>EnumerateInstalledAppsForLaunchServices</string>
+    <string>Lookup</string>
+    <string>LookupSystemAppState</string>
+    <string>LookupUninstalled</string>
+    <string>RegisterSafeHarbor</string>
+  </array>
+  <key>com.apple.lsapplicationworkspace.rebuildappdatabases</key><true/>
+  <key>com.apple.private.coreservices.can-perform-rebuild-registration</key><true/>
+  <key>com.apple.private.coreservices.can-register-install-results</key><true/>
+  <key>com.apple.private.coreservices.can-send-install-notifications</key><true/>
+  <key>com.apple.private.coreservices.canmaplsdatabase</key><true/>
+  <key>com.apple.springboard.opensensitiveurl</key><true/>
+  <key>com.apple.springboard.launchapplications</key><true/>
+  <key>com.apple.frontboard.launchapplications</key><true/>
+</dict>
+</plist>

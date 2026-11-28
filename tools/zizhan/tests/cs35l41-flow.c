@@ -76,6 +76,16 @@ int main(void){
  }
  zizhan_flow_stop(&f);while(f.inflight){assert(done(&f,oldest,now)==1);oldest=(oldest+1)%4;}
  assert(zizhan_flow_returned(&f)&&f.completed==f.submitted&&f.completed==1002&&f.confirmed_frames==1002ull*480);
- puts("PASS zizhan flow: in-flight cap, out-of-order DONE, stale-token reuse guard, bad payload/status, 100 ms timeout, limit drain, 1002 periods x3 in flight");
+ /* unbounded session flow (mode 42): runs past 30 s without auto-draining, still enforces 100 ms per-WRITE timeout */
+ memset(&f,0,sizeof f);assert(zizhan_flow_init_unbounded(&f,base,7,2,2880,480,0,0));
+ now=0;oldest=0;
+ for(unsigned i=0;i<3500;++i){
+  int s;while((s=zizhan_flow_claim(&f,&frame))>=0){assert(zizhan_flow_submit(&f,(unsigned)s,now,tx));}
+  now+=10000;assert(done(&f,oldest,now)==1);oldest=(oldest+1)%4;zizhan_flow_tick(&f,now);assert(f.phase==ZizhanFlowRunning);
+ }
+ assert(now==35000000ull&&f.phase==ZizhanFlowRunning);
+ zizhan_flow_stop(&f);while(f.inflight){assert(done(&f,oldest,now)==1);oldest=(oldest+1)%4;}
+ assert(zizhan_flow_returned(&f)&&f.completed==3501);
+ puts("PASS zizhan flow: in-flight cap, out-of-order DONE, stale-token reuse guard, bad payload/status, 100 ms timeout, limit drain, 1002 periods x3 in flight, unbounded >30s");
  return 0;
 }

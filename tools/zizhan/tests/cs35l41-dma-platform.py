@@ -61,15 +61,26 @@ int main(int argc,char **argv){assert(argc==2);std::string test=argv[1];
  for(unsigned i=0;i<113;++i)regs[(0xc00+i*4)/4]=0x20000;
  regs[(128+1)*4096/4]=1;*reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(regs)+(128+1)*4096+0x20)=uint64_t(0x23)<<48;
  regs[(128+74)*4096/4]=0x2000230a;regs[((128+74)*4096+0x10)/4]=0x60;
- if(test=="missing")missing=true;else if(test=="lock")lock_fail=true;else if(test=="map")map_fail=true;else if(test=="alloc")alloc_fail=true;else if(test=="table")table_bad=true;else if(test=="program")program_fail=true;else if(test=="sctlr-rao")sctlr_rao=true;else if(test=="cbar-readback")cbar_bad=true;else if(test=="tcr2-readback")tcr2_bad=true;else if(test=="asid-lower"||test=="asid-upper")*reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(regs)+(128+1)*4096+(test=="asid-lower"?0x20:0x28))=uint64_t(0x1801)<<48;else if(test=="asid-unstable")namespace_unstable=true;else assert(test=="pass"||test=="restore");
+ if(test=="missing")missing=true;else if(test=="lock")lock_fail=true;else if(test=="map")map_fail=true;else if(test=="alloc")alloc_fail=true;else if(test=="table")table_bad=true;else if(test=="program")program_fail=true;else if(test=="sctlr-rao")sctlr_rao=true;else if(test=="cbar-readback")cbar_bad=true;else if(test=="tcr2-readback")tcr2_bad=true;else if(test=="asid-lower"||test=="asid-upper")*reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(regs)+(128+1)*4096+(test=="asid-lower"?0x20:0x28))=uint64_t(0x1801)<<48;else if(test=="asid-unstable")namespace_unstable=true;else assert(test=="pass"||test=="restore"||test=="wifi-coexist");
  bool result=zizhan_audio_dma_map_begin();
- if(test=="pass"||test=="restore"){
+ if(test=="pass"||test=="restore"||test=="wifi-coexist"){
   assert(owner.config.ignore_top_byte==1&&owner.config.shared_asid==1&&owner.active_banks==1&&owner.namespace_reads>148&&owner.state.programmed.readback.sctlr==0x27&&owner.state.programmed.fault_status==0x400&&owner.config.lower->input_bits==32&&!owner.config.upper&&owner.state.programmed.readback.tcr2==0x38071);
-  assert(result&&owner.state.installed&&owner.audited.complete&&owner.audited.lower.leaf_pages==16&&locks==1&&!unlocks&&!map_releases&&!table_releases&&zizhan_audio_dma_map_address()==0x1f0000000);
-  if(test=="restore")restore_fail=true;
-  bool ended=zizhan_audio_dma_map_end();
-  if(test=="pass")assert(ended&&owner.state.restored&&!owner.state.uncertain&&map_releases==1&&table_releases==1&&unlocks==1);
-  else assert(!ended&&!owner.state.restored&&owner.state.uncertain&&!map_releases&&!table_releases&&unlocks==1);
+  assert(result&&owner.state.installed&&owner.audited.complete&&owner.audited.lower.leaf_pages==16&&locks==1&&unlocks==1&&!owner.lock_held&&!map_releases&&!table_releases&&zizhan_audio_dma_map_address()==0x1f0000000);
+  if(test=="wifi-coexist"){
+   // Simulate PongWifi acquiring pong_smmu_lease_lock() while audio daemon keeps ASID 0x1801 installed.
+   assert(pong_smmu_lease_lock()&&locks==2&&unlocks==1);
+   assert((regs[(128+owner.state.bank)*4096/4]&1u)==1u);
+   uint64_t live_ttbr0=*reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(regs)+(128+owner.state.bank)*4096+0x20);
+   assert((live_ttbr0>>48)==0x1801u);
+   pong_smmu_lease_unlock();
+   assert(unlocks==2&&zizhan_audio_dma_map_address()==0x1f0000000);
+   assert(zizhan_audio_dma_map_end()&&locks==3&&unlocks==3&&owner.state.restored);
+  }else{
+   if(test=="restore")restore_fail=true;
+   bool ended=zizhan_audio_dma_map_end();
+   if(test=="pass")assert(ended&&owner.state.restored&&!owner.state.uncertain&&map_releases==1&&table_releases==1&&locks==2&&unlocks==2);
+   else assert(!ended&&!owner.state.restored&&owner.state.uncertain&&!map_releases&&!table_releases&&locks==2&&unlocks==2);
+  }
  }else{
   assert(!result&&!zizhan_audio_dma_map_address());
   if(test=="sctlr-rao"||test=="cbar-readback"||test=="tcr2-readback"){assert(owner.state.program_status==ArmSmmu4KStateMismatch&&owner.state.attempted&&owner.state.uncertain&&!map_releases&&!table_releases&&owner.trace_count>10&&!owner.trace_overflow);assert(owner.state.programmed.readback.sctlr==(sctlr_rao?0x20000000u:0u));if(cbar_bad)assert(owner.state.programmed.readback.cbar==0x1f200);if(tcr2_bad)assert(owner.state.programmed.readback.tcr2==0x38171);bool prior=false,expected=false,actual=false,diag=false,trace=false;for(const auto &l:logs){prior|=l.find("kind=prior")!=std::string::npos;expected|=l.find("kind=expected")!=std::string::npos;actual|=l.find("kind=program-readback")!=std::string::npos;diag|=l.find("strict_policy=1")!=std::string::npos;trace|=l.find("DMAMAP_WRITE: index=0")!=std::string::npos;}assert(prior&&expected&&actual&&diag&&trace);}
@@ -85,6 +96,6 @@ with tempfile.TemporaryDirectory(prefix='zizhan-dma-platform-') as temp:
     for name in ('ArmSmmu4K','ArmSmmu4KContext','ArmSmmu4KProgram','ArmSmmu4KAudit'):
         obj=d/(name+'.o');subprocess.run([os.environ.get('CC','cc'),'-std=c11','-fsanitize=address,undefined','-c',str(R/'drivers/PongAdreno/ArmSmmu4K'/(name+'.c')),'-o',str(obj)],check=True,timeout=30);objects.append(str(obj))
     binary=d/'platform';subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I'+str(R/'drivers/PongPower'),str(cpp),*objects,'-o',str(binary)],check=True,timeout=30)
-    for case in ('pass','missing','lock','map','alloc','table','program','restore','sctlr-rao','cbar-readback','tcr2-readback','asid-lower','asid-upper','asid-unstable'):
+    for case in ('pass','wifi-coexist','missing','lock','map','alloc','table','program','restore','sctlr-rao','cbar-readback','tcr2-readback','asid-lower','asid-upper','asid-unstable'):
         subprocess.run([str(binary),case],check=True,timeout=10)
 print('PASS actual DMA platform/14controls/UEFIextent/globalowner/native4Kphysicalaudit/lifetimes/singleuse/uncertaintyretain;no hardware')

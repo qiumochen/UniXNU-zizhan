@@ -578,11 +578,19 @@ static const uint8_t ram_sha256[32]={
 static const uint32_t ram_spans[6][3]={
  {104,72,0x02000000},{184,528,0x0200009c},{720,1596,0x020003cc},
  {2324,1260,0x02000a14},{3592,6000,0x02c00000},{9600,20420,0x03800000}};
+static unsigned ram_step_bytes(unsigned burst,unsigned segment,unsigned rem,unsigned pass){
+ if(burst==2u){
+  if(segment==5u){return rem>=40u?40u:20u;}
+  return rem>=48u?48u:(rem>=36u?36u:(rem>=24u?24u:12u));
+ }
+ if(burst==1u){return pass?(segment==5u?20u:12u):4u;}
+ return 4u;
+}
 static int ram_load(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpSnapshot *snapshot,const ZizhanAmpTrim *trim,const uint8_t *bytes,unsigned length,
  ZizhanAmpHash hash,ZizhanAmpRam *out,unsigned header_only,unsigned burst,unsigned native_init){
  if(!out)return ZizhanAmpArgument;
- memset(out,0,sizeof *out);out->reason=ZizhanAmpOff;out->header_only=header_only;out->native_core_init=native_init;if(enabled!=1)return 0;
+ memset(out,0,sizeof *out);out->reason=ZizhanAmpOff;out->header_only=header_only;out->native_core_init=native_init;out->fast_burst=burst==2u?1u:0u;if(enabled!=1)return 0;
  const unsigned flags=ZizhanAmpExclusiveSe15|ZizhanAmpPinsVerified|ZizhanAmpResetReleased|ZizhanAmpUnmanagedSupplyTopology;
  if(verified!=flags||!snapshot||snapshot->status!=ZizhanAmpPass||snapshot->completed!=2||snapshot->identity.controller_uncertain||
     !trim||trim->status!=ZizhanAmpPass||trim->completed!=2||trim->transport.controller_uncertain||
@@ -626,23 +634,24 @@ static int ram_load(unsigned enabled,unsigned verified,GeniI2c *bus,const Zizhan
     reason=read_identity(bus,clock,state_regs[i],&out->after_state[chip][i],&out->transport);if(reason)goto fail;
     ++out->state_count[chip];if(out->after_state[chip][i]!=expected_state[i]){reason=ZizhanAmpStateChanged;goto fail;}
    }
-   const unsigned chunk=burst?(segment==5?20u:12u):4u;
-   for(unsigned at=0;at<ram_spans[segment][1];at+=pass?chunk:4u){
+   for(unsigned at=0,step=0;at<ram_spans[segment][1];at+=step){
+    step=ram_step_bytes(burst,segment,ram_spans[segment][1]-at,pass);
     out->failed_offset=at;
     if(clock->now_us(clock->context)-begin>=45000000){reason=ZizhanAmpTimeout;goto fail;}
     const uint32_t reg=ram_spans[segment][2]+at;
     const uint8_t *expected=bytes+ram_spans[segment][0]+at;
-    uint8_t wire[8]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg,0,0,0,0};
+    uint8_t wire[52]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg};
     if(!pass){
-     memcpy(wire+4,expected,4);++out->attempted_writes;
-     if(geni_i2c_start_write_bytes(bus,wire,8)){reason=ZizhanAmpBusy;goto fail;}
+     memcpy(wire+4,expected,step);out->attempted_writes+=step/4u;
+     if(burst==2u){++out->burst_writes;if(geni_i2c_start_write_burst(bus,wire,4u+step)){reason=ZizhanAmpBusy;goto fail;}}
+     else if(geni_i2c_start_write_bytes(bus,wire,8)){reason=ZizhanAmpBusy;goto fail;}
      reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;
-     ++out->acknowledged_writes;
+     out->acknowledged_writes+=step/4u;
     }else{
-     if(burst?geni_i2c_start_read_block(bus,wire,4,chunk):geni_i2c_start_read_bytes(bus,wire,4,4)){reason=ZizhanAmpBusy;goto fail;}
+     if(burst==2u?geni_i2c_start_read_burst(bus,wire,4,step):(burst?geni_i2c_start_read_block(bus,wire,4,step):geni_i2c_start_read_bytes(bus,wire,4,4))){reason=ZizhanAmpBusy;goto fail;}
      reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;
      if(burst)++out->burst_reads;
-     for(unsigned word=0;word<chunk/4;++word){
+     for(unsigned word=0;word<step/4u;++word){
       ++out->readbacks[chip];const uint8_t *p=expected+word*4;
       const uint32_t value=(uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];
       const uint32_t observed=wire_be32(burst?bus->rx_block[word]:bus->rx);
@@ -675,6 +684,9 @@ fail:
 int zizhan_cs35l41_ram_native_init(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpSnapshot *snapshot,const ZizhanAmpTrim *trim,const uint8_t *bytes,unsigned length,ZizhanAmpHash hash,ZizhanAmpRam *out){
  return ram_load(enabled,verified,bus,clock,snapshot,trim,bytes,length,hash,out,0,1,1);}
+int zizhan_cs35l41_ram_fast(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpSnapshot *snapshot,const ZizhanAmpTrim *trim,const uint8_t *bytes,unsigned length,ZizhanAmpHash hash,ZizhanAmpRam *out){
+ return ram_load(enabled,verified,bus,clock,snapshot,trim,bytes,length,hash,out,0,2,1);}
 int zizhan_cs35l41_ram(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpSnapshot *snapshot,const ZizhanAmpTrim *trim,const uint8_t *bytes,unsigned length,ZizhanAmpHash hash,ZizhanAmpRam *out){
  return ram_load(enabled,verified,bus,clock,snapshot,trim,bytes,length,hash,out,0,0,0);
@@ -755,13 +767,14 @@ static const uint8_t coeff_sha[2][32]={
 };
 static const uint32_t coeff_identity[22]={0x40000,0x30000,2,0x400a4,0x2b01,0x1f4,0xe,0,0,2,
  0xcd,0x1d3f01,0x94,0x50,0xe,0x7bc,0xf20b,0x100,0x176,0x4c,0,0};
-int zizhan_cs35l41_coefficients(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+static int coefficients_load(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpRam *ram,const uint8_t *top,unsigned top_size,const uint8_t *bottom,unsigned bottom_size,
- ZizhanAmpHash hash,ZizhanAmpCoefficients *out){
- if(!out){return ZizhanAmpArgument;}memset(out,0,sizeof *out);out->reason=ZizhanAmpOff;if(enabled!=1)return 0;
+ ZizhanAmpHash hash,ZizhanAmpCoefficients *out,unsigned fast_burst){
+ if(!out){return ZizhanAmpArgument;}memset(out,0,sizeof *out);out->reason=ZizhanAmpOff;out->fast_burst=fast_burst?1u:0u;if(enabled!=1)return 0;
  const unsigned flags=ZizhanAmpExclusiveSe15|ZizhanAmpPinsVerified|ZizhanAmpResetReleased|ZizhanAmpUnmanagedSupplyTopology;
+ const int burst_ok=ram&&((!ram->fast_burst&&ram->burst_reads==3618u)||(ram->fast_burst==1u&&ram->burst_writes==1420u&&ram->burst_reads==1420u));
  if(verified!=flags||!ram||ram->status!=ZizhanAmpPass||ram->completed!=2||!ram->source_verified||ram->transport.controller_uncertain||
-    ram->attempted_writes!=14938||ram->acknowledged_writes!=14938||ram->burst_reads!=3618||ram->mismatches){out->reason=ZizhanAmpPrerequisite;return 0;}
+    ram->attempted_writes!=14938||ram->acknowledged_writes!=14938||!burst_ok||ram->mismatches){out->reason=ZizhanAmpPrerequisite;return 0;}
  for(unsigned c=0;c<2;++c)if(ram->readbacks[c]!=7469||ram->segments_verified[c]!=6||ram->state_count[c]!=39||
     (ram->after_state[c][0]&1)||(ram->after_state[c][1]&0x31)||(ram->after_state[c][2]&1)){out->reason=ZizhanAmpPrerequisite;return 0;}
  if(ram->native_core_init){
@@ -803,19 +816,22 @@ int zizhan_cs35l41_coefficients(unsigned enabled,unsigned verified,GeniI2c *bus,
     if(!owned_config(&config,1)){reason=ZizhanAmpStateChanged;goto fail;}
     for(unsigned i=0;i<3;++i){reason=read_identity(bus,clock,state_regs[i],&out->after_state[chip][i],&out->transport);if(reason)goto fail;
      ++out->state_count[chip];if(out->after_state[chip][i]!=ram->after_state[chip][i]){reason=ZizhanAmpStateChanged;goto fail;}}
-    const unsigned step=pass&&!segment?12:4;
-    for(unsigned at=0;at<size;at+=step){
+    for(unsigned at=0,step=0;at<size;at+=step){
+     if(fast_burst&&!segment){const unsigned rem=size-at;step=rem>=48u?48u:(rem>=36u?36u:(rem>=24u?24u:12u));}
+     else{step=pass&&!segment?12u:4u;}
      out->failed_offset=at;if(clock->now_us(clock->context)-begin>=10000000){reason=ZizhanAmpTimeout;goto fail;}
      const uint32_t reg=base+at;const uint8_t *expected=files[chip]+start+at;
-     uint8_t wire[8]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg,0,0,0,0};
+     uint8_t wire[52]={(uint8_t)(reg>>24),(uint8_t)(reg>>16),(uint8_t)(reg>>8),(uint8_t)reg};
      if(!pass){
-      memcpy(wire+4,expected,4);++out->attempted_writes;
-      if(geni_i2c_start_write_bytes(bus,wire,8)){reason=ZizhanAmpBusy;goto fail;}
-      reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;++out->acknowledged_writes;
+      memcpy(wire+4,expected,step);out->attempted_writes+=step/4u;
+      if(fast_burst&&!segment){++out->burst_writes;if(geni_i2c_start_write_burst(bus,wire,4u+step)){reason=ZizhanAmpBusy;goto fail;}}
+      else if(geni_i2c_start_write_bytes(bus,wire,8)){reason=ZizhanAmpBusy;goto fail;}
+      reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;out->acknowledged_writes+=step/4u;
      }else{
-      if(segment?geni_i2c_start_read_bytes(bus,wire,4,4):geni_i2c_start_read_block(bus,wire,4,12)){reason=ZizhanAmpBusy;goto fail;}
+      if(segment?geni_i2c_start_read_bytes(bus,wire,4,4):(fast_burst?geni_i2c_start_read_burst(bus,wire,4,step):geni_i2c_start_read_block(bus,wire,4,12))){reason=ZizhanAmpBusy;goto fail;}
       reason=finish_transfer(bus,clock,&out->transport);if(reason)goto fail;
-      for(unsigned word=0;word<step/4;++word){const uint8_t *p=expected+word*4;
+      if(!segment){++out->burst_reads;}
+      for(unsigned word=0;word<step/4u;++word){const uint8_t *p=expected+word*4;
        const uint32_t wanted=(uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];
        ++out->readbacks[chip];if(wire_be32(segment?bus->rx:bus->rx_block[word])!=wanted){out->failed_offset=at+word*4;reason=ZizhanAmpReadback;goto fail;}}
      }
@@ -832,6 +848,16 @@ int zizhan_cs35l41_coefficients(unsigned enabled,unsigned verified,GeniI2c *bus,
 fail:
  out->elapsed_us=clock->now_us(clock->context)-begin;if(!out->transport.controller_uncertain)bus->address=original;
  out->status=ZizhanAmpFail;out->reason=reason;return reason;
+}
+int zizhan_cs35l41_coefficients(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpRam *ram,const uint8_t *top,unsigned top_size,const uint8_t *bottom,unsigned bottom_size,
+ ZizhanAmpHash hash,ZizhanAmpCoefficients *out){
+ return coefficients_load(enabled,verified,bus,clock,ram,top,top_size,bottom,bottom_size,hash,out,0);
+}
+int zizhan_cs35l41_coefficients_fast(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpRam *ram,const uint8_t *top,unsigned top_size,const uint8_t *bottom,unsigned bottom_size,
+ ZizhanAmpHash hash,ZizhanAmpCoefficients *out){
+ return coefficients_load(enabled,verified,bus,clock,ram,top,top_size,bottom,bottom_size,hash,out,1);
 }
 
 /* Actual module probe16 rates and wm_halo_configure_mpu23;fixedregisterfacts.
@@ -1110,9 +1136,115 @@ static int play_window(GeniI2c *bus,const ZizhanAmpClock *clock,const ZizhanAmpC
  for(unsigned chip=2;chip-->0;){reason=play_teardown(chip,bus,clock,coeff,out,begin);if(reason){return reason;}}
  return 0;
 }
+typedef struct {
+ GeniI2c *bus;const ZizhanAmpClock *clock;ZizhanAmpRun *out;
+ NativePulse context[2];ZizhanPulseOps io[2];int reason;
+} DaemonPoll;
+static volatile unsigned g_zizhan_receiver_mode = 0;
+void zizhan_audio_set_receiver_mode(int on) {
+ __atomic_store_n(&g_zizhan_receiver_mode, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+int zizhan_audio_get_receiver_mode(void) {
+ return (int)__atomic_load_n(&g_zizhan_receiver_mode, __ATOMIC_ACQUIRE);
+}
+static int daemon_amp_arm(void *p){
+ DaemonPoll *dp=p;ZizhanAmpRun *out=dp->out;
+ if(dp->reason||out->transport.controller_uncertain||geni_i2c_busy(dp->bus)){return 0;}
+ const unsigned recv_only=__atomic_load_n(&g_zizhan_receiver_mode,__ATOMIC_ACQUIRE);
+ for(unsigned chip=0;chip<2;++chip){
+  ZizhanPulseReceipt *r=&out->pulse[chip];
+  if(!r->patch_on||(r->armed&&!r->disabled)){dp->reason=ZizhanAmpPrerequisite;return 0;}
+  r->attempted=5;r->acknowledged=5;r->enabled=0;r->disabled=0;r->data_ack=0;r->complete=0;
+  r->reason=0;r->armed=0;r->polls=0;r->pcm_source=0;r->gain_set=0;
+  if(recv_only&&chip==1u){
+   /* Top earpiece receiver mode (VoiceChat): keep Bottom speaker 0x42 muted at 0x3300. */
+   r->disabled=1;r->data_ack=1;r->complete=1;continue;
+  }
+  dp->bus->address=chip?0x42:0x40;out->failed_chip=chip;out->failed_stage=10;
+  const unsigned saved_lvl=dp->io[chip].android_level;
+  if(recv_only&&chip==0u){dp->io[chip].android_level=0u;} /* -12 dB ear-safe receiver level */
+  const int arm_rc=zizhan_pulse_arm(&dp->io[chip],r);
+  dp->io[chip].android_level=saved_lvl;
+  if(arm_rc){
+   dp->reason=ZizhanAmpProtocol;
+   for(unsigned prev=chip+1;prev-->0;){
+    if(out->transport.controller_uncertain||geni_i2c_busy(dp->bus)){break;}
+    if(out->pulse[prev].armed&&!out->pulse[prev].disabled){
+     dp->bus->address=prev?0x42:0x40;(void)zizhan_pulse_disarm(&dp->io[prev],&out->pulse[prev],0);
+    }
+   }
+   return 0;
+  }
+ }
+ ++out->daemon_arms;return 1;
+}
+static int daemon_amp_poll(void *p){
+ DaemonPoll *dp=p;ZizhanAmpRun *out=dp->out;
+ if(dp->reason){return 1;}
+ ++out->play_polls;
+ if(out->play_polls==5){
+  for(unsigned chip=0;chip<2;++chip){dp->bus->address=chip?0x42:0x40;
+   for(unsigned i=0;i<16;++i){if(run_read(dp->bus,dp->clock,zizhan_play_snap_regs[i],&out->play_snap[chip][i],out)){break;}++out->play_snap_reads[chip];}}
+ }
+ for(unsigned chip=0;chip<2;++chip){
+  uint32_t halo=0;dp->bus->address=chip?0x42:0x40;out->failed_chip=chip;
+  if(out->pulse[chip].armed&&zizhan_pulse_hold_check(&dp->io[chip],&out->pulse[chip])){dp->reason=ZizhanAmpProtocol;return 1;}
+  if(run_read(dp->bus,dp->clock,0x28007d0,&halo,out)||halo!=2){dp->reason=ZizhanAmpStateChanged;return 1;}
+ }
+ return 0;
+}
+static int daemon_amp_disarm(void *p,int data_ok){
+ DaemonPoll *dp=p;ZizhanAmpRun *out=dp->out;int bad=0;
+ const int ok=data_ok&&!dp->reason;
+ for(unsigned chip=2;chip-->0;){
+  if(!out->pulse[chip].armed||out->pulse[chip].disabled){continue;}
+  dp->bus->address=chip?0x42:0x40;out->failed_chip=chip;out->failed_stage=12;
+  if(zizhan_pulse_disarm(&dp->io[chip],&out->pulse[chip],ok)){bad=1;}
+ }
+ ++out->daemon_disarms;
+ if(bad&&!dp->reason){dp->reason=ZizhanAmpProtocol;}
+ if(!bad&&ok){++out->daemon_sessions;}
+ return (bad||dp->reason)?0:1;
+}
+static int daemon_window(GeniI2c *bus,const ZizhanAmpClock *clock,const ZizhanAmpCoefficients *coeff,ZizhanAmpRun *out,
+                         ZizhanAudioAmpDaemonFn daemon_fn,void *daemon_ctx){
+ if(!out->play_ready[0]||!out->play_ready[1]||!daemon_fn){return ZizhanAmpPrerequisite;}
+ static DaemonPoll dp;memset(&dp,0,sizeof dp);
+ dp.bus=bus;dp.clock=clock;dp.out=out;
+ for(unsigned chip=0;chip<2;++chip){
+  dp.context[chip].bus=bus;dp.context[chip].clock=clock;dp.context[chip].out=out;dp.context[chip].chip=chip;
+  dp.io[chip]=pulse_ops(&dp.context[chip]);
+ }
+ const ZizhanAudioAmpSession session={&dp,daemon_amp_arm,daemon_amp_poll,daemon_amp_disarm};
+ out->failed_stage=11;
+ out->play_streamed=daemon_fn(daemon_ctx,&session)==1?1u:0u;
+ for(unsigned chip=2;chip-->0;){
+  if(!out->pulse[chip].armed||out->pulse[chip].disabled){continue;}
+  bus->address=chip?0x42:0x40;out->failed_chip=chip;out->failed_stage=12;
+  if(zizhan_pulse_disarm(&dp.io[chip],&out->pulse[chip],0)&&!dp.reason){dp.reason=ZizhanAmpProtocol;}
+ }
+ int reason=dp.reason?dp.reason:(out->play_streamed?0:ZizhanAmpProtocol);
+ if(reason){return reason;}
+ for(unsigned chip=0;chip<2;++chip){
+  if(!out->pulse[chip].armed&&!out->pulse[chip].disabled&&out->pulse[chip].patch_on){
+   out->pulse[chip].disabled=1;out->pulse[chip].data_ack=1;out->pulse[chip].complete=1;
+  }
+ }
+ const uint64_t teardown_begin=clock->now_us(clock->context);
+ for(unsigned chip=2;chip-->0;){reason=play_teardown(chip,bus,clock,coeff,out,teardown_begin);if(reason){return reason;}}
+ return 0;
+}
+static int silent_run_ex(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpCoefficients *coeff,ZizhanAmpRun *out,unsigned capture_only,unsigned observed_profile,unsigned clocked_profile,
+ const ZizhanAmpSpeakerCalibration *cal,const ZizhanAudioTransfer *transfer,ZizhanAudioAmpDaemonFn daemon_fn,void *daemon_ctx);
 static int silent_run(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpCoefficients *coeff,ZizhanAmpRun *out,unsigned capture_only,unsigned observed_profile,unsigned clocked_profile,const ZizhanAmpSpeakerCalibration *cal,const ZizhanAudioTransfer *transfer){
- if(!out){return ZizhanAmpArgument;}memset(out,0,sizeof *out);out->clocked_profile=clocked_profile;out->mailbox_profile=clocked_profile>=16;out->iv_profile=clocked_profile>=17;out->pulse_profile=clocked_profile==18||clocked_profile==19;out->play_profile=clocked_profile==19;out->play_ms=clocked_profile==19?zizhan_amp_play_ms:0u;out->asp_format=clocked_profile>=13;out->asp_rx_profile=clocked_profile>=12;out->native_rates=clocked_profile>=11;out->native_calibration=clocked_profile>=10;out->core_debug=clocked_profile==9;out->native_frame=clocked_profile>=8;out->pll_capture=clocked_profile>=2&&clocked_profile<=4;out->frequency_monitor=clocked_profile>=3;out->global_profile=clocked_profile>=4;out->mpu_capture_only=capture_only;out->observed_mpu_profile=observed_profile;out->reason=ZizhanAmpOff;if(enabled!=1)return 0;
+ return silent_run_ex(enabled,verified,bus,clock,coeff,out,capture_only,observed_profile,clocked_profile,cal,transfer,0,0);
+}
+static int silent_run_ex(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpCoefficients *coeff,ZizhanAmpRun *out,unsigned capture_only,unsigned observed_profile,unsigned clocked_profile,
+ const ZizhanAmpSpeakerCalibration *cal,const ZizhanAudioTransfer *transfer,ZizhanAudioAmpDaemonFn daemon_fn,void *daemon_ctx){
+ if(!out){return ZizhanAmpArgument;}memset(out,0,sizeof *out);out->clocked_profile=clocked_profile;out->mailbox_profile=clocked_profile>=16;out->iv_profile=clocked_profile>=17;out->pulse_profile=clocked_profile>=18&&clocked_profile<=20;out->play_profile=clocked_profile==19||clocked_profile==20;out->daemon_profile=clocked_profile==20;out->play_ms=clocked_profile==19?zizhan_amp_play_ms:0u;out->asp_format=clocked_profile>=13;out->asp_rx_profile=clocked_profile>=12;out->native_rates=clocked_profile>=11;out->native_calibration=clocked_profile>=10;out->core_debug=clocked_profile==9;out->native_frame=clocked_profile>=8;out->pll_capture=clocked_profile>=2&&clocked_profile<=4;out->frequency_monitor=clocked_profile>=3;out->global_profile=clocked_profile>=4;out->mpu_capture_only=capture_only;out->observed_mpu_profile=observed_profile;out->reason=ZizhanAmpOff;if(enabled!=1)return 0;
  if(out->native_calibration){
   if(!cal||cal->version!=1||cal->bytes!=sizeof *cal||!cal->resistance[0]||!cal->resistance[1]||
      cal->resistance[0]>=0xffffffu||cal->resistance[1]>=0xffffffu){out->reason=ZizhanAmpPrerequisite;return 0;}
@@ -1291,9 +1423,9 @@ static int silent_run(unsigned enabled,unsigned verified,GeniI2c *bus,const Zizh
     if(out->violations[chip][i]){reason=ZizhanAmpProtocol;goto stop_fail;}}
    reason=run_read(bus,clock,0x2bc7008,&out->watchdog[chip],out);if(reason)goto stop_fail;
    if(out->watchdog[chip]){reason=ZizhanAmpProtocol;goto stop_fail;}
-   if(sample==49&&transfer){
+   if(sample==49&&(transfer||daemon_fn)){
     AMP_CHECKPOINT(chip,8);
-    if((clocked_profile<15||clocked_profile>19)||(out->play_profile?!transfer->stream:!transfer->once)||out->halo_state[chip]!=2||out->heartbeat_changes[chip]<10){reason=ZizhanAmpPrerequisite;goto stop_fail;}
+    if((clocked_profile<15||clocked_profile>20)||(out->daemon_profile?!daemon_fn:(out->play_profile?(!transfer||!transfer->stream):(!transfer||!transfer->once)))||out->halo_state[chip]!=2||out->heartbeat_changes[chip]<10){reason=ZizhanAmpPrerequisite;goto stop_fail;}
     if(out->mailbox_profile){
      reason=native_mailbox(chip,0,bus,clock,coeff,out);if(reason)goto stop_fail;
      reason=native_mailbox(chip,1,bus,clock,coeff,out);if(reason)goto stop_fail;
@@ -1355,8 +1487,9 @@ stop_fail:
   }
   goto fail;
  }
- if(out->play_profile){reason=play_window(bus,clock,coeff,out,transfer,begin,limit);if(reason)goto fail;}
- if(clock->now_us(clock->context)-begin>=limit){reason=ZizhanAmpTimeout;goto fail;}
+ if(out->daemon_profile){reason=daemon_window(bus,clock,coeff,out,daemon_fn,daemon_ctx);if(reason)goto fail;}
+ else if(out->play_profile){reason=play_window(bus,clock,coeff,out,transfer,begin,limit);if(reason)goto fail;}
+ if(!out->daemon_profile&&clock->now_us(clock->context)-begin>=limit){reason=ZizhanAmpTimeout;goto fail;}
  out->elapsed_us=clock->now_us(clock->context)-begin;bus->address=original;out->status=ZizhanAmpPass;out->reason=0;return 0;
 fail:
  if(out->play_profile){out->play_reason=reason;out->play_stage=out->failed_stage;out->play_chip=out->failed_chip;play_teardown_all(bus,clock,coeff,out,begin);}
@@ -1480,6 +1613,11 @@ int zizhan_cs35l41_native_play_transfer(unsigned enabled,unsigned verified,GeniI
  if(!transfer||!transfer->stream||zizhan_amp_play_ms<100||zizhan_amp_play_ms>2000){if(out){memset(out,0,sizeof *out);out->reason=ZizhanAmpPrerequisite;out->play_stage=90u+(!transfer?1u:!transfer->stream?2u:3u);}return 0;}
  const int rc=silent_run(enabled,verified,bus,clock,coeff,out,0,1,19,cal,transfer);
  return rc;
+}
+int zizhan_cs35l41_native_daemon_transfer(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
+ const ZizhanAmpCoefficients *coeff,const ZizhanAmpSpeakerCalibration *cal,ZizhanAudioAmpDaemonFn daemon_fn,void *daemon_ctx,ZizhanAmpRun *out){
+ if(!daemon_fn){if(out){memset(out,0,sizeof *out);out->reason=ZizhanAmpPrerequisite;out->play_stage=94u;}return 0;}
+ return silent_run_ex(enabled,verified,bus,clock,coeff,out,0,1,20,cal,0,daemon_fn,daemon_ctx);
 }
 int zizhan_cs35l41_native_pulse_transfer(unsigned enabled,unsigned verified,GeniI2c *bus,const ZizhanAmpClock *clock,
  const ZizhanAmpCoefficients *coeff,const ZizhanAmpSpeakerCalibration *cal,const ZizhanAudioTransfer *transfer,ZizhanAmpRun *out){

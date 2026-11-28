@@ -85,7 +85,8 @@ def main():
             not re.fullmatch(r'[0-9a-f]{64}', digest) or
             not ((args.backup / (name + '.img.gz')).is_file() or (args.backup / name).is_file())):
             raise RuntimeError('Backup inventory is incomplete')
-    for path, base, size in [('/data/hackios/root.img', state['base'], state['file_bytes']),
+    root_file = state.get('file', '/data/hackios/root.img')
+    for path, base, size in [(root_file, state['base'], state['file_bytes']),
                              (klog['file'], klog['base'], klog['bytes'])]:
         if not re.fullmatch(r'/data/hackios/[A-Za-z0-9_.-]+', path):
             raise RuntimeError('Unexpected pinned path')

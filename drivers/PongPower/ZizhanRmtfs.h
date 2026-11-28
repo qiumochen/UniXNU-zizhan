@@ -7,7 +7,9 @@
 #pragma once
 
 namespace zizhan_rmtfs {
-constexpr uint64_t kCvp = 0x9ee00000, kArgs = kCvp + 0x10000, kBuf = kCvp + 0x100000, kBufSize = 0x280000;
+/* CVP carveout (0x9ee00000 + 0x700000): 0x9ee00000..+0x10000 SLPI PAS meta, +0x10000 rmtfs SMC args,
+ * +0x20000..+0x30000 MPSS PAS meta, +0x100000..+0x200000 SLPI FastRPC, +0x200000..+0x480000 rmtfs EFS buffer. */
+constexpr uint64_t kCvp = 0x9ee00000, kArgs = kCvp + 0x10000, kBuf = kCvp + 0x200000, kBufSize = 0x280000;
 constexpr uint32_t kPort = 0x4001, kSector = 512;
 constexpr uint32_t kVmidHlos = 3, kVmidMssMsa = 15, kPermRw = 0x6;
 

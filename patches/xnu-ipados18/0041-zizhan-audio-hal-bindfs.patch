@@ -1,0 +1,47 @@
+bindfs: allow PID 1 readonly /pong/audio-hal18 overlay when zizhan_audio_service=1
+--- a/bsd/miscfs/bindfs/bind_vfsops.c
++++ b/bsd/miscfs/bindfs/bind_vfsops.c
+@@ -75,6 +75,7 @@
+ #include <sys/param.h>
+ 
+ #include <IOKit/IOBSD.h>
++#include <pexpert/pexpert.h>
+ 
+ #include "bindfs.h"
+ 
+@@ -143,7 +144,15 @@
+ 	}
+ 
+ 	/* check entitlement */
+-	if (!native_bindfs_boot_mount && !IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) {
++	bool zizhan_boot_hal = false;
++	if (!native_bindfs_boot_mount && proc_selfpid() == 1 && (vfs_flags(mp) & MNT_RDONLY) != 0) {
++		uint32_t zizhan_audio_svc = 0;
++		if (PE_parse_boot_argn("zizhan_audio_service", &zizhan_audio_svc, sizeof(zizhan_audio_svc)) &&
++		    zizhan_audio_svc == 1) {
++			zizhan_boot_hal = true;
++		}
++	}
++	if (!native_bindfs_boot_mount && !zizhan_boot_hal && !IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) {
+ 		return EPERM;
+ 	}
+ 
+@@ -155,6 +164,9 @@
+ 		BINDFSERROR("error copying data from user %d\n", error);
+ 		goto error;
+ 	}
++	if (zizhan_boot_hal && strcmp(data, "/pong/audio-hal18") != 0) {
++		return EPERM;
++	}
+ 
+ 	/* This could happen if the system is configured for 32 bit inodes instead of
+ 	 * 64 bit */
+@@ -233,7 +245,7 @@
+ 	sp->f_flags = flags;
+ 
+ 	xmp->bindm_flags = BINDM_CASEINSENSITIVE; /* default to case insensitive */
+-	if (native_bindfs_boot_mount) {
++	if (native_bindfs_boot_mount || zizhan_boot_hal) {
+ 		xmp->bindm_flags |= BINDM_FORCE_ROOT;
+ 	}
+ 

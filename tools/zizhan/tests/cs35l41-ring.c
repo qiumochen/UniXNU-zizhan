@@ -28,7 +28,7 @@ int main(void){
  put16(ring,0,0,1);put16(ring,0,1,-2);
  put16(ring,1,0,32767);put16(ring,1,1,0);
  assert(zizhan_ring_pack(ring,ZizhanRingFrames,65534,pcm,&rr));
- assert(rr.packed==2880&&rr.reason==0&&!rr.underruns);
+ assert(rr.packed==2880&&rr.reason==0&&!rr.underruns&&rr.nonzero==4&&rr.max_abs==32768);
  check24(pcm+0,0x1234*256);check24(pcm+3,-256);
  check24(pcm+6,-8388608);check24(pcm+9,0x7fff*256);
  check24(pcm+12,256);check24(pcm+15,-512);

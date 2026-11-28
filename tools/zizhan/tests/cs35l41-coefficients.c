@@ -54,6 +54,22 @@ int main(int argc,char **argv){
   assert(zizhan_cs35l41_coefficients(1,flags,&f.bus,&clock,&ram,top_coeff,sizeof top_coeff,bottom_coeff,sizeof bottom_coeff,coeff_hash,&out)==ZizhanAmpBus);
   assert(out.transport.controller_uncertain&&f.commands==before+fail&&out.attempted_writes<=1883);
  }
+ /* Fast-burst coefficients on top of fast-burst RAM: 157 burst writes + 157 burst reads + 2 unpacked words. */
+ for(unsigned test=0;test<3;++test){
+  ZizhanAmpSnapshot snapshot;ZizhanAmpTrim trim;prepare(&f,&snapshot,&trim);
+  f.native_core_init=1;f.allow_fast_burst=1;f.ram_sparse=1;
+  assert(!zizhan_cs35l41_ram_fast(1,flags,&f.bus,&clock,&snapshot,&trim,firmware,sizeof firmware,fw_hash,&ram)&&ram.status==ZizhanAmpPass);
+  f.coeff_mode=1;coeff_bad_hash=0;
+  if(test==1){f.ram_mismatch=1;}
+  if(test==2){ram.burst_writes=1419;}
+  int rc=zizhan_cs35l41_coefficients_fast(1,flags,&f.bus,&clock,&ram,top_coeff,sizeof top_coeff,bottom_coeff,sizeof bottom_coeff,coeff_hash,&out);
+  if(!test){
+   assert(!rc&&out.status==ZizhanAmpPass&&out.completed==2&&out.fast_burst==1);
+   assert(out.burst_writes==157&&out.burst_reads==157&&out.attempted_writes==1883&&out.acknowledged_writes==1883);
+   assert(out.readbacks[0]==933&&out.readbacks[1]==950);
+  }else if(test==1){assert(rc==ZizhanAmpReadback);}
+  else{assert(!rc&&out.status==ZizhanAmpSkip&&out.reason==ZizhanAmpPrerequisite);}
+ }
  puts("PASS production per-chip coefficient fullchain,actual algorithm/base guards,exact spans/raw readback,both identities before writes,wronghash/partial/fault/timeout;no hardware");return 0;
 }
 #endif

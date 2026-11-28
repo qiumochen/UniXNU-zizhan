@@ -23,7 +23,11 @@ enum {ZizhanRequestOk=0,ZizhanRequestBadArgument,ZizhanRequestUnsupported,Zizhan
 #define ZIZHAN_AUDIO_PRM_SERVICE_MODE 40u
 /* PRM mode 41: mode 40 plus the profile 19 dual-amp playback window (attended, or dry). */
 #define ZIZHAN_AUDIO_PRM_PLAY_MODE 41u
-static inline int zizhan_service_owner_mode(unsigned prm){return prm==ZIZHAN_AUDIO_PRM_SERVICE_MODE||prm==ZIZHAN_AUDIO_PRM_PLAY_MODE;}
+/* PRM mode 42: persistent multi-session silent graph daemon (audio_output=0, no AMP/BST/data-pads). */
+#define ZIZHAN_AUDIO_PRM_DAEMON_MODE 42u
+static inline int zizhan_service_owner_mode(unsigned prm){
+ return prm==ZIZHAN_AUDIO_PRM_SERVICE_MODE||prm==ZIZHAN_AUDIO_PRM_PLAY_MODE||prm==ZIZHAN_AUDIO_PRM_DAEMON_MODE;
+}
 /* Only an explicit zizhan_audio_service=1 starts the owner. The Pong TFA9873
  * path (pong_audio) and every other PRM diagnostic mode own the same ADSP
  * graph and DMA window, so either one being set skips the service. */
@@ -49,6 +53,9 @@ static inline int zizhan_service_control_init(volatile ZizhanAudioControl *c,siz
 static inline int zizhan_service_memory_type(unsigned type){
  return type==ZizhanAudioMemoryControl||type==ZizhanAudioMemoryOutput;
 }
+static inline int zizhan_service_memory_type_ex(unsigned type,int capture_enabled){
+ return zizhan_service_memory_type(type)||(capture_enabled&&type==2u);
+}
 /* Start/Stop take no arguments. Stop is always accepted (idempotent);
  * Start succeeds only once a graph owner exists. */
 static inline unsigned zizhan_service_request(unsigned selector,unsigned scalar_in,unsigned struct_in,
@@ -63,7 +70,7 @@ static inline unsigned zizhan_service_request(unsigned selector,unsigned scalar_
  * with no owner, is refused. Stop is a request the owner honours between
  * periods; Stop with nothing running is a no-op. */
 enum {ZizhanHandoffIdle=0,ZizhanHandoffRequested,ZizhanHandoffRunning,ZizhanHandoffDone,ZizhanHandoffFailed};
-typedef struct {volatile uint32_t phase,owner,stop,starts,refused;} ZizhanAudioHandoff;
+typedef struct {volatile uint32_t phase,owner,stop,starts,refused,sessions;} ZizhanAudioHandoff;
 static inline int zizhan_handoff_register(ZizhanAudioHandoff *h){
  if(!h){return 0;}uint32_t expected=0;
  return __atomic_compare_exchange_n(&h->owner,&expected,1u,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
@@ -76,7 +83,8 @@ static inline int zizhan_handoff_request_start(ZizhanAudioHandoff *h){
  __atomic_add_fetch(&h->starts,1u,__ATOMIC_RELAXED);return 1;
 }
 static inline void zizhan_handoff_request_stop(ZizhanAudioHandoff *h){
- if(h)__atomic_store_n(&h->stop,1u,__ATOMIC_RELEASE);
+ if(!h){return;}const uint32_t p=__atomic_load_n(&h->phase,__ATOMIC_ACQUIRE);
+ if(p==ZizhanHandoffRequested||p==ZizhanHandoffRunning){__atomic_store_n(&h->stop,1u,__ATOMIC_RELEASE);}
 }
 static inline int zizhan_handoff_take(ZizhanAudioHandoff *h){
  if(!h){return 0;}uint32_t expected=ZizhanHandoffRequested;
@@ -88,6 +96,14 @@ static inline int zizhan_handoff_stopping(const ZizhanAudioHandoff *h){
 static inline void zizhan_handoff_finish(ZizhanAudioHandoff *h,int ok){
  if(h)__atomic_store_n(&h->phase,ok?(uint32_t)ZizhanHandoffDone:(uint32_t)ZizhanHandoffFailed,__ATOMIC_RELEASE);
 }
+/* Mode-42 multi-session daemon: return a cleanly drained Running session back to Idle. */
+static inline int zizhan_handoff_reset(ZizhanAudioHandoff *h){
+ if(!h||__atomic_load_n(&h->phase,__ATOMIC_ACQUIRE)!=ZizhanHandoffRunning){return 0;}
+ __atomic_store_n(&h->stop,0u,__ATOMIC_RELEASE);
+ uint32_t expected=ZizhanHandoffRunning;
+ if(!__atomic_compare_exchange_n(&h->phase,&expected,(uint32_t)ZizhanHandoffIdle,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){return 0;}
+ __atomic_add_fetch(&h->sessions,1u,__ATOMIC_RELAXED);return 1;
+}
 /* Mode-40 start frame: the first whole period at or after the first stable
  * watermark the owner sees. The HAL writes forward from there, so every frame
  * the owner claims was written after that observation; earlier ring frames
@@ -97,5 +113,16 @@ static inline uint64_t zizhan_service_start_frame(uint64_t written){
  if(!rest)return written;
  if(written>UINT64_MAX-ZIZHAN_AUDIO_PERIOD_FRAMES)return UINT64_MAX-(UINT64_MAX%ZIZHAN_AUDIO_PERIOD_FRAMES);
  return written+(ZIZHAN_AUDIO_PERIOD_FRAMES-rest);
+}
+/* Mode-42 start frame: anchor floor at the session's first observed watermark
+ * (never recomputed from cur_written, where ceil(cur)>=floor(cur) prevented any
+ * cushion), then back off cushion_periods behind the newest whole period ready. */
+static inline uint64_t zizhan_service_daemon_start_frame(uint64_t first_written,uint64_t cur_written,
+                                                         unsigned cushion_periods){
+ const uint64_t fl=zizhan_service_start_frame(first_written);
+ if(cur_written<=fl)return fl;
+ const uint64_t newest=cur_written-(cur_written%ZIZHAN_AUDIO_PERIOD_FRAMES);
+ const uint64_t back=(uint64_t)cushion_periods*ZIZHAN_AUDIO_PERIOD_FRAMES;
+ return newest>=fl+back?newest-back:fl;
 }
 #endif

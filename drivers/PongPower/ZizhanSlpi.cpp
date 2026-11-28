@@ -25,10 +25,15 @@
 #include "QcomSmem.h"
 #include "QcomSmp2p.h"
 #include "ZizhanSlpiStd.h"
+#include "ZizhanSlpiSensors.h"
 extern "C" int pong_adsp_shared_ready(void);
 extern "C" int pong_adsp_smem_lock(void);
 extern "C" void pong_adsp_smem_unlock(void);
 extern "C" int pong_adsp_slpi_load_state(int on);
+extern "C" int zizhan_display_power_state(void) __attribute__((weak));
+extern "C" int zizhan_outer_lid_closed(void) __attribute__((weak));
+extern "C" int pong_backlight_level(uint32_t *level);
+extern "C" int pong_backlight_set(uint32_t level, uint32_t timeout_ms);
 /* SENS-03, bsd/dev/pong_input.c (XNU patch 0038): /dev/zizhan-sensors for the HID bridge in backboardd (userland/touch.c) */
 extern "C" void zizhan_sensor_post(uint32_t kind, int32_t a, int32_t b, int32_t c);
 extern "C" bool zizhan_sensors_device_ready(void);
@@ -226,20 +231,22 @@ void pdmHandle(uint32_t srcNode, uint32_t srcPort, const uint8_t *q, uint32_t n)
  * continuous enable 513 {float sample_rate} -> measurements 1025 {repeated float, accuracy}, disable 10. Read-only use: look up
  * registry, accel and ambient_light, stream the accelerometer at 10 Hz and log it; nothing is written to the sensor registry. */
 constexpr uint32_t kSnsService = 400, kSnsClientPort = 0x4004;
-uint32_t gSlpiMode;
-uint32_t gSnsNode = 0xffffffffu, gSnsPort, gSnsTxn = 0x100, gSnsStage, gAccelSamples, gSnsInd;
-uint64_t gAccelLo, gAccelHi, gSnsNextMs;
-bool gAccelFound, gAccelOn;
-uint32_t gAccel[3];   // raw IEEE-754 bits: the kernel is built soft-float, so no float arithmetic here
-/* value * 1000 as an integer from float bits, integer math only (|v| < 2^20 is plenty for m/s2 and lux) */
+uint32_t gSlpiMode, gAlsAutoBright, gGyroWant, gMagWant, gBaroWant, gHingeWant = 1, gProxWant = 1, gSlpiQuiesce = 1;
+uint32_t gImuRot = zizhan_slpi_sensors::kDefaultImuRot, gHingeSimStartS;
+volatile int32_t gProxNearState = 0, gProxSimState = -1, gAlsLuxMilliExport = -1;
+volatile int32_t gHingeClosedState = -1, gHingeSimState = -1, gHingeDegMilliExport = -1;
+uint32_t gSnsNode = 0xffffffffu, gSnsPort, gSnsTxn = 0x100, gSnsStage, gSnsInd;
+uint32_t gAccelSamples, gAlsSamples, gGyroSamples, gMagSamples, gBaroSamples, gHingeSamples, gProxSamples, gProxRawAdc;
+uint64_t gAccelLo, gAccelHi, gAlsLo, gAlsHi, gGyroLo, gGyroHi, gMagLo, gMagHi, gBaroLo, gBaroHi, gHingeLo, gHingeHi, gProxLo, gProxHi, gSnsNextMs;
+bool gAccelFound, gAccelOn, gAlsFound, gAlsOn, gAlsFallbackStream, gGyroFound, gGyroOn;
+bool gMagFound, gMagOn, gBaroFound, gBaroOn, gHingeFound, gHingeOn, gHingeFallbackStream;
+bool gProxFound, gProxOn, gProxFallbackStream;
+uint32_t gAccel[3], gAls[2], gGyro[3], gMag[3], gBaro[2], gHinge[3], gProx[2];   // raw IEEE-754 bits: soft-float kernel
+zizhan_slpi_sensors::AutoBrightness gAutoBright;
+zizhan_slpi_sensors::QuiesceState gQuiesce;
+zizhan_slpi_sensors::HingeFoldState gHingeFold;
 int32_t milli(uint32_t bits) {
-  const int32_t e = int32_t((bits >> 23) & 0xff) - 127;
-  if (e < -20) return 0;
-  if (e > 20) return (bits >> 31) ? -2000000000 : 2000000000;
-  const uint64_t m = (bits & 0x7fffff) | 0x800000;   // 1.23 fixed point
-  const uint64_t scaled = m * 1000;
-  const uint64_t v = e >= 23 ? scaled << (e - 23) : scaled >> (23 - e);
-  return (bits >> 31) ? -int32_t(v) : int32_t(v);
+  return zizhan_slpi_sensors::milli_from_f32(bits);
 }
 constexpr uint64_t kSuid = 0xababababababababULL;
 
@@ -287,15 +294,98 @@ void snsSend(uint64_t lo, uint64_t hi, uint32_t msgId, const uint8_t *msg, uint3
 void snsSuid(const char *type) {
   Pb m = {};
   pbBytes(m, 1, reinterpret_cast<const uint8_t *>(type), uint32_t(strlen(type)));
-  pbVarField(m, 2, 0); pbVarField(m, 3, 1);                   // no updates, default sensor only
+  pbVarField(m, 2, 1); pbVarField(m, 3, 1);                   // register_updates=1, default sensor only
   snsSend(kSuid, kSuid, 512, m.b, m.n, type);
 }
 void snsAccelEnable(bool on) {
-  if (!on) { snsSend(gAccelLo, gAccelHi, 10, nullptr, 0, "accel-off"); gAccelOn = false; return; }
+  if (!gAccelFound) { return; }
+  if (!on) {
+    if (gAccelOn) { snsSend(gAccelLo, gAccelHi, 10, nullptr, 0, "accel-off"); gAccelOn = false; }
+    return;
+  }
   Pb m = {};
   pbF32(m, 1, 0x41200000u);   // 10.0f sample rate
   snsSend(gAccelLo, gAccelHi, 513, m.b, m.n, "accel-on");
   gAccelOn = true;
+}
+void snsAlsEnable(bool on) {
+  if (!gAlsFound) { return; }
+  if (!on) {
+    if (gAlsOn) { snsSend(gAlsLo, gAlsHi, 10, nullptr, 0, "als-off"); gAlsOn = false; }
+    return;
+  }
+  if (gAlsFallbackStream) {
+    Pb m = {};
+    pbF32(m, 1, 0x40a00000u);   // 5.0f fallback if on-change 514 is rejected
+    snsSend(gAlsLo, gAlsHi, 513, m.b, m.n, "als-on-stream");
+  } else {
+    snsSend(gAlsLo, gAlsHi, 514, nullptr, 0, "als-on-change");
+  }
+  gAlsOn = true;
+}
+void snsGyroEnable(bool on) {
+  if (!gGyroFound) { return; }
+  if (!on) {
+    if (gGyroOn) { snsSend(gGyroLo, gGyroHi, 10, nullptr, 0, "gyro-off"); gGyroOn = false; }
+    return;
+  }
+  Pb m = {};
+  pbF32(m, 1, 0x41200000u);   // 10.0f sample rate
+  snsSend(gGyroLo, gGyroHi, 513, m.b, m.n, "gyro-on");
+  gGyroOn = true;
+}
+void snsMagEnable(bool on) {
+  if (!gMagFound) { return; }
+  if (!on) {
+    if (gMagOn) { snsSend(gMagLo, gMagHi, 10, nullptr, 0, "mag-off"); gMagOn = false; }
+    return;
+  }
+  Pb m = {};
+  pbF32(m, 1, 0x40a00000u);   // 5.0f sample rate
+  snsSend(gMagLo, gMagHi, 513, m.b, m.n, "mag-on");
+  gMagOn = true;
+}
+void snsBaroEnable(bool on) {
+  if (!gBaroFound) { return; }
+  if (!on) {
+    if (gBaroOn) { snsSend(gBaroLo, gBaroHi, 10, nullptr, 0, "pressure-off"); gBaroOn = false; }
+    return;
+  }
+  Pb m = {};
+  pbF32(m, 1, 0x40000000u);   // 2.0f continuous sample rate (SSC pressure is a streaming sensor, not on-change)
+  snsSend(gBaroLo, gBaroHi, 513, m.b, m.n, "pressure-on");
+  gBaroOn = true;
+}
+void snsHingeEnable(bool on) {
+  if (!gHingeFound) { return; }
+  if (!on) {
+    if (gHingeOn) { snsSend(gHingeLo, gHingeHi, 10, nullptr, 0, "hinge-off"); gHingeOn = false; }
+    return;
+  }
+  if (gHingeFallbackStream) {
+    Pb m = {};
+    pbF32(m, 1, 0x40a00000u);   // 5.0f fallback stream
+    snsSend(gHingeLo, gHingeHi, 513, m.b, m.n, "hinge-on-stream");
+  } else {
+    snsSend(gHingeLo, gHingeHi, 514, nullptr, 0, "hinge-on-change");
+  }
+  gHingeOn = true;
+}
+void snsProxEnable(bool on) {
+  if (!gProxFound) { return; }
+  if (!on) {
+    if (gProxOn) { snsSend(gProxLo, gProxHi, 10, nullptr, 0, "prox-off"); gProxOn = false; }
+    return;
+  }
+  if (gProxOn) { return; }
+  if (gProxFallbackStream) {
+    Pb m = {};
+    pbF32(m, 1, 0x40000000u);   // 2.0f fallback stream
+    snsSend(gProxLo, gProxHi, 513, m.b, m.n, "prox-on-stream");
+  } else {
+    snsSend(gProxLo, gProxHi, 514, nullptr, 0, "prox-on-change");
+  }
+  gProxOn = true;
 }
 void snsEvent(const uint8_t *d, uint32_t n) {
   PbIn in = {d, n, 0};
@@ -323,6 +413,12 @@ void snsEvent(const uint8_t *d, uint32_t n) {
         }
         IOLog("ZIZHAN_SLPI: sns suid '%s' sensors=%u first=%016llx%016llx\n", type, count, fhi, flo);
         if (!strcmp(type, "accel") && count && !gAccelFound) { gAccelFound = true; gAccelLo = flo; gAccelHi = fhi; }
+        if (!strcmp(type, "ambient_light") && count && !gAlsFound) { gAlsFound = true; gAlsLo = flo; gAlsHi = fhi; }
+        if (!strcmp(type, "gyro") && count && !gGyroFound) { gGyroFound = true; gGyroLo = flo; gGyroHi = fhi; }
+        if (!strcmp(type, "mag") && count && !gMagFound) { gMagFound = true; gMagLo = flo; gMagHi = fhi; }
+        if (!strcmp(type, "pressure") && count && !gBaroFound) { gBaroFound = true; gBaroLo = flo; gBaroHi = fhi; }
+        if (!strcmp(type, "hinge_angle") && count && !gHingeFound) { gHingeFound = true; gHingeLo = flo; gHingeHi = fhi; }
+        if (!strcmp(type, "proximity") && count && !gProxFound) { gProxFound = true; gProxLo = flo; gProxHi = fhi; }
       } else if (msgId == 1025 && msg && lo == gAccelLo && hi == gAccelHi) {
         PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
         unsigned k = 0; int32_t accuracy = -1;
@@ -331,26 +427,190 @@ void snsEvent(const uint8_t *d, uint32_t n) {
           if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 3; i += 4) memcpy(&gAccel[k++], p3 + i, 4); }
           if (f3 == 2 && w3 == 0) accuracy = int32_t(v3);
         }
+        const int32_t raw[3] = {milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2])};
+        int32_t v[3] = {};
+        zizhan_slpi_sensors::rotate_imu_axes(raw[0], raw[1], raw[2], gImuRot, v);
         if (gSlpiMode == 4) {
-          // zizhan_accel_test=<s>: instead of the real reading, gravity along +y, +x, -y, -x in turn, <s> seconds each: the
-          // four ways of holding the phone, to see iPadOS rotate while it lies on a desk
+          // zizhan_accel_test=<s>: instead of the real reading, physical postures (+y upright, +x CCW, -y upside-down, -x CW)
+          // in SLPI coordinates rotated by gImuRot, <s> seconds each, to see iPadOS rotate while it lies on a desk
           static bool node;
           static uint32_t testS = 0xffffffffu;
           if (testS == 0xffffffffu) { testS = 0; (void)PE_parse_boot_argn("zizhan_accel_test", &testS, sizeof testS); }
           if (!node) node = zizhan_sensors_device_ready();
-          int32_t v[3] = {milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2])};
           if (testS) {
             static const int32_t held[4][3] = {{0, 9807, 0}, {9807, 0, 0}, {0, -9807, 0}, {-9807, 0, 0}};
             const unsigned phase = unsigned(nowMs() / 1000 / testS) % 4;
-            for (unsigned i = 0; i < 3; ++i) v[i] = held[phase][i];
+            zizhan_slpi_sensors::rotate_imu_axes(held[phase][0], held[phase][1], held[phase][2], gImuRot, v);
           }
           zizhan_sensor_post(16, v[0], v[1], v[2]);
         }
         if (gAccelSamples++ < 20)
-          IOLog("ZIZHAN_SLPI: accel #%u x=%d y=%d z=%d mm/s2 accuracy=%d\n", gAccelSamples, milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2]), accuracy);
-      } else if (gSnsInd < 40) {
+          IOLog("ZIZHAN_SLPI: accel #%u x=%d y=%d z=%d rot(%u)=(%d,%d,%d) mm/s2 accuracy=%d\n",
+                gAccelSamples, raw[0], raw[1], raw[2], gImuRot, v[0], v[1], v[2], accuracy);
+      } else if (msgId == 1025 && msg && gAlsFound && lo == gAlsLo && hi == gAlsHi) {
+        PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
+        unsigned k = 0; int32_t accuracy = -1;
+        gAls[0] = 0; gAls[1] = 0;
+        while (pbNext(s2, f3, w3, v3, p3, l3)) {
+          if (f3 == 1 && w3 == 5 && k < 2) { gAls[k++] = uint32_t(v3); }
+          if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 2; i += 4) { memcpy(&gAls[k++], p3 + i, 4); } }
+          if (f3 == 2 && w3 == 0) { accuracy = int32_t(v3); }
+        }
+        const int32_t lux_m = milli(gAls[0]), raw_m = milli(gAls[1]);
+        __atomic_store_n(&gAlsLuxMilliExport, lux_m >= 0 ? lux_m : 0, __ATOMIC_RELEASE);
+        if (gSlpiMode == 4) {
+          (void)zizhan_sensors_device_ready();
+          zizhan_sensor_post(17, lux_m, raw_m, accuracy);
+          if (gAlsAutoBright == 1u) {
+            uint32_t cur_bl = 0, target_bl = 0;
+            if (pong_backlight_level(&cur_bl) == 0 &&
+                zizhan_slpi_sensors::step_autobright(gAutoBright, lux_m, cur_bl, nowMs(), &target_bl)) {
+              const int brc = pong_backlight_set(target_bl, 400);
+              IOLog("ZIZHAN_SLPI: als-autobright lux_milli=%d bl %u -> %u rc=%d updates=%u\n",
+                    lux_m, cur_bl, target_bl, brc, gAutoBright.updates);
+            }
+          }
+        }
+        if (gAlsSamples++ < 20) {
+          IOLog("ZIZHAN_SLPI: als #%u lux_milli=%d raw_milli=%d accuracy=%d\n", gAlsSamples, lux_m, raw_m, accuracy);
+        }
+      } else if (msgId == 1025 && msg && gGyroFound && lo == gGyroLo && hi == gGyroHi) {
+        PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
+        unsigned k = 0; int32_t accuracy = -1;
+        while (pbNext(s2, f3, w3, v3, p3, l3)) {
+          if (f3 == 1 && w3 == 5 && k < 3) { gGyro[k++] = uint32_t(v3); }
+          if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 3; i += 4) { memcpy(&gGyro[k++], p3 + i, 4); } }
+          if (f3 == 2 && w3 == 0) { accuracy = int32_t(v3); }
+        }
+        const int32_t rx = milli(gGyro[0]), ry = milli(gGyro[1]), rz = milli(gGyro[2]);
+        int32_t grot[3] = {};
+        zizhan_slpi_sensors::rotate_imu_axes(rx, ry, rz, gImuRot, grot);
+        if (gSlpiMode == 4) {
+          (void)zizhan_sensors_device_ready();
+          zizhan_sensor_post(18, grot[0], grot[1], grot[2]);
+        }
+        if (gGyroSamples++ < 20) {
+          IOLog("ZIZHAN_SLPI: gyro #%u rx=%d ry=%d rz=%d mrad/s accuracy=%d\n", gGyroSamples, grot[0], grot[1], grot[2], accuracy);
+        }
+      } else if (msgId == 1025 && msg && gMagFound && lo == gMagLo && hi == gMagHi) {
+        PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
+        unsigned k = 0; int32_t accuracy = -1;
+        gMag[0] = 0; gMag[1] = 0; gMag[2] = 0;
+        while (pbNext(s2, f3, w3, v3, p3, l3)) {
+          if (f3 == 1 && w3 == 5 && k < 3) { gMag[k++] = uint32_t(v3); }
+          if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 3; i += 4) { memcpy(&gMag[k++], p3 + i, 4); } }
+          if (f3 == 2 && w3 == 0) { accuracy = int32_t(v3); }
+        }
+        const int32_t mx = milli(gMag[0]), my = milli(gMag[1]), mz = milli(gMag[2]);
+        int32_t mrot[3] = {};
+        zizhan_slpi_sensors::rotate_imu_axes(mx, my, mz, gImuRot, mrot);
+        const uint32_t norm = zizhan_slpi_sensors::mag_norm_milli_ut(mrot[0], mrot[1], mrot[2]);
+        if (gSlpiMode == 4) {
+          (void)zizhan_sensors_device_ready();
+          zizhan_sensor_post(19, mrot[0], mrot[1], mrot[2]);
+        }
+        if (gMagSamples++ < 20) {
+          IOLog("ZIZHAN_SLPI: mag #%u mx=%d my=%d mz=%d norm=%u milli-uT accuracy=%d\n",
+                gMagSamples, mx, my, mz, norm, accuracy);
+        }
+      } else if (msgId == 1025 && msg && gBaroFound && lo == gBaroLo && hi == gBaroHi) {
+        PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
+        unsigned k = 0; int32_t accuracy = -1;
+        gBaro[0] = 0; gBaro[1] = 0;
+        while (pbNext(s2, f3, w3, v3, p3, l3)) {
+          if (f3 == 1 && w3 == 5 && k < 2) { gBaro[k++] = uint32_t(v3); }
+          if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 2; i += 4) { memcpy(&gBaro[k++], p3 + i, 4); } }
+          if (f3 == 2 && w3 == 0) { accuracy = int32_t(v3); }
+        }
+        const int32_t raw_m = milli(gBaro[0]);
+        const uint32_t pa = zizhan_slpi_sensors::pressure_to_pa(raw_m);
+        if (gSlpiMode == 4 && zizhan_slpi_sensors::pressure_plausible_pa(pa)) {
+          (void)zizhan_sensors_device_ready();
+          zizhan_sensor_post(20, int32_t(pa), raw_m, accuracy);
+        }
+        if (gBaroSamples++ < 20) {
+          IOLog("ZIZHAN_SLPI: pressure #%u pa=%u raw_milli=%d accuracy=%d\n",
+                gBaroSamples, pa, raw_m, accuracy);
+        }
+      } else if ((msgId == 1025 || msgId == 1026) && msg && gHingeFound && lo == gHingeLo && hi == gHingeHi) {
+        PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
+        unsigned k = 0; int32_t accuracy = -1;
+        gHinge[0] = 0; gHinge[1] = 0; gHinge[2] = 0;
+        while (pbNext(s2, f3, w3, v3, p3, l3)) {
+          if (f3 == 1 && w3 == 5 && k < 3) { gHinge[k++] = uint32_t(v3); }
+          if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 3; i += 4) { memcpy(&gHinge[k++], p3 + i, 4); } }
+          if (f3 == 2 && w3 == 0) { accuracy = int32_t(v3); }
+        }
+        const int32_t deg_m = milli(gHinge[0]);
+        const int32_t posture = zizhan_slpi_sensors::hinge_posture(deg_m);
+        if (zizhan_slpi_sensors::hinge_angle_plausible(deg_m)) {
+          __atomic_store_n(&gHingeDegMilliExport, deg_m, __ATOMIC_RELEASE);
+          if (gHingeSimStartS == 0u) {
+            const int prev_closed = gHingeFold.closed;
+            if (zizhan_slpi_sensors::step_hinge_fold(gHingeFold, deg_m)) {
+              __atomic_store_n(&gHingeClosedState, gHingeFold.closed, __ATOMIC_RELEASE);
+              IOLog("ZIZHAN_SLPI: hinge-lid %d -> %d deg_milli=%d transitions=%u\n",
+                    prev_closed, gHingeFold.closed, deg_m, gHingeFold.transitions);
+            }
+          }
+          if (gSlpiMode == 4) {
+            (void)zizhan_sensors_device_ready();
+            zizhan_sensor_post(21, deg_m, posture, accuracy);
+          }
+        }
+        if (gHingeSamples++ < 20) {
+          IOLog("ZIZHAN_SLPI: hinge #%u deg_milli=%d posture=%d closed=%d accuracy=%d msg=%u\n",
+                gHingeSamples, deg_m, posture, __atomic_load_n(&gHingeClosedState, __ATOMIC_ACQUIRE), accuracy, msgId);
+        }
+      } else if ((msgId == 769 || msgId == 1031 || msgId == 1025 || msgId == 1026) &&
+                 msg && gProxFound && lo == gProxLo && hi == gProxHi) {
+        PbIn s2 = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
+        uint32_t evType = 0, rawAdc = 0;
+        int32_t accuracy = -1;
+        unsigned k = 0;
+        gProx[0] = 0; gProx[1] = 0;
+        while (pbNext(s2, f3, w3, v3, p3, l3)) {
+          if (msgId == 769 || msgId == 1031) {
+            if (f3 == 1 && w3 == 0) { evType = uint32_t(v3); }
+            if (f3 == 2 && (w3 == 0 || w3 == 5)) { rawAdc = uint32_t(v3); }
+            if (f3 == 3 && w3 == 0) { accuracy = int32_t(v3); }
+          } else {
+            if (f3 == 1 && w3 == 5 && k < 2) { gProx[k++] = uint32_t(v3); }
+            if (f3 == 1 && w3 == 2) { for (uint32_t i = 0; i + 4 <= l3 && k < 2; i += 4) { memcpy(&gProx[k++], p3 + i, 4); } }
+            if (f3 == 2 && w3 == 0) { accuracy = int32_t(v3); }
+          }
+        }
+        const int32_t dist_m = milli(gProx[0]);
+        const bool near = zizhan_slpi_sensors::proximity_is_near(msgId, evType, dist_m);
+        __atomic_store_n(&gProxNearState, near ? 1 : 0, __ATOMIC_RELEASE);
+        gProxRawAdc = rawAdc;
+        if (gSlpiMode == 4) {
+          (void)zizhan_sensors_device_ready();
+          zizhan_sensor_post(22, near ? 1 : 0, int32_t(rawAdc), accuracy);
+        }
+        if (gProxSamples++ < 24) {
+          IOLog("ZIZHAN_SLPI: proximity #%u near=%u raw_adc=%u dist_milli=%d accuracy=%d msg=%u\n",
+                gProxSamples, near ? 1u : 0u, rawAdc, dist_m, accuracy, msgId);
+        }
+      } else if (gSnsInd < 64) {
         uint32_t code = 0xffffffffu;
-        if (msgId == 130 && msg) { PbIn e = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3; while (pbNext(e, f3, w3, v3, p3, l3)) { if (f3 == 1 && w3 == 0) code = uint32_t(v3); } }
+        if (msgId == 130 && msg) {
+          PbIn e = {msg, msgLen, 0}; uint32_t f3, w3, l3; uint64_t v3; const uint8_t *p3;
+          while (pbNext(e, f3, w3, v3, p3, l3)) { if (f3 == 1 && w3 == 0) { code = uint32_t(v3); } }
+          if (gAlsFound && lo == gAlsLo && hi == gAlsHi && !gAlsFallbackStream) {
+            gAlsFallbackStream = true;
+            gAlsOn = false;
+            snsAlsEnable(true);
+          } else if (gHingeFound && lo == gHingeLo && hi == gHingeHi && !gHingeFallbackStream) {
+            gHingeFallbackStream = true;
+            gHingeOn = false;
+            snsHingeEnable(true);
+          } else if (gProxFound && lo == gProxLo && hi == gProxHi && !gProxFallbackStream) {
+            gProxFallbackStream = true;
+            gProxOn = false;
+            snsProxEnable(true);
+          }
+        }
         IOLog("ZIZHAN_SLPI: sns event uid=%016llx%016llx msg_id=%u bytes=%u error=%d\n", hi, lo, msgId, msgLen, int(code));
       }
     }
@@ -886,9 +1146,18 @@ void worker(void *, wait_result_t) {
   for (unsigned i = 0; i < 1200 && !pong_ufs_ready(); ++i) IOSleep(100);
   // modem-6: loading 108 MB while the first desktop frame releases the boot console (a one-time full-panel clear with
   // preemption off) pushed that clear past the 6 ms preemption limit and panicked. Start only after the first frame.
-  for (unsigned i = 0; i < 1200 && !(&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)); ++i) IOSleep(100);
-  IOLog("ZIZHAN_SLPI: desktop frame seen=%u, starting in 10 s\n", (&pong_zc_flipped_tag && pong_zc_flipped_tag) ? 1u : 0u);
-  IOSleep(10000);
+  for (unsigned i = 0; i < 1200 && !(&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)); ++i) {
+    IOSleep(100);
+  }
+  uint32_t delayMs = 1500;
+  (void)PE_parse_boot_argn("zizhan_slpi_delay_ms", &delayMs, sizeof delayMs);
+  if (delayMs > 60000) {
+    delayMs = 60000;
+  }
+  IOLog("ZIZHAN_SLPI: desktop frame seen=%u, starting in %u ms\n", (&pong_zc_flipped_tag && pong_zc_flipped_tag) ? 1u : 0u, delayMs);
+  if (delayMs) {
+    IOSleep(delayMs);
+  }
   if (gShared) {
     unsigned waited = 0;
     for (; waited < 600 && !pong_adsp_shared_ready(); ++waited) IOSleep(100);
@@ -1064,35 +1333,145 @@ again:
       lastBits = bits;
       if (bits & kFatal) { readCrash(); break; }
       if (bits & kReady) readySeen = true;
-      if (!cycle && (bits & kReady) && !gGlinkOn) glinkStart();
+      if (!cycle && (bits & kReady) && !gGlinkOn) {
+        glinkStart();
+      }
     }
-    if (!cycle) glinkService();
-    if (gSlpiMode >= 3 && !cycle && zizhan_frpc::gUp && !zizhan_frpc::gDone) zizhan_frpc::run();
+    if (!cycle) {
+      for (unsigned burst = 0; burst < 64; ++burst) {
+        const uint32_t rx0 = gGlink.rx_messages;
+        const uint32_t calls0 = zizhan_frpc::gFs.calls;
+        glinkService();
+        if (gSlpiMode >= 3 && zizhan_frpc::gUp && !zizhan_frpc::gDone) {
+          zizhan_frpc::run();
+        }
+        if (gAccelOn) {
+          break;
+        }
+        if (gGlink.rx_messages == rx0 && zizhan_frpc::gFs.calls == calls0) {
+          IODelay(80);
+          glinkService();
+          if (gSlpiMode >= 3 && zizhan_frpc::gUp && !zizhan_frpc::gDone) {
+            zizhan_frpc::run();
+          }
+          if (gGlink.rx_messages == rx0 && zizhan_frpc::gFs.calls == calls0) {
+            break;
+          }
+        }
+      }
+    }
+    if (gHingeSimStartS && !cycle && gSlpiMode == 4) {
+      const uint64_t elapsed_s = (now - t0) / 1000ull;
+      const int32_t sim_deg = (elapsed_s >= gHingeSimStartS && elapsed_s < gHingeSimStartS + 20ull) ? 5000 : 177000;
+      __atomic_store_n(&gHingeDegMilliExport, sim_deg, __ATOMIC_RELEASE);
+      const int prev_closed = gHingeFold.closed;
+      if (zizhan_slpi_sensors::step_hinge_fold(gHingeFold, sim_deg)) {
+        __atomic_store_n(&gHingeClosedState, gHingeFold.closed, __ATOMIC_RELEASE);
+        IOLog("ZIZHAN_SLPI: hinge-lid-sim %d -> %d deg_milli=%d elapsed_s=%llu transitions=%u\n",
+              prev_closed, gHingeFold.closed, sim_deg, (unsigned long long)elapsed_s, gHingeFold.transitions);
+      }
+    }
+    if (gSlpiMode == 4 && !cycle && gSnsStage >= 10 && gIpcrtr && gIpcrtr->up) {
+      const int disp = zizhan_display_power_state ? zizhan_display_power_state() : 1;
+      const int lid = zizhan_outer_lid_closed ? zizhan_outer_lid_closed() : 0;
+      const auto qa = zizhan_slpi_sensors::step_quiesce(gQuiesce, gSlpiQuiesce != 0, disp, now);
+      if (qa == zizhan_slpi_sensors::QuiesceAction::Pause) {
+        snsAccelEnable(false);
+        snsAlsEnable(false);
+        snsGyroEnable(false);
+        snsMagEnable(false);
+        snsBaroEnable(false);
+        /* Keep on-change hinge_angle armed across display-off standby so physical fold/unfold
+         * always delivers lid transitions (zero wakeup traffic while stationary). */
+        if (!zizhan_slpi_sensors::proximity_keep_on_in_standby(lid)) {
+          snsProxEnable(false);
+        }
+        IOLog("ZIZHAN_SLPI: standby quiesce streams=off lid=%d hinge_on=%u prox_on=%u pauses=%u resumes=%u\n",
+              lid, gHingeOn ? 1u : 0u, gProxOn ? 1u : 0u, gQuiesce.pauses, gQuiesce.resumes);
+      } else if (qa == zizhan_slpi_sensors::QuiesceAction::Resume) {
+        snsAccelEnable(true);
+        snsAlsEnable(true);
+        if (gGyroWant) { snsGyroEnable(true); }
+        if (gMagWant) { snsMagEnable(true); }
+        if (gBaroWant) { snsBaroEnable(true); }
+        if (gHingeWant) { snsHingeEnable(true); }
+        if (gProxWant) { snsProxEnable(true); }
+        IOLog("ZIZHAN_SLPI: wake resume streams=on pauses=%u resumes=%u\n", gQuiesce.pauses, gQuiesce.resumes);
+      } else if (gQuiesce.quiesced) {
+        if (gHingeWant && !gHingeOn) {
+          snsHingeEnable(true);
+        }
+        if (gProxWant) {
+          if (zizhan_slpi_sensors::proximity_keep_on_in_standby(lid) && !gProxOn) {
+            snsProxEnable(true);
+          } else if (!zizhan_slpi_sensors::proximity_keep_on_in_standby(lid) && gProxOn) {
+            snsProxEnable(false);
+          }
+        }
+      }
+    }
     if (gSlpiMode >= 2 && !cycle && gSnsNode != 0xffffffffu && gIpcrtr && gIpcrtr->up && now >= gSnsNextMs) {
-      switch (gSnsStage) {   // one step per slot: registry, accel, ambient_light lookups, then the accelerometer stream
-      case 0: gSnsNextMs = now + 3000; break;
-      case 1: snsSuid("registry"); gSnsNextMs = now + 1500; break;
-      case 2: snsSuid("accel"); gSnsNextMs = now + 1500; break;
-      case 3: snsSuid("ambient_light"); gSnsNextMs = now + 2000; break;
-      case 4:
-        if (gAccelFound) { snsAccelEnable(true); gSnsNextMs = now + 10000; break; }
-        IOLog("ZIZHAN_SLPI: sns no accel sensor yet (t=%llus), retry in 15 s\n", (now - t0) / 1000);
-        gSnsStage = 0xffffffffu; gSnsNextMs = now + 15000;   // ++ below wraps it to 0
+      switch (gSnsStage) {   // one lookup per 120 ms slot: full SUID inventory, then enable active streams
+      case 0: gSnsNextMs = now + 150; break;
+      case 1: snsSuid("registry"); gSnsNextMs = now + 120; break;
+      case 2: snsSuid("accel"); gSnsNextMs = now + 120; break;
+      case 3: snsSuid("ambient_light"); gSnsNextMs = now + 120; break;
+      case 4: snsSuid("gyro"); gSnsNextMs = now + 120; break;
+      case 5: snsSuid("mag"); gSnsNextMs = now + 120; break;
+      case 6: snsSuid("pressure"); gSnsNextMs = now + 120; break;
+      case 7: snsSuid("proximity"); gSnsNextMs = now + 120; break;
+      case 8: snsSuid("hinge_angle"); gSnsNextMs = now + 200; break;
+      case 9:
+        if (gAccelFound) {
+          if (gHingeWant && gSlpiMode == 4) { snsHingeEnable(true); }
+          if (!gQuiesce.quiesced) {
+            snsAccelEnable(true);
+            snsAlsEnable(true);
+            if (gGyroWant) { snsGyroEnable(true); }
+            if (gMagWant) { snsMagEnable(true); }
+            if (gBaroWant) { snsBaroEnable(true); }
+            if (gProxWant && gSlpiMode == 4) { snsProxEnable(true); }
+          } else if (gProxWant && gSlpiMode == 4 &&
+                     zizhan_slpi_sensors::proximity_keep_on_in_standby(zizhan_outer_lid_closed ? zizhan_outer_lid_closed() : 0)) {
+            snsProxEnable(true);
+          }
+          gSnsNextMs = now + 10000;
+          break;
+        }
+        IOLog("ZIZHAN_SLPI: sns no accel sensor yet (t=%llus), retry in 2 s\n", (now - t0) / 1000);
+        gSnsStage = 0xffffffffu; gSnsNextMs = now + 2000;   // ++ below wraps it to 0
         break;
       default:
         gSnsNextMs = now + (gSlpiMode == 4 && now - t0 > 120000 ? 60000 : 10000);
-        if (gAccelOn) IOLog("ZIZHAN_SLPI: accel samples=%u last x=%d y=%d z=%d mm/s2\n", gAccelSamples, milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2]));
+        if (gAccelOn || gAlsOn || gGyroOn || gMagOn || gBaroOn || gHingeOn || gProxOn || gQuiesce.quiesced) {
+          IOLog("ZIZHAN_SLPI: sensors accel=%u(%d,%d,%d) als=%u(lux_milli=%d) gyro=%u mag=%u baro=%u(pa=%u) hinge=%u(deg_milli=%d) prox=%u(near=%d) quiesced=%u(%u/%u)\n",
+                gAccelSamples, milli(gAccel[0]), milli(gAccel[1]), milli(gAccel[2]),
+                gAlsSamples, milli(gAls[0]), gGyroSamples, gMagSamples,
+                gBaroSamples, zizhan_slpi_sensors::pressure_to_pa(milli(gBaro[0])),
+                gHingeSamples, milli(gHinge[0]),
+                gProxSamples, __atomic_load_n(&gProxNearState, __ATOMIC_ACQUIRE),
+                gQuiesce.quiesced ? 1u : 0u, gQuiesce.pauses, gQuiesce.resumes);
+        }
       }
-      if (gSnsStage < 5 || gSnsStage == 0xffffffffu) ++gSnsStage;
+      if (gSnsStage < 10 || gSnsStage == 0xffffffffu) ++gSnsStage;
     }
-    if (now - t0 > 10000 && !(lastBits != 0xffffffffu && (lastBits & kReady))) break;
-    IOSleep(10);
+    if (now - t0 > 10000 && !(lastBits != 0xffffffffu && (lastBits & kReady))) {
+      break;
+    }
+    const bool fastBringup = !cycle && !gAccelOn && !gQuiesce.quiesced && (now - t0 < 15000);
+    IOSleep(zizhan_slpi_sensors::poll_sleep_ms(gQuiesce, fastBringup));
   }
   stage = 27;
 out:
   IOLog("ZIZHAN_SLPI: stage=%d rc=%d bits=%x pas_started=%u\n", stage, rc, lastBits == 0xffffffffu ? 0u : lastBits, pasStarted ? 1u : 0u);
-  if (gAccelOn) {   // stop the stream before the DSP goes away
+  if (gAccelOn || gAlsOn || gGyroOn || gMagOn || gBaroOn || gHingeOn || gProxOn) {   // stop active streams before the DSP goes away
     snsAccelEnable(false);
+    snsAlsEnable(false);
+    snsGyroEnable(false);
+    snsMagEnable(false);
+    snsBaroEnable(false);
+    snsHingeEnable(false);
+    snsProxEnable(false);
     for (uint64_t s0 = nowMs(); nowMs() - s0 < 500;) { glinkService(); IOSleep(10); }
   }
   if (pasStarted) {
@@ -1140,18 +1519,74 @@ out:
 }
 }  // namespace
 
+extern "C" int zizhan_slpi_proximity_near(void) {
+  const int32_t sim = __atomic_load_n(&gProxSimState, __ATOMIC_ACQUIRE);
+  if (sim >= 0) {
+    return sim != 0 ? 1 : 0;
+  }
+  return __atomic_load_n(&gProxNearState, __ATOMIC_ACQUIRE) != 0 ? 1 : 0;
+}
+
+extern "C" int32_t zizhan_slpi_ambient_lux_milli(void) {
+  return __atomic_load_n(&gAlsLuxMilliExport, __ATOMIC_ACQUIRE);
+}
+
+extern "C" void zizhan_slpi_set_prox_sim(int near) {
+  __atomic_store_n(&gProxSimState, near, __ATOMIC_RELEASE);
+}
+
+extern "C" int zizhan_slpi_hinge_closed(void) {
+  const int32_t sim = __atomic_load_n(&gHingeSimState, __ATOMIC_ACQUIRE);
+  if (sim >= 0) {
+    return sim != 0 ? 1 : 0;
+  }
+  return __atomic_load_n(&gHingeClosedState, __ATOMIC_ACQUIRE);
+}
+
+extern "C" int32_t zizhan_slpi_hinge_deg_milli(void) {
+  return __atomic_load_n(&gHingeDegMilliExport, __ATOMIC_ACQUIRE);
+}
+
+extern "C" void zizhan_slpi_set_hinge_sim(int closed) {
+  __atomic_store_n(&gHingeSimState, closed, __ATOMIC_RELEASE);
+}
+
 extern "C" void zizhan_slpi_start(void) {
-  uint32_t mode = 0, adsp = 0, modem = 0;
+  uint32_t mode = 0, adsp = 0, modem = 0, all = 0, proxSim = 0xffffffffu, imuRot = 0xffffffffu, hingeSim = 0;
+  if (PE_parse_boot_argn("zizhan_prox_sim", &proxSim, sizeof proxSim) && proxSim <= 1u) {
+    __atomic_store_n(&gProxSimState, int32_t(proxSim), __ATOMIC_RELEASE);
+  }
+  if (PE_parse_boot_argn("zizhan_imu_rot", &imuRot, sizeof imuRot) && imuRot <= 3u) {
+    gImuRot = imuRot;
+  }
+  if (PE_parse_boot_argn("zizhan_hinge_sim", &hingeSim, sizeof hingeSim) && hingeSim >= 20u && hingeSim <= 600u) {
+    gHingeSimStartS = hingeSim;
+  }
   if (!PE_parse_boot_argn("zizhan_slpi", &mode, sizeof mode) || mode < 1 || mode > 4) return;
   gSlpiMode = mode;
+  (void)PE_parse_boot_argn("zizhan_als_autobright", &gAlsAutoBright, sizeof gAlsAutoBright);
+  if (PE_parse_boot_argn("zizhan_sensors_all", &all, sizeof all) && all == 1u) {
+    gGyroWant = 1;
+    gMagWant = 1;
+    gBaroWant = 1;
+    gHingeWant = 1;
+    gProxWant = 1;
+  }
+  (void)PE_parse_boot_argn("zizhan_gyro", &gGyroWant, sizeof gGyroWant);
+  (void)PE_parse_boot_argn("zizhan_mag", &gMagWant, sizeof gMagWant);
+  (void)PE_parse_boot_argn("zizhan_baro", &gBaroWant, sizeof gBaroWant);
+  (void)PE_parse_boot_argn("zizhan_hinge", &gHingeWant, sizeof gHingeWant);
+  (void)PE_parse_boot_argn("zizhan_prox", &gProxWant, sizeof gProxWant);
+  (void)PE_parse_boot_argn("zizhan_slpi_quiesce", &gSlpiQuiesce, sizeof gSlpiQuiesce);
   // pong_adsp=2 boots the audio DSP: its worker then owns the mailbox and the mutex and this one asks it. pong_adsp=1 only
   // surveys and opens nothing, which leaves no owner to ask and no safe second opener.
   (void)PE_parse_boot_argn("pong_adsp", &adsp, sizeof adsp);
   if (adsp == 1) { IOLog("ZIZHAN_SLPI: SKIP pong_adsp=1 (survey) leaves the AOSS mailbox without an owner\n"); return; }
   gShared = adsp >= 2;
-  if (PE_parse_boot_argn("zizhan_modem", &modem, sizeof modem) && modem == 2) { IOLog("ZIZHAN_SLPI: SKIP zizhan_modem=2 owns the same resources\n"); return; }
+  (void)modem;   /* MPSS now uses 0x9ee20000 meta + 0x9f000000 rmtfs and shares PongAdsp's AOSS/SMEM lock */
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &t) != KERN_SUCCESS) { IOLog("ZIZHAN_SLPI: FAIL worker\n"); return; }
   thread_deallocate(t);
-  IOLog("ZIZHAN_SLPI: RUNNING pas=%u region=%llx+%llx\n", kPas, kMpssBase, kMpssSize);
+  IOLog("ZIZHAN_SLPI: RUNNING pas=%u region=%llx+%llx imu_rot=%u hinge_sim=%u\n",
+        kPas, kMpssBase, kMpssSize, gImuRot, gHingeSimStartS);
 }

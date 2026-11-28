@@ -13,6 +13,7 @@
 #include "GeniI2c.h"
 #include "ZizhanPm8008.h"
 #include "ZizhanCci.h"
+#include "ZizhanCamCapture.h"
 
 namespace zizhan_cam_probe {
 struct Win {
@@ -207,7 +208,9 @@ static void attended(const Sensor &sn) {
 static void worker(void *arg, wait_result_t) {
   const uint32_t mode = uint32_t(uintptr_t(arg));
   IOSleep(40000);   // after the desktop and Wi-Fi
-  if (mode == 1) inventory(); else attended(kSensors[mode - 2]);
+  if (mode == 1) inventory();
+  else if (mode == 6 || mode == 7) zizhan_cam_capture::run(mode);
+  else attended(kSensors[mode - 2]);
   thread_terminate(current_thread());
   thread_block(THREAD_CONTINUE_NULL);
 }
@@ -216,11 +219,11 @@ static void start() {
   uint32_t mode = 0;
   if (!PE_parse_boot_argn("zizhan_cam_probe", &mode, sizeof mode) || !mode) return;
   uint32_t present = 0;
-  if (mode >= 2 && (!PE_parse_boot_argn("zizhan_user_present", &present, sizeof present) || present != 1)) {
-    IOLog("ZIZHAN_CAM_PROBE: SKIP mode=2 needs zizhan_user_present=1\n");
+  if (mode >= 2 && mode <= 5 && (!PE_parse_boot_argn("zizhan_user_present", &present, sizeof present) || present != 1)) {
+    IOLog("ZIZHAN_CAM_PROBE: SKIP mode=%u needs zizhan_user_present=1\n", mode);
     return;
   }
-  if (mode > 5) { IOLog("ZIZHAN_CAM_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
+  if (mode > 7) { IOLog("ZIZHAN_CAM_PROBE: SKIP unsupported-mode=%u\n", mode); return; }
   thread_t t = THREAD_NULL;
   if (kernel_thread_start(worker, reinterpret_cast<void *>(uintptr_t(mode)), &t) == KERN_SUCCESS) thread_deallocate(t);
   IOLog("ZIZHAN_CAM_PROBE: RUNNING mode=%u\n", mode);

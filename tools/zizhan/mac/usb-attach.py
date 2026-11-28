@@ -13,12 +13,16 @@ import time
 
 
 class Attach:
-    def __init__(self, root, timeout=100, settle=3, clock=time.monotonic, pause=time.sleep):
+    def __init__(self, root, timeout=150, settle=3, max_kicks=2, kick_interval=35,
+                 initial_wait=25, clock=time.monotonic, pause=time.sleep):
         self.root = Path(root)
         self.clock, self.pause = clock, pause
         self.started = clock()
         self.deadline = self.started + timeout
         self.settle = settle
+        self.max_kicks = max_kicks
+        self.kick_interval = kick_interval
+        self.initial_wait = initial_wait
         self.serial = os.environ.get("ANDROID_SERIAL")
         self.events = []
         self.previous = None
@@ -143,35 +147,51 @@ class Attach:
             return False
         self.previous = None
         self.event("reboot_dispatched")
-        if self.wait_ready(25):
+        if self.wait_ready(self.initial_wait):
             return True
         if self.reason in ("AMBIGUOUS_FASTBOOT", "WRONG_PRODUCT"):
             return False
         if not port_recorded:
             self.reason = "NO_RECORDED_RECOVERY_PORT"
             return False
-        self.event("recovery_begin")
-        result = self.command(["bash", str(self.root / "usbkick.sh"), "kick"], 15)
-        if result is None or result.returncode:
-            self.reason = "PORT_RECOVERY_FAILED"
-            return False
-        self.previous = None
-        return self.wait_ready(max(0, self.deadline - self.clock()))
+        for attempt in range(1, self.max_kicks + 1):
+            if self.clock() >= self.deadline:
+                break
+            self.event("recovery_begin", attempt=attempt)
+            result = self.command(["bash", str(self.root / "usbkick.sh"), "kick"], 15)
+            if result is None or result.returncode:
+                self.reason = "PORT_RECOVERY_FAILED"
+                return False
+            self.previous = None
+            window = (max(0, self.deadline - self.clock())
+                      if attempt == self.max_kicks
+                      else min(self.kick_interval, max(0, self.deadline - self.clock())))
+            if self.wait_ready(window):
+                return True
+            if self.reason in ("AMBIGUOUS_FASTBOOT", "WRONG_PRODUCT"):
+                return False
+        return False
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--enter", action="store_true", help="reboot Android; allow one recorded-port cycle")
-    parser.add_argument("--timeout", type=float, default=100)
+    parser.add_argument("--enter", action="store_true", help="reboot Android; allow bounded recorded-port cycles")
+    parser.add_argument("--timeout", type=float, default=150)
     parser.add_argument("--settle", type=float, default=3)
+    parser.add_argument("--max-kicks", type=int, default=2)
+    parser.add_argument("--kick-interval", type=float, default=35)
+    parser.add_argument("--initial-wait", type=float, default=25)
     args = parser.parse_args()
-    if not 10 <= args.timeout <= 180 or not 1 <= args.settle <= 10:
-        parser.error("timeout must be 10..180 seconds; settle must be 1..10 seconds")
+    if (not 10 <= args.timeout <= 240 or not 1 <= args.settle <= 10
+            or not 1 <= args.max_kicks <= 3 or not 1 <= args.kick_interval <= 90
+            or not 1 <= args.initial_wait <= 60):
+        parser.error("timeout 10..240, settle 1..10, max-kicks 1..3, kick-interval 1..90, initial-wait 1..60")
     work = Path(os.environ.get("ZIZHAN_SRC", Path.home() / "zizhan"))
     logs = work / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix="usb-attach-", suffix=".json", dir=logs)
-    attach = Attach(Path(__file__).resolve().parent, args.timeout, args.settle)
+    attach = Attach(Path(__file__).resolve().parent, args.timeout, args.settle,
+                    args.max_kicks, args.kick_interval, args.initial_wait)
     passed = False
     try:
         passed = attach.enter() if args.enter else attach.wait_ready(args.timeout)

@@ -168,12 +168,15 @@ typedef struct {
  unsigned source_verified,failed_chip,failed_segment,failed_offset;
  uint32_t after_state[2][3];uint64_t elapsed_us;
  unsigned native_core_init,core_init_attempted,core_init_acknowledged,core_init_reads[2];uint32_t core_init_before[2][3],core_init_after[2][3];
- unsigned header_only,mismatches,packed_count,unpacked_count,burst_reads;
+ unsigned header_only,mismatches,packed_count,unpacked_count,burst_reads,fast_burst,burst_writes;
  uint32_t header_expected[18],header_observed[18],header_unpacked[24];
  ZizhanAmpIdentity transport;
 } ZizhanAmpRam;
 /* Original probe full CCM=0 before firmware;separate from trim evidence. */
 int zizhan_cs35l41_ram_native_init(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
+ const ZizhanAmpSnapshot *,const ZizhanAmpTrim *,const uint8_t *,unsigned,ZizhanAmpHash,ZizhanAmpRam *);
+/* Fast-burst native init (M1-FASTBOOT): 48-byte XM/YM and 40-byte PM FIFO bursts for both write and full readback. */
+int zizhan_cs35l41_ram_fast(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpSnapshot *,const ZizhanAmpTrim *,const uint8_t *,unsigned,ZizhanAmpHash,ZizhanAmpRam *);
 int zizhan_cs35l41_ram(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpSnapshot *,const ZizhanAmpTrim *,const uint8_t *,unsigned,ZizhanAmpHash,ZizhanAmpRam *);
@@ -190,7 +193,7 @@ int zizhan_cs35l41_ram_burst(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
 typedef struct {
  unsigned status,reason,completed,identity_words[2],attempted_writes,acknowledged_writes;
  unsigned readbacks[2],segments_verified[2],source_verified,state_count[2];
- unsigned failed_chip,failed_segment,failed_offset;
+ unsigned failed_chip,failed_segment,failed_offset,fast_burst,burst_writes,burst_reads;
  uint32_t identity[2][22],after_state[2][3];uint64_t elapsed_us;
  ZizhanAmpIdentity transport;
 } ZizhanAmpCoefficients;
@@ -198,6 +201,8 @@ typedef struct {
  * algorithm headers BEFORE any coefficient write. Exact original T/B file
  * hashes,three fixed RAM spans,full readback,10s limit;no DSP/control writes. */
 int zizhan_cs35l41_coefficients(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,const ZizhanAmpRam *,
+ const uint8_t *,unsigned,const uint8_t *,unsigned,ZizhanAmpHash,ZizhanAmpCoefficients *);
+int zizhan_cs35l41_coefficients_fast(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,const ZizhanAmpRam *,
  const uint8_t *,unsigned,const uint8_t *,unsigned,ZizhanAmpHash,ZizhanAmpCoefficients *);
 typedef struct {
  unsigned status,reason,completed,attempted,acknowledged,readbacks[2],failed_chip,failed_index;
@@ -230,6 +235,7 @@ typedef struct {
  unsigned pulse_profile;ZizhanPulseReceipt pulse[2];
  /* profile 19 playback window (docs/plan/2026-11-18-m1-playback-amp.md) */
  unsigned play_profile,play_ms,play_ready[2],play_torn[2],play_streamed,play_polls,play_reason,play_stage,play_chip;
+ unsigned daemon_profile,daemon_sessions,daemon_arms,daemon_disarms;
  /* Read-only register snapshot at poll 5 of the play window (zizhan_play_snap_regs order). */
  uint32_t play_snap[2][16];unsigned play_snap_reads[2];
  /* zizhan_audio_echo: top chip ASP TX1 source/enables before, after setup, after restore; 4810. */
@@ -298,6 +304,8 @@ extern uint32_t zizhan_amp_dump_values[2][228]; /* 1: dry play window echoes ASP
 extern unsigned zizhan_amp_play_ms; /* 0 unless the kernel sets zizhan_audio_play_ms=<100..2000> */
 int zizhan_cs35l41_native_play_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);
+int zizhan_cs35l41_native_daemon_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
+ const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,ZizhanAudioAmpDaemonFn,void *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_pulse_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,const ZizhanAudioTransfer *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_iv_transfer(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
@@ -314,6 +322,8 @@ int zizhan_cs35l41_native_rates_run(unsigned,unsigned,GeniI2c *,const ZizhanAmpC
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,ZizhanAmpRun *);
 int zizhan_cs35l41_native_protection_run(unsigned,unsigned,GeniI2c *,const ZizhanAmpClock *,
  const ZizhanAmpCoefficients *,const ZizhanAmpSpeakerCalibration *,ZizhanAmpRun *);
+void zizhan_audio_set_receiver_mode(int on);
+int zizhan_audio_get_receiver_mode(void);
 #ifdef __cplusplus
 }
 #endif

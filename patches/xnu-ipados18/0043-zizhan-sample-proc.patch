@@ -1,0 +1,206 @@
+zizhan UX-08: allow zizhan_sample_proc=<name> and zizhan_sample_oncpu=1 for multi-thread backboardd zoom profiling (diagnostic, off by default).
+--- a/bsd/dev/pong_fts.c
++++ b/bsd/dev/pong_fts.c
+@@ -1065,23 +1065,32 @@
+ /* zizhan UX-06 diagnostic: osfmk/arm64/pong_ui_exception.c */
+ extern void pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag);
+ 
++static char sample_proc_name[32];
++static int sample_proc_init;
++
+ static int
+ synth_springboard_pid(proc_t p, void *pid)
+ {
+ 	char name[32] = {};
+ 
+ 	proc_name(proc_pid(p), name, sizeof(name));
+-	if (strcmp(name, "SpringBoard") == 0) {
++	if (strcmp(name, sample_proc_name) == 0) {
+ 		*(int *)pid = proc_pid(p);
+ 	}
+ 	return PROC_RETURNED;
+ }
+ 
+-/* boot-arg zizhan_sample=<ms>: sample SpringBoard's main thread for <ms> from a synthetic touch-down (2 ms steps). */
++/* boot-arg zizhan_sample=<ms> [zizhan_sample_proc=<name>]: sample target task for <ms> from a synthetic touch-down. */
+ static void
+ synth_sample(uint32_t sample_ms, uint32_t hold_ms, unsigned flags, unsigned tag)
+ {
+ 	int pid = -1;
++	if (!sample_proc_init) {
++		if (!PE_parse_boot_argn("zizhan_sample_proc", sample_proc_name, sizeof(sample_proc_name)) || !sample_proc_name[0]) {
++			strlcpy(sample_proc_name, "SpringBoard", sizeof(sample_proc_name));
++		}
++		sample_proc_init = 1;
++	}
+ 	proc_iterate(PROC_ALLPROCLIST, synth_springboard_pid, &pid, NULL, NULL);
+ 	proc_t p = pid > 0 ? proc_find(pid) : PROC_NULL;
+ 	if (p == PROC_NULL) {
+--- a/osfmk/arm64/pong_ui_exception.c
++++ b/osfmk/arm64/pong_ui_exception.c
+@@ -191,6 +191,38 @@
+ 	}
+ }
+ 
++static thread_t
++pong_sample_pick_thread(task_t task, unsigned n)
++{
++	thread_t chosen = THREAD_NULL, runnable = THREAD_NULL, t = THREAD_NULL;
++	unsigned active_n = 0;
++
++	task_lock(task);
++	queue_iterate(&task->threads, t, thread_t, task_threads) {
++		const processor_t last = t->last_processor;
++		if (!(t->state & TH_WAIT) && last != PROCESSOR_NULL && last->active_thread == t) {
++			active_n++;
++			if (chosen == THREAD_NULL || (n % active_n) == 0) {
++				chosen = t;
++			}
++		} else if (runnable == THREAD_NULL && !(t->state & TH_WAIT)) {
++			runnable = t;
++		}
++	}
++	if (chosen == THREAD_NULL) {
++		if (runnable != THREAD_NULL) {
++			chosen = runnable;
++		} else if (!queue_empty(&task->threads)) {
++			chosen = (thread_t)queue_first(&task->threads);
++		}
++	}
++	if (chosen != THREAD_NULL) {
++		thread_reference(chosen);
++	}
++	task_unlock(task);
++	return chosen;
++}
++
+ void pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag);
+ void
+ pong_sample_main_thread(task_t task, unsigned duration_ms, unsigned step_us, unsigned flags, unsigned tag)
+@@ -217,12 +249,14 @@
+ 	static uint8_t ndeep[kSamples];
+ 	static char mode[kSamples + 1];
+ 	static struct pong_sample_req req;
+-	static unsigned ipi_mode, step_override, ipi_lost;
++	static unsigned ipi_mode, oncpu_mode, step_override, ipi_lost;
+ 	if (stacks_mode < 0) {
+ 		unsigned v = 0;
+ 		stacks_mode = PE_parse_boot_argn("zizhan_sample_stacks", &v, sizeof(v)) && v ? 1 : 0;
+ 		v = 0;
+ 		ipi_mode = PE_parse_boot_argn("zizhan_sample_ipi", &v, sizeof(v)) && v ? (v == 2 ? 2 : 1) : 0;
++		v = 0;
++		oncpu_mode = PE_parse_boot_argn("zizhan_sample_oncpu", &v, sizeof(v)) && v ? 1 : 0;
+ 		PE_parse_boot_argn("zizhan_sample_us", &step_override, sizeof(step_override));
+ 		if (ipi_mode) {
+ 			stacks_mode = 1;
+@@ -264,10 +298,14 @@
+ 	nanoseconds_to_absolutetime((uint64_t)step_us * 1000ULL, &step_abs);
+ 	const unsigned total = duration_ms * 1000U / step_us;
+ 	for (unsigned n = 0; n < total && nline < kSamples; n++) {
+-		const int state = thread->state;
++		thread_t cur = oncpu_mode ? pong_sample_pick_thread(task, n) : thread;
++		if (cur == THREAD_NULL) {
++			break;
++		}
++		const int state = cur->state;
+ 		const uint8_t wait = (state & TH_WAIT) ? 1 : 0;
+-		const event64_t event = wait ? thread->wait_event : 0;
+-		const arm_saved_state_t *ss = get_user_regs(thread);
++		const event64_t event = wait ? cur->wait_event : 0;
++		const arm_saved_state_t *ss = get_user_regs(cur);
+ 		uint64_t pc = 0, lr = 0, fp = 0, sp = 0, ra[kDepth] = { 0 };
+ 		int32_t sys = 0;
+ 		const bool want_stack = wait || stacks_mode;
+@@ -285,14 +323,14 @@
+ 		memset(far, 0, sizeof(far));
+ 		if (!wait) {
+ 			/* running or runnable: which CPU it last ran on (an efficiency core does this work ~3x slower) */
+-			const processor_t last = thread->last_processor;
++			const processor_t last = cur->last_processor;
+ 			sys = last != PROCESSOR_NULL ? last->cpu_id : -1;
+ 			/* +100: runnable but not on that CPU (queued behind other threads) */
+-			if (last == PROCESSOR_NULL || last->active_thread != thread) {
++			if (last == PROCESSOR_NULL || last->active_thread != cur) {
+ 				sys += 100;
+ 			} else if (ipi_mode && last->cpu_id != cpu_number()) {
+ 				how = 'x';
+-				req.target = thread;
++				req.target = cur;
+ 				req.nkbt = 0;
+ 				os_atomic_store(&req.done, 0, release);
+ 				if (cpu_xcall(last->cpu_id, pong_sample_xcall, &req) == KERN_SUCCESS) {
+@@ -314,9 +352,9 @@
+ 						/* zizhan_sample_ipi=2: the walk above races the running thread (only 42 % of the user samples reached
+ 						 * start in ux-k2). Stop the thread for the walk: it halts at the user boundary within an interrupt, its
+ 						 * saved state is then exact and the frames cannot change. Costs the thread a stop and a start a sample. */
+-						const bool held = ipi_mode == 2 && thread_suspend(thread) == KERN_SUCCESS;
++						const bool held = ipi_mode == 2 && thread_suspend(cur) == KERN_SUCCESS;
+ 						if (held) {
+-							const arm_saved_state_t *stopped = get_user_regs(thread);
++							const arm_saved_state_t *stopped = get_user_regs(cur);
+ 							if (stopped != NULL && is_saved_state64(stopped)) {
+ 								pc = get_saved_state_pc(stopped) & mask;
+ 								lr = get_saved_state_lr(stopped) & mask;
+@@ -328,7 +366,7 @@
+ 						pong_sample_walk(map, walk_fp, walk_sp, far, kPongSampleDeep);
+ 						memcpy(ra, far, sizeof(ra));
+ 						if (held) {
+-							(void)thread_resume(thread);
++							(void)thread_resume(cur);
+ 						}
+ 					} else if (done == 2) {
+ 						/* pc and ra stay the user state of the trap or fault that entered the kernel */
+@@ -382,13 +420,16 @@
+ 			overflow++;
+ 			line[nline++] = '?';
+ 		}
++		if (oncpu_mode) {
++			thread_deallocate(cur);
++		}
+ 		deadline += step_abs;
+ 		assert_wait_deadline((event_t)&sigs, THREAD_UNINT, deadline);
+ 		thread_block(THREAD_CONTINUE_NULL);
+ 	}
+ 	thread_deallocate(thread);
+-	vm_map_deallocate(map);
+ 	if (!(flags & 2)) {
++		vm_map_deallocate(map);
+ 		return;
+ 	}
+ 	vm_shared_region_t region = vm_shared_region_get(task);
+@@ -402,12 +443,14 @@
+ 		printf("ZIZHAN_SAMPLE %u line %u: %.100s\n", tag, at, line + at);
+ 	}
+ 	if (ipi_mode) {
+-		/* every tap window (even tags): the per-sample kind, then the stacks of the samples taken on the CPU */
++		/* every tap window (even tags, plus odd exit_zoom tags when oncpu_mode is set): per-sample kind and stacks */
+ 		printf("ZIZHAN_SAMPLE %u ipi: kernel_slide=0x%llx lost=%u\n", tag, (uint64_t)vm_kernel_slide, ipi_lost);
+ 		for (unsigned at = 0; at < nline; at += 100) {
+ 			printf("ZIZHAN_SAMPLE %u mode %u: %.100s\n", tag, at, mode + at);
+ 		}
+-		for (unsigned n = 0; n < nline && !(tag & 1) && tag <= 60; n++) {
++		const bool emit_st = oncpu_mode ? (tag <= 25) : (!(tag & 1) && tag <= 60);
++		const bool emit_dst = oncpu_mode ? (tag >= 2 && tag <= 7) : (tag >= 2 && tag <= 8 && !(tag & 1));
++		for (unsigned n = 0; emit_st && n < nline; n++) {
+ 			const uint64_t *k = stacks[n], *ks = kstacks[n];
+ 			if (mode[n] != 'U' && mode[n] != 'K') {
+ 				continue;
+@@ -418,8 +461,8 @@
+ 				printf("ZIZHAN_SAMPLE %u kst %u: 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx\n", tag, n,
+ 				    ks[0], ks[1], ks[2], ks[3], ks[4], ks[5], ks[6], ks[7]);
+ 			}
+-			/* the deep frames of taps 1..4 only (tags 2..8): about 1 KiB a sample in the console ring */
+-			for (unsigned d = 0; tag >= 2 && tag <= 8 && d < ndeep[n]; d += 8) {
++			/* the deep frames of early windows only: about 1 KiB a sample in the console ring */
++			for (unsigned d = 0; emit_dst && d < ndeep[n]; d += 8) {
+ 				const uint64_t *f = &deep[n][d];
+ 				const unsigned left = ndeep[n] - d;
+ 				printf("ZIZHAN_SAMPLE %u dst %u %u: %llx %llx %llx %llx %llx %llx %llx %llx\n", tag, n, d,
+@@ -440,6 +483,7 @@
+ 		    tag, i < 10 ? '0' + i : 'a' + (i - 10), s->count, s->first, s->wait ? "wait" : "run(sys=cpu)", s->sys, s->event, s->pc, s->lr,
+ 		    s->ra[0], s->ra[1], s->ra[2], s->ra[3], s->ra[4], s->ra[5], s->ra[6], s->ra[7]);
+ 	}
++	vm_map_deallocate(map);
+ }
+ #else
+ #include <stdint.h>

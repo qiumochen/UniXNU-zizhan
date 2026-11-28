@@ -31,6 +31,11 @@ int main() {
     assert(se.read(GENI_CLK_CFG)==0x71&&se.read(GENI_SCL_COUNTERS)==((10u<<20)|(11u<<10)|26));
     assert(se.read(GENI_SE_IRQ_EN)==0x800); // preserve unrelated bits, mask all four external routes
     assert(se.writes.size()==13);
+    // 400 kHz Fast-mode opt-in: exact 0x21 / (5<<20)|(12<<10)|24, requires depth-16 TX/RX FIFOs.
+    init(se);assert(prepare(se,r,true)==Ok&&r.config==0x3000021);
+    assert(se.read(GENI_CLK_CFG)==0x21&&se.read(GENI_SCL_COUNTERS)==((5u<<20)|(12u<<10)|24));
+    init(se);se.words[0xe24]=(32u<<24)|(8u<<16);
+    assert(prepare(se,r,true)==Fifo&&se.writes.empty());
     for(unsigned level=0;level<8;++level) {
         root=Page{};r=Receipt{};root.words[0x28]=1;
         for(unsigned i=0;i<8;++i)root.words[0x30+4*i]=0x100;

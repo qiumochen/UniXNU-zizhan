@@ -24,6 +24,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include "zizhan-battery-ui18.h"
 
 static bool icons_installed,radios_installed;
 static IMP transcript_original;
@@ -44,14 +45,41 @@ static void record(const char *text)
     (void)write(fd,text,strnlen(text,16384));(void)write(fd,"\n",1);
     (void)fsync(fd);close(fd);
 }
+static char abi_kind(const char *t)
+{
+    if(!t)return 0;
+    while(*t && strchr("rnNoORV",*t))t++;
+    return *t;
+}
 static bool abi(Method m,const char *ret,unsigned argc,const char *args)
 {
     if(!m || method_getNumberOfArguments(m)!=argc+2)return false;
-    char *s=method_copyReturnType(m);bool good=s && s[0] && strchr(ret,s[0]);free(s);
+    char *s=method_copyReturnType(m);char k=abi_kind(s);bool good=k && strchr(ret,k);free(s);
     for(unsigned i=0;good && i<argc;i++) {
-        s=method_copyArgumentType(m,i+2);good=s && s[0]==args[i];free(s);
+        s=method_copyArgumentType(m,i+2);good=abi_kind(s)==args[i];free(s);
     }
     return good;
+}
+static bool settings_boot_option(const char *key)
+{
+    static char cached[2048];
+    static dispatch_once_t once;
+    static bool ok;
+    dispatch_once(&once, ^{
+        size_t size=sizeof(cached)-1;
+        if(sysctlbyname("kern.zizhan_bootargs",cached,&size,NULL,0)==0 ||
+           (size=sizeof(cached)-1,sysctlbyname("kern.bootargs",cached,&size,NULL,0)==0)) {
+            cached[size<sizeof(cached)?size:sizeof(cached)-1]='\0';
+            ok=true;
+        }
+    });
+    if(!ok)return false;
+    size_t len=strlen(key);
+    for(const char *p=cached;(p=strstr(p,key));p+=len) {
+        if((p==cached || p[-1]==' ' || p[-1]=='\t') &&
+           (p[len]=='\0' || p[len]==' ' || p[len]=='\t'))return true;
+    }
+    return false;
 }
 static void hook(const char *cls,const char *name,const char *ret,unsigned argc,const char *args,IMP imp)
 {
@@ -277,9 +305,359 @@ static CGImageRef scale_icon(CGImageRef input,double scale)
     }
     return result;
 }
+/* Stage 5: Expose genuine Qualcomm ADSP battmgr battery health telemetry (NominalChargeCapacity,
+ * DesignCapacity, CycleCount, StateOfHealth, Voltage, Temperature) read live via IOPS in
+ * Settings > Battery without fabricating Apple Battery Service Flags/State, UPOCount, or WRa.
+ * Disable with boot-arg zizhan_batt_ui=0. */
+static IMP bui_specifiers_original,bhui_specifiers_original,bui_insert_contig_original;
+static bool bui_hw_installed,bhui_hw_installed;
+static bool dict_int_value(CFDictionaryRef dict,CFStringRef key,int *out)
+{
+    if(!dict || !key || !out)return false;
+    CFTypeRef val=CFDictionaryGetValue(dict,key);
+    if(!val || CFGetTypeID(val)!=CFNumberGetTypeID())return false;
+    int tmp=0;
+    if(!CFNumberGetValue((CFNumberRef)val,kCFNumberIntType,&tmp))return false;
+    *out=tmp;
+    return true;
+}
+static void parse_battery_dict(CFDictionaryRef src,ZizhanBatteryHwTelemetry *out)
+{
+    if(!src || !out || CFGetTypeID(src)!=CFDictionaryGetTypeID())return;
+    (void)dict_int_value(src,CFSTR("NominalChargeCapacity"),&out->nominal_mah);
+    (void)dict_int_value(src,CFSTR("DesignCapacity"),&out->design_mah);
+    (void)dict_int_value(src,CFSTR("MaximumCapacityPercent"),&out->max_percent);
+    (void)dict_int_value(src,CFSTR("CycleCount"),&out->cycle_count);
+    if(!dict_int_value(src,CFSTR("Voltage"),&out->voltage_mv))
+        (void)dict_int_value(src,CFSTR("AppleRawBatteryVoltage"),&out->voltage_mv);
+    if(dict_int_value(src,CFSTR("InstantAmperage"),&out->current_ma))out->has_current=1;
+    if(dict_int_value(src,CFSTR("Temperature"),&out->temp_centi_c))out->has_temp=1;
+    CFTypeRef bd=CFDictionaryGetValue(src,CFSTR("BatteryData"));
+    if(bd && CFGetTypeID(bd)==CFDictionaryGetTypeID()) {
+        CFDictionaryRef bdict=(CFDictionaryRef)bd;
+        int v=0;
+        if(dict_int_value(bdict,CFSTR("NominalChargeCapacity"),&v) && v>0)out->nominal_mah=v;
+        if(dict_int_value(bdict,CFSTR("DesignCapacity"),&v) && v>0)out->design_mah=v;
+        if(dict_int_value(bdict,CFSTR("CycleCount"),&v) && v>0)out->cycle_count=v;
+        if(dict_int_value(bdict,CFSTR("StateOfHealth"),&v) && v>0)out->soh_percent=v;
+        if(dict_int_value(bdict,CFSTR("Voltage"),&v) && v>0)out->voltage_mv=v;
+        if(dict_int_value(bdict,CFSTR("InstantAmperage"),&v)){out->current_ma=v;out->has_current=1;}
+        if(dict_int_value(bdict,CFSTR("Temperature"),&v)){out->temp_centi_c=v;out->has_temp=1;}
+    }
+}
+static bool read_battery_hw_telemetry(ZizhanBatteryHwTelemetry *out)
+{
+    if(!out)return false;
+    memset(out,0,sizeof(*out));
+    typedef CFMutableDictionaryRef (*service_matching_t)(const char *);
+    typedef uint32_t (*matching_service_t)(uint32_t,CFDictionaryRef);
+    typedef kern_return_t (*create_props_t)(uint32_t,CFMutableDictionaryRef *,CFAllocatorRef,uint32_t);
+    typedef int (*release_service_t)(uint32_t);
+    typedef CFArrayRef (*copy_sources_t)(CFTypeRef);
+    static service_matching_t io_matching;
+    static matching_service_t io_get_service;
+    static create_props_t io_create_props;
+    static release_service_t io_release;
+    static copy_sources_t copy_sources;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *iokit=dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",RTLD_LAZY|RTLD_LOCAL);
+        if(iokit) {
+            io_matching=(service_matching_t)dlsym(iokit,"IOServiceMatching");
+            io_get_service=(matching_service_t)dlsym(iokit,"IOServiceGetMatchingService");
+            io_create_props=(create_props_t)dlsym(iokit,"IORegistryEntryCreateCFProperties");
+            io_release=(release_service_t)dlsym(iokit,"IOObjectRelease");
+            copy_sources=(copy_sources_t)dlsym(iokit,"IOPSCopyPowerSourcesByType");
+        }
+    });
+    /* Read directly from kernel AppleSmartBattery (PongBattery) first: in 22H374 Preferences on iPad7,12,
+     * IOPSCopyPowerSourcesByType("InternalBattery") can return empty when powerd SCDynamicStore lacks it. */
+    if(io_matching && io_get_service && io_create_props && io_release) {
+        CFMutableDictionaryRef match=io_matching("AppleSmartBattery");
+        uint32_t entry=match?io_get_service(0,match):0;
+        if(entry) {
+            CFMutableDictionaryRef props=NULL;
+            if(io_create_props(entry,&props,kCFAllocatorDefault,0)==KERN_SUCCESS && props) {
+                parse_battery_dict(props,out);
+                CFRelease(props);
+            }
+            (void)io_release(entry);
+        }
+        if(zizhan_battery_has_hw_health(out))return true;
+    }
+    if(!copy_sources)return false;
+    CFArrayRef sources=copy_sources(CFSTR("InternalBattery"));
+    if(!sources || CFGetTypeID(sources)!=CFArrayGetTypeID() || !CFArrayGetCount(sources)) {
+        if(sources)CFRelease(sources);
+        return false;
+    }
+    CFDictionaryRef src=(CFDictionaryRef)CFArrayGetValueAtIndex(sources,0);
+    parse_battery_dict(src,out);
+    CFRelease(sources);
+    return zizhan_battery_has_hw_health(out)!=0;
+}
+static id cfstr_autoreleased(const char *utf8)
+{
+    CFStringRef s=CFStringCreateWithCString(NULL,utf8,kCFStringEncodingUTF8);
+    return s?((id(*)(id,SEL))objc_msgSend)((id)s,sel_registerName("autorelease")):nil;
+}
+static id zizhan_batt_capacity_getter(id self,SEL selector,id specifier)
+{
+    (void)self;(void)selector;(void)specifier;
+    ZizhanBatteryHwTelemetry t;char buf[96];
+    if(read_battery_hw_telemetry(&t) && zizhan_battery_format_capacity(&t,buf,sizeof(buf)))
+        return cfstr_autoreleased(buf);
+    return nil;
+}
+static id zizhan_batt_cycles_getter(id self,SEL selector,id specifier)
+{
+    (void)self;(void)selector;(void)specifier;
+    ZizhanBatteryHwTelemetry t;char buf[64];
+    if(read_battery_hw_telemetry(&t) && zizhan_battery_format_cycles(&t,buf,sizeof(buf)))
+        return cfstr_autoreleased(buf);
+    return nil;
+}
+static id zizhan_batt_soh_getter(id self,SEL selector,id specifier)
+{
+    (void)self;(void)selector;(void)specifier;
+    ZizhanBatteryHwTelemetry t;char buf[128];
+    if(read_battery_hw_telemetry(&t) && zizhan_battery_format_soh_live(&t,buf,sizeof(buf)))
+        return cfstr_autoreleased(buf);
+    return nil;
+}
+static CFArrayRef build_battery_hw_specifiers(id target,const ZizhanBatteryHwTelemetry *t)
+{
+    Class pss=objc_lookUpClass("PSSpecifier");
+    SEL s_grp=sel_registerName("groupSpecifierWithID:name:");
+    SEL s_pref=sel_registerName("preferenceSpecifierNamed:target:set:get:detail:cell:edit:");
+    SEL s_set_id=sel_registerName("setIdentifier:");
+    SEL s_set_prop=sel_registerName("setProperty:forKey:");
+    if(!pss || !abi(class_getClassMethod(pss,s_grp),"@",2,"@@") ||
+       !(abi(class_getClassMethod(pss,s_pref),"@",7,"@@::#q#") ||
+         abi(class_getClassMethod(pss,s_pref),"@",7,"@@::#Q#")) ||
+       !abi(class_getInstanceMethod(pss,s_set_id),"v",1,"@") ||
+       !abi(class_getInstanceMethod(pss,s_set_prop),"v",2,"@@"))return NULL;
+    /* "电池健康（BM4V 硬件实测）" */
+    id group=((id(*)(Class,SEL,id,id))objc_msgSend)(pss,s_grp,
+        (id)CFSTR("ZIZHAN_BATT_HW_GROUP"),
+        (id)CFSTR("\xe7\x94\xb5\xe6\xb1\xa0\xe5\x81\xa5\xe5\xba\xb7\xef\xbc\x88" "BM4V \xe7\xa1\xac\xe4\xbb\xb6\xe5\xae\x9e\xe6\xb5\x8b\xef\xbc\x89"));
+    if(!group)return NULL;
+    const CFStringRef *fkey=dlsym(RTLD_DEFAULT,"PSFooterTextGroupKey");
+    CFStringRef footer_key=(fkey && *fkey)?*fkey:CFSTR("footerText");
+    /* Honest explanation: real Qualcomm ADSP telemetry, no Apple auth/service fabrication, usage chart accumulates over multi-bucket uptime. */
+    ((void(*)(id,SEL,id,id))objc_msgSend)(group,s_set_prop,
+        (id)CFSTR("\xe6\x95\xb0\xe6\x8d\xae\xe7\x9b\xb4\xe6\x8e\xa5\xe8\xaf\xbb\xe5\x8f\x96\xe8\x87\xaa\xe9\xab\x98\xe9\x80\x9a ADSP \xe7\x94\xb5\xe6\xb1\xa0\xe7\xae\xa1\xe7\x90\x86\xe5\x9b\xba\xe4\xbb\xb6\xef\xbc\x8c\xe4\xb8\x8d\xe5\x90\xab Apple \xe8\xae\xa4\xe8\xaf\x81\xe8\x8a\xaf\xe7\x89\x87\xe6\x9c\x8d\xe5\x8a\xa1\xe7\x8a\xb6\xe6\x80\x81\xe3\x80\x82\xe7\x94\xb5\xe6\xb1\xa0\xe7\x94\xa8\xe9\x87\x8f\xe6\x9b\xb2\xe7\xba\xbf\xe9\x9c\x80\xe7\xb3\xbb\xe7\xbb\x9f\xe8\xbf\x9e\xe7\xbb\xad\xe8\xbf\x90\xe8\xa1\x8c\xe7\xb4\xaf\xe7\xa7\xaf\xe5\xa4\x9a\xe6\x97\xb6\xe6\xae\xb5\xe6\xa0\xb7\xe6\x9c\xac\xe5\x90\x8e\xe8\x87\xaa\xe5\x8a\xa8\xe6\x98\xbe\xe7\xa4\xba\xe3\x80\x82"),
+        (id)footer_key);
+    CFMutableArrayRef items=CFArrayCreateMutable(NULL,4,&kCFTypeArrayCallBacks);
+    if(!items)return NULL;
+    CFArrayAppendValue(items,group);
+    char buf[128];
+    if(zizhan_battery_format_capacity(t,buf,sizeof(buf))) {
+        id row=((id(*)(Class,SEL,id,id,SEL,SEL,Class,long,Class))objc_msgSend)(pss,s_pref,
+            (id)CFSTR("\xe6\x9c\x80\xe5\xa4\xa7\xe5\xae\xb9\xe9\x87\x8f"),target,NULL,
+            sel_registerName("zizhan_batt_capacity_value:"),Nil,4L,Nil);
+        if(row){((void(*)(id,SEL,id))objc_msgSend)(row,s_set_id,(id)CFSTR("ZIZHAN_BATT_CAPACITY"));CFArrayAppendValue(items,row);}
+    }
+    if(zizhan_battery_format_cycles(t,buf,sizeof(buf))) {
+        id row=((id(*)(Class,SEL,id,id,SEL,SEL,Class,long,Class))objc_msgSend)(pss,s_pref,
+            (id)CFSTR("\xe5\xbe\xaa\xe7\x8e\xaf\xe8\xae\xa1\xe6\x95\xb0"),target,NULL,
+            sel_registerName("zizhan_batt_cycles_value:"),Nil,4L,Nil);
+        if(row){((void(*)(id,SEL,id))objc_msgSend)(row,s_set_id,(id)CFSTR("ZIZHAN_BATT_CYCLES"));CFArrayAppendValue(items,row);}
+    }
+    if(zizhan_battery_format_soh_live(t,buf,sizeof(buf))) {
+        id row=((id(*)(Class,SEL,id,id,SEL,SEL,Class,long,Class))objc_msgSend)(pss,s_pref,
+            (id)CFSTR("\xe7\x94\xb5\xe8\x8a\xaf\xe7\x8a\xb6\xe6\x80\x81"),target,NULL,
+            sel_registerName("zizhan_batt_soh_value:"),Nil,4L,Nil);
+        if(row){((void(*)(id,SEL,id))objc_msgSend)(row,s_set_id,(id)CFSTR("ZIZHAN_BATT_SOH"));CFArrayAppendValue(items,row);}
+    }
+    if(CFArrayGetCount(items)<=1){CFRelease(items);return NULL;}
+    return items;
+}
+static bool specifiers_has_id(id list,CFStringRef want)
+{
+    SEL s_cnt=sel_registerName("count"),s_at=sel_registerName("objectAtIndex:"),s_id=sel_registerName("identifier");
+    unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(list,s_cnt);
+    for(unsigned long i=0;i<n;i++) {
+        id sp=((id(*)(id,SEL,unsigned long))objc_msgSend)(list,s_at,i);
+        if(!sp || !((BOOL(*)(id,SEL,SEL))objc_msgSend)(sp,sel_registerName("respondsToSelector:"),s_id))continue;
+        id ident=((id(*)(id,SEL))objc_msgSend)(sp,s_id);
+        if(ident && CFGetTypeID((CFTypeRef)ident)==CFStringGetTypeID() && CFEqual((CFTypeRef)ident,want))return true;
+    }
+    return false;
+}
+static bool specifier_id_utf8(id sp,char *buf,size_t cap)
+{
+    if(!sp || !buf || !cap)return false;
+    buf[0]='\0';
+    SEL s_id=sel_registerName("identifier");
+    if(!((BOOL(*)(id,SEL,SEL))objc_msgSend)(sp,sel_registerName("respondsToSelector:"),s_id))return false;
+    id ident=((id(*)(id,SEL))objc_msgSend)(sp,s_id);
+    if(!ident || CFGetTypeID((CFTypeRef)ident)!=CFStringGetTypeID())return false;
+    return CFStringGetCString((CFStringRef)ident,buf,cap,kCFStringEncodingUTF8)!=0;
+}
+static long specifier_cell_type(id sp)
+{
+    if(!sp)return -1;
+    SEL s_ct=sel_registerName("cellType");
+    if(!((BOOL(*)(id,SEL,SEL))objc_msgSend)(sp,sel_registerName("respondsToSelector:"),s_ct))return -1;
+    return ((long(*)(id,SEL))objc_msgSend)(sp,s_ct);
+}
+static void zizhan_bui_insert_contiguous(id self,SEL selector,id specs,unsigned long idx,BOOL anim)
+{
+    /* In default two-switch mode, ignore asynchronous PerfPowerServices / PLBatteryUI graph & spinner insertions. */
+    if(!settings_boot_option("zizhan_batt_ui=full")) {
+        if(!specs)return;
+        SEL s_cnt=sel_registerName("count"),s_at=sel_registerName("objectAtIndex:");
+        unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(specs,s_cnt);
+        bool any_kept=false;
+        for(unsigned long i=0;i<n;i++) {
+            id sp=((id(*)(id,SEL,unsigned long))objc_msgSend)(specs,s_at,i);
+            char idbuf[96];
+            if(specifier_id_utf8(sp,idbuf,sizeof(idbuf)) && zizhan_battery_is_kept_switch_id(idbuf))any_kept=true;
+        }
+        if(!any_kept)return;
+    }
+    if(bui_insert_contig_original)
+        ((void(*)(id,SEL,id,unsigned long,BOOL))bui_insert_contig_original)(self,selector,specs,idx,anim);
+}
+static id zizhan_bui_specifiers(id self,SEL selector)
+{
+    id list=((id(*)(id,SEL))bui_specifiers_original)(self,selector);
+    if(!list)return list;
+    Class mut_cls=objc_lookUpClass("NSMutableArray");
+    if(!mut_cls || !((BOOL(*)(id,SEL,Class))objc_msgSend)(list,sel_registerName("isKindOfClass:"),mut_cls))return list;
+    if(!settings_boot_option("zizhan_batt_ui=full")) {
+        /* Default two-switch clean mode: retain ONLY Battery Percentage + Low Power Mode switches
+         * (and the single native group header/footer preceding Low Power Mode), removing all spinners & empty charts. */
+        SEL s_cnt=sel_registerName("count"),s_at=sel_registerName("objectAtIndex:");
+        SEL s_rem=sel_registerName("removeAllObjects"),s_add=sel_registerName("addObject:");
+        unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(list,s_cnt);
+        id pct_sp=nil,lpm_sp=nil,lpm_group=nil,last_group=nil;
+        for(unsigned long i=0;i<n;i++) {
+            id sp=((id(*)(id,SEL,unsigned long))objc_msgSend)(list,s_at,i);
+            if(!sp)continue;
+            if(specifier_cell_type(sp)==0)last_group=sp;
+            char idbuf[96];
+            if(!specifier_id_utf8(sp,idbuf,sizeof(idbuf)))continue;
+            if(!strcmp(idbuf,"BATTERY_PERCENTAGE_IDENTIFIER") && !pct_sp)pct_sp=sp;
+            else if(!strcmp(idbuf,"LOW_POWER_MODE_IDENTIFIER") && !lpm_sp){lpm_sp=sp;lpm_group=last_group;}
+        }
+        if(pct_sp || lpm_sp) {
+            if(pct_sp)((id(*)(id,SEL))objc_msgSend)(pct_sp,sel_registerName("retain"));
+            if(lpm_sp)((id(*)(id,SEL))objc_msgSend)(lpm_sp,sel_registerName("retain"));
+            if(lpm_group)((id(*)(id,SEL))objc_msgSend)(lpm_group,sel_registerName("retain"));
+            ((void(*)(id,SEL))objc_msgSend)(list,s_rem);
+            if(lpm_group)((void(*)(id,SEL,id))objc_msgSend)(list,s_add,lpm_group);
+            if(pct_sp)((void(*)(id,SEL,id))objc_msgSend)(list,s_add,pct_sp);
+            if(lpm_sp)((void(*)(id,SEL,id))objc_msgSend)(list,s_add,lpm_sp);
+            if(lpm_group)((void(*)(id,SEL))objc_msgSend)(lpm_group,sel_registerName("release"));
+            if(lpm_sp)((void(*)(id,SEL))objc_msgSend)(lpm_sp,sel_registerName("release"));
+            if(pct_sp)((void(*)(id,SEL))objc_msgSend)(pct_sp,sel_registerName("release"));
+            static unsigned slim_logged;
+            if(__atomic_fetch_add(&slim_logged,1,__ATOMIC_RELAXED)<4)
+                record("BatteryUIController slimmed to two switches (Battery Percentage + Low Power Mode)");
+        }
+        return list;
+    }
+    if(specifiers_has_id(list,CFSTR("ZIZHAN_BATT_HW_GROUP")))return list;
+    ZizhanBatteryHwTelemetry t;
+    if(!read_battery_hw_telemetry(&t))return list;
+    CFArrayRef hw=build_battery_hw_specifiers(self,&t);
+    if(!hw)return list;
+    /* Insert right after LOW_POWER_MODE_IDENTIFIER / BATTERY_PERCENTAGE_IDENTIFIER so it sits above the usage chart. */
+    SEL s_cnt=sel_registerName("count"),s_at=sel_registerName("objectAtIndex:"),s_id=sel_registerName("identifier");
+    SEL s_ins=sel_registerName("insertObject:atIndex:");
+    unsigned long n=((unsigned long(*)(id,SEL))objc_msgSend)(list,s_cnt),insert_at=0;
+    for(unsigned long i=0;i<n;i++) {
+        id sp=((id(*)(id,SEL,unsigned long))objc_msgSend)(list,s_at,i);
+        id ident=(sp && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(sp,sel_registerName("respondsToSelector:"),s_id))?
+            ((id(*)(id,SEL))objc_msgSend)(sp,s_id):nil;
+        if(ident && CFGetTypeID((CFTypeRef)ident)==CFStringGetTypeID() &&
+           (CFEqual((CFTypeRef)ident,CFSTR("LOW_POWER_MODE_IDENTIFIER")) ||
+            CFEqual((CFTypeRef)ident,CFSTR("BATTERY_PERCENTAGE_IDENTIFIER")) ||
+            CFEqual((CFTypeRef)ident,CFSTR("BATTERY_HEALTH_TITLE"))))
+            insert_at=i+1;
+    }
+    CFIndex hc=CFArrayGetCount(hw);
+    for(CFIndex j=0;j<hc;j++) {
+        ((void(*)(id,SEL,id,unsigned long))objc_msgSend)(list,s_ins,(id)CFArrayGetValueAtIndex(hw,j),insert_at+(unsigned long)j);
+    }
+    CFRelease(hw);
+    static unsigned logged;
+    if(__atomic_fetch_add(&logged,1,__ATOMIC_RELAXED)<4) {
+        char msg[160];
+        snprintf(msg,sizeof(msg),"ADSP real battery health specifiers attached: %d/%d mAh cycles=%d soh=%d%%",
+                 t.nominal_mah,t.design_mah,t.cycle_count,t.soh_percent);
+        record(msg);
+    }
+    return list;
+}
+static id zizhan_bhui_specifiers(id self,SEL selector)
+{
+    id list=((id(*)(id,SEL))bhui_specifiers_original)(self,selector);
+    if(!list || specifiers_has_id(list,CFSTR("ZIZHAN_BATT_HW_GROUP")))return list;
+    Class rc=objc_lookUpClass("BatteryUIResourceClass");
+    SEL s_unavail=sel_registerName("batteryDataUnavailable");
+    if(!rc || !abi(class_getClassMethod(rc,s_unavail),"Bc",0,"") ||
+       !((BOOL(*)(Class,SEL))objc_msgSend)(rc,s_unavail))return list;
+    Class mut_cls=objc_lookUpClass("NSMutableArray");
+    if(!mut_cls || !((BOOL(*)(id,SEL,Class))objc_msgSend)(list,sel_registerName("isKindOfClass:"),mut_cls))return list;
+    ZizhanBatteryHwTelemetry t;
+    if(!read_battery_hw_telemetry(&t))return list;
+    CFArrayRef hw=build_battery_hw_specifiers(self,&t);
+    if(!hw)return list;
+    ((void(*)(id,SEL))objc_msgSend)(list,sel_registerName("removeAllObjects"));
+    SEL s_add=sel_registerName("addObject:");
+    for(CFIndex j=0,hc=CFArrayGetCount(hw);j<hc;j++)
+        ((void(*)(id,SEL,id))objc_msgSend)(list,s_add,(id)CFArrayGetValueAtIndex(hw,j));
+    CFRelease(hw);
+    record("BatteryHealthUIController infinite spinner replaced with real ADSP hardware telemetry");
+    return list;
+}
+static void register_battery_getters(Class cls)
+{
+    (void)class_addMethod(cls,sel_registerName("zizhan_batt_capacity_value:"),(IMP)zizhan_batt_capacity_getter,"@24@0:8@16");
+    (void)class_addMethod(cls,sel_registerName("zizhan_batt_cycles_value:"),(IMP)zizhan_batt_cycles_getter,"@24@0:8@16");
+    (void)class_addMethod(cls,sel_registerName("zizhan_batt_soh_value:"),(IMP)zizhan_batt_soh_getter,"@24@0:8@16");
+}
+static void battery_hw_install(void)
+{
+    if(settings_boot_option("zizhan_batt_ui=0"))return;
+    if(!bui_hw_installed) {
+        Class bui=objc_lookUpClass("BatteryUIController");
+        Method m=bui?class_getInstanceMethod(bui,sel_registerName("specifiers")):NULL;
+        Method sup=bui?class_getInstanceMethod(class_getSuperclass(bui),sel_registerName("specifiers")):NULL;
+        if(m && m!=sup && abi(m,"@",0,"")) {
+            register_battery_getters(bui);
+            bui_specifiers_original=method_setImplementation(m,(IMP)zizhan_bui_specifiers);
+            bui_hw_installed=bui_specifiers_original!=NULL;
+            SEL s_ins=sel_registerName("insertContiguousSpecifiers:atIndex:animated:");
+            Method m_ins=class_getInstanceMethod(bui,s_ins);
+            if(m_ins && (abi(m_ins,"v",3,"@QB") || abi(m_ins,"v",3,"@qB") || abi(m_ins,"v",3,"@Qc") || abi(m_ins,"v",3,"@qc"))) {
+                IMP orig_ins=method_getImplementation(m_ins);
+                if(class_addMethod(bui,s_ins,(IMP)zizhan_bui_insert_contiguous,method_getTypeEncoding(m_ins)))
+                    bui_insert_contig_original=orig_ins;
+                else
+                    bui_insert_contig_original=method_setImplementation(m_ins,(IMP)zizhan_bui_insert_contiguous);
+            }
+            if(bui_hw_installed)record("22H374 BatteryUIController two-switch clean policy installed");
+        }
+    }
+    if(!bhui_hw_installed) {
+        Class bhui=objc_lookUpClass("BatteryHealthUIController");
+        Method m=bhui?class_getInstanceMethod(bhui,sel_registerName("specifiers")):NULL;
+        Method sup=bhui?class_getInstanceMethod(class_getSuperclass(bhui),sel_registerName("specifiers")):NULL;
+        if(m && m!=sup && abi(m,"@",0,"")) {
+            register_battery_getters(bhui);
+            bhui_specifiers_original=method_setImplementation(m,(IMP)zizhan_bhui_specifiers);
+            bhui_hw_installed=bhui_specifiers_original!=NULL;
+        }
+    }
+}
 static void added(const struct mach_header *head,intptr_t slide)
 {
     methods();
+    battery_hw_install();
     static const uint8_t mobile_uuid[]={0x8f,0xeb,0x56,0xd8,0x54,0x30,0x3e,0x27,0x88,0xe4,0x13,0x7f,0x30,0x53,0x42,0xa6};
     static const uint8_t about_uuid[]={0x24,0x82,0x62,0xd0,0x70,0xed,0x3e,0xd5,0xbf,0x6f,0x4c,0x4c,0x8f,0x8d,0xec,0xfb};
     uintptr_t entry=(uintptr_t)head+0x77bc;
@@ -544,6 +922,17 @@ static void launch_poll(void *context)
     id app=((id(*)(id,SEL))objc_msgSend)((id)objc_lookUpClass("UIApplication"),sel_registerName("sharedApplication"));
     id windows=app?((id(*)(id,SEL))objc_msgSend)(app,sel_registerName("windows")):nil;
     const unsigned long count=windows?((unsigned long(*)(id,SEL))objc_msgSend)(windows,sel_registerName("count")):0;
+    if(settings_boot_option("zizhan_scene_diag=1") && polls<=8) {
+        for(unsigned long i=0;i<count;i++) {
+            id win=((id(*)(id,SEL,unsigned long))objc_msgSend)(windows,sel_registerName("objectAtIndex:"),i);
+            Class wc=win?object_getClass(win):Nil;
+            SEL sw=sel_registerName("_windowInterfaceOrientation"),sb=sel_registerName("bounds");
+            long wori=(wc && abi(class_getInstanceMethod(wc,sw),"qQ",0,""))?((long(*)(id,SEL))objc_msgSend)(win,sw):-1;
+            CGRect b=(wc && abi(class_getInstanceMethod(wc,sb),"{",0,""))?((CGRect(*)(id,SEL))objc_msgSend)(win,sb):CGRectZero;
+            fprintf(stderr,"Zizhan scene18 diag[Preferences]: poll=%u win=%lu/%lu %s wori=%ld bounds=%.0fx%.0f\n",
+                polls,i,count,win?object_getClassName(win):"nil",wori,b.size.width,b.size.height);
+        }
+    }
     unsigned long cells=0;
     for(unsigned long i=0;i<count;i++)cells+=ui_cells(((id(*)(id,SEL,unsigned long))objc_msgSend)(windows,sel_registerName("objectAtIndex:"),i),0);
     if(cells || polls>=300) {launch_note(cells?"first screen":"no screen after 30 s",cells);return;}

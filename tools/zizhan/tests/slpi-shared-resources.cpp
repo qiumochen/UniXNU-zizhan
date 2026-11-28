@@ -30,22 +30,26 @@ int main() {
     assert(!owner.send(qmp, Processor::Adsp, true, ack));
     assert(!owner.send(qmp, Processor::Slpi, true, ack));
     assert(!owner.send(qmp, Processor::Slpi, false, ack));
+    assert(!owner.send(qmp, Processor::Modem, true, ack));
+    assert(!owner.send(qmp, Processor::Modem, false, ack));
     assert(sent == std::vector<std::string>({
         "{class: image, res: load_state, name: adsp, val: on}",
         "{class: image, res: load_state, name: slpi, val: on}",
-        "{class: image, res: load_state, name: slpi, val: off}"}));
-    assert(waits == 3 && kicks == 3);
+        "{class: image, res: load_state, name: slpi, val: off}",
+        "{class: image, res: load_state, name: modem, val: on}",
+        "{class: image, res: load_state, name: modem, val: off}"}));
+    assert(waits == 5 && kicks == 5);
     auto before = std::array<uint32_t, 256>{};
     memcpy(before.data(), ram, sizeof ram);
     assert(owner.send(qmp, static_cast<Processor>(99), true, ack) == BadProcessor);
-    assert(!memcmp(before.data(), ram, sizeof ram) && waits == 3 && kicks == 3);
+    assert(!memcmp(before.data(), ram, sizeof ram) && waits == 5 && kicks == 5);
     ram[64] = 100; // busy remote mailbox even though cached state is open
     assert(owner.send(qmp, Processor::Slpi, true, ack) == QcomQmpBusy);
-    assert(ram[64] == 100 && waits == 3 && kicks == 3);
+    assert(ram[64] == 100 && waits == 5 && kicks == 5);
     ram[64] = 0;
     qmp.state = QcomQmpChannelWait;
     assert(owner.send(qmp, Processor::Slpi, true, ack) == MailboxUnavailable);
-    assert(!ram[64] && waits == 3 && kicks == 3);
+    assert(!ram[64] && waits == 5 && kicks == 5);
     qmp.state = QcomQmpOpen;
     assert(owner.send(qmp, Processor::Slpi, true, [&](uint32_t ms, auto done) {
         assert(ms == 1000 && !done()); ++waits; return false;
@@ -54,7 +58,7 @@ int main() {
     assert(qcom_qmp_step(&qmp) == QcomQmpOpen); // includes a possible late ack
     memcpy(before.data(), ram, sizeof ram);
     assert(owner.send(qmp, Processor::Adsp, true, ack) == MailboxUnavailable);
-    assert(!memcmp(before.data(), ram, sizeof ram) && waits == 4 && kicks == 4);
+    assert(!memcmp(before.data(), ram, sizeof ram) && waits == 6 && kicks == 6);
 
     alignas(8) uint8_t bytes[0x5000] = {};
     QcomSmem smem = {bytes, sizeof bytes};

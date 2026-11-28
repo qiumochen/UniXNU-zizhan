@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <syslog.h>
 #include "ZizhanAudioServiceGate.h"
+#include "ZizhanAudioCapture.h"
 
 enum {kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kOutStream = 3, kInStream = 4, kVolume = 5};
 #define kPlugInBundleID "org.unixnu.zizhan.audio"
@@ -34,27 +35,35 @@ static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_uint gRefs = 1;
 static io_connect_t gConnect;
 static _Atomic(ZizhanAudioControl *) gControl;
+static _Atomic(ZizhanAudioCaptureControl *) gCapture;
 static int16_t *gOut;
+static int16_t *gIn;
 static atomic_uint gIoUsers;
 static atomic_uint gOutActive = 1;
-static _Atomic(Float32) gVolume = 0.25f;
+static atomic_uint gInActive = 1;
+static _Atomic(Float32) gVolume = 0.55f;
 static Float64 gHostTicksPerFrame;
 static uint64_t gZeroOrigin, gZeroSeed;
+static uint64_t gInReadPos;
+static uint32_t gInAnchored;
 static void setHostClock(void);
 
 // ---- Kernel service ------------------------------------------------------------------------------------------------------------
-static mach_vm_address_t gMapped[2];
+static mach_vm_address_t gMapped[3];
 // Present: the service exists and its v2 control page is valid. Ready (data flowing) is the kernel's
 // own gate and comes only after StartIO, so it cannot decide whether the device is listed.
 static int ready(void) {
     return gControl && zizhan_audio_control_valid(gControl);
 }
+static int captureReady(void) {
+    return ready() && gCapture && gIn && zizhan_audio_capture_valid(gCapture);
+}
 static int running(void) {
     return ready() && (__atomic_load_n(&gControl->state, __ATOMIC_ACQUIRE) & ZizhanAudioOutputRunning);
 }
 static void disconnectService(void) {
-    gControl = NULL; gOut = NULL;
-    for (unsigned i=0; i<2; ++i) if(gMapped[i]) {
+    gControl = NULL; gCapture = NULL; gOut = NULL; gIn = NULL;
+    for (unsigned i=0; i<3; ++i) if(gMapped[i]) {
         IOConnectUnmapMemory64(gConnect, i, mach_task_self(), gMapped[i]); gMapped[i]=0;
     }
     if(gConnect) IOServiceClose(gConnect);
@@ -74,7 +83,7 @@ static int connectService(void) {
     kern_return_t kr=IOServiceOpen(service,mach_task_self(),0,&gConnect);
     IOObjectRelease(service);
     if(kr!=KERN_SUCCESS){gConnect=0;return -1;}
-    void *control=NULL,*out=NULL;
+    void *control=NULL,*out=NULL,*in_ring=NULL;
     if(mapType(0,&control,sizeof(ZizhanAudioControl)) || mapType(1,&out,ZIZHAN_AUDIO_RING_FRAMES*4)) {
         disconnectService();return -1;
     }
@@ -82,10 +91,14 @@ static int connectService(void) {
     if(!zizhan_audio_control_valid(c)) {
         disconnectService();return -1;
     }
+    ZizhanAudioCaptureControl *cap=(ZizhanAudioCaptureControl *)zizhan_audio_capture_slot(c);
+    if(zizhan_audio_capture_valid(cap) && mapType(ZizhanAudioMemoryCapture,&in_ring,ZIZHAN_AUDIO_CAPTURE_RING_BYTES)==0) {
+        gCapture=cap;gIn=in_ring;
+    }
     gOut=out;gControl=c;
     gHostTicksPerFrame=(Float64)c->ticks_per_frame_q32/4294967296.0;
     setHostClock();
-    syslog(LOG_NOTICE,"ZizhanAudio HAL: zizhan stereo service connected (present, not yet running)");
+    syslog(LOG_NOTICE,"ZizhanAudio HAL: zizhan stereo service connected (present, capture=%d)",gCapture?1:0);
     return 0;
 }
 static void *awaitService(void *unused) {
@@ -174,42 +187,63 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
 static OSStatus IsPropertySettable(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a, Boolean *out) {
     (void)d; (void)pid;
     *out = (o == kVolume && (a->mSelector == kAudioLevelControlPropertyScalarValue || a->mSelector == kAudioLevelControlPropertyDecibelValue)) ||
-           (o == kOutStream && (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat || a->mSelector == kAudioStreamPropertyIsActive)) ||
+           ((o == kOutStream || (o == kInStream && captureReady())) &&
+            (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat || a->mSelector == kAudioStreamPropertyIsActive)) ||
            (o == kDevice && a->mSelector == kAudioDevicePropertyNominalSampleRate);
     return HasProperty(d, o, pid, a) ? 0 : kAudioHardwareUnknownPropertyError;
 }
 
-static Float32 toDb(Float32 scalar) {return scalar <= 0.0001f ? -96.0f : 20.0f * log10f(scalar);}
+/* Mobile speaker dB span: audiomxd divides DecibelRange into 16 steps; -26 dB gives 1.625 dB/step
+ * (80% slider = -5.2 dB = 0.55 linear instead of -12 dB = 0.251 under the old -48 dB studio span),
+ * while 0% (-26 dB) remains exact digital silence (0.0f). */
+static const Float32 kMinVolumeDb = -26.0f;
+static Float32 toDb(Float32 scalar) {
+    if (scalar <= 0.0f) { return kMinVolumeDb; }
+    Float32 db = 20.0f * log10f(scalar);
+    return db < kMinVolumeDb ? kMinVolumeDb : (db > 0.0f ? 0.0f : db);
+}
+static Float32 fromDb(Float32 db) {
+    if (db <= kMinVolumeDb) { return 0.0f; }
+    if (db >= 0.0f) { return 1.0f; }
+    return powf(10.0f, db / 20.0f);
+}
 
 static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a, UInt32 qs,
                                 const void *q, UInt32 size, const void *data) {
     (void)d; (void)pid; (void)qs; (void)q;
     if (o == kVolume && size >= sizeof(Float32)) {
         Float32 v = *(const Float32 *)data;
-        if (a->mSelector == kAudioLevelControlPropertyDecibelValue) v = v <= -96.0f ? 0.0f : powf(10.0f, v / 20.0f);
-        else if (a->mSelector != kAudioLevelControlPropertyScalarValue) return kAudioHardwareUnknownPropertyError;
         if(!isfinite(v))return kAudioHardwareIllegalOperationError;
-        gVolume = v < 0 ? 0 : v > 1 ? 1 : v;
-        AudioObjectPropertyAddress changed[2] = {{kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
-                                                 {kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}};
-        gHost->PropertiesChanged(gHost, kVolume, 2, changed);
+        if (a->mSelector == kAudioLevelControlPropertyDecibelValue) v = fromDb(v);
+        else if (a->mSelector != kAudioLevelControlPropertyScalarValue) return kAudioHardwareUnknownPropertyError;
+        Float32 clamped = v < 0 ? 0 : v > 1 ? 1 : v;
+        Float32 prev = atomic_exchange(&gVolume, clamped);
+        if (fabsf(clamped - prev) >= 1e-5f) {
+            syslog(LOG_NOTICE, "ZizhanAudio HAL: volume set scalar=%.4f db=%.2f", (double)clamped, (double)toDb(clamped));
+            AudioObjectPropertyAddress changed[2] = {{kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+                                                     {kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}};
+            if (gHost) gHost->PropertiesChanged(gHost, kVolume, 2, changed);
+        }
         return 0;
     }
-    if(o==kOutStream && a->mSelector==kAudioStreamPropertyIsActive) {
+    if((o==kOutStream || (o==kInStream && captureReady())) && a->mSelector==kAudioStreamPropertyIsActive) {
         if(size!=sizeof(UInt32))return kAudioHardwareBadPropertySizeError;
         const UInt32 active=*(const UInt32 *)data;
         if(active>1)return kAudioHardwareIllegalOperationError;
-        if(atomic_exchange(&gOutActive,active)!=active && gHost)
-            gHost->PropertiesChanged(gHost,kOutStream,1,a);
+        atomic_uint *slot = (o==kOutStream) ? &gOutActive : &gInActive;
+        if(atomic_exchange(slot,active)!=active && gHost)
+            gHost->PropertiesChanged(gHost,o,1,a);
         return 0;
     }
-    if (o == kOutStream && (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat)) {
+    if ((o == kOutStream || (o == kInStream && captureReady())) &&
+        (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat)) {
         if(size!=sizeof(AudioStreamBasicDescription))return kAudioHardwareBadPropertySizeError;
-        const AudioStreamBasicDescription *f = data, expected = format(2);
+        const UInt32 want_ch = (o == kOutStream) ? 2 : 1;
+        const AudioStreamBasicDescription *f = data, expected = format(want_ch);
         return f->mSampleRate==expected.mSampleRate && f->mFormatID==expected.mFormatID &&
             f->mFormatFlags==expected.mFormatFlags && f->mBytesPerPacket==expected.mBytesPerPacket &&
             f->mFramesPerPacket==1 && f->mBytesPerFrame==expected.mBytesPerFrame &&
-            f->mChannelsPerFrame==2 && f->mBitsPerChannel==32 ? 0 : kAudioDeviceUnsupportedFormatError;
+            f->mChannelsPerFrame==want_ch && f->mBitsPerChannel==32 ? 0 : kAudioDeviceUnsupportedFormatError;
     }
     if (o == kDevice && a->mSelector == kAudioDevicePropertyNominalSampleRate)
         return size >= sizeof(Float64) && *(const Float64 *)data == kRate ? 0 : kAudioDeviceUnsupportedFormatError;
@@ -237,6 +271,7 @@ static UInt32 objects(AudioObjectID o, AudioObjectPropertyScope scope, AudioObje
     if (o == kPlugIn && ready()) list[n++] = kDevice;
     else if (o == kDevice) {
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kOutStream;
+        if (captureReady() && scope != kAudioObjectPropertyScopeOutput) list[n++] = kInStream;
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kVolume;
     }
     return n;
@@ -245,14 +280,14 @@ static UInt32 objects(AudioObjectID o, AudioObjectPropertyScope scope, AudioObje
 static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a, UInt32 qs,
                              const void *q, UInt32 inDataSize, UInt32 *outDataSize, void *outData) {
     (void)d; (void)pid;
-    if(o==kInStream)return kAudioHardwareBadObjectError;
+    if(o==kInStream && !captureReady())return kAudioHardwareBadObjectError;
     const AudioObjectPropertySelector s = a->mSelector;
     // iOS18 enumerates these lists before accepting a newly discovered
     // device. An empty supported list differs from an unknown property.
     if(o>=kPlugIn && o<=kVolume &&
        (s==kAudioObjectPropertyCustomPropertyInfoList ||
         (o==kPlugIn && (s==kAudioPlugInPropertyBoxList || s==kAudioPlugInPropertyClockDeviceList)) ||
-        (o==kOutStream && s=='taps'))) {
+        ((o==kOutStream || o==kInStream) && s=='taps'))) {
         *outDataSize=0;return 0;
     }
     switch (o) {
@@ -304,8 +339,10 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
         // 22H374 kAudioDevicePropertyWantsDisplayRouting, also UInt32.
         // TFA9873 speakers are not an HDMI/DisplayPort audio endpoint.
         case 'drte': REPLY(UInt32, 0);
-        case kAudioDevicePropertyDeviceCanBeDefaultDevice: REPLY(UInt32, ready() && a->mScope!=kAudioObjectPropertyScopeInput);
-        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: REPLY(UInt32, ready() && a->mScope!=kAudioObjectPropertyScopeInput);
+        case kAudioDevicePropertyDeviceCanBeDefaultDevice:
+            REPLY(UInt32, a->mScope == kAudioObjectPropertyScopeInput ? captureReady() : ready());
+        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
+            REPLY(UInt32, a->mScope == kAudioObjectPropertyScopeInput ? captureReady() : ready());
         case kAudioDevicePropertyLatency: REPLY(UInt32, latencyFrames());
         case kAudioDevicePropertySafetyOffset: REPLY(UInt32, latencyFrames()+2*ZIZHAN_AUDIO_PERIOD_FRAMES);
         case kAudioDevicePropertyNominalSampleRate: REPLY(Float64, kRate);
@@ -320,15 +357,18 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
             *outDataSize = 2 * sizeof(UInt32); return 0;
         }
         case kAudioDevicePropertyPreferredChannelLayout: {
-            const UInt32 channels = a->mScope == kAudioObjectPropertyScopeInput ? 0 : 2;
+            const UInt32 channels = a->mScope == kAudioObjectPropertyScopeInput ? (captureReady() ? 1 : 0) : 2;
             const UInt32 bytes = (UInt32)(offsetof(AudioChannelLayout, mChannelDescriptions) + channels * sizeof(AudioChannelDescription));
             if (inDataSize < bytes) return kAudioHardwareBadPropertySizeError;
             AudioChannelLayout *l = outData;
             memset(l, 0, bytes);
             l->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions;
             l->mNumberChannelDescriptions = channels;
-            if(channels)l->mChannelDescriptions[0].mChannelLabel=kAudioChannelLabel_Left;
-            if (channels == 2) l->mChannelDescriptions[1].mChannelLabel = kAudioChannelLabel_Right;
+            if (channels == 1) l->mChannelDescriptions[0].mChannelLabel = kAudioChannelLabel_Mono;
+            else if (channels == 2) {
+                l->mChannelDescriptions[0].mChannelLabel = kAudioChannelLabel_Left;
+                l->mChannelDescriptions[1].mChannelLabel = kAudioChannelLabel_Right;
+            }
             *outDataSize = bytes; return 0;
         }
         case kAudioObjectPropertyOwnedObjects:
@@ -355,7 +395,7 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
         case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kDevice);
         case kAudioObjectPropertyName: if (o == kOutStream) REPLY_STR("Speaker"); REPLY_STR("Microphone");
         case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; return 0;
-        case kAudioStreamPropertyIsActive: REPLY(UInt32, atomic_load(&gOutActive));
+        case kAudioStreamPropertyIsActive: REPLY(UInt32, atomic_load(o == kOutStream ? &gOutActive : &gInActive));
         case kAudioStreamPropertyDirection: REPLY(UInt32, o == kInStream);
         case kAudioStreamPropertyTerminalType: REPLY(UInt32, o == kOutStream ? kAudioStreamTerminalTypeSpeaker : kAudioStreamTerminalTypeMicrophone);
         case kAudioStreamPropertyStartingChannel: REPLY(UInt32, 1);
@@ -380,13 +420,13 @@ static OSStatus propertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_
         case kAudioControlPropertyElement: REPLY(AudioObjectPropertyElement, kAudioObjectPropertyElementMain);
         case kAudioLevelControlPropertyScalarValue: REPLY(Float32, gVolume);
         case kAudioLevelControlPropertyDecibelValue: REPLY(Float32, toDb(gVolume));
-        case kAudioLevelControlPropertyDecibelRange: REPLY(AudioValueRange, ((AudioValueRange){-96.0, 0.0}));
+        case kAudioLevelControlPropertyDecibelRange: REPLY(AudioValueRange, ((AudioValueRange){kMinVolumeDb, 0.0}));
         case kAudioLevelControlPropertyConvertScalarToDecibels:
             if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
             *(Float32 *)outData = toDb(*(Float32 *)outData); *outDataSize = sizeof(Float32); return 0;
         case kAudioLevelControlPropertyConvertDecibelsToScalar:
             if (inDataSize < sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
-            *(Float32 *)outData = *(Float32 *)outData <= -96.0f ? 0.0f : powf(10.0f, *(Float32 *)outData / 20.0f); *outDataSize = sizeof(Float32); return 0;
+            *(Float32 *)outData = fromDb(*(Float32 *)outData); *outDataSize = sizeof(Float32); return 0;
         default: return kAudioHardwareUnknownPropertyError;
         }
     default:
@@ -428,18 +468,29 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
     OSStatus r = 0;
     if (gIoUsers == 0) {
         if (connectService()) r = kAudioHardwareNotRunningError;
-        else if (call(ZizhanAudioStartOutput) != KERN_SUCCESS) r = kAudioHardwareNotRunningError;
         else {
-            setHostClock();
-            unsigned i;
-            // The kernel builds and starts the graph after accepting Start; Running means the anchor is published.
-            for(i=0;i<300 && ready() && !running();i++)usleep(10000);
-            if(!running()) {
-                call(ZizhanAudioStopOutput);r=kAudioHardwareNotRunningError;
-            } else {
-                uint64_t host=mach_absolute_time(),anchor=gControl->out_anchor_host;
-                gZeroOrigin=host>anchor?(uint64_t)((Float64)(host-anchor)/gHostTicksPerFrame):0;
-                gZeroSeed++;
+            kern_return_t kr = KERN_FAILURE;
+            for (unsigned attempt = 0; attempt < 25; ++attempt) {
+                kr = call(ZizhanAudioStartOutput);
+                if (kr == KERN_SUCCESS || kr != kIOReturnNotReady) break;
+                usleep(5000);
+            }
+            if (kr != KERN_SUCCESS) r = kAudioHardwareNotRunningError;
+            else {
+                setHostClock();
+                unsigned i;
+                // The kernel builds and starts the graph after accepting Start; Running means the anchor is published.
+                for(i=0;i<300 && ready() && !running();i++)usleep(10000);
+                if(!running()) {
+                    call(ZizhanAudioStopOutput);r=kAudioHardwareNotRunningError;
+                } else {
+                    uint64_t host=mach_absolute_time(),anchor=gControl->out_anchor_host;
+                    gZeroOrigin=host>anchor?(uint64_t)((Float64)(host-anchor)/gHostTicksPerFrame):0;
+                    gZeroSeed++;
+                    gInReadPos=0;
+                    gInAnchored=0;
+                    if (captureReady()) zizhan_audio_capture_notify_client(gCapture);
+                }
             }
         }
 
@@ -453,8 +504,12 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
     (void)d; (void)client;
     if (o != kDevice) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
-    if (gIoUsers && --gIoUsers == 0) {call(ZizhanAudioStopOutput);}
+    if (gIoUsers && --gIoUsers == 0) {
+        call(ZizhanAudioStopOutput);
+        for (unsigned i = 0; i < 25 && running(); ++i) usleep(5000);
+    }
     pthread_mutex_unlock(&gLock);
+    syslog(LOG_NOTICE, "ZizhanAudio HAL: StopIO users=%u", atomic_load(&gIoUsers));
     return 0;
 }
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client, Float64 *sampleTime, UInt64 *hostTime, UInt64 *seed) {
@@ -476,14 +531,29 @@ static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, 
 }
 static OSStatus WillDoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client, UInt32 op, Boolean *will, Boolean *inPlace) {
     (void)d; (void)o; (void)client;
-    *will = op == kAudioServerPlugInIOOperationWriteMix;
+    *will = (op == kAudioServerPlugInIOOperationWriteMix) ||
+            (op == kAudioServerPlugInIOOperationReadInput && captureReady());
     *inPlace = true;
     return 0;
 }
 static OSStatus BeginIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client, UInt32 op, UInt32 frames, const AudioServerPlugInIOCycleInfo *info) {
     (void)d; (void)o; (void)client; (void)op; (void)frames; (void)info; return 0;
 }
-static inline int16_t toS16(Float32 v) {if(!isfinite(v))v=0; v *= 32767.0f; return (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v);}
+/* Soft-knee +3.0 dB (1.4125x) presence boost with smooth Hermite saturation above |x| = 0.5:
+ * quiet voice memos and dialogue get full +3 dB lift (combined with kMinVolumeDb=-26 dB -> +9.8 dB at 80%),
+ * while 0 dBFS normalized music peaks compress smoothly into [-32767, +32767] without hard clipping. */
+static inline int16_t toS16(Float32 v) {
+    if (!isfinite(v) || v == 0.0f) return 0;
+    const Float32 sign = v < 0.0f ? -1.0f : 1.0f;
+    Float32 a = fabsf(v) * 1.4125375f;
+    if (a > 0.65f) {
+        const Float32 excess = a - 0.65f;
+        a = 0.65f + 0.35f * (excess / (0.35f + excess));
+    }
+    if (a > 1.0f) a = 1.0f;
+    const Float32 scaled = sign * a * 32767.0f;
+    return (int16_t)(scaled > 32767.0f ? 32767 : scaled < -32768.0f ? -32768 : scaled);
+}
 static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, AudioObjectID stream, UInt32 client, UInt32 op, UInt32 frames,
                               const AudioServerPlugInIOCycleInfo *info, void *main, void *secondary) {
     (void)d; (void)o; (void)client; (void)secondary;
@@ -501,6 +571,31 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
         // Producer watermark: only after the samples are in the ring, and never backwards.
         uint64_t written = 0;
         if (zizhan_audio_written_stable(gControl, &written) && t > written) zizhan_audio_publish_written(gControl, t);
+    } else if (op == kAudioServerPlugInIOOperationReadInput && stream == kInStream && captureReady()) {
+        const int active_in = atomic_load(&gInActive) ? 1 : 0;
+        if (!active_in) {
+            memset(main, 0, (size_t)frames * sizeof(float));
+        } else {
+            uint64_t cap_w = 0;
+            if (!gInAnchored && zizhan_audio_capture_written_stable(gCapture, &cap_w) && cap_w >= frames) {
+                const uint64_t cushion = 2u * ZIZHAN_AUDIO_PERIOD_FRAMES;
+                gInReadPos = (cap_w > cushion + frames) ? (cap_w - cushion) : (cap_w - frames);
+                gInAnchored = 1;
+            }
+            if (!gInAnchored) {
+                (void)zizhan_audio_capture_read_f32(gCapture, gIn, UINT64_MAX - frames, frames, 1, (float *)main);
+            } else {
+                if (zizhan_audio_capture_written_stable(gCapture, &cap_w)) {
+                    if (gInReadPos + frames > cap_w) {
+                        gInReadPos = (cap_w >= frames) ? (cap_w - frames) : 0;
+                    } else if (cap_w > gInReadPos + ZIZHAN_AUDIO_RING_FRAMES / 2u) {
+                        gInReadPos = cap_w - 2u * ZIZHAN_AUDIO_PERIOD_FRAMES;
+                    }
+                }
+                (void)zizhan_audio_capture_read_f32(gCapture, gIn, gInReadPos, frames, 1, (float *)main);
+                gInReadPos += frames;
+            }
+        }
     }
 
     return 0;

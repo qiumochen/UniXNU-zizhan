@@ -1,0 +1,179 @@
+zizhan APP-02/CAM-02: gated container-app UI adapter injection and camera frame/lease sysctl bridge.
+--- a/bsd/dev/pong_input.c
++++ b/bsd/dev/pong_input.c
+@@ -3,6 +3,7 @@
+ #include <pexpert/arm64/board_config.h>
+ #if defined(PONG)
+ #include <kern/clock.h>
++#include <kern/kalloc.h>
+ #include <kern/locks.h>
+ #include <miscfs/devfs/devfs.h>
+ #include <sys/conf.h>
+@@ -10,6 +11,7 @@
+ #include <sys/fcntl.h>
+ #include <sys/proc.h>
+ #include <sys/pong_input.h>
++#include <sys/sysctl.h>
+ #include <sys/systm.h>
+ #include <sys/uio.h>
+ #include <sys/vnode.h>
+@@ -118,4 +120,86 @@ out:
+ bool pong_touch_device_ready(void) {return input_ready(0,"pong-touch");}
+ bool pong_buttons_device_ready(void) {return input_ready(1,"pong-buttons");}
+ bool zizhan_sensors_device_ready(void) {return input_ready(2,"zizhan-sensors");}
++
++static zizhan_cam_ctrl_fn cam_ctrl_cb;
++static zizhan_cam_frame_fn cam_frame_cb;
++
++void
++zizhan_cam_register(zizhan_cam_ctrl_fn ctrl_fn, zizhan_cam_frame_fn frame_fn)
++{
++    lck_mtx_lock(&node_lock);
++    cam_ctrl_cb = ctrl_fn;
++    cam_frame_cb = frame_fn;
++    lck_mtx_unlock(&node_lock);
++}
++
++static int
++sysctl_zizhan_cam_ctrl(__unused struct sysctl_oid *oidp, __unused void *arg1,
++    __unused int arg2, struct sysctl_req *req)
++{
++    zizhan_cam_ctrl_fn fn;
++    lck_mtx_lock(&node_lock);
++    fn = cam_ctrl_cb;
++    lck_mtx_unlock(&node_lock);
++    int val = fn ? fn(-1) : 0;
++    int error = sysctl_handle_int(oidp, &val, 0, req);
++    if (error || req->newptr == USER_ADDR_NULL) {
++        return error;
++    }
++    return fn ? fn(val) : ENXIO;
++}
++SYSCTL_PROC(_kern, OID_AUTO, zizhan_cam_ctrl,
++    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED,
++    0, 0, sysctl_zizhan_cam_ctrl, "I", "zizhan camera lease control");
++
++static int
++sysctl_zizhan_cam_frame(__unused struct sysctl_oid *oidp, __unused void *arg1,
++    __unused int arg2, struct sysctl_req *req)
++{
++    if (req->newptr != USER_ADDR_NULL) {
++        return EPERM;
++    }
++    zizhan_cam_frame_fn fn;
++    lck_mtx_lock(&node_lock);
++    fn = cam_ctrl_cb ? cam_frame_cb : NULL;
++    lck_mtx_unlock(&node_lock);
++    if (!fn) {
++        return ENXIO;
++    }
++    size_t total = fn(NULL, 0, 0);
++    if (total == 0) {
++        return EAGAIN;
++    }
++    if (req->oldptr == USER_ADDR_NULL) {
++        return SYSCTL_OUT(req, NULL, total);
++    }
++    const size_t kChunk = 16384;
++    void *buf = kalloc_data(kChunk, Z_WAITOK | Z_ZERO);
++    if (!buf) {
++        return ENOMEM;
++    }
++    size_t limit = req->oldlen < total ? req->oldlen : total;
++    size_t off = 0;
++    int error = 0;
++    while (off < limit) {
++        size_t want = limit - off;
++        if (want > kChunk) {
++            want = kChunk;
++        }
++        size_t got = fn(buf, want, off);
++        if (got == 0) {
++            break;
++        }
++        error = SYSCTL_OUT(req, buf, got);
++        if (error) {
++            break;
++        }
++        off += got;
++    }
++    kfree_data(buf, kChunk);
++    return error;
++}
++SYSCTL_PROC(_kern, OID_AUTO, zizhan_cam_frame,
++    CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED,
++    0, 0, sysctl_zizhan_cam_frame, "-", "zizhan camera frame snapshot");
+ #endif
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6011,6 +6011,43 @@ sysctl_exec_inject(__unused struct sysctl_oid *oidp, __unused void *arg1,
+ SYSCTL_PROC(_kern, OID_AUTO, exec_inject, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED,
+     0, 0, sysctl_exec_inject, "A", "LIBRARY NAME... [; LIBRARY NAME...]");
+ 
++static uint32_t zizhan_inject_apps = 0;
++SYSCTL_UINT(_kern, OID_AUTO, zizhan_inject_apps, CTLFLAG_RW | CTLFLAG_LOCKED,
++    &zizhan_inject_apps, 0, "Inject UI adapter into container apps and camera clients");
++
++static bool
++zizhan_exec_wants_app_adapter(struct image_params *imgp, const char *name, size_t namelen)
++{
++	uint32_t enabled = zizhan_inject_apps;
++	if (!enabled) {
++		(void)PE_parse_boot_argn("zizhan_inject_apps", &enabled, sizeof(enabled));
++		if (enabled) {
++			zizhan_inject_apps = enabled;
++		}
++	}
++	if (!enabled || name == NULL) {
++		return false;
++	}
++	if ((namelen == 6 && strncmp(name, "Camera", 6) == 0) ||
++	    (namelen == 8 && strncmp(name, "FaceTime", 8) == 0) ||
++	    (namelen == 12 && strncmp(name, "MobileSafari", 12) == 0) ||
++	    (namelen == 15 && strncmp(name, "ZizhanInstaller", 15) == 0)) {
++		return true;
++	}
++	if (imgp->ip_strings != NULL &&
++	    strncmp(imgp->ip_strings, EXECUTABLE_KEY, sizeof(EXECUTABLE_KEY) - 1) == 0) {
++		const char *ep = imgp->ip_strings + (sizeof(EXECUTABLE_KEY) - 1);
++		const char kPfx1[] = "/private/var/containers/Bundle/Application/";
++		const char kPfx2[] = "/var/containers/Bundle/Application/";
++		if ((strncmp(ep, kPfx1, sizeof(kPfx1) - 1) == 0 ||
++		    strncmp(ep, kPfx2, sizeof(kPfx2) - 1) == 0) &&
++		    strnstr(ep, ".app/", MAXPATHLEN) != NULL && strnstr(ep, ".appex/", MAXPATHLEN) == NULL) {
++			return true;
++		}
++	}
++	return false;
++}
++
+ static bool
+ exec_inject_env(struct image_params *imgp, char *env, size_t size)
+ {
+@@ -6037,6 +6074,14 @@ exec_inject_env(struct image_params *imgp, char *env, size_t size)
+ 			if ((size_t)(p - word) == imgp->ip_ndp->ni_cnd.cn_namelen &&
+ 			    p != word && strncmp(word, name, p - word) == 0) matched = true;
+ 		}
++		{
++			const char kUiLib[] = "/pong/libpong-ui18.dylib";
++			if (!matched && liblen == sizeof(kUiLib) - 1 &&
++			    strncmp(library, kUiLib, sizeof(kUiLib) - 1) == 0 &&
++			    zizhan_exec_wants_app_adapter(imgp, name, imgp->ip_ndp->ni_cnd.cn_namelen)) {
++				matched = true;
++			}
++		}
+ 		if (matched && liblen && *library == '/') {
+ 			if (used + (any ? 1 : 0) + liblen >= size) return false;
+ 			if (any) env[used++] = ':';
+--- a/bsd/sys/pong_input.h
++++ b/bsd/sys/pong_input.h
+@@ -23,6 +23,9 @@ bool pong_touch_device_ready(void);
+ bool pong_buttons_device_ready(void);
+ void zizhan_sensor_post(uint32_t, int32_t, int32_t, int32_t);
+ bool zizhan_sensors_device_ready(void);
++typedef int (*zizhan_cam_ctrl_fn)(int);
++typedef size_t (*zizhan_cam_frame_fn)(void *, size_t, size_t);
++void zizhan_cam_register(zizhan_cam_ctrl_fn, zizhan_cam_frame_fn);
+ void pong_goodix_init(void);
+ void pong_buttons_init(void);
+ #endif

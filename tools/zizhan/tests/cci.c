@@ -66,8 +66,16 @@ int main(void) {
   memset(&f, 0, sizeof f); f.nack_q = 4;
   assert(zizhan_cci_read16_m(&o, 1, 0x10, 0x0016, id, 2) == ZizhanCciNack);
   assert(zizhan_cci_read16_m(&o, 2, 0x10, 0x0016, id, 2) == ZizhanCciArgument);
+  /* master 1 write16_u8 + table_m (OV13B10 SW reset + mode select) */
+  memset(&f, 0, sizeof f);
+  static const ZizhanCciReg8 tbl[2] = {{0x0103, 0x01}, {0x0100, 0x01}};
+  unsigned wdone = 0;
+  assert(zizhan_cci_write16_table_m(&o, 1, 0x36, tbl, 2, &wdone) == ZizhanCciOk && wdone == 2 && f.starts == 2);
+  assert(f.loads[2][0] == (1u | 0x36u << 4));
+  assert(f.loads[2][1] == (9u | (3u << 4) | (0x01u << 8) | (0x03u << 16) | (0x01u << 24)));
+  assert(f.loads[2][2] == (8u | (1u << 8)));
   /* argument checks */
   assert(zizhan_cci_read16(&o, 0x80, 0, id, 2) == ZizhanCciArgument && zizhan_cci_read16(&o, 0x1a, 0, id, 12) == ZizhanCciLength);
-  puts("PASS cci (masters 0 and 1): reset/init timings, chip-id read framing (SET_PARAM/WRITE/REPORT, SET_PARAM/READ, echo byte skipped), NACK q0/q1, timeout, length");
+  puts("PASS cci (masters 0 and 1): reset/init timings, chip-id read & reg16 write framing, NACK q0/q1, timeout, length");
   return 0;
 }

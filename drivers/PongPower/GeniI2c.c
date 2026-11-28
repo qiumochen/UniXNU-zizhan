@@ -30,10 +30,10 @@ int geni_i2c_prepare(GeniI2c *g, const GeniIo *io, uint8_t address, uint32_t *co
 int geni_i2c_prepare_poll(GeniI2c *g, const GeniIo *io, uint8_t address, uint32_t *config)
 { return prepare(g, io, address, config, 1); }
 
-/* Starts one write command of length bytes (at most 8); the data goes in when the engine asks for it (TX watermark). */
+/* Starts one write command of length bytes (at most 52); the data goes in when the engine asks for it (TX watermark). */
 static void write_command(GeniI2c *g, const uint8_t *bytes, uint32_t length, int hold)
 {
-    g->tx[0] = g->tx[1] = 0;
+    for (unsigned w = 0; w < 13; ++w) { g->tx[w] = 0; }
     for (uint32_t i = 0; i < length; ++i) g->tx[i / 4] |= (uint32_t)bytes[i] << (8 * (i % 4));
     g->tx_words = (uint8_t)((length + 3) / 4);
     g->length = length;
@@ -79,7 +79,24 @@ int geni_i2c_start_read_bytes(GeniI2c *g, const uint8_t *bytes, uint32_t length,
 int geni_i2c_start_read_block(GeniI2c *g,const uint8_t *bytes,uint32_t length,uint32_t read_length)
 {
     if(g->phase!=GeniIdle||!bytes||length!=4||(read_length!=12&&read_length!=20))return -1;
-    for(unsigned i=0;i<5;++i)g->rx_block[i]=0;
+    for(unsigned i=0;i<12;++i){g->rx_block[i]=0;}
+    g->reading=1;g->rx_length=(uint8_t)read_length;g->error=GeniOk;
+    write_command(g,bytes,length,1);return 0;
+}
+static int valid_burst_payload(uint32_t payload)
+{
+    return payload==12||payload==20||payload==24||payload==36||payload==40||payload==48;
+}
+int geni_i2c_start_write_burst(GeniI2c *g,const uint8_t *bytes,uint32_t length)
+{
+    if(g->phase!=GeniIdle||!bytes||length<16||!valid_burst_payload(length-4))return -1;
+    g->reading=0;g->error=GeniOk;
+    write_command(g,bytes,length,0);return 0;
+}
+int geni_i2c_start_read_burst(GeniI2c *g,const uint8_t *bytes,uint32_t length,uint32_t read_length)
+{
+    if(g->phase!=GeniIdle||!bytes||length!=4||!valid_burst_payload(read_length))return -1;
+    for(unsigned i=0;i<12;++i){g->rx_block[i]=0;}
     g->reading=1;g->rx_length=(uint8_t)read_length;g->error=GeniOk;
     write_command(g,bytes,length,1);return 0;
 }
@@ -132,7 +149,7 @@ int geni_i2c_event(GeniI2c *g, uint32_t status)
     }
     /* GeniReadDone */
     const unsigned words=(g->rx_length+3)/4;
-    if (!words||words>5||(rd(g, GENI_RX_FIFO_STATUS)&0x1ffffffu)<words) return finish(g, GeniErrNoData, status);
+    if (!words||words>12||(rd(g, GENI_RX_FIFO_STATUS)&0x1ffffffu)<words) return finish(g, GeniErrNoData, status);
     for(unsigned i=0;i<words;++i)g->rx_block[i]=rd(g,GENI_RX_FIFO);
     g->rx = g->rx_block[0];
     g->data = (uint8_t)g->rx;

@@ -1,10 +1,23 @@
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoMemory.h"
+#include "../ZizhanSpanCollect.h"
 /* Where a call that never returns is stuck: the free/unmap/release path stores a stage number here, the board page shows it. */
 extern "C" {volatile uint32_t native_adreno_trace_stage;}
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include <kern/task.h>
+#include <pexpert/pexpert.h>
+
+static bool fastSpansEnabled()
+{
+    static int mode = -1;
+    if (mode < 0) {
+        uint32_t v = 1;
+        PE_parse_boot_argn("pong_fast_spans", &v, sizeof(v));
+        mode = v ? 1 : 0;
+    }
+    return mode != 0;
+}
 
 static bool outputWidth(unsigned bits)
 {return bits==32 || bits==36 || bits==40 || bits==42 || bits==44 || bits==48;}
@@ -141,19 +154,45 @@ IOReturn NativeAdrenoMemory::allocate(size_t bytes,unsigned bits,bool contiguous
     status=kIOReturnUnsupported;
     if(!mapping_ || ((uintptr_t)mapping_&4095) || bytes>UINTPTR_MAX-(uintptr_t)mapping_ ||
         descriptor_->getLength()!=bytes)goto failed;
-    span_capacity_=bytes/4096;
-    spans_=IONewData(NativeAdrenoPhysicalSpan,span_capacity_);
-    if(!spans_) {status=kIOReturnNoMemory;goto failed;}
-    for(size_t offset=0;offset<bytes;offset+=4096) {
-        IOByteCount length=0;
-        addr64_t physical=descriptor_->getPhysicalSegment(offset,&length,kIOMemoryMapperNone);
-        if(!physical || (physical&4095) || length<4096 || physical>=limit || 4096>limit-physical)
-            {status=kIOReturnUnsupported;goto failed;}
-        if(contiguous && offset && physical!=spans_[0].physical+offset)
-            {status=kIOReturnUnsupported;goto failed;}
-        if(span_count_ && physical==spans_[span_count_-1].physical+spans_[span_count_-1].bytes)
-            spans_[span_count_-1].bytes+=4096;
-        else spans_[span_count_++]={offset,physical,4096};
+    {
+        const bool fast=fastSpansEnabled();
+        NativeAdrenoPhysicalSpan inline4[4]={};
+        if(!fast) {
+            span_capacity_=bytes/4096;
+            spans_=IONewData(NativeAdrenoPhysicalSpan,span_capacity_);
+            if(!spans_) {status=kIOReturnNoMemory;goto failed;}
+        }
+        uint64_t first_pa=0;
+        for(size_t offset=0;offset<bytes;) {
+            IOByteCount length=0;
+            addr64_t physical=descriptor_->getPhysicalSegment(offset,&length,kIOMemoryMapperNone);
+            if(offset==0) {first_pa=physical;}
+            size_t step=0;
+            if(!zizhan_adreno_perf::step_segment(offset,bytes,physical,(size_t)length,limit,contiguous,first_pa,fast,&step))
+                {status=kIOReturnUnsupported;goto failed;}
+            NativeAdrenoPhysicalSpan *dst=spans_?spans_:inline4;
+            if(span_count_ && physical==dst[span_count_-1].physical+dst[span_count_-1].bytes) {
+                dst[span_count_-1].bytes+=step;
+            } else {
+                const size_t cap=spans_?span_capacity_:4u;
+                if(span_count_>=cap) {
+                    const size_t new_cap=zizhan_adreno_perf::next_span_capacity(cap,bytes);
+                    NativeAdrenoPhysicalSpan *grown=IONewData(NativeAdrenoPhysicalSpan,new_cap);
+                    if(!grown) {status=kIOReturnNoMemory;goto failed;}
+                    memcpy(grown,dst,span_count_*sizeof(NativeAdrenoPhysicalSpan));
+                    if(spans_) {IODeleteData(spans_,NativeAdrenoPhysicalSpan,span_capacity_);}
+                    spans_=grown;span_capacity_=new_cap;dst=spans_;
+                }
+                dst[span_count_++]={offset,physical,step};
+            }
+            offset+=step;
+        }
+        if(!spans_) {
+            span_capacity_=span_count_?span_count_:1u;
+            spans_=IONewData(NativeAdrenoPhysicalSpan,span_capacity_);
+            if(!spans_) {status=kIOReturnNoMemory;goto failed;}
+            memcpy(spans_,inline4,span_count_*sizeof(NativeAdrenoPhysicalSpan));
+        }
     }
     bzero(mapping_,bytes);
     status=NativeAdrenoMaintainOwnedPages(mapping_,bytes,NativeAdrenoClean);
@@ -213,18 +252,44 @@ IOReturn NativeAdrenoMemory::importTask(void *task,uint64_t address,size_t bytes
     native_adreno_import_stage=16;
     if(imported_->getLength()!=bytes)goto failed;
     native_adreno_import_stage=17;
-    span_capacity_=bytes/4096;
-    spans_=IONewData(NativeAdrenoPhysicalSpan,span_capacity_);
-    if(!spans_) {status=kIOReturnNoMemory;goto failed;}
-    for(size_t offset=0;offset<bytes;offset+=4096) {
-        IOByteCount length=0;
-        addr64_t physical=imported_->getPhysicalSegment(offset,&length,kIOMemoryMapperNone);
-        if(!physical || (physical&4095) || length<4096 || physical>=limit || 4096>limit-physical)
-            {native_adreno_import_stage=18;native_adreno_import_fail_pa=physical;native_adreno_import_fail_offset=offset;
-             status=kIOReturnUnsupported;goto failed;}
-        if(span_count_ && physical==spans_[span_count_-1].physical+spans_[span_count_-1].bytes)
-            spans_[span_count_-1].bytes+=4096;
-        else spans_[span_count_++]={offset,physical,4096};
+    {
+        const bool fast=fastSpansEnabled();
+        NativeAdrenoPhysicalSpan inline4[4]={};
+        if(!fast) {
+            span_capacity_=bytes/4096;
+            spans_=IONewData(NativeAdrenoPhysicalSpan,span_capacity_);
+            if(!spans_) {status=kIOReturnNoMemory;goto failed;}
+        }
+        for(size_t offset=0;offset<bytes;) {
+            IOByteCount length=0;
+            addr64_t physical=imported_->getPhysicalSegment(offset,&length,kIOMemoryMapperNone);
+            size_t step=0;
+            if(!zizhan_adreno_perf::step_segment(offset,bytes,physical,(size_t)length,limit,false,0,fast,&step))
+                {native_adreno_import_stage=18;native_adreno_import_fail_pa=physical;native_adreno_import_fail_offset=offset;
+                 status=kIOReturnUnsupported;goto failed;}
+            NativeAdrenoPhysicalSpan *dst=spans_?spans_:inline4;
+            if(span_count_ && physical==dst[span_count_-1].physical+dst[span_count_-1].bytes) {
+                dst[span_count_-1].bytes+=step;
+            } else {
+                const size_t cap=spans_?span_capacity_:4u;
+                if(span_count_>=cap) {
+                    const size_t new_cap=zizhan_adreno_perf::next_span_capacity(cap,bytes);
+                    NativeAdrenoPhysicalSpan *grown=IONewData(NativeAdrenoPhysicalSpan,new_cap);
+                    if(!grown) {status=kIOReturnNoMemory;goto failed;}
+                    memcpy(grown,dst,span_count_*sizeof(NativeAdrenoPhysicalSpan));
+                    if(spans_) {IODeleteData(spans_,NativeAdrenoPhysicalSpan,span_capacity_);}
+                    spans_=grown;span_capacity_=new_cap;dst=spans_;
+                }
+                dst[span_count_++]={offset,physical,step};
+            }
+            offset+=step;
+        }
+        if(!spans_) {
+            span_capacity_=span_count_?span_count_:1u;
+            spans_=IONewData(NativeAdrenoPhysicalSpan,span_capacity_);
+            if(!spans_) {status=kIOReturnNoMemory;goto failed;}
+            memcpy(spans_,inline4,span_count_*sizeof(NativeAdrenoPhysicalSpan));
+        }
     }
     native_adreno_import_stage=19;
     native_adreno_pool_stats[7]=native_adreno_pool_stats[7]+(uint32_t)span_count_;

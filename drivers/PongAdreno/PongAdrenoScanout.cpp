@@ -314,7 +314,7 @@ static void shotMapPool(uint64_t phys,uint64_t bytes)
     IOLog("PONG SHOT: pool 0x%llx + %llu MiB %s\n",(unsigned long long)phys,(unsigned long long)(bytes>>20),how);
 }
 IOBufferMemoryDescriptor *dbAlloc;
-IOMemoryDescriptor *dbPool;uint64_t dbPoolBytes;   /* mode 1 on the loader's panel pool (/chosen/pong-panel-pool) */
+IOMemoryDescriptor *dbPool;IOMemoryMap *dbPoolMapping;uint64_t dbPoolBytes;   /* mode 1 on the loader's panel pool (/chosen/pong-panel-pool) */
 /* Pool buffers dbuf does not use itself are slots for backboardd's panel-sized canvases (xnu patch 0011 MiniIOSurface, boot-arg
  * pong_zc=1): step 3.1 of docs/plan/2026-10-31-zero-copy-step3.md. Taken/given under slotLock; geometry must match the panel. */
 constexpr unsigned SlotMax=8;
@@ -510,6 +510,10 @@ void dbInit(uint64_t physical,size_t rounded,uint32_t stride,uint32_t height)
             const unsigned n=poolLayout.buffers;
             dbPool=IOMemoryDescriptor::withPhysicalAddress(lease[0],uint64_t(n)*stride,kIODirectionInOut);
             if(dbPool) {
+                if(dbPool->prepare()==kIOReturnSuccess) {
+                    dbPoolMapping=dbPool->createMappingInTask(kernel_task,0,kIOMapAnywhere|kIOMapCopybackCache);
+                    if(!dbPoolMapping)dbPool->complete();
+                }
                 shotMapPool(lease[0],lease[1]);
                 for(unsigned i=0;i<n;++i){db[dbN]={lease[0]+uint64_t(i)*stride,uint64_t(i)*stride};++dbN;}
                 dbPoolBytes=uint64_t(n)*stride;
@@ -1334,6 +1338,96 @@ static int finish();static int zcFlip(int zi,uint32_t stride);
 extern "C" {volatile uint32_t pong_zc_flipped_tag,pong_zc_latched_tag;}
 uint32_t zcTag, zcFence;
 unsigned zcAsync;
+static volatile uint32_t coverRedirect, coverSeq;
+static const uint8_t *coverVa;
+static uint64_t coverPhys;
+static uint32_t coverW, coverH, coverStride;
+static const uint8_t *bufKernelVa(int idx)
+{
+    if (idx <= 0 || unsigned(idx) >= dbN) {
+        return nullptr;
+    }
+    for (unsigned s = 0; s < slotCount; ++s) {
+        if (slotDb[s] == idx && slotMapping[s]) {
+            return reinterpret_cast<const uint8_t *>(slotMapping[s]->getVirtualAddress());
+        }
+    }
+    if (dbPoolMapping && db[idx].offset != ~0ull && db[idx].offset < dbPoolBytes) {
+        return reinterpret_cast<const uint8_t *>(dbPoolMapping->getVirtualAddress()) + db[idx].offset;
+    }
+    return nullptr;
+}
+static void publishCover(int idx, uint32_t stride)
+{
+    const uint8_t *va = bufKernelVa(idx);
+    if (!va) {
+        return;
+    }
+    const uint32_t s0 = (__atomic_load_n(&coverSeq, __ATOMIC_RELAXED) & ~1u) + 1u;
+    __atomic_store_n(&coverSeq, s0, __ATOMIC_RELEASE);
+    coverVa = va;
+    coverPhys = db[idx].phys;
+    coverW = uint32_t(mode.width);
+    coverH = uint32_t(mode.height);
+    coverStride = stride ? stride : (db[idx].stride ? db[idx].stride : uint32_t(mode.stride));
+    uint32_t s1 = s0 + 1u;
+    if (s1 == 0u) {
+        s1 = 2u;
+    }
+    __atomic_store_n(&coverSeq, s1, __ATOMIC_RELEASE);
+}
+extern "C" void pong_scanout_set_cover_redirect(int active)
+{
+    if (!scanout_gate) {
+        __atomic_store_n(&coverRedirect, active ? 1u : 0u, __ATOMIC_RELEASE);
+        return;
+    }
+    IOLockLock(scanout_gate);
+    const uint32_t want = active ? 1u : 0u;
+    const uint32_t prev = __atomic_load_n(&coverRedirect, __ATOMIC_RELAXED);
+    if (want && !prev) {
+        if (dbOn && dbN) {
+            dbSettle();
+        }
+        __atomic_store_n(&coverRedirect, 1u, __ATOMIC_RELEASE);
+        if (dbShown > 0 && unsigned(dbShown) < dbN) {
+            publishCover(dbShown, db[dbShown].stride);
+        }
+        IOLog("PONG SCANOUT: cover redirect ON (shown=%d phys=0x%llx)\n",
+              dbShown, (dbShown >= 0 && unsigned(dbShown) < dbN) ? (unsigned long long)db[dbShown].phys : 0ull);
+    } else if (!want && prev) {
+        __atomic_store_n(&coverRedirect, 0u, __ATOMIC_RELEASE);
+        if (dbOn && dbShown >= 0 && unsigned(dbShown) < dbN) {
+            dbFlip(dbShown);
+        }
+        IOLog("PONG SCANOUT: cover redirect OFF (restored shown=%d)\n", dbShown);
+    }
+    IOLockUnlock(scanout_gate);
+}
+extern "C" uint32_t pong_scanout_cover_snapshot(const uint8_t **va_out, uint64_t *phys_out,
+                                                uint32_t *w_out, uint32_t *h_out, uint32_t *stride_out)
+{
+    for (unsigned tries = 0; tries < 4; ++tries) {
+        const uint32_t s0 = __atomic_load_n(&coverSeq, __ATOMIC_ACQUIRE);
+        if ((s0 & 1u) != 0u || s0 == 0u) {
+            continue;
+        }
+        const uint8_t *va = coverVa;
+        const uint64_t phys = coverPhys;
+        const uint32_t w = coverW, h = coverH, st = coverStride;
+        __asm__ volatile("dmb ishld" ::: "memory");
+        const uint32_t s1 = __atomic_load_n(&coverSeq, __ATOMIC_ACQUIRE);
+        if (s0 == s1 && va) {
+            if (va_out) { *va_out = va; }
+            if (phys_out) { *phys_out = phys; }
+            if (w_out) { *w_out = w; }
+            if (h_out) { *h_out = h; }
+            if (stride_out) { *stride_out = st; }
+            return s0 >> 1;
+        }
+    }
+    return 0;
+}
 extern "C" void pong_scanout_set_tag(uint32_t tag) { zcTag = tag; }
 extern "C" void pong_scanout_set_fence(uint32_t fence) { zcFence = fence; }
 static void zcLatchedTo(uint32_t t){for(;;){const uint32_t o=pong_zc_latched_tag;if(int32_t(t-o)<=0)return;if(OSCompareAndSwap(o,t,&pong_zc_latched_tag))return;}}
@@ -1440,23 +1534,38 @@ static int zcFlip(int zi,uint32_t stride)
     const uint64_t fw=us(mach_absolute_time()-f0);zcFenceUs+=fw;if(fw>zcFenceMaxUs)zcFenceMaxUs=fw;
     uint64_t lw=0;
     hudDraw(db[zi].phys,stride);
-    if(zi!=dbFlipped && zi!=dbShown) {
-        if(dbFlipped>=0) {   /* keep flips in order (async: this is where the presenter waits for the TE now) */
-            const uint64_t o0=mach_absolute_time();unsigned k=0;while(k<200 && !dbLatched()){IODelay(100);++k;}
-            if(dbLatched())zcLatchedTo(pong_zc_flipped_tag);
-            dbSettle();if(zcAsync)lw=us(mach_absolute_time()-o0);
+    if (__atomic_load_n(&coverRedirect, __ATOMIC_ACQUIRE)) {
+        db[zi].stride = stride;
+        dbShown = zi;
+        dbFlipped = -1;
+        publishCover(zi, stride);
+        shotCapture(db[zi].phys, stride);
+        pong_zc_flipped_tag = zcTag;
+        zcLatchedTo(zcTag);
+        for (unsigned p = 0; p < 40; ++p) {
+            IODelay(100);
         }
-        dbFlip(zi);
+        tMapped = mach_absolute_time();
+    } else {
+        if(zi!=dbFlipped && zi!=dbShown) {
+            if(dbFlipped>=0) {   /* keep flips in order (async: this is where the presenter waits for the TE now) */
+                const uint64_t o0=mach_absolute_time();unsigned k=0;while(k<200 && !dbLatched()){IODelay(100);++k;}
+                if(dbLatched())zcLatchedTo(pong_zc_flipped_tag);
+                dbSettle();if(zcAsync)lw=us(mach_absolute_time()-o0);
+            }
+            dbFlip(zi);
+        }
+        publishCover(zi, stride);
+        shotCapture(db[zi].phys,stride);
+        pong_zc_flipped_tag=zcTag;   /* after the CTL_FLUSH write (dbFlip ends in a dsb) */
+        const uint64_t l0=mach_absolute_time();unsigned k=0;tMapped=l0;   /* GT c: entry, flip written, latched (async: returned) */
+        if(!zcAsync) {
+            while(k<200 && !dbLatched()){IODelay(100);++k;}   /* <= 20 ms, about one 120 Hz frame plus slack */
+            lw=us(mach_absolute_time()-l0);if(!dbLatched())++zcLatchTimeouts;else zcLatchedTo(zcTag);
+        }
+        zcLatchUs+=lw;if(lw>zcLatchMaxUs)zcLatchMaxUs=lw;
+        dbSettle();
     }
-    shotCapture(db[zi].phys,stride);
-    pong_zc_flipped_tag=zcTag;   /* after the CTL_FLUSH write (dbFlip ends in a dsb) */
-    const uint64_t l0=mach_absolute_time();unsigned k=0;tMapped=l0;   /* GT c: entry, flip written, latched (async: returned) */
-    if(!zcAsync) {
-        while(k<200 && !dbLatched()){IODelay(100);++k;}   /* <= 20 ms, about one 120 Hz frame plus slack */
-        lw=us(mach_absolute_time()-l0);if(!dbLatched())++zcLatchTimeouts;else zcLatchedTo(zcTag);
-    }
-    zcLatchUs+=lw;if(lw>zcLatchMaxUs)zcLatchMaxUs=lw;
-    dbSettle();
     if(zcFrames<=4) {
         char text[220];
         dpuLine(text,snprintf(text,sizeof text,"PONG ZC: frame %llu: buffer %d at 0x%llx stride %u, fence %u/%u after %llu us, %s after %llu us\n",
@@ -1483,7 +1592,19 @@ static int finish()
     if(ok && completed++<3)note("GPU frame completed",pending.id,0);
     if(dbFirstCopy==1 && pending.delivered && pending.done){dbFirstCopy=2;dbMark(ok?"first GPU copy: retired":"first GPU copy: failed");}
     if(dbFirstCopy==2 && dbMode==3 && dbKlog && completed==64){dbFirstCopy=3;dbMark("64 GPU copies through the two-range mapping done");}
-    if(ok && dbOn && pending.target!=dbShown && pending.target!=dbFlipped){hudDraw(db[pending.target].phys,db[pending.target].stride?db[pending.target].stride:uint32_t(mode.stride));dbFlip(pending.target);shotCapture(db[pending.target].phys,db[pending.target].stride?db[pending.target].stride:uint32_t(mode.stride));}   /* the copy has retired: show it */
+    if(ok && dbOn && pending.target!=dbShown && pending.target!=dbFlipped){
+        const uint32_t st = db[pending.target].stride ? db[pending.target].stride : uint32_t(mode.stride);
+        hudDraw(db[pending.target].phys, st);
+        if (__atomic_load_n(&coverRedirect, __ATOMIC_ACQUIRE)) {
+            dbShown = pending.target;
+            dbFlipped = -1;
+            publishCover(pending.target, st);
+        } else {
+            dbFlip(pending.target);
+            publishCover(pending.target, st);
+        }
+        shotCapture(db[pending.target].phys, st);
+    }   /* the copy has retired: show it */
     /* GT c: a copy (offered, picked up, retired) or, id bit 31, a zero-copy frame (zcFlip entered, flip written, latched) */
     if(pong_gtrace_on)pong_gtrace_note(3,(uint32_t)pending.id|(pending.memory?0u:0x80000000u),us(pending.offeredAt),pending.delivered?us(tMapped):0,us(mach_absolute_time()));
     const uint64_t r0=mach_absolute_time();

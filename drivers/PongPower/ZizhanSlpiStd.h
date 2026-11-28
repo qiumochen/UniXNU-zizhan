@@ -413,9 +413,11 @@ inline int32_t invoke(Fs &fs, uint32_t method, const Call &c) {
     }
     const Node &n = fs.nodes[node];
     uint64_t st[12] = {};
+    const uint64_t ts = !strncmp(n.path, "/mnt/vendor/persist/", 20) ? 1700000100ull : 1700000000ull;
     st[0] = 96; st[1] = 1; st[2] = uint64_t(node) + 1;
     st[3] = uint64_t(n.dir ? 040755u : 0100644u) | (uint64_t(n.dir ? 2 : 1) << 32);
     st[5] = n.size;
+    st[6] = ts; st[8] = ts; st[10] = ts;
     c.put(0, 0, st, 96);
     return kOk;
   }

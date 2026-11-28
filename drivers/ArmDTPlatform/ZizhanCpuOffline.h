@@ -20,6 +20,8 @@ kern_return_t processor_start_from_user(processor_t processor);
 namespace zizhan_cpu_offline {
 constexpr unsigned kFirst = 2, kLast = 7;
 static uint32_t gOffline;   // bit per CPU taken offline by us
+static IOLock *gLock;
+static volatile uint32_t gSystemSleepHold;
 
 static void apply(bool off) {
   uint64_t t0 = 0, t1 = 0;
@@ -45,19 +47,42 @@ static void apply(bool off) {
         gOffline, (t1 - t0) / 1000000);
 }
 
+static void prepare_system_sleep() {
+  if (!gLock) return;
+  IOLockLock(gLock);
+  __atomic_store_n(&gSystemSleepHold, 1u, __ATOMIC_RELEASE);
+  if (gOffline) apply(false);
+  IOLockUnlock(gLock);
+}
+
+static void finish_system_wake() {
+  if (!gLock) return;
+  IOLockLock(gLock);
+  __atomic_store_n(&gSystemSleepHold, 0u, __ATOMIC_RELEASE);
+  IOLockUnlock(gLock);
+}
+
 static void worker(void *, wait_result_t) {
   int last = 1;
   unsigned offFor = 0;
   for (;;) {
     IOSleep(500);
-    const int state = zizhan_display_power_state();
-    if (state == 0) {
-      if (++offFor == 4 && !gOffline) apply(true);   // off for 2 s
-    } else {
+    if (__atomic_load_n(&gSystemSleepHold, __ATOMIC_ACQUIRE)) {
       offFor = 0;
-      if (gOffline) apply(false);
+      continue;
     }
-    last = state;
+    IOLockLock(gLock);
+    if (!__atomic_load_n(&gSystemSleepHold, __ATOMIC_ACQUIRE)) {
+      const int state = zizhan_display_power_state();
+      if (state == 0) {
+        if (++offFor == 4 && !gOffline) apply(true);   // off for 2 s
+      } else {
+        offFor = 0;
+        if (gOffline) apply(false);
+      }
+      last = state;
+    }
+    IOLockUnlock(gLock);
   }
   (void)last;
 }
@@ -69,6 +94,8 @@ static void start() {
     IOLog("ZIZHAN_CPU_OFFLINE: SKIP processor_exit=0\n");
     return;
   }
+  if (!gLock) gLock = IOLockAlloc();
+  if (!gLock) return;
   thread_t th = THREAD_NULL;
   if (kernel_thread_start(worker, nullptr, &th) == KERN_SUCCESS) thread_deallocate(th);
   IOLog("ZIZHAN_CPU_OFFLINE: RUNNING cpus %u..%u follow the display\n", kFirst, kLast);

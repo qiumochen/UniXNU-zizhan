@@ -4,7 +4,9 @@
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include <AudioToolbox/AudioQueue.h>
 #include <dispatch/dispatch.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,9 +16,11 @@
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <mach-o/nlist.h>
 #include <math.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -35,6 +39,9 @@
 #include "zizhan-network-observer18.h"
 #include "zizhan-weather-observer18.h"
 #include "zizhan-statusbar18.h"
+#include "zizhan-scene-orient18.h"
+#include "zizhan-cllocation18.h"
+#include "zizhan-ipa-install18.h"
 
 static bool software_composition;
 static bool scanout_format;
@@ -77,6 +84,7 @@ static int (*release_service)(uint32_t);
 static CFURLRef container_root, container_library;
 static void launchservices_directories(void);
 static void installd_directory(void);
+static void installd_codesign_policy(void);
 static void pluginkit_directory(void);
 static void phone_selector_image(const struct mach_header *,intptr_t);
 static void phone_gestalt_image(const struct mach_header *,intptr_t);
@@ -1371,6 +1379,8 @@ static void photos_context_image(const struct mach_header *header,intptr_t slide
  * This selects a real software backend; no Metal device is fabricated.
  * Match this image's UUID and entry instructions, never a 20G81 address.
  */
+static void springboard_scene_orientation_policy(void);
+static void zizhan_cllocation_policy(void);
 static void compositor_image(const struct mach_header *header,intptr_t slide)
 {
     brightness18_image(header,slide);
@@ -1382,8 +1392,11 @@ static void compositor_image(const struct mach_header *header,intptr_t slide)
     container_persona_policy();
     springboard_platform_policy();
     springboard_setup_policy();
+    springboard_scene_orientation_policy();
+    zizhan_cllocation_policy();
     launchservices_directories();
     installd_directory();
+    installd_codesign_policy();
     pluginkit_directory();
     if((!software_composition && !scanout_format) || ((!software_composition || renderer_installed) && format_installed) || header->magic!=MH_MAGIC_64)return;
     const struct mach_header_64 *h=(const struct mach_header_64 *)header;
@@ -1445,14 +1458,23 @@ static id volume18_control(void)
 
 static struct { uint64_t presses; bool held; } volume18_keys[2];
 static bool volume18_ready;
+static bool volume18_has_cancel;
 static int volume18_ready_token=-1;
 static const char *volume18_names[]={"dev.unixnu.pong.volume18.increase","dev.unixnu.pong.volume18.decrease"};
+static void volume18_cancel(void)
+{
+    id control=volume18_control();
+    SEL cancel=sel_registerName("cancelVolumeEvent");
+    if(!control || !method_abi(class_getInstanceMethod(object_getClass(control),cancel),"v",0,""))return;
+    ((void(*)(id,SEL))objc_msgSend)(control,cancel);
+}
 static bool volume18_step(unsigned index)
 {
     id control=volume18_control();
     SEL action=sel_registerName(index?"decreaseVolume":"increaseVolume");
     if(!control || !method_abi(class_getInstanceMethod(object_getClass(control),action),"v",0,""))return false;
     ((void(*)(id,SEL))objc_msgSend)(control,action);
+    if(volume18_has_cancel)volume18_cancel();
     return true;
 }
 static void volume18_repeat(void *context)
@@ -1476,17 +1498,24 @@ static void volume18_prepare(void *context)
         else fprintf(stderr,"Pong volume18: matching SBVolumeControl ABI unavailable; keep consumer HID\n");
         return;
     }
+    volume18_has_cancel=method_abi(class_getInstanceMethod(cls,sel_registerName("cancelVolumeEvent")),"v",0,"");
     for(unsigned i=0;i<2;i++) {
         int token=-1;
         if(notify_register_dispatch(volume18_names[i],&token,dispatch_get_main_queue(),^(int changed){
             uint64_t state=0;if(notify_get_state(changed,&state))return;
             uint64_t count=state>>1,old=volume18_keys[i].presses;
+            bool was_held=volume18_keys[i].held;
             volume18_keys[i].held=(state&1)!=0;volume18_keys[i].presses=count;
             // A restarted backboardd begins a new counter. Consume the new
             // click, never replay an old queue or synthesize a device report.
+            // 22H374 SBVolumeControl increaseVolume/decreaseVolume arm an
+            // NSRunLoop performSelector repeat until cancelVolumeEvent runs.
             uint64_t steps=count>=old?count-old:count;
             if(steps>8)steps=8;
+            if(steps && volume18_has_cancel && !volume18_keys[1u-i].held)volume18_cancel();
             for(uint64_t n=0;n<steps;n++)(void)volume18_step(i);
+            if(!volume18_keys[i].held && (steps || was_held) && !volume18_keys[1u-i].held)
+                volume18_cancel();
             if(steps && volume18_keys[i].held)dispatch_after_f(
                 dispatch_time(DISPATCH_TIME_NOW,400*NSEC_PER_MSEC),dispatch_get_main_queue(),
                 (void *)(uintptr_t)((count<<1)|i),volume18_repeat);
@@ -1497,6 +1526,167 @@ static void volume18_prepare(void *context)
     if(notify_register_check("dev.unixnu.pong.volume18.ready",&volume18_ready_token)!=NOTIFY_STATUS_OK)return;
     volume18_ready=true;(void)notify_set_state(volume18_ready_token,1);
     fprintf(stderr,"Pong volume18: physical volume keys routed to 22H374 SBVolumeControl; power uses HID\n");
+}
+
+struct audio18_aq_ctx {
+    OSStatus (*enqueue)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    double phase;
+    double step;
+    unsigned callbacks;
+    unsigned max_callbacks;
+};
+
+static void audio18_aq_fill(struct audio18_aq_ctx *ctx, AudioQueueBufferRef buf)
+{
+    const unsigned frames = 4800u;
+    float *dst = (float *)buf->mAudioData;
+    for (unsigned i = 0; i < frames; ++i) {
+        float s = 0.5f * sinf((float)ctx->phase);
+        dst[2 * i] = s;
+        dst[2 * i + 1] = s;
+        ctx->phase += ctx->step;
+        if (ctx->phase > 6.283185307179586) ctx->phase -= 6.283185307179586;
+    }
+    buf->mAudioDataByteSize = frames * 2u * (UInt32)sizeof(float);
+}
+
+static void audio18_aq_cb(void *user, AudioQueueRef q, AudioQueueBufferRef buf)
+{
+    struct audio18_aq_ctx *ctx = (struct audio18_aq_ctx *)user;
+    if (!ctx || ctx->callbacks >= ctx->max_callbacks) return;
+    ctx->callbacks++;
+    audio18_aq_fill(ctx, buf);
+    (void)ctx->enqueue(q, buf, 0, NULL);
+}
+
+static void audio18_test_session(void *context)
+{
+    unsigned session = (unsigned)(uintptr_t)context;
+    void *atb = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
+    typedef OSStatus (*aq_new_fn)(const AudioStreamBasicDescription *, AudioQueueOutputCallback, void *, CFRunLoopRef, CFStringRef, UInt32, AudioQueueRef *);
+    typedef OSStatus (*aq_alloc_fn)(AudioQueueRef, UInt32, AudioQueueBufferRef *);
+    typedef OSStatus (*aq_enq_fn)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    typedef OSStatus (*aq_start_fn)(AudioQueueRef, const AudioTimeStamp *);
+    typedef OSStatus (*aq_stop_fn)(AudioQueueRef, Boolean);
+    typedef OSStatus (*aq_disp_fn)(AudioQueueRef, Boolean);
+    aq_new_fn fn_new = atb ? (aq_new_fn)dlsym(atb, "AudioQueueNewOutput") : NULL;
+    aq_alloc_fn fn_alloc = atb ? (aq_alloc_fn)dlsym(atb, "AudioQueueAllocateBuffer") : NULL;
+    aq_enq_fn fn_enq = atb ? (aq_enq_fn)dlsym(atb, "AudioQueueEnqueueBuffer") : NULL;
+    aq_start_fn fn_start = atb ? (aq_start_fn)dlsym(atb, "AudioQueueStart") : NULL;
+    aq_stop_fn fn_stop = atb ? (aq_stop_fn)dlsym(atb, "AudioQueueStop") : NULL;
+    aq_disp_fn fn_disp = atb ? (aq_disp_fn)dlsym(atb, "AudioQueueDispose") : NULL;
+    if (!fn_new || !fn_alloc || !fn_enq || !fn_start || !fn_stop || !fn_disp) {
+        fprintf(stderr, "Pong audio18: session=%u AudioToolbox symbols unavailable\n", session);
+        return;
+    }
+    const double hz = (session == 1u) ? 440.0 : 660.0;
+    AudioStreamBasicDescription fmt = {0};
+    fmt.mSampleRate = 48000.0;
+    fmt.mFormatID = kAudioFormatLinearPCM;
+    fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    fmt.mBytesPerPacket = 8;
+    fmt.mFramesPerPacket = 1;
+    fmt.mBytesPerFrame = 8;
+    fmt.mChannelsPerFrame = 2;
+    fmt.mBitsPerChannel = 32;
+    struct audio18_aq_ctx ctx = { .enqueue = fn_enq, .phase = 0.0, .step = 6.283185307179586 * hz / 48000.0, .callbacks = 0, .max_callbacks = 16 };
+    AudioQueueRef q = NULL;
+    OSStatus st_new = fn_new(&fmt, audio18_aq_cb, &ctx, NULL, NULL, 0, &q);
+    OSStatus st_start = -1, st_stop = -1;
+    if (st_new == 0 && q) {
+        for (unsigned i = 0; i < 3; ++i) {
+            AudioQueueBufferRef b = NULL;
+            if (fn_alloc(q, 4800u * 8u, &b) == 0 && b) {
+                audio18_aq_fill(&ctx, b);
+                (void)fn_enq(q, b, 0, NULL);
+            }
+        }
+        st_start = fn_start(q, NULL);
+        usleep(1500000);
+        ctx.max_callbacks = 0;
+        st_stop = fn_stop(q, true);
+        (void)fn_disp(q, true);
+    }
+    fprintf(stderr, "Pong audio18: test session=%u hz=%.0f new=%d start=%d callbacks=%u stop=%d\n",
+            session, hz, (int)st_new, (int)st_start, ctx.callbacks, (int)st_stop);
+}
+
+struct audio18_cap_ctx {
+    OSStatus (*enqueue)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    unsigned callbacks;
+    unsigned max_callbacks;
+    unsigned total_frames;
+    float max_abs;
+};
+
+typedef void (*AudioQueueInputCbFn)(void *, AudioQueueRef, AudioQueueBufferRef, const AudioTimeStamp *, UInt32, const AudioStreamPacketDescription *);
+
+static void audio18_cap_cb(void *user, AudioQueueRef q, AudioQueueBufferRef buf,
+                           const AudioTimeStamp *start_time, UInt32 num_packets,
+                           const AudioStreamPacketDescription *pkt_desc)
+{
+    (void)start_time; (void)num_packets; (void)pkt_desc;
+    struct audio18_cap_ctx *ctx = (struct audio18_cap_ctx *)user;
+    if (!ctx || !buf || ctx->callbacks >= ctx->max_callbacks) return;
+    ctx->callbacks++;
+    const unsigned frames = buf->mAudioDataByteSize / (UInt32)sizeof(float);
+    const float *samples = (const float *)buf->mAudioData;
+    ctx->total_frames += frames;
+    for (unsigned i = 0; i < frames; ++i) {
+        float a = fabsf(samples[i]);
+        if (a > ctx->max_abs) ctx->max_abs = a;
+    }
+    (void)ctx->enqueue(q, buf, 0, NULL);
+}
+
+static void audio18_cap_test_session(void *context)
+{
+    unsigned session = (unsigned)(uintptr_t)context;
+    void *atb = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
+    typedef OSStatus (*aq_new_in_fn)(const AudioStreamBasicDescription *, AudioQueueInputCbFn, void *, CFRunLoopRef, CFStringRef, UInt32, AudioQueueRef *);
+    typedef OSStatus (*aq_alloc_fn)(AudioQueueRef, UInt32, AudioQueueBufferRef *);
+    typedef OSStatus (*aq_enq_fn)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    typedef OSStatus (*aq_start_fn)(AudioQueueRef, const AudioTimeStamp *);
+    typedef OSStatus (*aq_stop_fn)(AudioQueueRef, Boolean);
+    typedef OSStatus (*aq_disp_fn)(AudioQueueRef, Boolean);
+    aq_new_in_fn fn_new = atb ? (aq_new_in_fn)dlsym(atb, "AudioQueueNewInput") : NULL;
+    aq_alloc_fn fn_alloc = atb ? (aq_alloc_fn)dlsym(atb, "AudioQueueAllocateBuffer") : NULL;
+    aq_enq_fn fn_enq = atb ? (aq_enq_fn)dlsym(atb, "AudioQueueEnqueueBuffer") : NULL;
+    aq_start_fn fn_start = atb ? (aq_start_fn)dlsym(atb, "AudioQueueStart") : NULL;
+    aq_stop_fn fn_stop = atb ? (aq_stop_fn)dlsym(atb, "AudioQueueStop") : NULL;
+    aq_disp_fn fn_disp = atb ? (aq_disp_fn)dlsym(atb, "AudioQueueDispose") : NULL;
+    if (!fn_new || !fn_alloc || !fn_enq || !fn_start || !fn_stop || !fn_disp) {
+        fprintf(stderr, "Pong audio18: capture session=%u AudioToolbox symbols unavailable\n", session);
+        return;
+    }
+    AudioStreamBasicDescription fmt = {0};
+    fmt.mSampleRate = 48000.0;
+    fmt.mFormatID = kAudioFormatLinearPCM;
+    fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    fmt.mBytesPerPacket = 4;
+    fmt.mFramesPerPacket = 1;
+    fmt.mBytesPerFrame = 4;
+    fmt.mChannelsPerFrame = 1;
+    fmt.mBitsPerChannel = 32;
+    struct audio18_cap_ctx ctx = { .enqueue = fn_enq, .callbacks = 0, .max_callbacks = 32, .total_frames = 0, .max_abs = 0.0f };
+    AudioQueueRef q = NULL;
+    OSStatus st_new = fn_new(&fmt, audio18_cap_cb, &ctx, NULL, NULL, 0, &q);
+    OSStatus st_start = -1, st_stop = -1;
+    if (st_new == 0 && q) {
+        for (unsigned i = 0; i < 3; ++i) {
+            AudioQueueBufferRef b = NULL;
+            if (fn_alloc(q, 4800u * 4u, &b) == 0 && b) {
+                (void)fn_enq(q, b, 0, NULL);
+            }
+        }
+        st_start = fn_start(q, NULL);
+        usleep(1600000);
+        ctx.max_callbacks = 0;
+        st_stop = fn_stop(q, true);
+        (void)fn_disp(q, true);
+    }
+    fprintf(stderr, "Pong audio18: capture session=%u new=%d start=%d callbacks=%u frames=%u max_abs=%.5f stop=%d\n",
+            session, (int)st_new, (int)st_start, ctx.callbacks, ctx.total_frames, (double)ctx.max_abs, (int)st_stop);
 }
 
 static bool zizhan_bringup_preferences(void)
@@ -1609,6 +1799,29 @@ static void open_url_on_main(void *unused)
     if(!pending_open_url[0])return;
     Class workspace=objc_lookUpClass("LSApplicationWorkspace");
     id ws=workspace?((id(*)(id,SEL))objc_msgSend)((id)workspace,sel_registerName("defaultWorkspace")):nil;
+    if(!strncmp(pending_open_url,"bundle:",7) && pending_open_url[7]) {
+        SEL app=sel_registerName("openApplicationWithBundleID:");
+        CFStringRef identifier=CFStringCreateWithCString(NULL,pending_open_url+7,kCFStringEncodingUTF8);
+        BOOL ok=NO;
+        if(ws && identifier && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(ws,sel_registerName("respondsToSelector:"),app))
+            ok=((BOOL(*)(id,SEL,id))objc_msgSend)(ws,app,(id)identifier);
+        if(!ok && identifier) {
+            Class uiAppCls=objc_lookUpClass("UIApplication");
+            id sb=uiAppCls?((id(*)(Class,SEL))objc_msgSend)(uiAppCls,sel_registerName("sharedApplication")):nil;
+            SEL sLaunch=sel_registerName("launchApplicationWithIdentifier:suspended:");
+            if(sb && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(sb,sel_registerName("respondsToSelector:"),sLaunch))
+                ok=((BOOL(*)(id,SEL,id,BOOL))objc_msgSend)(sb,sLaunch,(id)identifier,NO);
+        }
+        static unsigned bundle_retries;
+        if(!ok && bundle_retries<2) {
+            bundle_retries++;
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,6*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,open_url_on_main);
+        }
+        fprintf(stderr,"Pong UI18: open-bundle %s returned=%d retry=%u (workspace %d)\n",
+            pending_open_url+7,(int)ok,bundle_retries,ws!=nil);
+        if(identifier)CFRelease(identifier);
+        return;
+    }
     CFURLRef target=CFURLCreateWithBytes(NULL,(const UInt8 *)pending_open_url,strlen(pending_open_url),kCFStringEncodingUTF8,NULL);
     BOOL accepted=NO;
     SEL open=sel_registerName("openSensitiveURL:withOptions:");
@@ -1723,6 +1936,187 @@ static void installd_directory(void)
     fprintf(stderr,"Pong MI18: native installd uses writable _installd Library\n");
 }
 
+/* Track 2 (APP-02): Allow decrypted (cryptid == 0) Ad-hoc / self-signed 4K & 16K third-party IPAs
+ * through installd's MICodeSigningVerifier while preserving clean rejection of FairPlay-encrypted
+ * (cryptid != 0) App Store binaries. Opt-out via boot-arg zizhan_ipa_install=0. */
+static bool installd_codesign_installed;
+static IMP mi_perform_val_original;
+static IMP mi_validate_copy_original;
+
+static int zizhan_mi_inspect_url(id url, ZizhanMachoReport *rep, id *ent_dict_out)
+{
+    if(!url)return ZIZHAN_IPA_ERR_ARGS;
+    UInt8 pbuf[1024]={0};
+    if(!CFURLGetFileSystemRepresentation((CFURLRef)url,true,pbuf,sizeof(pbuf)-1))return ZIZHAN_IPA_ERR_ARGS;
+    struct stat st;
+    if(lstat((const char *)pbuf,&st)!=0)return ZIZHAN_IPA_ERR_ARGS;
+    char exec_path[1024]={0};
+    if(S_ISDIR(st.st_mode)) {
+        /* Bundle directory: read Info.plist CFBundleExecutable */
+        char plist_path[1024];
+        snprintf(plist_path,sizeof(plist_path),"%s/Info.plist",(const char *)pbuf);
+        Class dict_cls=objc_lookUpClass("NSDictionary"),str_cls=objc_lookUpClass("NSString");
+        id pstr=str_cls?((id(*)(Class,SEL,const char *))objc_msgSend)(str_cls,sel_registerName("stringWithUTF8String:"),plist_path):nil;
+        id info=(dict_cls && pstr)?((id(*)(Class,SEL,id))objc_msgSend)(dict_cls,sel_registerName("dictionaryWithContentsOfFile:"),pstr):nil;
+        id exe=info?((id(*)(id,SEL,id))objc_msgSend)(info,sel_registerName("objectForKey:"),(id)CFSTR("CFBundleExecutable")):nil;
+        const char *ename=exe?((const char *(*)(id,SEL))objc_msgSend)(exe,sel_registerName("UTF8String")):NULL;
+        if(!ename || !ename[0])return ZIZHAN_IPA_ERR_NOT_MACHO;
+        snprintf(exec_path,sizeof(exec_path),"%s/%s",(const char *)pbuf,ename);
+    } else {
+        snprintf(exec_path,sizeof(exec_path),"%s",(const char *)pbuf);
+    }
+    int fd=open(exec_path,O_RDONLY);
+    if(fd<0)return ZIZHAN_IPA_ERR_ARGS;
+    struct stat est;
+    if(fstat(fd,&est)!=0 || est.st_size<64 || est.st_size>(512LL<<20)){close(fd);return ZIZHAN_IPA_ERR_TRUNCATED;}
+    size_t sz=(size_t)est.st_size;
+    uint8_t *buf=(uint8_t *)malloc(sz);
+    if(!buf){close(fd);return ZIZHAN_IPA_ERR_ARGS;}
+    size_t off=0;
+    while(off<sz) {
+        ssize_t r=read(fd,buf+off,sz-off);
+        if(r<=0)break;
+        off+=(size_t)r;
+    }
+    close(fd);
+    if(off!=sz){free(buf);return ZIZHAN_IPA_ERR_TRUNCATED;}
+    int rc=zizhan_macho_inspect(buf,sz,rep);
+    if(rc==ZIZHAN_IPA_OK && ent_dict_out && rep->entitlements_len>0 &&
+       (uint64_t)rep->entitlements_off+rep->entitlements_len<=sz) {
+        CFDataRef edata=CFDataCreate(NULL,buf+rep->entitlements_off,(CFIndex)rep->entitlements_len);
+        if(edata) {
+            CFPropertyListRef plist=CFPropertyListCreateWithData(NULL,edata,kCFPropertyListImmutable,NULL,NULL);
+            if(plist) {
+                if(CFGetTypeID(plist)==CFDictionaryGetTypeID())
+                    *ent_dict_out=((id(*)(id,SEL))objc_msgSend)((id)plist,sel_registerName("autorelease"));
+                else
+                    CFRelease(plist);
+            }
+            CFRelease(edata);
+        }
+    }
+    free(buf);
+    return rc;
+}
+
+static BOOL zizhan_mi_perform_validation(id self,SEL selector,id *error)
+{
+    SEL s_bundle=sel_registerName("bundle"),s_exe=sel_registerName("executableURL");
+    id bundle=((BOOL(*)(id,SEL,SEL))objc_msgSend)(self,sel_registerName("respondsToSelector:"),s_bundle)?
+        ((id(*)(id,SEL))objc_msgSend)(self,s_bundle):nil;
+    id exe_url=(bundle && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(bundle,sel_registerName("respondsToSelector:"),s_exe))?
+        ((id(*)(id,SEL))objc_msgSend)(bundle,s_exe):nil;
+    ZizhanMachoReport rep;
+    int rc=zizhan_mi_inspect_url(exe_url,&rep,NULL);
+    if(rc==ZIZHAN_IPA_ERR_FAIRPLAY_ENCRYPTED) {
+        fprintf(stderr,"Zizhan MI18: REJECT FairPlay encrypted Mach-O cryptid=%u\n",rep.cryptid);
+        return ((BOOL(*)(id,SEL,id *))mi_perform_val_original)(self,selector,error);
+    }
+    if(rc==ZIZHAN_IPA_OK) {
+        const char *yes_sels[]={"setAllowAdhocSigning:","setSkipProfileIDValidation:"};
+        const char *no_sels[]={"setPerformOnlineAuthorization:","setVerifyTrustCachePresence:","setValidateResources:"};
+        for(unsigned i=0;i<2;i++) {
+            SEL s=sel_registerName(yes_sels[i]);
+            if(((BOOL(*)(id,SEL,SEL))objc_msgSend)(self,sel_registerName("respondsToSelector:"),s))
+                ((void(*)(id,SEL,BOOL))objc_msgSend)(self,s,YES);
+        }
+        for(unsigned i=0;i<3;i++) {
+            SEL s=sel_registerName(no_sels[i]);
+            if(((BOOL(*)(id,SEL,SEL))objc_msgSend)(self,sel_registerName("respondsToSelector:"),s))
+                ((void(*)(id,SEL,BOOL))objc_msgSend)(self,s,NO);
+        }
+    }
+    return ((BOOL(*)(id,SEL,id *))mi_perform_val_original)(self,selector,error);
+}
+
+static id zizhan_mi_validate_and_copy(id cls,SEL selector,id url,id options,id *error)
+{
+    ZizhanMachoReport rep;
+    id ent_dict=nil;
+    int rc=zizhan_mi_inspect_url(url,&rep,&ent_dict);
+    if(rc==ZIZHAN_IPA_ERR_FAIRPLAY_ENCRYPTED) {
+        return ((id(*)(id,SEL,id,id,id *))mi_validate_copy_original)(cls,selector,url,options,error);
+    }
+    id res=((id(*)(id,SEL,id,id,id *))mi_validate_copy_original)(cls,selector,url,options,error);
+    if(rc!=ZIZHAN_IPA_OK)return res;
+
+    const CFStringRef *k_cdhash=dlsym(RTLD_DEFAULT,"kMISValidationInfoCdHash");
+    const CFStringRef *k_sigid=dlsym(RTLD_DEFAULT,"kMISValidationInfoSigningID");
+    const CFStringRef *k_stype=dlsym(RTLD_DEFAULT,"kMISValidationInfoSignerType");
+    const CFStringRef *k_ents=dlsym(RTLD_DEFAULT,"kMISValidationInfoEntitlements");
+    const CFStringRef *k_native=dlsym(RTLD_DEFAULT,"kMISValidationInfoIsNativeForPlatform");
+
+    CFMutableDictionaryRef info=res?
+        CFDictionaryCreateMutableCopy(NULL,0,(CFDictionaryRef)res):
+        CFDictionaryCreateMutable(NULL,8,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if(!info)return res;
+
+    const char *sid=rep.signing_id[0]?rep.signing_id:"com.zizhan.adhoc";
+    if(!res) {
+        CFDataRef cdh=CFDataCreate(NULL,rep.cdhash,20);
+        if(cdh && k_cdhash && *k_cdhash)CFDictionarySetValue(info,*k_cdhash,cdh);
+        if(cdh)CFRelease(cdh);
+
+        CFStringRef sref=CFStringCreateWithCString(NULL,sid,kCFStringEncodingUTF8);
+        if(sref && k_sigid && *k_sigid)CFDictionarySetValue(info,*k_sigid,sref);
+        if(sref)CFRelease(sref);
+
+        int stype=6; /* 22H374 libmis AdHoc=6 -> MICodeSignerType=5 */
+        CFNumberRef ntype=CFNumberCreate(NULL,kCFNumberIntType,&stype);
+        if(ntype && k_stype && *k_stype)CFDictionarySetValue(info,*k_stype,ntype);
+        if(ntype)CFRelease(ntype);
+
+        if(k_native && *k_native)CFDictionarySetValue(info,*k_native,kCFBooleanTrue);
+    }
+
+    /* Ensure every decrypted Ad-hoc bundle carries application-identifier so installd accepts bare codesign -s - IPAs */
+    if(k_ents && *k_ents) {
+        CFDictionaryRef cur_ents=(CFDictionaryRef)CFDictionaryGetValue(info,*k_ents);
+        if(!cur_ents && ent_dict)cur_ents=(CFDictionaryRef)ent_dict;
+        CFMutableDictionaryRef ments=cur_ents?
+            CFDictionaryCreateMutableCopy(NULL,0,cur_ents):
+            CFDictionaryCreateMutable(NULL,4,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        if(ments) {
+            if(!CFDictionaryGetValue(ments,CFSTR("application-identifier"))) {
+                char appid[320];
+                snprintf(appid,sizeof(appid),"ZIZHAN0000.%s",sid);
+                CFStringRef aref=CFStringCreateWithCString(NULL,appid,kCFStringEncodingUTF8);
+                if(aref){CFDictionarySetValue(ments,CFSTR("application-identifier"),aref);CFRelease(aref);}
+            }
+            if(!CFDictionaryGetValue(ments,CFSTR("keychain-access-groups"))) {
+                const void *kag[2]={CFSTR("ZIZHAN0000.*"),CFSTR("*")};
+                CFArrayRef arr=CFArrayCreate(NULL,kag,2,&kCFTypeArrayCallBacks);
+                if(arr){CFDictionarySetValue(ments,CFSTR("keychain-access-groups"),arr);CFRelease(arr);}
+            }
+            if(!CFDictionaryGetValue(ments,CFSTR("com.apple.security.application-groups"))) {
+                const void *ag[1]={CFSTR("group.com.zizhan.shared")};
+                CFArrayRef arr=CFArrayCreate(NULL,ag,1,&kCFTypeArrayCallBacks);
+                if(arr){CFDictionarySetValue(ments,CFSTR("com.apple.security.application-groups"),arr);CFRelease(arr);}
+            }
+            CFDictionarySetValue(info,*k_ents,ments);
+            CFRelease(ments);
+        }
+    }
+
+    if(!res && error)*error=nil;
+    fprintf(stderr,"Zizhan MI18: validated decrypted Mach-O id=%s page_bytes=%u orig_ok=%d\n",sid,rep.cd_page_bytes,res!=nil);
+    return ((id(*)(id,SEL))objc_msgSend)((id)info,sel_registerName("autorelease"));
+}
+
+static void installd_codesign_policy(void)
+{
+    if(!installd_process || installd_codesign_installed || boot_option("zizhan_ipa_install=0"))return;
+    Class cls=objc_lookUpClass("MICodeSigningVerifier");
+    if(!cls)return;
+    Method m_perf=class_getInstanceMethod(cls,sel_registerName("performValidationWithError:"));
+    Method m_copy=class_getClassMethod(cls,sel_registerName("_validateSignatureAndCopyInfoForURL:withOptions:error:"));
+    if(!m_perf || !m_copy)return;
+    mi_perform_val_original=method_setImplementation(m_perf,(IMP)zizhan_mi_perform_validation);
+    mi_validate_copy_original=method_setImplementation(m_copy,(IMP)zizhan_mi_validate_and_copy);
+    installd_codesign_installed=mi_perform_val_original!=NULL && mi_validate_copy_original!=NULL;
+    fprintf(stderr,"Zizhan MI18: decrypted 4K/16K IPA MICodeSigningVerifier hook=%d\n",(int)installd_codesign_installed);
+}
+
 static id ls_directory(id self,SEL selector)
 {
     (void)self;
@@ -1739,6 +2133,27 @@ static id ls_directory(id self,SEL selector)
  * preserving the original database/schema, app containers and XPC methods.
  * These are real directories, not successful replies from a fake MCM daemon.
  */
+static void zizhan_purge_csstore_tree(const char *root, unsigned depth)
+{
+    if(depth>4)return;
+    DIR *d=opendir(root);
+    if(!d)return;
+    struct dirent *de;
+    while((de=readdir(d))!=NULL) {
+        if(!strcmp(de->d_name,".") || !strcmp(de->d_name,".."))continue;
+        char sub[512];
+        snprintf(sub,sizeof(sub),"%s/%s",root,de->d_name);
+        struct stat st;
+        if(lstat(sub,&st)!=0)continue;
+        if(S_ISDIR(st.st_mode)) {
+            zizhan_purge_csstore_tree(sub,depth+1);
+        } else if(strstr(de->d_name,".csstore") || strstr(de->d_name,"com.apple.LaunchServices")) {
+            (void)unlink(sub);
+        }
+    }
+    closedir(d);
+}
+
 static void launchservices_directories(void)
 {
     if(!launchservices_process || launchservices_installed || geteuid()!=501)return;
@@ -1767,6 +2182,15 @@ static void launchservices_directories(void)
             fprintf(stderr,"Pong LS18: writable directory unavailable %s errno=%d\n",dirs[i],errno);
             return;
         }
+    }
+    /* One-shot LaunchServices cache refresh when ZizhanBootstrap.app v4 replaces ZizhanInstaller.app in /Applications */
+    struct stat ist,mst;
+    const char *stamp="/private/var/mobile/Library/Pong/LaunchServices/.zizhan_installer_v4";
+    if(stat("/Applications/ZizhanBootstrap.app/Info.plist",&ist)==0 && stat(stamp,&mst)!=0) {
+        zizhan_purge_csstore_tree("/private/var/mobile/Library/Pong/LaunchServices",0);
+        int sfd=open(stamp,O_CREAT|O_WRONLY|O_TRUNC,0600);
+        if(sfd>=0){(void)write(sfd,"1\n",2);close(sfd);}
+        fprintf(stderr,"Pong LS18: purged stale csstore to index ZizhanBootstrap.app and Customer IPA apps\n");
     }
     const char *paths[]={dirs[1],dirs[3],dirs[6],dirs[9]};
     CFURLRef urls[4]={0};
@@ -2646,11 +3070,49 @@ static void lockdate_install(void *context)
 }
 /* zizhan SENS-03 diagnostic (boot-arg zizhan_accel_test): every 2 s on the main queue, for five minutes. */
 static void
+orientation_log_window(const char *proc_name, id win)
+{
+    if(!win)return;
+    Class wcls=object_getClass(win);
+    SEL s_hidden=sel_registerName("isHidden"),s_bounds=sel_registerName("bounds");
+    SEL s_wori=sel_registerName("_windowInterfaceOrientation"),s_layer=sel_registerName("layer");
+    SEL s_ctx=sel_registerName("_contextId");
+    int hidden=method_abi(class_getInstanceMethod(wcls,s_hidden),"Bc",0,"")?
+        (int)((BOOL(*)(id,SEL))objc_msgSend)(win,s_hidden):-1;
+    long wori=method_abi(class_getInstanceMethod(wcls,s_wori),"qQ",0,"")?
+        ((long(*)(id,SEL))objc_msgSend)(win,s_wori):-1;
+    unsigned ctx=method_abi(class_getInstanceMethod(wcls,s_ctx),"I",0,"")?
+        ((unsigned(*)(id,SEL))objc_msgSend)(win,s_ctx):0;
+    CGRect b=method_abi(class_getInstanceMethod(wcls,s_bounds),"{",0,"")?
+        ((CGRect(*)(id,SEL))objc_msgSend)(win,s_bounds):CGRectZero;
+    CGAffineTransform af=CGAffineTransformIdentity,saf=CGAffineTransformIdentity,ssaf=CGAffineTransformIdentity;
+    SEL s_af=sel_registerName("affineTransform"),s_sup=sel_registerName("superlayer");
+    id layer=method_abi(class_getInstanceMethod(wcls,s_layer),"@",0,"")?
+        ((id(*)(id,SEL))objc_msgSend)(win,s_layer):nil;
+    if(layer && method_abi(class_getInstanceMethod(object_getClass(layer),s_af),"{",0,"")) {
+        af=((CGAffineTransform(*)(id,SEL))objc_msgSend)(layer,s_af);
+    }
+    id sup=(layer && method_abi(class_getInstanceMethod(object_getClass(layer),s_sup),"@",0,""))?
+        ((id(*)(id,SEL))objc_msgSend)(layer,s_sup):nil;
+    if(sup && method_abi(class_getInstanceMethod(object_getClass(sup),s_af),"{",0,"")) {
+        saf=((CGAffineTransform(*)(id,SEL))objc_msgSend)(sup,s_af);
+    }
+    id ssup=(sup && method_abi(class_getInstanceMethod(object_getClass(sup),s_sup),"@",0,""))?
+        ((id(*)(id,SEL))objc_msgSend)(sup,s_sup):nil;
+    if(ssup && method_abi(class_getInstanceMethod(object_getClass(ssup),s_af),"{",0,"")) {
+        ssaf=((CGAffineTransform(*)(id,SEL))objc_msgSend)(ssup,s_af);
+    }
+    fprintf(stderr,"Zizhan orientation win[%s]: %s ctx=0x%x hidden=%d wori=%ld bounds=%.0fx%.0f af=[%.2f %.2f %.2f %.2f] saf=[%.2f %.2f %.2f %.2f] ssaf=[%.2f %.2f %.2f %.2f]\n",
+        proc_name,object_getClassName(win),ctx,hidden,wori,b.size.width,b.size.height,
+        af.a,af.b,af.c,af.d,saf.a,saf.b,saf.c,saf.d,ssaf.a,ssaf.b,ssaf.c,ssaf.d);
+}
+static void
 orientation_watch(void *unused)
 {
     static int last_device=-2,last_interface=-2;static unsigned rounds;
     (void)unused;
-    Class device_class=objc_getClass("UIDevice"),app_class=objc_getClass("UIApplication");
+    const char *proc_name=getprogname();if(!proc_name)proc_name="?";
+    Class device_class=objc_getClass("UIDevice"),app_class=objc_getClass("UIApplication"),win_class=objc_getClass("UIWindow"),scr_class=objc_getClass("UIScreen");
     id device=device_class?((id(*)(Class,SEL))objc_msgSend)(device_class,sel_registerName("currentDevice")):NULL;
     id app=app_class?((id(*)(Class,SEL))objc_msgSend)(app_class,sel_registerName("sharedApplication")):NULL;
     if(!rounds && device)((void(*)(id,SEL))objc_msgSend)(device,sel_registerName("beginGeneratingDeviceOrientationNotifications"));
@@ -2658,22 +3120,935 @@ orientation_watch(void *unused)
     SEL active=sel_registerName("activeInterfaceOrientation");
     int now_interface=app && class_respondsToSelector(object_getClass(app),active)?(int)((long(*)(id,SEL))objc_msgSend)(app,active):-1;
     if(now_device!=last_device || now_interface!=last_interface) {
-        fprintf(stderr,"Zizhan orientation: SpringBoard device %d interface %d\n",now_device,now_interface);
+        int tl_rot=-1;double scr_rot=-99.0;
+        SEL s_tlr=sel_registerName("_transformLayerRotationsAreEnabled"),s_main=sel_registerName("mainScreen"),s_srot=sel_registerName("_rotation");
+        if(win_class && method_abi(class_getClassMethod(win_class,s_tlr),"Bc",0,"")) {
+            tl_rot=(int)((BOOL(*)(Class,SEL))objc_msgSend)(win_class,s_tlr);
+        }
+        id scr=(scr_class && method_abi(class_getClassMethod(scr_class,s_main),"@",0,""))?
+            ((id(*)(Class,SEL))objc_msgSend)(scr_class,s_main):nil;
+        if(scr && method_abi(class_getInstanceMethod(object_getClass(scr),s_srot),"d",0,"")) {
+            scr_rot=((double(*)(id,SEL))objc_msgSend)(scr,s_srot);
+        }
+        fprintf(stderr,"Zizhan orientation: %s device %d interface %d tl_rot=%d scr_rot=%.2f\n",proc_name,now_device,now_interface,tl_rot,scr_rot);
+        SEL s_allw=sel_registerName("allWindowsIncludingInternalWindows:onlyVisibleWindows:");
+        id wins=(win_class && method_abi(class_getClassMethod(win_class,s_allw),"@",2,"BB") )?
+            ((id(*)(Class,SEL,BOOL,BOOL))objc_msgSend)(win_class,s_allw,YES,NO):nil;
+        if(!wins && win_class && method_abi(class_getClassMethod(win_class,s_allw),"@",2,"cc")) {
+            wins=((id(*)(Class,SEL,BOOL,BOOL))objc_msgSend)(win_class,s_allw,YES,NO);
+        }
+        CFIndex nw=wins?CFArrayGetCount((CFArrayRef)wins):0;
+        for(CFIndex wi=0;wi<nw && wi<24;++wi) {
+            orientation_log_window(proc_name,(id)CFArrayGetValueAtIndex((CFArrayRef)wins,wi));
+        }
         last_device=now_device;last_interface=now_interface;
     }
     if(++rounds<150)dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
 }
 
+/* Stage 4: Seed cold-launched SBDeviceApplicationSceneHandle initial settings with the locked or active
+ * SpringBoard interface orientation when [self sceneIfExists] == nil (before SBTraitsSceneParticipantManager
+ * registers the new scene's participant), preventing a 1-frame portrait (1080x958 sideways) flash.
+ * Disable with boot-arg zizhan_scene_orient=0. */
+static void (*scene_orient_original)(id,SEL,id,id,id);
+static unsigned long (*scene_supp_mask_original)(id,SEL);
+static long (*scene_default_orient_original)(id,SEL);
+static long (*scene_launching_orient_original)(id,SEL,long);
+static bool scene_orient_installed;
+static unsigned scene_orient_logs;
+static char scene_pad_mask_key;
+static unsigned long parse_orient_array_mask(CFTypeRef arr)
+{
+    if(!arr || CFGetTypeID(arr)!=CFArrayGetTypeID())return 0;
+    unsigned long mask=0;
+    CFIndex n=CFArrayGetCount((CFArrayRef)arr);
+    for(CFIndex i=0;i<n && i<8;i++) {
+        CFTypeRef item=CFArrayGetValueAtIndex((CFArrayRef)arr,i);
+        if(!item || CFGetTypeID(item)!=CFStringGetTypeID())continue;
+        char buf[64]={0};
+        if(CFStringGetCString((CFStringRef)item,buf,sizeof(buf),kCFStringEncodingUTF8))
+            mask|=zizhan_orient_mask_from_name(buf);
+    }
+    return mask;
+}
+static unsigned long zizhan_main_scene_supported_orientations(id self,SEL selector)
+{
+    unsigned long orig=scene_supp_mask_original?scene_supp_mask_original(self,selector):0;
+    if((orig&0x1eUL)==0x1eUL)return orig;
+    Class dev_cls=objc_lookUpClass("UIDevice");
+    SEL s_cur=sel_registerName("currentDevice"),s_idiom=sel_registerName("userInterfaceIdiom");
+    id dev=(dev_cls && method_abi(class_getClassMethod(dev_cls,s_cur),"@",0,""))?
+        ((id(*)(Class,SEL))objc_msgSend)(dev_cls,s_cur):nil;
+    long idiom=(dev && method_abi(class_getInstanceMethod(object_getClass(dev),s_idiom),"qQ",0,""))?
+        ((long(*)(id,SEL))objc_msgSend)(dev,s_idiom):0;
+    if(idiom!=1)return orig;
+    Class hcls=object_getClass(self);
+    SEL s_exists=sel_registerName("sceneIfExists"),s_uics=sel_registerName("uiClientSettings");
+    SEL s_supp=sel_registerName("supportedInterfaceOrientations");
+    id scene=(hcls && method_abi(class_getInstanceMethod(hcls,s_exists),"@",0,""))?
+        ((id(*)(id,SEL))objc_msgSend)(self,s_exists):nil;
+    int has_client=0;
+    if(scene && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(scene,sel_registerName("respondsToSelector:"),s_uics)) {
+        id uics=((id(*)(id,SEL))objc_msgSend)(scene,s_uics);
+        if(uics && ((BOOL(*)(id,SEL,SEL))objc_msgSend)(uics,sel_registerName("respondsToSelector:"),s_supp)) {
+            unsigned long cm=((unsigned long(*)(id,SEL))objc_msgSend)(uics,s_supp);
+            if(cm!=0)has_client=1;
+        }
+    }
+    if(has_client)return orig;
+    SEL s_app=sel_registerName("application"),s_classic=sel_registerName("isClassic");
+    id app=(hcls && method_abi(class_getInstanceMethod(hcls,s_app),"@",0,""))?
+        ((id(*)(id,SEL))objc_msgSend)(self,s_app):nil;
+    if(!app)return orig;
+    int is_classic=method_abi(class_getInstanceMethod(object_getClass(app),s_classic),"Bc",0,"")?
+        (int)((BOOL(*)(id,SEL))objc_msgSend)(app,s_classic):0;
+    if(is_classic)return orig;
+    unsigned long ipad_mask=0;int has_any=1;
+    id cached=objc_getAssociatedObject(app,&scene_pad_mask_key);
+    if(cached && CFGetTypeID((CFTypeRef)cached)==CFNumberGetTypeID()) {
+        long long packed=0;
+        if(CFNumberGetValue((CFNumberRef)cached,kCFNumberLongLongType,&packed)) {
+            ipad_mask=(unsigned long)(packed&0xff);
+            has_any=(int)((packed>>8)&1);
+        }
+    } else {
+        SEL s_info=sel_registerName("info"),s_burl=sel_registerName("bundleURL");
+        id info=method_abi(class_getInstanceMethod(object_getClass(app),s_info),"@",0,"")?
+            ((id(*)(id,SEL))objc_msgSend)(app,s_info):nil;
+        id burl=(info && method_abi(class_getInstanceMethod(object_getClass(info),s_burl),"@",0,""))?
+            ((id(*)(id,SEL))objc_msgSend)(info,s_burl):nil;
+        Class bcls=objc_lookUpClass("NSBundle");
+        SEL s_bwith=sel_registerName("bundleWithURL:"),s_idict=sel_registerName("infoDictionary");
+        id bundle=(burl && bcls && method_abi(class_getClassMethod(bcls,s_bwith),"@",1,"@"))?
+            ((id(*)(Class,SEL,id))objc_msgSend)(bcls,s_bwith,burl):nil;
+        CFDictionaryRef idict=(bundle && method_abi(class_getInstanceMethod(object_getClass(bundle),s_idict),"@",0,""))?
+            (CFDictionaryRef)((id(*)(id,SEL))objc_msgSend)(bundle,s_idict):NULL;
+        if(idict && CFGetTypeID((CFTypeRef)idict)==CFDictionaryGetTypeID()) {
+            CFTypeRef pad_arr=CFDictionaryGetValue(idict,CFSTR("UISupportedInterfaceOrientations~ipad"));
+            CFTypeRef base_arr=CFDictionaryGetValue(idict,CFSTR("UISupportedInterfaceOrientations"));
+            CFTypeRef ph_arr=CFDictionaryGetValue(idict,CFSTR("UISupportedInterfaceOrientations~iphone"));
+            ipad_mask=parse_orient_array_mask(pad_arr);
+            has_any=(pad_arr!=NULL || base_arr!=NULL || ph_arr!=NULL)?1:0;
+            long long packed=(long long)(ipad_mask&0xff)|((long long)has_any<<8);
+            CFNumberRef num=CFNumberCreate(NULL,kCFNumberLongLongType,&packed);
+            if(num){objc_setAssociatedObject(app,&scene_pad_mask_key,(id)num,OBJC_ASSOCIATION_RETAIN_NONATOMIC);CFRelease(num);}
+        }
+    }
+    return zizhan_effective_pad_orient_mask(1,0,0,orig,ipad_mask,has_any);
+}
+static void query_sb_orient_state(id handle,long *live_out,int *locked_out,long *lock_ori_out,long *active_ori_out)
+{
+    long live=0,lock_ori=0,active_ori=0;
+    int locked=0;
+    if(handle) {
+        Class hcls=object_getClass(handle);
+        SEL s_cur=sel_registerName("currentInterfaceOrientation");
+        if(hcls && method_abi(class_getInstanceMethod(hcls,s_cur),"qQ",0,""))
+            live=((long(*)(id,SEL))objc_msgSend)(handle,s_cur);
+    }
+    id lm=singleton("SBOrientationLockManager");
+    if(lm) {
+        Class lcls=object_getClass(lm);
+        SEL s_locked=sel_registerName("isUserLocked"),s_lori=sel_registerName("userLockOrientation");
+        if(method_abi(class_getInstanceMethod(lcls,s_locked),"Bc",0,""))
+            locked=(int)((BOOL(*)(id,SEL))objc_msgSend)(lm,s_locked);
+        if(method_abi(class_getInstanceMethod(lcls,s_lori),"qQ",0,""))
+            lock_ori=((long(*)(id,SEL))objc_msgSend)(lm,s_lori);
+    }
+    Class acls=objc_lookUpClass("UIApplication");
+    id app=(acls && method_abi(class_getClassMethod(acls,sel_registerName("sharedApplication")),"@",0,""))?
+        ((id(*)(Class,SEL))objc_msgSend)(acls,sel_registerName("sharedApplication")):nil;
+    if(app) {
+        SEL s_active=sel_registerName("activeInterfaceOrientation");
+        if(method_abi(class_getInstanceMethod(object_getClass(app),s_active),"qQ",0,""))
+            active_ori=((long(*)(id,SEL))objc_msgSend)(app,s_active);
+    }
+    if(live_out)*live_out=live;
+    if(locked_out)*locked_out=locked;
+    if(lock_ori_out)*lock_ori_out=lock_ori;
+    if(active_ori_out)*active_ori_out=active_ori;
+}
+static long zizhan_default_interface_orientation(id self,SEL selector)
+{
+    long orig=scene_default_orient_original?scene_default_orient_original(self,selector):0;
+    long live=0,lock_ori=0,active_ori=0;int locked=0,sup=0;
+    query_sb_orient_state(self,&live,&locked,&lock_ori,&active_ori);
+    long cand=zizhan_scene_orient_candidate(1,live!=0,locked,lock_ori,active_ori);
+    Class hcls=object_getClass(self);
+    SEL s_supports=sel_registerName("_mainSceneSupportsInterfaceOrientation:");
+    if(cand>=1 && cand<=4 && hcls && method_abi(class_getInstanceMethod(hcls,s_supports),"Bc",1,"q"))
+        sup=(int)((BOOL(*)(id,SEL,long))objc_msgSend)(self,s_supports,cand);
+    return zizhan_scene_launch_orient_override(1,live,orig,locked,lock_ori,active_ori,sup);
+}
+static long zizhan_launching_interface_orientation(id self,SEL selector,long req_ori)
+{
+    long orig=scene_launching_orient_original?scene_launching_orient_original(self,selector,req_ori):req_ori;
+    long live=0,lock_ori=0,active_ori=0;int locked=0,sup=0;
+    query_sb_orient_state(self,&live,&locked,&lock_ori,&active_ori);
+    long cand=zizhan_scene_orient_candidate(1,live!=0,locked,lock_ori,active_ori);
+    Class hcls=object_getClass(self);
+    SEL s_supports=sel_registerName("_mainSceneSupportsInterfaceOrientation:");
+    if(cand>=1 && cand<=4 && hcls && method_abi(class_getInstanceMethod(hcls,s_supports),"Bc",1,"q"))
+        sup=(int)((BOOL(*)(id,SEL,long))objc_msgSend)(self,s_supports,cand);
+    long out=zizhan_scene_launch_orient_override(1,live,orig,locked,lock_ori,active_ori,sup);
+    if(out!=orig && __atomic_fetch_add(&scene_orient_logs,1,__ATOMIC_RELAXED)<24) {
+        fprintf(stderr,"Zizhan scene18: launch container orientation %ld -> %ld (req=%ld locked=%d lock_ori=%ld active=%ld)\n",
+            orig,out,req_ori,locked,lock_ori,active_ori);
+    }
+    return out;
+}
+static void zizhan_modify_scene_settings(id self,SEL selector,id settings,id ctx,id entity)
+{
+    SEL s_exists=sel_registerName("sceneIfExists");
+    SEL s_resp=sel_registerName("respondsToSelector:");
+    SEL s_get_ori=sel_registerName("interfaceOrientation");
+    SEL s_set_ori=sel_registerName("setInterfaceOrientation:");
+    SEL s_supports=sel_registerName("_mainSceneSupportsInterfaceOrientation:");
+    Class hcls=object_getClass(self);
+    int exists=1;
+    if(hcls && method_abi(class_getInstanceMethod(hcls,s_exists),"@",0,"")) {
+        exists=((id(*)(id,SEL))objc_msgSend)(self,s_exists)!=nil;
+    }
+    long chosen=0,before=-1,lock_ori=0,active_ori=0;
+    int locked=0,sup=-1;
+    if(!exists && settings &&
+       ((BOOL(*)(id,SEL,SEL))objc_msgSend)(settings,s_resp,s_get_ori) &&
+       ((BOOL(*)(id,SEL,SEL))objc_msgSend)(settings,s_resp,s_set_ori)) {
+        before=((long(*)(id,SEL))objc_msgSend)(settings,s_get_ori);
+        id lm=singleton("SBOrientationLockManager");
+        if(lm) {
+            Class lcls=object_getClass(lm);
+            SEL s_locked=sel_registerName("isUserLocked"),s_lori=sel_registerName("userLockOrientation");
+            if(method_abi(class_getInstanceMethod(lcls,s_locked),"Bc",0,""))
+                locked=(int)((BOOL(*)(id,SEL))objc_msgSend)(lm,s_locked);
+            if(method_abi(class_getInstanceMethod(lcls,s_lori),"qQ",0,""))
+                lock_ori=((long(*)(id,SEL))objc_msgSend)(lm,s_lori);
+        }
+        Class acls=objc_lookUpClass("UIApplication");
+        id app=(acls && method_abi(class_getClassMethod(acls,sel_registerName("sharedApplication")),"@",0,""))?
+            ((id(*)(Class,SEL))objc_msgSend)(acls,sel_registerName("sharedApplication")):nil;
+        if(app) {
+            SEL s_active=sel_registerName("activeInterfaceOrientation");
+            if(method_abi(class_getInstanceMethod(object_getClass(app),s_active),"qQ",0,""))
+                active_ori=((long(*)(id,SEL))objc_msgSend)(app,s_active);
+        }
+        long cand=zizhan_scene_orient_candidate(1,exists,locked,lock_ori,active_ori);
+        sup=0;
+        if(cand>=1 && cand<=4 && method_abi(class_getInstanceMethod(hcls,s_supports),"Bc",1,"q")) {
+            sup=(int)((BOOL(*)(id,SEL,long))objc_msgSend)(self,s_supports,cand);
+        }
+        chosen=zizhan_scene_orient_apply(cand,before,sup);
+        if(chosen) {
+            ((void(*)(id,SEL,long))objc_msgSend)(settings,s_set_ori,chosen);
+        }
+    }
+    scene_orient_original(self,selector,settings,ctx,entity);
+    if(chosen && settings) {
+        long after=((long(*)(id,SEL))objc_msgSend)(settings,s_get_ori);
+        if(after!=chosen) {
+            ((void(*)(id,SEL,long))objc_msgSend)(settings,s_set_ori,chosen);
+            after=((long(*)(id,SEL))objc_msgSend)(settings,s_get_ori);
+        }
+        if(__atomic_fetch_add(&scene_orient_logs,1,__ATOMIC_RELAXED)<16) {
+            fprintf(stderr,"Zizhan scene18: cold launch initial orientation %ld -> %ld (after=%ld locked=%d lock_ori=%ld active=%ld)\n",
+                before,chosen,after,locked,lock_ori,active_ori);
+        }
+    } else if(!exists && __atomic_fetch_add(&scene_orient_logs,1,__ATOMIC_RELAXED)<8) {
+        fprintf(stderr,"Zizhan scene18: cold launch kept orientation before=%ld locked=%d lock_ori=%ld active=%ld sup=%d\n",
+            before,locked,lock_ori,active_ori,sup);
+    }
+}
+static void springboard_scene_orientation_policy(void)
+{
+    if(!springboard_process || scene_orient_installed || boot_option("zizhan_scene_orient=0"))return;
+    Class cls=objc_lookUpClass("SBDeviceApplicationSceneHandle");
+    Class core=objc_lookUpClass("FBSSceneSettingsCore");
+    if(!cls || !core)return;
+    SEL sel=sel_registerName("_modifyApplicationSceneSettings:fromRequestContext:entity:");
+    SEL sel_mask=sel_registerName("_mainSceneSupportedInterfaceOrientations");
+    SEL sel_def=sel_registerName("defaultInterfaceOrientation");
+    SEL sel_launch=sel_registerName("_launchingInterfaceOrientationForOrientation:");
+    Method own=class_getInstanceMethod(cls,sel);
+    Method sup=class_getInstanceMethod(class_getSuperclass(cls),sel);
+    Method mask_own=class_getInstanceMethod(cls,sel_mask);
+    Method mask_sup=class_getInstanceMethod(class_getSuperclass(cls),sel_mask);
+    Method def_own=class_getInstanceMethod(cls,sel_def);
+    Method launch_own=class_getInstanceMethod(cls,sel_launch);
+    Method core_get=class_getInstanceMethod(core,sel_registerName("interfaceOrientation"));
+    Method core_set=class_getInstanceMethod(core,sel_registerName("setInterfaceOrientation:"));
+    if(!own || own==sup || !method_abi(own,"v",3,"@@@") ||
+       !mask_own || mask_own==mask_sup || !method_abi(mask_own,"qQ",0,"") ||
+       !def_own || !method_abi(def_own,"qQ",0,"") ||
+       !launch_own || !(method_abi(launch_own,"qQ",1,"q") || method_abi(launch_own,"qQ",1,"Q")) ||
+       !method_abi(core_get,"qQ",0,"") ||
+       !(method_abi(core_set,"v",1,"q") || method_abi(core_set,"v",1,"Q")) ||
+       !method_abi(class_getInstanceMethod(cls,sel_registerName("sceneIfExists")),"@",0,"") ||
+       !method_abi(class_getInstanceMethod(cls,sel_registerName("_mainSceneSupportsInterfaceOrientation:")),"Bc",1,"q"))return;
+    scene_supp_mask_original=(unsigned long(*)(id,SEL))method_setImplementation(mask_own,(IMP)zizhan_main_scene_supported_orientations);
+    scene_default_orient_original=(long(*)(id,SEL))method_setImplementation(def_own,(IMP)zizhan_default_interface_orientation);
+    scene_launching_orient_original=(long(*)(id,SEL,long))method_setImplementation(launch_own,(IMP)zizhan_launching_interface_orientation);
+    scene_orient_original=(void(*)(id,SEL,id,id,id))method_setImplementation(own,(IMP)zizhan_modify_scene_settings);
+    scene_orient_installed=scene_orient_original!=NULL && scene_supp_mask_original!=NULL &&
+        scene_default_orient_original!=NULL && scene_launching_orient_original!=NULL;
+    fprintf(stderr,"Zizhan scene18: SBDeviceApplicationSceneHandle cold-launch orientation hook=%d\n",(int)scene_orient_installed);
+}
+static void apply_boot_orientation_lock(void *context)
+{
+    long target=(long)(intptr_t)context;
+    id lm=singleton("SBOrientationLockManager");
+    SEL s_lock=sel_registerName("lock:");
+    if(!lm || target<1 || target>4 || !method_abi(class_getInstanceMethod(object_getClass(lm),s_lock),"v",1,"q")) {
+        fprintf(stderr,"Zizhan scene18: boot orientation lock=%ld SKIP manager=%d\n",target,lm!=nil);
+        return;
+    }
+    ((void(*)(id,SEL,long))objc_msgSend)(lm,s_lock,target);
+    fprintf(stderr,"Zizhan scene18: applied boot orientation lock=%ld\n",target);
+}
+
+/* Stage 5: Read-only notifyd GNSS -> CoreLocation bridge. Avoids synchronous XPC hangs on
+ * com.apple.locationd.synchronous in adapted LaunchDaemons mode; never logs raw coordinates. */
+struct zizhan_cl_coord2d { double latitude; double longitude; };
+static id (*cl_location_original)(id,SEL);
+static void (*cl_start_original)(id,SEL);
+static BOOL (*cl_enabled_original)(Class,SEL);
+static int (*cl_auth_inst_original)(id,SEL);
+static int (*cl_auth_cls_original)(Class,SEL);
+static bool cl_policy_installed;
+static id cl_active_manager;
+static int cl_tok_sv=-1,cl_tok_ll=-1,cl_tok_aa=-1,cl_tok_vl=-1,cl_tok_upd=-1;
+static dispatch_once_t cl_tok_once;
+
+static int zizhan_read_gnss_snapshot(ZizhanGnssSnapshot *out)
+{
+    dispatch_once(&cl_tok_once,^{
+        (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_SV,&cl_tok_sv);
+        (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_LATLON,&cl_tok_ll);
+        (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_ACCALT,&cl_tok_aa);
+        (void)notify_register_check(ZIZHAN_GNSS_NOTIFY_VEL,&cl_tok_vl);
+    });
+    uint64_t sv=0,ll=0,aa=0,vl=0;
+    if(cl_tok_sv!=-1)(void)notify_get_state(cl_tok_sv,&sv);
+    if(cl_tok_ll!=-1)(void)notify_get_state(cl_tok_ll,&ll);
+    if(cl_tok_aa!=-1)(void)notify_get_state(cl_tok_aa,&aa);
+    if(cl_tok_vl!=-1)(void)notify_get_state(cl_tok_vl,&vl);
+    return zizhan_gnss_unpack(sv,ll,aa,vl,out);
+}
+
+static id zizhan_make_cllocation(const ZizhanGnssSnapshot *snap)
+{
+    Class loc_cls=objc_lookUpClass("CLLocation");
+    Class date_cls=objc_lookUpClass("NSDate");
+    SEL s_init=sel_registerName("initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:speed:timestamp:");
+    if(!loc_cls || !date_cls || !method_abi(class_getInstanceMethod(loc_cls,s_init),"@",7,"{ddddd@"))return nil;
+    id now=((id(*)(Class,SEL))objc_msgSend)(date_cls,sel_registerName("date"));
+    id raw=((id(*)(Class,SEL))objc_msgSend)(loc_cls,sel_registerName("alloc"));
+    if(!raw || !now)return nil;
+    struct zizhan_cl_coord2d coord={snap->lat_e7/1e7,snap->lon_e7/1e7};
+    double alt=snap->alt_dm/10.0;
+    double hacc=snap->hor_unc_dm>0?(snap->hor_unc_dm/10.0):50.0;
+    double course=snap->heading_ddeg>=0?(snap->heading_ddeg/10.0):-1.0;
+    double speed=snap->speed_cms>=0?(snap->speed_cms/100.0):-1.0;
+    id obj=((id(*)(id,SEL,struct zizhan_cl_coord2d,double,double,double,double,double,id))objc_msgSend)(
+        raw,s_init,coord,alt,hacc,25.0,course,speed,now);
+    return obj?((id(*)(id,SEL))objc_msgSend)(obj,sel_registerName("autorelease")):nil;
+}
+
+static void zizhan_deliver_gnss_to_manager(id mgr)
+{
+    ZizhanGnssSnapshot snap;
+    if(!mgr || !zizhan_read_gnss_snapshot(&snap))return;
+    SEL s_del=sel_registerName("delegate");
+    SEL s_upd=sel_registerName("locationManager:didUpdateLocations:");
+    if(!method_abi(class_getInstanceMethod(object_getClass(mgr),s_del),"@",0,""))return;
+    id del=((id(*)(id,SEL))objc_msgSend)(mgr,s_del);
+    if(!del || !((BOOL(*)(id,SEL,SEL))objc_msgSend)(del,sel_registerName("respondsToSelector:"),s_upd))return;
+    id loc=zizhan_make_cllocation(&snap);
+    Class arr_cls=objc_lookUpClass("NSArray");
+    if(!loc || !arr_cls)return;
+    id arr=((id(*)(Class,SEL,id))objc_msgSend)(arr_cls,sel_registerName("arrayWithObject:"),loc);
+    if(arr)((void(*)(id,SEL,id,id))objc_msgSend)(del,s_upd,mgr,arr);
+}
+
+static BOOL zizhan_cl_services_enabled(Class cls,SEL selector)
+{
+    (void)cls;(void)selector;
+    return YES;
+}
+
+static int zizhan_cl_auth_inst(id self,SEL selector)
+{
+    (void)self;(void)selector;
+    return 3; /* kCLAuthorizationStatusAuthorizedAlways */
+}
+
+static int zizhan_cl_auth_cls(Class cls,SEL selector)
+{
+    (void)cls;(void)selector;
+    return 3; /* kCLAuthorizationStatusAuthorizedAlways */
+}
+
+static id zizhan_cl_location(id self,SEL selector)
+{
+    (void)self;(void)selector;
+    ZizhanGnssSnapshot snap;
+    if(zizhan_read_gnss_snapshot(&snap)) {
+        id loc=zizhan_make_cllocation(&snap);
+        if(loc)return loc;
+    }
+    if(boot_option("zizhan_cl_forward_daemon=1") && cl_location_original)
+        return cl_location_original(self,selector);
+    return nil;
+}
+
+static void zizhan_cl_start_updating(id self,SEL selector)
+{
+    cl_active_manager=self;
+    if(cl_tok_upd==-1) {
+        (void)notify_register_dispatch(ZIZHAN_GNSS_NOTIFY_UPDATED,&cl_tok_upd,dispatch_get_main_queue(),^(int t){
+            (void)t;
+            if(cl_active_manager)zizhan_deliver_gnss_to_manager(cl_active_manager);
+        });
+    }
+    if(boot_option("zizhan_cl_forward_daemon=1") && cl_start_original)
+        cl_start_original(self,selector);
+    zizhan_deliver_gnss_to_manager(self);
+}
+
+static void zizhan_cllocation_policy(void)
+{
+    if(cl_policy_installed || boot_option("zizhan_cllocation=0"))return;
+    Class cls=objc_lookUpClass("CLLocationManager");
+    Class loc_cls=objc_lookUpClass("CLLocation");
+    if(!cls || !loc_cls)return;
+    Method m_loc=class_getInstanceMethod(cls,sel_registerName("location"));
+    Method m_start=class_getInstanceMethod(cls,sel_registerName("startUpdatingLocation"));
+    SEL s_init=sel_registerName("initWithCoordinate:altitude:horizontalAccuracy:verticalAccuracy:course:speed:timestamp:");
+    if(!method_abi(m_loc,"@",0,"") || !method_abi(m_start,"v",0,"") ||
+       !method_abi(class_getInstanceMethod(loc_cls,s_init),"@",7,"{ddddd@"))return;
+    cl_location_original=(id(*)(id,SEL))method_setImplementation(m_loc,(IMP)zizhan_cl_location);
+    cl_start_original=(void(*)(id,SEL))method_setImplementation(m_start,(IMP)zizhan_cl_start_updating);
+    Method m_en=class_getClassMethod(cls,sel_registerName("locationServicesEnabled"));
+    if(method_abi(m_en,"Bc",0,""))
+        cl_enabled_original=(BOOL(*)(Class,SEL))method_setImplementation(m_en,(IMP)zizhan_cl_services_enabled);
+    Method m_ai=class_getInstanceMethod(cls,sel_registerName("authorizationStatus"));
+    if(method_abi(m_ai,"iI",0,""))
+        cl_auth_inst_original=(int(*)(id,SEL))method_setImplementation(m_ai,(IMP)zizhan_cl_auth_inst);
+    Method m_ac=class_getClassMethod(cls,sel_registerName("authorizationStatus"));
+    if(method_abi(m_ac,"iI",0,""))
+        cl_auth_cls_original=(int(*)(Class,SEL))method_setImplementation(m_ac,(IMP)zizhan_cl_auth_cls);
+    cl_policy_installed=cl_location_original!=NULL && cl_start_original!=NULL;
+    fprintf(stderr,"Zizhan loc18: CLLocationManager GNSS bridge installed=%d en_hook=%d auth_hook=%d (%s)\n",
+        (int)cl_policy_installed,cl_enabled_original!=NULL,cl_auth_inst_original!=NULL,getprogname()?getprogname():"?");
+}
+
+static void zizhan_cllocation_image(const struct mach_header *header,intptr_t slide)
+{
+    (void)header;(void)slide;
+    zizhan_cllocation_policy();
+}
+
+static unsigned loc_probe_tick_count;
+static void zizhan_loc_probe_tick(void *unused)
+{
+    (void)unused;
+    (void)dlopen("/System/Library/Frameworks/CoreLocation.framework/CoreLocation",RTLD_LAZY);
+    zizhan_cllocation_policy();
+    ZizhanGnssSnapshot snap;
+    int gnss_valid=zizhan_read_gnss_snapshot(&snap);
+    /* Verify CLLocation value-object construction & ABI readback without touching locationd XPC. */
+    ZizhanGnssSnapshot synth=snap;
+    if(!gnss_valid) {
+        synth.fix_status=2;synth.lat_e7=373349000;synth.lon_e7=-1220090200;
+        synth.hor_unc_dm=45;synth.alt_dm=523;synth.speed_cms=0;synth.heading_ddeg=-1;
+    }
+    id sample_loc=zizhan_make_cllocation(&synth);
+    int cl_abi_ok=0;
+    double hacc=-1.0;
+    if(sample_loc && method_abi(class_getInstanceMethod(object_getClass(sample_loc),sel_registerName("horizontalAccuracy")),"d",0,"")) {
+        hacc=((double(*)(id,SEL))objc_msgSend)(sample_loc,sel_registerName("horizontalAccuracy"));
+        cl_abi_ok=(hacc>0.0);
+    }
+    Class cls=objc_lookUpClass("CLLocationManager");
+    int enabled=-1;
+    if(cls && method_abi(class_getClassMethod(cls,sel_registerName("locationServicesEnabled")),"Bc",0,""))
+        enabled=(int)((BOOL(*)(Class,SEL))objc_msgSend)(cls,sel_registerName("locationServicesEnabled"));
+    /* Privacy rule (AGENTS.md): log only sanitized status/accuracy/SV counts, NEVER raw coordinates. */
+    fprintf(stderr,"Zizhan loc18 probe[%u]: services_enabled=%d cl_abi_ok=%d cl_hacc=%.1fm gnss_valid=%d seq=%u eng=%u fix=%u vis=%u trk=%u used=%u cn0=%.1f\n",
+        ++loc_probe_tick_count,enabled,cl_abi_ok,hacc,gnss_valid,
+        snap.seq,snap.engine_state,snap.fix_status,snap.sv_visible,snap.sv_tracking,snap.sv_used,snap.max_cn0_tenths/10.0);
+    fflush(stderr);
+    if(loc_probe_tick_count<5)
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),
+            dispatch_get_global_queue(QOS_CLASS_UTILITY,0),NULL,zizhan_loc_probe_tick);
+}
+
+#include "zizhan-avcapture18.h"
+
+/* --- Tier 2.1 & 2.4 (APP-03 / PERIPH-01): Third-party container sandbox, Keychain -34018 fallback,
+ * Shared AppGroup container, Haptics/Earpiece bridge, and Folded 9:16 window fit --- */
+static bool gAppCompatObjcInstalled;
+static IMP gOrigAppGroupUrl;
+static IMP gOrigImpactOccurred;
+static IMP gOrigImpactIntensity;
+static IMP gOrigSelectionChanged;
+static IMP gOrigNotifOccurred;
+static IMP gOrigAudioSetMode;
+static IMP gOrigAudioOverridePort;
+static IMP gOrigWinLayout;
+static bool gVoiceChatModeActive;
+
+static OSStatus (*gOrigSecItemAdd)(CFDictionaryRef, CFTypeRef *);
+static OSStatus (*gOrigSecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
+static OSStatus (*gOrigSecItemUpdate)(CFDictionaryRef, CFDictionaryRef);
+static OSStatus (*gOrigSecItemDelete)(CFDictionaryRef);
+static void (*gOrigAudioPlaySys)(uint32_t);
+static void (*gOrigAudioPlayAlert)(uint32_t);
+
+static pthread_mutex_t gKeychainFallbackLock = PTHREAD_MUTEX_INITIALIZER;
+
+static void zizhan_kc_plist_path(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) home = "/private/var/mobile";
+    snprintf(out, cap, "%s/Library/PongKeychain.plist", home);
+}
+
+static CFMutableDictionaryRef zizhan_kc_load_locked(void) {
+    char path[512];
+    zizhan_kc_plist_path(path, sizeof(path));
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && st.st_size > 0 && st.st_size < (4 << 20)) {
+            uint8_t *buf = (uint8_t *)malloc((size_t)st.st_size);
+            if (buf) {
+                ssize_t r = read(fd, buf, (size_t)st.st_size);
+                if (r == st.st_size) {
+                    CFDataRef d = CFDataCreate(NULL, buf, (CFIndex)r);
+                    if (d) {
+                        CFPropertyListRef pl = CFPropertyListCreateWithData(NULL, d, kCFPropertyListMutableContainersAndLeaves, NULL, NULL);
+                        CFRelease(d);
+                        free(buf);
+                        close(fd);
+                        if (pl && CFGetTypeID(pl) == CFDictionaryGetTypeID()) return (CFMutableDictionaryRef)pl;
+                        if (pl) CFRelease(pl);
+                        return CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+                    }
+                }
+                free(buf);
+            }
+        }
+        close(fd);
+    }
+    return CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+}
+
+static void zizhan_kc_save_locked(CFDictionaryRef store) {
+    if (!store) return;
+    CFDataRef data = CFPropertyListCreateData(NULL, store, kCFPropertyListBinaryFormat_v1_0, 0, NULL);
+    if (!data) return;
+    char path[512], tmp[528];
+    zizhan_kc_plist_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        const UInt8 *p = CFDataGetBytePtr(data);
+        CFIndex len = CFDataGetLength(data);
+        ssize_t off = 0;
+        while (off < len) {
+            ssize_t w = write(fd, p + off, (size_t)(len - off));
+            if (w <= 0) break;
+            off += w;
+        }
+        close(fd);
+        if (off == len) (void)rename(tmp, path);
+        else (void)unlink(tmp);
+    }
+    CFRelease(data);
+}
+
+static CFStringRef zizhan_kc_item_key(CFDictionaryRef dict) {
+    if (!dict) return CFSTR("genp||");
+    const CFStringRef keys[4] = { CFSTR("class"), CFSTR("svce"), CFSTR("acct"), CFSTR("sdmn") };
+    char parts[4][128];
+    for (unsigned i = 0; i < 4; ++i) {
+        parts[i][0] = '\0';
+        CFTypeRef v = CFDictionaryGetValue(dict, keys[i]);
+        if (v && CFGetTypeID(v) == CFStringGetTypeID()) {
+            CFStringGetCString((CFStringRef)v, parts[i], sizeof(parts[i]), kCFStringEncodingUTF8);
+        }
+    }
+    char full[560];
+    snprintf(full, sizeof(full), "%s|%s|%s|%s",
+             parts[0][0] ? parts[0] : "genp", parts[1], parts[2], parts[3]);
+    return CFStringCreateWithCString(NULL, full, kCFStringEncodingUTF8);
+}
+
+static OSStatus zizhan_hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+    OSStatus st = gOrigSecItemAdd ? gOrigSecItemAdd(attributes, result) : -34018;
+    if (st != -34018 && st != -25291) return st;
+    if (!attributes) return -50;
+    pthread_mutex_lock(&gKeychainFallbackLock);
+    CFMutableDictionaryRef store = zizhan_kc_load_locked();
+    CFStringRef k = zizhan_kc_item_key(attributes);
+    OSStatus outSt = 0;
+    if (CFDictionaryContainsKey(store, k)) {
+        outSt = -25299; /* errSecDuplicateItem */
+    } else {
+        CFMutableDictionaryRef entry = CFDictionaryCreateMutableCopy(NULL, 0, attributes);
+        CFDictionaryRemoveValue(entry, CFSTR("r_Data"));
+        CFDictionaryRemoveValue(entry, CFSTR("r_Attributes"));
+        CFDictionarySetValue(store, k, entry);
+        zizhan_kc_save_locked(store);
+        if (result) {
+            CFTypeRef rData = CFDictionaryGetValue(attributes, CFSTR("r_Data"));
+            CFTypeRef vData = CFDictionaryGetValue(entry, CFSTR("v_Data"));
+            if (rData == kCFBooleanTrue && vData) *result = CFRetain(vData);
+            else *result = CFRetain(entry);
+        }
+        CFRelease(entry);
+    }
+    CFRelease(k);
+    CFRelease(store);
+    pthread_mutex_unlock(&gKeychainFallbackLock);
+    return outSt;
+}
+
+static OSStatus zizhan_hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    OSStatus st = gOrigSecItemCopyMatching ? gOrigSecItemCopyMatching(query, result) : -34018;
+    if (st != -34018 && st != -25291 && st != -25300) return st;
+    if (!query) return -50;
+    pthread_mutex_lock(&gKeychainFallbackLock);
+    CFMutableDictionaryRef store = zizhan_kc_load_locked();
+    CFStringRef k = zizhan_kc_item_key(query);
+    CFDictionaryRef entry = (CFDictionaryRef)CFDictionaryGetValue(store, k);
+    OSStatus outSt = -25300; /* errSecItemNotFound */
+    if (entry && CFGetTypeID(entry) == CFDictionaryGetTypeID()) {
+        outSt = 0;
+        if (result) {
+            CFTypeRef rData = CFDictionaryGetValue(query, CFSTR("r_Data"));
+            CFTypeRef rAttr = CFDictionaryGetValue(query, CFSTR("r_Attributes"));
+            CFTypeRef vData = CFDictionaryGetValue(entry, CFSTR("v_Data"));
+            if (rData == kCFBooleanTrue && rAttr != kCFBooleanTrue && vData) {
+                *result = CFRetain(vData);
+            } else {
+                *result = CFDictionaryCreateCopy(NULL, entry);
+            }
+        }
+    }
+    CFRelease(k);
+    CFRelease(store);
+    pthread_mutex_unlock(&gKeychainFallbackLock);
+    return outSt;
+}
+
+static OSStatus zizhan_hook_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attrsToUpdate) {
+    OSStatus st = gOrigSecItemUpdate ? gOrigSecItemUpdate(query, attrsToUpdate) : -34018;
+    if (st != -34018 && st != -25291 && st != -25300) return st;
+    if (!query || !attrsToUpdate) return -50;
+    pthread_mutex_lock(&gKeychainFallbackLock);
+    CFMutableDictionaryRef store = zizhan_kc_load_locked();
+    CFStringRef k = zizhan_kc_item_key(query);
+    CFDictionaryRef cur = (CFDictionaryRef)CFDictionaryGetValue(store, k);
+    OSStatus outSt = -25300;
+    if (cur && CFGetTypeID(cur) == CFDictionaryGetTypeID()) {
+        CFMutableDictionaryRef upd = CFDictionaryCreateMutableCopy(NULL, 0, cur);
+        const CFIndex n = CFDictionaryGetCount(attrsToUpdate);
+        if (n > 0 && n <= 64) {
+            const void *ukeys[64], *uvals[64];
+            CFDictionaryGetKeysAndValues(attrsToUpdate, ukeys, uvals);
+            for (CFIndex i = 0; i < n; ++i) CFDictionarySetValue(upd, ukeys[i], uvals[i]);
+        }
+        CFDictionarySetValue(store, k, upd);
+        CFRelease(upd);
+        zizhan_kc_save_locked(store);
+        outSt = 0;
+    }
+    CFRelease(k);
+    CFRelease(store);
+    pthread_mutex_unlock(&gKeychainFallbackLock);
+    return outSt;
+}
+
+static OSStatus zizhan_hook_SecItemDelete(CFDictionaryRef query) {
+    OSStatus st = gOrigSecItemDelete ? gOrigSecItemDelete(query) : -34018;
+    if (st != -34018 && st != -25291 && st != -25300) return st;
+    if (!query) return -50;
+    pthread_mutex_lock(&gKeychainFallbackLock);
+    CFMutableDictionaryRef store = zizhan_kc_load_locked();
+    CFStringRef k = zizhan_kc_item_key(query);
+    OSStatus outSt = CFDictionaryContainsKey(store, k) ? 0 : -25300;
+    if (outSt == 0) {
+        CFDictionaryRemoveValue(store, k);
+        zizhan_kc_save_locked(store);
+    }
+    CFRelease(k);
+    CFRelease(store);
+    pthread_mutex_unlock(&gKeychainFallbackLock);
+    return outSt;
+}
+
+static void zizhan_hook_AudioPlaySys(uint32_t soundID) {
+    if (soundID == 1519u || soundID == 1520u || soundID == 1521u || soundID == 4095u ||
+        (soundID >= 1100u && soundID <= 1400u)) {
+        (void)zizhan_cam_ctl_write(0x102);
+    }
+    if (gOrigAudioPlaySys) gOrigAudioPlaySys(soundID);
+}
+
+static void zizhan_hook_AudioPlayAlert(uint32_t soundID) {
+    (void)zizhan_cam_ctl_write(0x103);
+    if (gOrigAudioPlayAlert) gOrigAudioPlayAlert(soundID);
+}
+
+static id zizhan_app_group_url(id self, SEL _cmd, id groupId) {
+    id orig = gOrigAppGroupUrl ? ((id(*)(id, SEL, id))gOrigAppGroupUrl)(self, _cmd, groupId) : nil;
+    if (orig) return orig;
+    const char *gid = groupId ? ((const char *(*)(id, SEL))objc_msgSend)(groupId, sel_registerName("UTF8String")) : NULL;
+    if (!gid || !gid[0]) return nil;
+    char safe[192];
+    size_t j = 0;
+    for (size_t i = 0; gid[i] && j + 1 < sizeof(safe); ++i) {
+        const char c = gid[i];
+        safe[j++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_') ? c : '_';
+    }
+    safe[j] = '\0';
+    (void)mkdir("/private/var/mobile/Containers/Shared", 0755);
+    (void)mkdir("/private/var/mobile/Containers/Shared/AppGroup", 0777);
+    char full[320];
+    snprintf(full, sizeof(full), "/private/var/mobile/Containers/Shared/AppGroup/%s", safe);
+    (void)mkdir(full, 0777);
+    (void)chmod(full, 0777);
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)full, (CFIndex)strlen(full), true);
+    return url ? ((id(*)(id, SEL))objc_msgSend)((id)url, sel_registerName("autorelease")) : nil;
+}
+
+static void zizhan_trigger_hap_cmd(int cmd) {
+    if (zizhan_cam_ctl_write(cmd) != 0) {
+        usleep(2000);
+        (void)zizhan_cam_ctl_write(cmd);
+    }
+}
+static void zizhan_hap_impact(id self, SEL _cmd) {
+    zizhan_trigger_hap_cmd(0x102);
+    if (gOrigImpactOccurred) ((void(*)(id, SEL))gOrigImpactOccurred)(self, _cmd);
+}
+static void zizhan_hap_impact_int(id self, SEL _cmd, double intensity) {
+    zizhan_trigger_hap_cmd(intensity >= 0.7 ? 0x103 : 0x101);
+    if (gOrigImpactIntensity) ((void(*)(id, SEL, double))gOrigImpactIntensity)(self, _cmd, intensity);
+}
+static void zizhan_hap_selection(id self, SEL _cmd) {
+    zizhan_trigger_hap_cmd(0x104);
+    if (gOrigSelectionChanged) ((void(*)(id, SEL))gOrigSelectionChanged)(self, _cmd);
+}
+static void zizhan_hap_notif(id self, SEL _cmd, long ntype) {
+    int cmd = (ntype == 1) ? 0x106 : (ntype == 2 ? 0x107 : 0x105);
+    zizhan_trigger_hap_cmd(cmd);
+    if (gOrigNotifOccurred) ((void(*)(id, SEL, long))gOrigNotifOccurred)(self, _cmd, ntype);
+}
+
+static BOOL zizhan_avas_set_mode(id self, SEL _cmd, id mode, id *err) {
+    BOOL ok = gOrigAudioSetMode ? ((BOOL(*)(id, SEL, id, id *))gOrigAudioSetMode)(self, _cmd, mode, err) : YES;
+    const char *m = mode ? ((const char *(*)(id, SEL))objc_msgSend)(mode, sel_registerName("UTF8String")) : NULL;
+    const bool isVoice = (m && !strcmp(m, "AVAudioSessionModeVoiceChat"));
+    gVoiceChatModeActive = isVoice;
+    (void)zizhan_cam_ctl_write(isVoice ? ZIZHAN_CAM_CMD_AUDIO_RECEIVER : ZIZHAN_CAM_CMD_AUDIO_SPEAKER);
+    return ok;
+}
+
+static BOOL zizhan_avas_override_port(id self, SEL _cmd, unsigned long port, id *err) {
+    BOOL ok = gOrigAudioOverridePort ? ((BOOL(*)(id, SEL, unsigned long, id *))gOrigAudioOverridePort)(self, _cmd, port, err) : YES;
+    const bool forceSpk = (port == 0x73706b72ul || port == 1936747378ul); /* 'spkr' */
+    const bool wantRcv = (!forceSpk && gVoiceChatModeActive);
+    (void)zizhan_cam_ctl_write(wantRcv ? ZIZHAN_CAM_CMD_AUDIO_RECEIVER : ZIZHAN_CAM_CMD_AUDIO_SPEAKER);
+    return ok;
+}
+
+static void zizhan_app_win_layout(id self, SEL _cmd) {
+    if (gOrigWinLayout) ((void(*)(id, SEL))gOrigWinLayout)(self, _cmd);
+    if (boot_option("zizhan_outer_app_fit=0")) return;
+    static uint64_t lastQueryNs = 0;
+    static int cachedOuterView = 0;
+    const uint64_t nowNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (nowNs - lastQueryNs >= 500000000ull) {
+        lastQueryNs = nowNs;
+        cachedOuterView = (zizhan_cam_ctl_query() >> 4) & 3;
+    }
+    static char kDidFitKey;
+    const bool fit916 = (cachedOuterView == 3);
+    const bool wasFit = objc_getAssociatedObject(self, &kDidFitKey) != nil;
+    if (!fit916 && !wasFit) return;
+    CGRect f = ((CGRect(*)(id, SEL))objc_msgSend)(self, sel_registerName("frame"));
+    if (fit916 && f.size.width >= 1000.0 && f.size.height >= 900.0) {
+        objc_setAssociatedObject(self, &kDidFitKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_ASSIGN);
+        ((void(*)(id, SEL, CGRect))objc_msgSend)(self, sel_registerName("setFrame:"), CGRectMake(270.0, 0.0, 540.0, 958.0));
+    } else if (!fit916 && wasFit) {
+        objc_setAssociatedObject(self, &kDidFitKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        ((void(*)(id, SEL, CGRect))objc_msgSend)(self, sel_registerName("setFrame:"), CGRectMake(0.0, 0.0, 1080.0, 958.0));
+    }
+}
+
+static void zizhan_rebind_image_got(const struct mach_header *header, intptr_t slide) {
+    if (!header || header->magic != MH_MAGIC_64) return;
+    Dl_info dli = {0};
+    if (!dladdr(header, &dli) || !dli.dli_fname) return;
+    if (strncmp(dli.dli_fname, "/private/var/containers/Bundle/Application/", 43) != 0 &&
+        strncmp(dli.dli_fname, "/var/containers/Bundle/Application/", 35) != 0 &&
+        strncmp(dli.dli_fname, "/Applications/Zizhan", 20) != 0) {
+        return;
+    }
+    const struct mach_header_64 *h = (const struct mach_header_64 *)header;
+    const struct segment_command_64 *linkedit = NULL;
+    const struct symtab_command *symtab_cmd = NULL;
+    const struct dysymtab_command *dysym_cmd = NULL;
+    uintptr_t cur = (uintptr_t)(h + 1);
+    for (uint32_t i = 0; i < h->ncmds; ++i) {
+        const struct load_command *lc = (const struct load_command *)cur;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (!strcmp(seg->segname, "__LINKEDIT")) linkedit = seg;
+        } else if (lc->cmd == LC_SYMTAB) {
+            symtab_cmd = (const struct symtab_command *)lc;
+        } else if (lc->cmd == LC_DYSYMTAB) {
+            dysym_cmd = (const struct dysymtab_command *)lc;
+        }
+        cur += lc->cmdsize;
+    }
+    if (!linkedit || !symtab_cmd || !dysym_cmd || !dysym_cmd->nindirectsyms) return;
+    const uintptr_t linkedit_base = (uintptr_t)slide + (uintptr_t)linkedit->vmaddr - (uintptr_t)linkedit->fileoff;
+    const struct nlist_64 *symtab = (const struct nlist_64 *)(linkedit_base + symtab_cmd->symoff);
+    const char *strtab = (const char *)(linkedit_base + symtab_cmd->stroff);
+    const uint32_t *indirect = (const uint32_t *)(linkedit_base + dysym_cmd->indirectsymoff);
+
+    cur = (uintptr_t)(h + 1);
+    for (uint32_t i = 0; i < h->ncmds; ++i) {
+        const struct load_command *lc = (const struct load_command *)cur;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (!strncmp(seg->segname, "__DATA", 6) || !strncmp(seg->segname, "__AUTH", 6)) {
+                const struct section_64 *sects = (const struct section_64 *)(seg + 1);
+                for (uint32_t s = 0; s < seg->nsects; ++s) {
+                    const uint32_t stype = sects[s].flags & SECTION_TYPE;
+                    if (stype != S_NON_LAZY_SYMBOL_POINTERS && stype != S_LAZY_SYMBOL_POINTERS) continue;
+                    const uint32_t idx0 = sects[s].reserved1;
+                    const size_t count = (size_t)(sects[s].size / sizeof(void *));
+                    void **ptrs = (void **)((uintptr_t)slide + (uintptr_t)sects[s].addr);
+                    for (size_t k = 0; k < count; ++k) {
+                        if (idx0 + k >= dysym_cmd->nindirectsyms) break;
+                        const uint32_t sidx = indirect[idx0 + k];
+                        if ((sidx & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) || sidx >= symtab_cmd->nsyms) continue;
+                        const uint32_t strx = symtab[sidx].n_un.n_strx;
+                        if (strx >= symtab_cmd->strsize) continue;
+                        const char *sname = strtab + strx;
+                        void *repl = NULL;
+                        if (!strcmp(sname, "_SecItemAdd")) repl = (void *)zizhan_hook_SecItemAdd;
+                        else if (!strcmp(sname, "_SecItemCopyMatching")) repl = (void *)zizhan_hook_SecItemCopyMatching;
+                        else if (!strcmp(sname, "_SecItemUpdate")) repl = (void *)zizhan_hook_SecItemUpdate;
+                        else if (!strcmp(sname, "_SecItemDelete")) repl = (void *)zizhan_hook_SecItemDelete;
+                        else if (!strcmp(sname, "_AudioServicesPlaySystemSound")) repl = (void *)zizhan_hook_AudioPlaySys;
+                        else if (!strcmp(sname, "_AudioServicesPlayAlertSound")) repl = (void *)zizhan_hook_AudioPlayAlert;
+                        if (repl) {
+                            const vm_address_t pg = (vm_address_t)(&ptrs[k]) & ~((vm_address_t)vm_page_size - 1u);
+                            if (vm_protect(mach_task_self(), pg, vm_page_size, FALSE,
+                                           VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) == KERN_SUCCESS) {
+                                ptrs[k] = repl;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cur += lc->cmdsize;
+    }
+}
+
+static void zizhan_app_sandbox_compat_policy(void) {
+    if (boot_option("zizhan_app_compat=0")) return;
+    static dispatch_once_t symOnce;
+    dispatch_once(&symOnce, ^{
+        void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+        if (sec) {
+            gOrigSecItemAdd          = dlsym(sec, "SecItemAdd");
+            gOrigSecItemCopyMatching = dlsym(sec, "SecItemCopyMatching");
+            gOrigSecItemUpdate       = dlsym(sec, "SecItemUpdate");
+            gOrigSecItemDelete       = dlsym(sec, "SecItemDelete");
+        }
+        void *atb = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
+        if (atb) {
+            gOrigAudioPlaySys   = dlsym(atb, "AudioServicesPlaySystemSound");
+            gOrigAudioPlayAlert = dlsym(atb, "AudioServicesPlayAlertSound");
+        }
+    });
+
+    if (!gAppCompatObjcInstalled) {
+        Class fmCls = objc_lookUpClass("NSFileManager");
+        Class impCls = objc_lookUpClass("UIImpactFeedbackGenerator");
+        Class selCls = objc_lookUpClass("UISelectionFeedbackGenerator");
+        Class notCls = objc_lookUpClass("UINotificationFeedbackGenerator");
+        Class winCls = objc_lookUpClass("UIWindow");
+        Method m;
+        if (fmCls && !gOrigAppGroupUrl && (m = class_getInstanceMethod(fmCls, sel_registerName("containerURLForSecurityApplicationGroupIdentifier:"))))
+            gOrigAppGroupUrl = method_setImplementation(m, (IMP)zizhan_app_group_url);
+        if (impCls && !gOrigImpactOccurred && (m = class_getInstanceMethod(impCls, sel_registerName("impactOccurred"))))
+            gOrigImpactOccurred = method_setImplementation(m, (IMP)zizhan_hap_impact);
+        if (impCls && !gOrigImpactIntensity && (m = class_getInstanceMethod(impCls, sel_registerName("impactOccurredWithIntensity:"))))
+            gOrigImpactIntensity = method_setImplementation(m, (IMP)zizhan_hap_impact_int);
+        if (selCls && !gOrigSelectionChanged && (m = class_getInstanceMethod(selCls, sel_registerName("selectionChanged"))))
+            gOrigSelectionChanged = method_setImplementation(m, (IMP)zizhan_hap_selection);
+        if (notCls && !gOrigNotifOccurred && (m = class_getInstanceMethod(notCls, sel_registerName("notificationOccurred:"))))
+            gOrigNotifOccurred = method_setImplementation(m, (IMP)zizhan_hap_notif);
+        if (winCls && !gOrigWinLayout && (m = class_getInstanceMethod(winCls, sel_registerName("layoutSubviews"))))
+            gOrigWinLayout = method_setImplementation(m, (IMP)zizhan_app_win_layout);
+        if (gOrigAppGroupUrl && gOrigImpactOccurred && gOrigWinLayout) gAppCompatObjcInstalled = true;
+    }
+    Class avasCls = objc_lookUpClass("AVAudioSession");
+    if (avasCls && !gOrigAudioSetMode) {
+        Method m1 = class_getInstanceMethod(avasCls, sel_registerName("setMode:error:"));
+        Method m2 = class_getInstanceMethod(avasCls, sel_registerName("overrideOutputAudioPort:error:"));
+        if (m1) gOrigAudioSetMode = method_setImplementation(m1, (IMP)zizhan_avas_set_mode);
+        if (m2) gOrigAudioOverridePort = method_setImplementation(m2, (IMP)zizhan_avas_override_port);
+    }
+}
+
+static void zizhan_app_sandbox_image(const struct mach_header *header, intptr_t slide) {
+    zizhan_app_sandbox_compat_policy();
+    zizhan_rebind_image_got(header, slide);
+}
+
+static bool is_core_daemon_or_shell(const char *name)
+{
+    static const char *const kCore[]={
+        "SpringBoard","backboardd","Preferences","containermanagerd","containermanagerd_system",
+        "usermanagerd","lsd","installd","pkd","runningboardd","PosterBoard","Photos","weatherd"
+    };
+    for(unsigned i=0;i<sizeof(kCore)/sizeof(kCore[0]);i++)
+        if(!strcmp(name,kCore[i]))return true;
+    return false;
+}
 
 __attribute__((constructor)) static void pong_ui18_start(void)
 {
     const char *name=getprogname();
     if(!name)return;
+    if(geteuid()==0 && !boot_option("zizhan_inject_apps=0")) {
+        uint32_t one=1;
+        (void)sysctlbyname("kern.zizhan_inject_apps",NULL,NULL,&one,sizeof(one));
+    }
     if(!strcmp(name,"weatherd")) {
         if(boot_option("zizhan_net_diag=1")){app_network_start(name);app_weather_start();}
         return;
     }
-    if(!strcmp(name,"MobileSafari") || !strcmp(name,"Weather")) {
+    if(!is_core_daemon_or_shell(name)) {
+        (void)dup2(2,1);setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);
+        zizhan_cllocation_policy();
+        zizhan_avcapture_policy();
+        zizhan_camera_app_bridge_init();
+        zizhan_app_sandbox_compat_policy();
+        for(uint32_t i=0,n=_dyld_image_count();i<n;i++)
+            zizhan_rebind_image_got(_dyld_get_image_header(i),_dyld_get_image_vmaddr_slide(i));
+        _dyld_register_func_for_add_image(zizhan_cllocation_image);
+        _dyld_register_func_for_add_image(zizhan_avcapture_image);
+        _dyld_register_func_for_add_image(zizhan_app_sandbox_image);
         if(boot_option("zizhan_app_diag=1"))app_diag_start(name);
         if(boot_option("zizhan_net_diag=1")) {
             app_network_start(name);
@@ -2718,7 +4093,11 @@ __attribute__((constructor)) static void pong_ui18_start(void)
     wallpaper_process=boot_option("pong_wallpaper_catalog_override=1") && wallpaper_paths_process;
     (void)dup2(2,1);setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);
     fprintf(stderr,"Pong iPadOS18 adapter: %s (22H374)\n",name);
-    if(strcmp(name,"Preferences")==0)pong_settings18_start();
+    if(strcmp(name,"Preferences")==0) {
+        pong_settings18_start();
+        if(boot_value("zizhan_accel_test=",(char[16]){0},16))
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
+    }
     if(strcmp(name,"Preferences")==0 && boot_option("pong_pane=DISPLAY")) {
         brightness_test_restore_only=boot_option("pong_brightness_restore_only=1");
         if(brightness_test_restore_only || boot_option("pong_brightness_ui_test=1"))
@@ -2757,13 +4136,33 @@ __attribute__((constructor)) static void pong_ui18_start(void)
         display_link_rates();
         /* zizhan SENS-03 diagnostic: the device and interface orientation SpringBoard has, said when either changes */
         if(boot_value("zizhan_accel_test=",(char[16]){0},16))
-            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,60*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,8*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,orientation_watch);
+        char lock_buf[16];
+        if(boot_value("zizhan_lock_orient=",lock_buf,sizeof(lock_buf))) {
+            long lval=atol(lock_buf);
+            if(lval>=1 && lval<=4)
+                dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,12*NSEC_PER_SEC),dispatch_get_main_queue(),(void *)(intptr_t)lval,apply_boot_orientation_lock);
+        }
         // The consumer reports are accepted but physical volume remains
         // unresponsive on this imported iPad board. Route those transitions
         // to the existing 22H374 controller after checking its actual ABI.
         // Power stays on HID; backboardd sends each volume transition once.
         if(!boot_option("pong_volume_direct=0"))
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,volume18_prepare);
+        if(boot_option("zizhan_audio_test=1")) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,12*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)1u,audio18_test_session);
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,34*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)2u,audio18_test_session);
+        }
+        if(boot_option("zizhan_audio_cap_test=1")) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,22*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),(void *)(uintptr_t)1u,audio18_cap_test_session);
+        }
+        if(boot_option("zizhan_loc_probe=1")) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,16*NSEC_PER_SEC),
+                dispatch_get_global_queue(QOS_CLASS_UTILITY,0),NULL,zizhan_loc_probe_tick);
+        }
         skip_setup=boot_option("pong_skip_setup=1");
         /* zizhan: setup adaptation does not authorize forcing an unlock or
          * disabling automatic display sleep. Bring-up actions are opt-in. */
@@ -2778,11 +4177,34 @@ __attribute__((constructor)) static void pong_ui18_start(void)
             (void)boot_value("pong_open_at=",openat,sizeof(openat));
             snprintf(pending_open_url,sizeof(pending_open_url),"%s",openurl);
             int at=atoi(openat);if(at<=0)at=15;
-            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)at*NSEC_PER_SEC),
-                dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),NULL,open_pending_url);
+            struct timeval kbt={0,0};size_t kbtsz=sizeof(kbt);
+            bool same_boot_done=false;
+            if(strcmp(openurl,"bundle:com.zizhan.bootstrap")==0 && sysctlbyname("kern.boottime",&kbt,&kbtsz,NULL,0)==0) {
+                char sbuf[64]={0};int bfd=open("/private/var/tmp/.zizhan_bootstrap_boottime",O_RDONLY);
+                if(bfd>=0){(void)read(bfd,sbuf,sizeof(sbuf)-1);close(bfd);same_boot_done=(atol(sbuf)==(long)kbt.tv_sec && kbt.tv_sec>0);}
+            }
+            if(same_boot_done) {
+                if(boot_option("zizhan_ux_tour=1")) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,26*NSEC_PER_SEC),dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{
+                        snprintf(pending_open_url,sizeof(pending_open_url),"bundle:com.zizhan.compatsuite");
+                        open_pending_url(NULL);
+                    });
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,52*NSEC_PER_SEC),dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{
+                        snprintf(pending_open_url,sizeof(pending_open_url),"bundle:com.zizhan.installer");
+                        open_pending_url(NULL);
+                    });
+                }
+            } else {
+                dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,(int64_t)at*NSEC_PER_SEC),
+                    dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),NULL,open_pending_url);
+            }
         }
     }
     if(strcmp(name,"backboardd")==0) {
+        if(!boot_option("zizhan_inject_apps=0")) {
+            uint32_t one=1;
+            (void)sysctlbyname("kern.zizhan_inject_apps",NULL,NULL,&one,sizeof(one));
+        }
         software_composition=boot_option("pong_ui_software=1");
         scanout_format=true;
         backboard_container();

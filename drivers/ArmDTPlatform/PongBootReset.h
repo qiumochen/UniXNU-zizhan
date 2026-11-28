@@ -99,7 +99,9 @@ static uint32_t gDeadline, gAfterSpringBoard, gPanicHold = 2, pong_reset_warm = 
 // So a second thread, the guard, watches the pinger: once the pinger has passed its deadline (gPingerEnd) or the absolute deadline
 // has passed, and no reset has happened within gGuardGrace seconds, it resets by itself, touching nothing but the SMC calls (no
 // IOLog, no klog, no display registers). The DRAM ramoops survives the warm reset for RamoopsDump. pong_autoreset_guard=<s> (0 off).
-static volatile uint64_t gPingerEnd;   // absolute time at which the pinger leaves its loop (shortened when SpringBoard is seen)
+static volatile uint64_t gPingerEnd;   // hardware CNTVCT_EL0 tick at which the pinger leaves its loop
+static volatile uint64_t gBootCounter;
+static volatile bool gWatchdogPinging;
 static volatile bool gResetting;
 static uint32_t gGuardGrace = 20;
 static char gSampleProc[32] = "backboardd";
@@ -108,6 +110,11 @@ static uint64_t counterFrequency() {
   uint64_t f = 0;
   __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
   return f ? f : 19200000;
+}
+static uint64_t counterTicks() {
+  uint64_t t = 0;
+  __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(t));
+  return t;
 }
 // PSCI SYSTEM_RESET2 with SYSTEM_WARM_RESET (type 0) when the firmware has it: the reset Android's warm reboot uses, which
 // keeps DRAM in self-refresh. PSCI SYSTEM_RESET (cold) left the ramoops console unreadable (g23), and the watchdog bite keeps
@@ -123,8 +130,8 @@ static void resetNow() {
 }
 static void panicReset() {
   if (pong_klog_flush) pong_klog_flush(2);
-  const uint64_t f = counterFrequency(), t = mach_absolute_time();
-  while (mach_absolute_time() - t < gPanicHold * f) {}
+  const uint64_t f = counterFrequency(), t = counterTicks();
+  while (counterTicks() - t < gPanicHold * f) {}
   resetNow();
 }
 static int findSpringBoard(struct proc *p, void *found) {
@@ -138,19 +145,37 @@ static bool springBoardRunning() {
   proc_iterate(1 /* PROC_ALLPROCLIST */, findSpringBoard, &found, nullptr, nullptr);
   return found;
 }
+/* Safe to call from ArmCpu's masked platform-sleep tick: mach_absolute_time() pauses across IOPMrootDomain
+ * sleep, so all autoreset deadlines use real wall-clock CNTVCT_EL0 ticks. */
+static void ping_from_sleep() {
+  if (!__atomic_load_n(&gWatchdogPinging, __ATOMIC_ACQUIRE) || __atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) return;
+  const uint64_t end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
+  if (end && counterTicks() >= end) return;
+  smc2(GunyahWdtPing, 0, 0, nullptr);
+  gPings = gPings + 1;
+}
+static bool deadline_due_soon(uint32_t margin_s) {
+  if (!__atomic_load_n(&gWatchdogPinging, __ATOMIC_ACQUIRE) || __atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) return false;
+  const uint64_t end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
+  if (!end) return false;
+  const uint64_t now = counterTicks(), margin = (uint64_t)margin_s * counterFrequency();
+  return now >= end || (end - now) <= margin;
+}
+
 static void pinger(void *, wait_result_t) {
-  const uint64_t f = counterFrequency(), start = mach_absolute_time();
+  const uint64_t f = counterFrequency(), start = gBootCounter ? gBootCounter : counterTicks();
   uint64_t end = (uint64_t)gDeadline * f;
   bool seen = false, sampled = false, traced = false;
   uint64_t seenAt = 0;
-  for (uint64_t now = 0; now < end; now = mach_absolute_time() - start) {
+  __atomic_store_n(&gWatchdogPinging, true, __ATOMIC_RELEASE);
+  for (uint64_t now = counterTicks() - start; now < end; now = counterTicks() - start) {
     smc2(GunyahWdtPing, 0, 0, nullptr);
     gPings = gPings + 1;
     if (gAfterSpringBoard && !seen && springBoardRunning()) {
       seen = true;
       seenAt = now;
       if (now + (uint64_t)gAfterSpringBoard * f < end) end = now + (uint64_t)gAfterSpringBoard * f;
-      gPingerEnd = start + end;
+      __atomic_store_n(&gPingerEnd, start + end, __ATOMIC_RELEASE);
       IOLog("PONG_AUTORESET: SpringBoard up at %llus; resetting %us later\n", now / f, gAfterSpringBoard);
     }
     // pong_tsample=<s>: sample pong_tsample_proc's threads for <s> seconds from 20 s after SpringBoard (with the synthetic swipes).
@@ -164,10 +189,11 @@ static void pinger(void *, wait_result_t) {
     }
     IOSleep(1000);
   }
-  gPingerEnd = mach_absolute_time();
+  __atomic_store_n(&gWatchdogPinging, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&gPingerEnd, counterTicks(), __ATOMIC_RELEASE);
   pong_scanout_summary();
   IOLog("PONG_AUTORESET: deadline reached after %u pings; watchdog bites in 1 s\n", gPings);
-  gResetting = true;
+  __atomic_store_n(&gResetting, true, __ATOMIC_RELEASE);
   IOSleep(200);
   if (pong_klog_flush) pong_klog_flush(1);
   resetNow();
@@ -175,18 +201,18 @@ static void pinger(void *, wait_result_t) {
 
 static uint32_t gKlogPeriod, gGuardTicks;   // pong_klog_period=<s>: copy the console to the UFS klog every <s> seconds (reason 5)
 static void guard(void *, wait_result_t) {
-  const uint64_t f = counterFrequency(), start = mach_absolute_time();
+  const uint64_t f = counterFrequency(), start = gBootCounter ? gBootCounter : counterTicks();
   const uint64_t grace = (uint64_t)gGuardGrace * f, cap = start + (uint64_t)gDeadline * f + grace;
   for (;;) {
     IOSleep(1000);
     // Rounds that die without reaching the warm reset (pinger stuck, cold watchdog bite, DRAM console garbled: g152l/o/p)
     // still leave their console this way. Diagnostics only: each copy is ~1 MB of UFS writes.
     if (gKlogPeriod && pong_klog_flush && ++gGuardTicks % gKlogPeriod == 0 && !gResetting) pong_klog_flush(5);
-    if (gResetting) return;   // the pinger is resetting: its watchdog bite (1 s) is on the way
-    const uint64_t now = mach_absolute_time(), end = gPingerEnd;
+    if (__atomic_load_n(&gResetting, __ATOMIC_ACQUIRE)) return;   // the pinger is resetting: its watchdog bite (1 s) is on the way
+    const uint64_t now = counterTicks(), end = __atomic_load_n(&gPingerEnd, __ATOMIC_ACQUIRE);
     if ((end && now > end + grace) || now > cap) break;
   }
-  gResetting = true;
+  __atomic_store_n(&gResetting, true, __ATOMIC_RELEASE);
   resetNow();   // PSCI SYSTEM_RESET2 (warm, keeps DRAM) and the 1 s watchdog bite behind it
 }
 static int armWatchdog(uint32_t deadline, char *text, unsigned cap) {
@@ -197,10 +223,11 @@ static int armWatchdog(uint32_t deadline, char *text, unsigned cap) {
   const int64_t set = (int64_t)smc2(GunyahWdtSetTime, GunyahWdtTimeoutMs, GunyahWdtTimeoutMs, nullptr);
   if (set) {snprintf(text, cap, "watchdog set-time %lld, not armed", (long long)set); return 2;}
   gDeadline = deadline;
+  gBootCounter = counterTicks();
+  __atomic_store_n(&gPingerEnd, gBootCounter + (uint64_t)deadline * counterFrequency(), __ATOMIC_RELEASE);
   thread_t thread;
   if (kernel_thread_start(pinger, nullptr, &thread) != KERN_SUCCESS) {snprintf(text, cap, "watchdog: no thread"); return 3;}
   thread_deallocate(thread);
-  gPingerEnd = mach_absolute_time() + (uint64_t)deadline * counterFrequency();
   if (gGuardGrace && kernel_thread_start(guard, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
   const int64_t on = (int64_t)smc2(GunyahWdtControl, GunyahWdtEnable, 0, nullptr);
   snprintf(text, cap, "watchdog enable=%lld, pings until %us, bite 60 s later (last ping %llu ms ago)", (long long)on, deadline,

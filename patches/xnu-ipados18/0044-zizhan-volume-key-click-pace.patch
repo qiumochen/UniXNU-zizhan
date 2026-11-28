@@ -1,0 +1,126 @@
+zizhan IO-01: pace physical volume keys to single-step clicks with 400 ms hold repeat (zizhan_vol_pace).
+--- a/bsd/dev/pong_buttons.c
++++ b/bsd/dev/pong_buttons.c
+@@ -21,6 +21,8 @@
+ static uint32_t reset_ms=3000;
+ static uint64_t power_down_at;
+ static bool reset_fired;
++static uint32_t vol_pace=1;
++static struct {uint32_t held_ms;uint8_t down;} vol_state[2];
+ static vm_offset_t core,cnfg,observer;
+ static bool v7;
+ static uint32_t channels;
+@@ -77,6 +79,41 @@
+     return true;
+ }
+ 
++unsigned pong_volume_key_sample(uint32_t code,int down,uint32_t dt_ms);
++unsigned
++pong_volume_key_sample(uint32_t code,int down,uint32_t dt_ms)
++{
++    if (code!=PONG_BUTTON_VOLUME_UP && code!=PONG_BUTTON_VOLUME_DOWN) {
++        return 0;
++    }
++    unsigned idx=(code==PONG_BUTTON_VOLUME_UP)?0u:1u;
++    if (!down) {
++        vol_state[idx].down=0;
++        vol_state[idx].held_ms=0;
++        return 0;
++    }
++    unsigned fire=0;
++    if (!vol_state[idx].down) {
++        vol_state[idx].down=1;
++        vol_state[idx].held_ms=0;
++        fire=1;
++    } else {
++        uint32_t prev=vol_state[idx].held_ms;
++        uint32_t next=(dt_ms>0xffffu-prev)?0xffffu:(prev+dt_ms);
++        vol_state[idx].held_ms=next;
++        if (next>=400u) {
++            if (prev<400u || (next-400u)/112u>(prev-400u)/112u) {
++                fire=1;
++            }
++        }
++    }
++    if (fire) {
++        pong_touch_post(PONG_BUTTON_DOWN,code,0,0);
++        pong_touch_post(PONG_BUTTON_UP,code,0,0);
++    }
++    return fire;
++}
++
+ static void look(struct key *k,bool down)
+ {
+     bool steady=k->last==down;k->last=down;
+@@ -84,7 +121,11 @@
+     if (!k->live) {if (!down) k->live=true;return;}
+     if (k->down==down) return;
+     k->down=down;
+-    pong_touch_post(down?PONG_BUTTON_DOWN:PONG_BUTTON_UP,k->code,0,0);
++    if (vol_pace && k->code!=PONG_BUTTON_POWER) {
++        (void)pong_volume_key_sample(k->code,down?1:0,0);
++    } else {
++        pong_touch_post(down?PONG_BUTTON_DOWN:PONG_BUTTON_UP,k->code,0,0);
++    }
+     printf("Pong keys: %u %s\n",k->code,down?"down":"up");
+ }
+ 
+@@ -118,8 +159,10 @@
+     printf("Pong keys: arbiter v%u channels=%u PON=%u GPIO6=%u; power=%u up=%u down=%u\n",
+         v7?7:5,channels,pon.channel,pin.channel,keys[0].usable,keys[1].usable,keys[2].usable);
+     unsigned failures=0;
++    uint32_t last_poll_ms=16;
+     for (;;) {
+         bool good=true;
++        bool was_vol_down[3]={false,keys[1].down,keys[2].down};
+         if (keys[0].usable) {
+             if (read_registers(&pon,0x10,&state,1)) {
+                 look(&keys[0],(state&0x80)!=0);look(&keys[2],(state&0x40)!=0);
+@@ -129,6 +172,13 @@
+             if (read_registers(&pin,0x10,&state,1)) look(&keys[1],(state&1)==0);
+             else good=false;
+         }
++        if (vol_pace && good) {
++            for (unsigned i=1;i<3;i++) {
++                if (keys[i].usable && was_vol_down[i] && keys[i].down) {
++                    (void)pong_volume_key_sample(keys[i].code,1,last_poll_ms);
++                }
++            }
++        }
+         if (reset_ms && keys[0].usable) {
+             if (!keys[0].down) power_down_at=0;
+             else if (!power_down_at) power_down_at=mach_absolute_time();
+@@ -143,8 +193,15 @@
+         }
+         failures=good?0:failures+1;
+         if (failures>=8) {
+-            for (unsigned i=0;i<3;i++) if (keys[i].down)
+-                pong_touch_post(PONG_BUTTON_UP,keys[i].code,0,0);
++            for (unsigned i=0;i<3;i++) {
++                if (keys[i].down) {
++                    if (vol_pace && i>0) {
++                        (void)pong_volume_key_sample(keys[i].code,0,0);
++                    } else {
++                        pong_touch_post(PONG_BUTTON_UP,keys[i].code,0,0);
++                    }
++                }
++            }
+             printf("Pong keys: repeated observer read failure; stop optional polling\n");break;
+         }
+         uint32_t poll_ms=16;
+@@ -159,6 +216,7 @@
+                 poll_ms=64;
+             }
+         }
++        last_poll_ms=poll_ms;
+         uint64_t deadline;
+         clock_interval_to_deadline(poll_ms,NSEC_PER_MSEC,&deadline);
+         assert_wait_deadline((event_t)keys,THREAD_UNINT,deadline);
+@@ -173,6 +231,7 @@
+     uint32_t enabled=0;thread_t t;
+     if (!PE_parse_boot_argn("pong_buttons",&enabled,sizeof(enabled)) || !enabled) return;
+     PE_parse_boot_argn("pong_button_reset",&reset_ms,sizeof(reset_ms));
++    PE_parse_boot_argn("zizhan_vol_pace",&vol_pace,sizeof(vol_pace));
+     if (kernel_thread_start(keys_thread,NULL,&t)==KERN_SUCCESS) thread_deallocate(t);
+ }
+ #endif

@@ -441,6 +441,13 @@ void snsEvent(const uint8_t *d, uint32_t n) {
             static const int32_t held[4][3] = {{0, 9807, 0}, {9807, 0, 0}, {0, -9807, 0}, {-9807, 0, 0}};
             const unsigned phase = unsigned(nowMs() / 1000 / testS) % 4;
             zizhan_slpi_sensors::rotate_imu_axes(held[phase][0], held[phase][1], held[phase][2], gImuRot, v);
+          } else if (zizhan_outer_lid_closed && zizhan_outer_lid_closed() != 0) {
+            /* OUTER-04: Outer 1080x2520 cover scanout is natively upright portrait (wori=1). Force upright
+             * portrait gravity (0, +9807, 0 -> HID y=-1g -> UIInterfaceOrientationPortrait=1) while folded;
+             * unfolding immediately restores live gImuRot 4-way gravity auto-rotation on the 8.02" inner panel. */
+            v[0] = 0;
+            v[1] = 9807;
+            v[2] = 0;
           }
           zizhan_sensor_post(16, v[0], v[1], v[2]);
         }

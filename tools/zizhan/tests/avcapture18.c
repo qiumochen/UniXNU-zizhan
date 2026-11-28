@@ -124,10 +124,159 @@ static void test_awb_and_isp_bgra(void) {
     free(raw);
 }
 
+static void test_cam04_orientation_bayer_hotpixel_and_denoise(void) {
+    /* 1. Verify 90 deg CW rear mount rotation + native Bayer parity invariance:
+     *    Raw sensor is 160x120 (even). Under 90 deg CW rotation -> 120x160 upright portrait:
+     *    - Raw bottom-left (x=0..18, y=100..118) moves to output TOP-LEFT (ox=4, oy=4)!
+     *    - Raw top-left (x=0..18, y=0..18) moves to output TOP-RIGHT (ox=115, oy=4)!
+     *    Pack pure RED (R=700, G=100, B=100) at raw bottom-left and pure BLUE (R=100, G=100, B=700)
+     *    at raw top-left in GRBG order, and verify NO R/B channel swap occurs after 90 deg CW! */
+    const uint16_t sw = 160u, sh = 120u, stride = 200u;
+    uint8_t *raw = (uint8_t *)calloc(1, (size_t)stride * sh);
+    uint8_t *out_rear = (uint8_t *)calloc(1, 120u * 160u * 4u);
+    assert(raw && out_rear);
+    for (uint16_t y = 0; y < sh; y += 2u) {
+        for (uint16_t x = 0; x < sw; x += 2u) {
+            uint16_t r = 240u, g = 240u, b = 240u;
+            if (x < 24u && y >= 96u) {
+                r = 720u; g = 110u; b = 110u; /* raw bottom-left = RED */
+            } else if (x < 24u && y < 24u) {
+                r = 110u; g = 110u; b = 720u; /* raw top-left = BLUE */
+            }
+            /* GRBG: p00=G, p01=R, p10=B, p11=G */
+            pack_raw10_quad(raw, stride, x, y, g, r, b, g);
+        }
+    }
+    uint32_t dgain = 0;
+    (void)zizhan_cam_isp_raw10_to_bgra_ex(
+        raw, sw, sh, stride, ZIZHAN_BAYER_GRBG, 90, 0, 0,
+        64u, 256u, 256u, 256u, 1, &dgain, out_rear, 120u, 160u,
+        NULL, NULL, NULL, NULL);
+    const uint8_t *tl = out_rear + (4u * 120u + 4u) * 4u;
+    const uint8_t *tr = out_rear + (4u * 120u + 115u) * 4u;
+    const uint8_t *mid = out_rear + (80u * 120u + 60u) * 4u;
+    /* BGRA layout: [0]=B, [1]=G, [2]=R, [3]=A */
+    assert(tl[2] > 200u && tl[2] > tl[0] + 100u && tl[2] > tl[1] + 80u); /* Top-left is RED */
+    assert(tr[0] > 200u && tr[0] > tr[2] + 100u && tr[0] > tr[1] + 80u); /* Top-right is BLUE */
+    /* CCM neutral-gray invariance: mid gray (240,240,240) stays strictly R==G==B! */
+    assert(abs((int)mid[0] - (int)mid[1]) <= 1 && abs((int)mid[2] - (int)mid[1]) <= 1);
+
+    /* 2. Verify 270 deg CW + horizontal selfie mirror on RGGB (IMX596 front camera):
+     *    Raw bottom-right (x=136..158, y=96..118) -> unmirrored 270 CW top-right -> mirrored TOP-LEFT! */
+    memset(raw, 0, (size_t)stride * sh);
+    for (uint16_t y = 0; y < sh; y += 2u) {
+        for (uint16_t x = 0; x < sw; x += 2u) {
+            uint16_t r = 220u, g = 220u, b = 220u;
+            if (x >= 136u && y >= 96u) {
+                r = 120u; g = 740u; b = 120u; /* raw bottom-right = GREEN */
+            }
+            /* RGGB: p00=R, p01=G, p10=G, p11=B */
+            pack_raw10_quad(raw, stride, x, y, r, g, g, b);
+        }
+    }
+    dgain = 0;
+    (void)zizhan_cam_isp_raw10_to_bgra_ex(
+        raw, sw, sh, stride, ZIZHAN_BAYER_RGGB, 270, 1, 0,
+        64u, 256u, 256u, 256u, 1, &dgain, out_rear, 120u, 160u,
+        NULL, NULL, NULL, NULL);
+    assert(tl[1] > 200u && tl[1] > tl[0] + 80u && tl[1] > tl[2] + 80u); /* Mirrored top-left is GREEN */
+
+    /* 3. Hot-pixel immunity + high-gain dark-frame noise coring + temporal IIR denoiser:
+     *    Indoor mid-dark scene (raw=140) with isolated 1023 hot pixels must NOT crush luma,
+     *    and dark-cap high-gain noise (64 +- 18, gain=3840) must core cleanly near black. */
+    for (uint16_t y = 0; y < sh; y += 2u) {
+        for (uint16_t x = 0; x < sw; x += 2u) {
+            uint16_t v = 160u;
+            if (x == 32u && y == 32u) { v = 1023u; } /* isolated saturated hot quad */
+            pack_raw10_quad(raw, stride, x, y, v, v, v, v);
+        }
+    }
+    dgain = 0;
+    const uint16_t hot_luma = zizhan_cam_isp_raw10_to_bgra_ex(
+        raw, sw, sh, stride, ZIZHAN_BAYER_GRBG, 90, 0, 0,
+        64u, 256u, 256u, 1024u, 1, &dgain, out_rear, 120u, 160u,
+        NULL, NULL, NULL, NULL);
+    assert(hot_luma >= 120u); /* Previously single 1023 hot pixel crushed luma < 85! */
+
+    /* High-gain dark cap (mean 64 +- 14 readout noise at 15x gain=3840): output mean luma <= 6 */
+    for (uint16_t y = 0; y < sh; y += 2u) {
+        for (uint16_t x = 0; x < sw; x += 2u) {
+            const uint16_t n0 = (uint16_t)(54u + (((x * 13u + y * 7u) % 21u)));
+            const uint16_t n1 = (uint16_t)(54u + (((x * 17u + y * 11u) % 21u)));
+            pack_raw10_quad(raw, stride, x, y, n0, n1, n0, n1);
+        }
+    }
+    uint16_t mr = 0, mg = 0, mb = 0, rq = 0, bq = 0;
+    dgain = 0;
+    const uint16_t dark_luma = zizhan_cam_isp_raw10_to_bgra_ex(
+        raw, sw, sh, stride, ZIZHAN_BAYER_GRBG, 90, 0, 0,
+        64u, 256u, 256u, 3840u, 1, &dgain, out_rear, 120u, 160u,
+        NULL, &mr, &mg, &mb);
+    zizhan_cam_awb_gains(mr, mg, mb, 64u, &rq, &bq);
+    assert(rq == 256u && bq == 256u); /* Dark noise must NOT skew AWB away from neutral */
+    assert(dark_luma <= 6u);
+
+    /* Temporal denoiser preserves sharp high-contrast motion while smoothing small static noise */
+    uint8_t *prev = (uint8_t *)calloc(1, 120u * 160u * 4u);
+    assert(prev != NULL);
+    int valid = 0;
+    memset(out_rear, 100, 120u * 160u * 4u);
+    zizhan_cam_temporal_denoise_bgra(out_rear, prev, 120u, 160u, 120u * 4u, 2048u, &valid);
+    assert(valid == 1 && prev[0] == 100u);
+    out_rear[0] = 112u; /* +12 static noise -> blended to ~103 */
+    out_rear[4] = 240u; /* +140 motion edge -> preserved 100% at 240 */
+    zizhan_cam_temporal_denoise_bgra(out_rear, prev, 120u, 160u, 120u * 4u, 2048u, &valid);
+    assert(out_rear[0] == 103u);
+    assert(out_rear[4] == 240u);
+
+    /* Preview layer orientation mapping across folded (wori=1) and unfolded (wori=1..4),
+     * plus exact 2x2 matrix composition proof against live SpringBoard saf transforms:
+     *   wori=1: saf=[ 1, 0, 0, 1]  wori=2: saf=[-1, 0, 0,-1]
+     *   wori=3: saf=[ 0, 1,-1, 0]  wori=4: saf=[ 0,-1, 1, 0]
+     * For every unfolded wori in 1..4, saf(R(turns * pi/2) * v_img) must map:
+     *   Image TOP (0, -1) -> (-1, 0)_fb (physical camera top)
+     *   Image RIGHT (+1, 0) -> (0, -1)_fb (physical phone right / selfie user right) */
+    assert(zizhan_cam_preview_quarter_turns_cw(1, 1) == 0);
+    assert(zizhan_cam_preview_quarter_turns_cw(0, 4) == 0);
+    assert(zizhan_cam_preview_quarter_turns_cw(0, 1) == 3);
+    assert(zizhan_cam_preview_quarter_turns_cw(0, 3) == 2);
+    assert(zizhan_cam_preview_quarter_turns_cw(0, 2) == 1);
+
+    static const int kSaf[5][4] = {
+        { 0,  0,  0,  0},
+        { 1,  0,  0,  1}, /* wori=1 */
+        {-1,  0,  0, -1}, /* wori=2 */
+        { 0,  1, -1,  0}, /* wori=3 */
+        { 0, -1,  1,  0}, /* wori=4 */
+    };
+    static const int kCos[4] = { 1,  0, -1,  0};
+    static const int kSin[4] = { 0,  1,  0, -1};
+    for (long wori = 1; wori <= 4; ++wori) {
+        const int t = zizhan_cam_preview_quarter_turns_cw(0, wori) & 3;
+        /* CoreGraphics row-vector rotation: (x', y') = (x*cos - y*sin, x*sin + y*cos) */
+        const int top_wx = 0 * kCos[t] - (-1) * kSin[t];
+        const int top_wy = 0 * kSin[t] + (-1) * kCos[t];
+        const int top_fx = top_wx * kSaf[wori][0] + top_wy * kSaf[wori][2];
+        const int top_fy = top_wx * kSaf[wori][1] + top_wy * kSaf[wori][3];
+        assert(top_fx == -1 && top_fy == 0);
+
+        const int rt_wx = 1 * kCos[t] - 0 * kSin[t];
+        const int rt_wy = 1 * kSin[t] + 0 * kCos[t];
+        const int rt_fx = rt_wx * kSaf[wori][0] + rt_wy * kSaf[wori][2];
+        const int rt_fy = rt_wx * kSaf[wori][1] + rt_wy * kSaf[wori][3];
+        assert(rt_fx == 0 && rt_fy == -1);
+    }
+
+    free(prev);
+    free(out_rear);
+    free(raw);
+}
+
 int main(void) {
     assert(sizeof(ZizhanCamFrameHeader) == 64u);
     test_ae_closed_loop();
     test_awb_and_isp_bgra();
+    test_cam04_orientation_bayer_hotpixel_and_denoise();
     puts("PASS avcapture18");
     return 0;
 }

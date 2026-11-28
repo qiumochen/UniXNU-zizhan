@@ -21,6 +21,7 @@ extern "C" volatile uint32_t pong_zc_flipped_tag __attribute__((weak));
 extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 extern "C" void zizhan_outer_fold_show(int closed) __attribute__((weak));
 extern "C" uint32_t zizhan_outer_fold_mode(void) __attribute__((weak));
+extern "C" int zizhan_outer_direct_desktop(void) __attribute__((weak));
 extern "C" int zizhan_slpi_hinge_closed(void);
 
 namespace zizhan_hall {
@@ -156,17 +157,26 @@ static void worker(void *arg, wait_result_t) {
     ++reads;
     if (update.event == Event::Baseline || update.event == Event::Transition) {
       baseline = true;
-      if (update.event == Event::Transition) ++changes;
-      if (reports++ < 64) IOLog("ZIZHAN_HALL: %s raw=0x%x level=%s asserted=%u at_ns=%llu\n",
-            update.event == Event::Baseline ? "BASELINE" : "TRANSITION",
-            raw, rawName(high), update.stable ? 1u : 0u,
-            static_cast<unsigned long long>(when));
+      if (update.event == Event::Transition) { ++changes; }
+      if (reports++ < 64) {
+        IOLog("ZIZHAN_HALL: %s raw=0x%x level=%s asserted=%u at_ns=%llu\n",
+              update.event == Event::Baseline ? "BASELINE" : "TRANSITION",
+              raw, rawName(high), update.stable ? 1u : 0u,
+              static_cast<unsigned long long>(when));
+      }
+      if (config.follow && update.event == Event::Baseline && update.stable && zizhan_outer_fold_show) {
+        /* Cold boot with lid already closed: enter Cover Clock immediately instead of waiting 30s. */
+        zizhan_outer_fold_show(1);
+        outer_refresh_ns = when;
+      }
       if (config.follow && update.event == Event::Transition) {
         const int display = zizhan_display_power_state ? zizhan_display_power_state() : -1;
         const bool desktop = &pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE);
         const uint32_t outer_mode = zizhan_outer_fold_mode ? zizhan_outer_fold_mode() : 1u;
         const uint64_t now_ms = when / 1000000ULL;
-        if (desktop && outer_mode == 2u) {
+        const bool direct_desk = zizhan_outer_direct_desktop ? (zizhan_outer_direct_desktop() != 0) : false;
+        (void)outer_mode;
+        if (desktop && direct_desk) {
           if (update.stable) {
             if (pong_scanout_set_cover_redirect) {
               pong_scanout_set_cover_redirect(1);

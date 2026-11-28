@@ -172,10 +172,13 @@ def main():
                  audit_adt((payload / 'kernel.macho.adt').read_bytes(), boot_manifest=boot_manifest))
     (out / 'adt-audit.json').write_text(json.dumps(adt_audit, indent=2) + '\n')
     initrd_line = 'initrd = "Payloads/scratch-data.img"\n' if data_ramdisk else ''
+    entry_title = ('iPadOS 18 (zizhan)'
+                   if args.identity and args.identity.startswith('ipad')
+                   else 'Pong iOS 18 - iPhone 16 Pro')
     (payload / 'unixnu.toml').write_text('version = 1\n[boot]\ntimeout = 3\n'
         'default = "pong-xnu"\n[kits]\nautoload = false\n[[driver]]\n'
         'path = "DarwinBoot24.efi"\nconnect = false\n[[entry]]\n'
-        'id = "pong-xnu"\ntitle = "Pong iOS 18 - iPhone 16 Pro"\n'
+        f'id = "pong-xnu"\ntitle = "{entry_title}"\n'
         'type = "xnu"\npath = "kernel.macho"\n' + initrd_line + 'args = "' + boot_args + '"\n')
     fat = out / 'payload-fat.img'
     env = dict(os.environ, MTOOLS_SKIP_CHECK='1', TZ='UTC')

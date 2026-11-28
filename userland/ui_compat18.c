@@ -3405,6 +3405,44 @@ static void apply_boot_orientation_lock(void *context)
     fprintf(stderr,"Zizhan scene18: applied boot orientation lock=%ld\n",target);
 }
 
+static int zizhan_cam_ctl_query(void);
+static void cover_orient_lock_watch(void *unused)
+{
+    (void)unused;
+    static int was_closed=0;
+    static int saved_state=0;
+    const int q=zizhan_cam_ctl_query();
+    const int closed=(int)(((uint32_t)q>>6)&1u);
+    id lm=singleton("SBOrientationLockManager");
+    if(lm) {
+        Class lcls=object_getClass(lm);
+        SEL s_locked=sel_registerName("isUserLocked");
+        SEL s_lori=sel_registerName("userLockOrientation");
+        SEL s_lock=sel_registerName("lock:");
+        SEL s_unlock=sel_registerName("unlock");
+        int locked=0;
+        long lock_ori=0;
+        if(method_abi(class_getInstanceMethod(lcls,s_locked),"Bc",0,"")) {
+            locked=(int)((BOOL(*)(id,SEL))objc_msgSend)(lm,s_locked);
+        }
+        if(method_abi(class_getInstanceMethod(lcls,s_lori),"qQ",0,"")) {
+            lock_ori=((long(*)(id,SEL))objc_msgSend)(lm,s_lori);
+        }
+        const int act=zizhan_cover_orient_lock_step(1,closed,&was_closed,&saved_state,locked,lock_ori);
+        if(act==1 && method_abi(class_getInstanceMethod(lcls,s_lock),"v",1,"q")) {
+            ((void(*)(id,SEL,long))objc_msgSend)(lm,s_lock,1L);
+            fprintf(stderr,"Zizhan scene18: cover folded -> locked portrait (wori=1, saved=%d)\n",saved_state);
+        } else if(act==-1 && method_abi(class_getInstanceMethod(lcls,s_unlock),"v",0,"")) {
+            ((void(*)(id,SEL))objc_msgSend)(lm,s_unlock);
+            fprintf(stderr,"Zizhan scene18: cover unfolded -> restored free IMU orientation\n");
+        } else if(act>=11 && act<=14 && method_abi(class_getInstanceMethod(lcls,s_lock),"v",1,"q")) {
+            ((void(*)(id,SEL,long))objc_msgSend)(lm,s_lock,(long)(act-10));
+            fprintf(stderr,"Zizhan scene18: cover unfolded -> restored user lock=%d\n",act-10);
+        }
+    }
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,300*NSEC_PER_MSEC),dispatch_get_main_queue(),NULL,cover_orient_lock_watch);
+}
+
 /* Stage 5: Read-only notifyd GNSS -> CoreLocation bridge. Avoids synchronous XPC hangs on
  * com.apple.locationd.synchronous in adapted LaunchDaemons mode; never logs raw coordinates. */
 struct zizhan_cl_coord2d { double latitude; double longitude; };
@@ -4142,6 +4180,9 @@ __attribute__((constructor)) static void pong_ui18_start(void)
             long lval=atol(lock_buf);
             if(lval>=1 && lval<=4)
                 dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,12*NSEC_PER_SEC),dispatch_get_main_queue(),(void *)(intptr_t)lval,apply_boot_orientation_lock);
+        }
+        if(!boot_option("zizhan_outer_orient_lock=0")) {
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,6*NSEC_PER_SEC),dispatch_get_main_queue(),NULL,cover_orient_lock_watch);
         }
         // The consumer reports are accepted but physical volume remains
         // unresponsive on this imported iPad board. Route those transitions

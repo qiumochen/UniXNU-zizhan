@@ -23,6 +23,7 @@ extern "C" { volatile uint32_t pong_zc_flipped_tag = 1; }
 extern "C" void pong_touch_post(uint32_t, uint32_t, uint32_t, uint32_t) {}
 extern "C" void zizhan_outer_fold_show(int) {}
 extern "C" uint32_t zizhan_outer_fold_mode(void) { return 1u; }
+extern "C" int zizhan_outer_direct_desktop(void) { return 0; }
 extern "C" int zizhan_slpi_hinge_closed(void) { return slpi_hinge_state; }
 """
 harness = r'''

@@ -26,6 +26,7 @@ typedef size_t (*zizhan_cam_frame_fn)(void *, size_t, size_t);
 void zizhan_cam_register(zizhan_cam_ctrl_fn, zizhan_cam_frame_fn);
 int zizhan_cam_sleep_busy(void);
 uint32_t zizhan_outer_active_view(void) __attribute__((weak));
+int zizhan_outer_lid_closed(void) __attribute__((weak));
 }
 
 namespace zizhan_cam_stream {
@@ -46,6 +47,7 @@ static volatile int gActiveSensor = 0;  /* 0=off, 1=imx766, 2=imx596, 4=ov13b10 
 static volatile int gAfRequested = 0;
 static volatile uint64_t gLeaseUntilTicks = 0;
 static uint8_t *gPublishedBuf[2] = {nullptr, nullptr};
+static uint8_t *gTemporalBuf = nullptr;
 static volatile uint32_t gPublishedIdx = 0;
 static volatile uint32_t gPublishedSeq = 0;
 static uint8_t sCachedCphyProf = 0xffu;
@@ -122,6 +124,8 @@ struct StreamSession {
 
   ZizhanCamAeState ae{};
   uint16_t awbR = 256u, awbB = 256u;
+  uint32_t smoothDgainQ8 = 0u;
+  int temporalValid = 0;
 
   bool setVcmDac(uint16_t dac) {
     if (!haveVcm || !cci0.va) return false;
@@ -219,6 +223,8 @@ struct StreamSession {
 
   bool openHardware(int wantHwPos) {
     hwPos = wantHwPos;
+    smoothDgainQ8 = 0u;
+    temporalValid = 0;
     const bool isMain766 = (wantHwPos == 1);
     const bool isFront596 = (wantHwPos == 2);
 
@@ -599,7 +605,10 @@ struct StreamSession {
 
   bool captureOneFrame(uint32_t slotIdx, bool stampQr) {
     if (__atomic_exchange_n(&gAfRequested, 0, __ATOMIC_ACQ_REL) != 0) {
-      if (hwPos == 1 && haveVcm) runAutofocusSweep();
+      if (hwPos == 1 && haveVcm) {
+        runAutofocusSweep();
+        temporalValid = 0;
+      }
     }
 
     ZizhanCamCcOps csidOps = {&csid, zizhan_cam_capture::mmio_rd, zizhan_cam_capture::mmio_wr, zizhan_cam_capture::mmio_pause, 2000};
@@ -630,24 +639,38 @@ struct StreamSession {
 
     const uint32_t nextPub = (__atomic_load_n(&gPublishedIdx, __ATOMIC_RELAXED) ^ 1u) & 1u;
     uint8_t *outBuf = gPublishedBuf[nextPub];
-    if (!outBuf) return false;
+    if (!outBuf) { return false; }
 
     uint8_t *bgra = outBuf + sizeof(ZizhanCamFrameHeader);
     uint16_t mean10 = 0, r10 = 0, g10 = 0, b10 = 0;
     const int mirrorX = (reqPos == 2) ? 1 : 0;
-    const int flipY   = (hwPos == 4 || hwPos == 1) ? 1 : 0;
+    /* CAM-04 physical sensor mount roll from live FDT (work/camera-dt/camera-dt.txt):
+     *  - Rear IMX766 (hwPos=1) & OV13B10 (hwPos=4): roll = 90 deg CW (0x5a)
+     *  - Front IMX596 (hwPos=2): roll = 270 deg CW (0x10e) + selfie horizontal mirror */
+    int rotCwDeg = (hwPos == 2) ? 270 : 90;
+    uint32_t rotOverride = 0xffffffffu;
+    if (PE_parse_boot_argn("zizhan_cam_rot", &rotOverride, sizeof(rotOverride)) &&
+        (rotOverride == 0u || rotOverride == 90u || rotOverride == 180u || rotOverride == 270u)) {
+      rotCwDeg = int(rotOverride);
+    }
 
-    const uint16_t meanLuma = zizhan_cam_isp_raw10_to_bgra(
+    const uint16_t meanLuma = zizhan_cam_isp_raw10_to_bgra_ex(
         const_cast<const uint8_t *>(rawVa), rawW, rawH, rawStride,
-        bayerOrder, mirrorX, flipY,
-        ae.black_level, awbR, awbB,
+        bayerOrder, rotCwDeg, mirrorX, 0,
+        ae.black_level, awbR, awbB, ae.gain_q8, 1, &smoothDgainQ8,
         bgra, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H,
         &mean10, &r10, &g10, &b10);
 
+    if (gTemporalBuf) {
+      zizhan_cam_temporal_denoise_bgra(
+          bgra, gTemporalBuf, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H,
+          ZIZHAN_CAM_OUT_STRIDE, ae.gain_q8, &temporalValid);
+    }
+
     uint16_t flags = ZIZHAN_CAM_FLAG_OPTICAL;
-    if (hwPos != reqPos) flags |= ZIZHAN_CAM_FLAG_FALLBACK;
-    if (hwPos == 1) flags |= ZIZHAN_CAM_FLAG_MAIN_IMX766;
-    if (afLocked) flags |= ZIZHAN_CAM_FLAG_AF_LOCKED;
+    if (hwPos != reqPos) { flags |= ZIZHAN_CAM_FLAG_FALLBACK; }
+    if (hwPos == 1) { flags |= ZIZHAN_CAM_FLAG_MAIN_IMX766; }
+    if (afLocked) { flags |= ZIZHAN_CAM_FLAG_AF_LOCKED; }
     if (stampQr) {
       zizhan_cam_stamp_test_qr(bgra, ZIZHAN_CAM_OUT_W, ZIZHAN_CAM_OUT_H);
       flags |= ZIZHAN_CAM_FLAG_QR_STAMP;
@@ -663,7 +686,6 @@ struct StreamSession {
 
     uint64_t tsNs = 0;
     absolutetime_to_nanoseconds(mach_absolute_time(), &tsNs);
-    const uint32_t seq = __atomic_add_fetch(&gPublishedSeq, 1u, __ATOMIC_ACQ_REL);
 
     ZizhanCamFrameHeader hdr{};
     hdr.magic          = ZIZHAN_CAM_MAGIC;
@@ -672,7 +694,6 @@ struct StreamSession {
     hdr.width          = ZIZHAN_CAM_OUT_W;
     hdr.height         = ZIZHAN_CAM_OUT_H;
     hdr.stride         = ZIZHAN_CAM_OUT_STRIDE;
-    hdr.seq            = seq;
     hdr.exposure_lines = ae.exposure_lines;
     hdr.analog_gain_q8 = ae.gain_q8;
     hdr.awb_r_q8       = awbR;
@@ -684,6 +705,8 @@ struct StreamSession {
     hdr.timestamp_ns   = tsNs;
 
     IOLockLock(gLock);
+    const uint32_t seq = __atomic_add_fetch(&gPublishedSeq, 1u, __ATOMIC_ACQ_REL);
+    hdr.seq = seq;
     memcpy(outBuf, &hdr, sizeof(hdr));
     __atomic_store_n(&gPublishedIdx, nextPub, __ATOMIC_RELEASE);
     IOLockUnlock(gLock);
@@ -769,8 +792,8 @@ struct StreamSession {
 };
 
 static int modeToWantPos(int mode) {
-  if (mode == ZIZHAN_CAM_CMD_FRONT) return 2;
-  if (mode == ZIZHAN_CAM_CMD_ULTRA) return 4;
+  if (mode == ZIZHAN_CAM_CMD_FRONT) { return 2; }
+  if (mode == ZIZHAN_CAM_CMD_ULTRA) { return 4; }
   return 1; /* ZIZHAN_CAM_CMD_BACK or ZIZHAN_CAM_CMD_BACK_QR -> 1x Main IMX766 */
 }
 
@@ -785,8 +808,9 @@ static void streamWorker(void *, wait_result_t) {
       continue;
     }
 
-    if (!gPublishedBuf[0]) gPublishedBuf[0] = static_cast<uint8_t *>(IOMallocData(ZIZHAN_CAM_TOTAL_BYTES));
-    if (!gPublishedBuf[1]) gPublishedBuf[1] = static_cast<uint8_t *>(IOMallocData(ZIZHAN_CAM_TOTAL_BYTES));
+    if (!gPublishedBuf[0]) { gPublishedBuf[0] = static_cast<uint8_t *>(IOMallocData(ZIZHAN_CAM_TOTAL_BYTES)); }
+    if (!gPublishedBuf[1]) { gPublishedBuf[1] = static_cast<uint8_t *>(IOMallocData(ZIZHAN_CAM_TOTAL_BYTES)); }
+    if (!gTemporalBuf)     { gTemporalBuf     = static_cast<uint8_t *>(IOMallocData(ZIZHAN_CAM_OUT_BYTES)); }
     if (!gPublishedBuf[0] || !gPublishedBuf[1]) {
       IOSleep(200);
       continue;
@@ -842,7 +866,8 @@ static int camCtrl(int cmd) {
     const uint32_t seq = __atomic_load_n(&gPublishedSeq, __ATOMIC_ACQUIRE);
     const uint32_t act = uint32_t(__atomic_load_n(&gActiveSensor, __ATOMIC_ACQUIRE)) & 0xfu;
     const uint32_t oview = zizhan_outer_active_view ? (zizhan_outer_active_view() & 3u) : 0u;
-    return int(((seq & 0x00ffffffu) << 8) | (oview << 4) | act);
+    const uint32_t closed = (zizhan_outer_lid_closed && zizhan_outer_lid_closed() != 0) ? 1u : 0u;
+    return int(((seq & 0x00ffffffu) << 8) | (closed << 6) | (oview << 4) | act);
   }
   if (cmd == ZIZHAN_CAM_CMD_AF) {
     __atomic_store_n(&gAfRequested, 1, __ATOMIC_RELEASE);
@@ -857,7 +882,12 @@ static int camCtrl(int cmd) {
     IOLog("ZIZHAN_RECEIVER_MODE: mode=%s (%d)\n", rcv ? "earpiece-top-0x40" : "stereo-speaker", rcv);
     return 0;
   }
-  if (cmd < 0 || cmd > 4) return EINVAL;
+  if (cmd < 0 || cmd > 4) { return EINVAL; }
+  uint32_t streamEn = 1u;
+  (void)PE_parse_boot_argn("zizhan_cam_stream", &streamEn, sizeof(streamEn));
+  if (streamEn == 0u) {
+    return ENXIO;
+  }
   if (cmd == ZIZHAN_CAM_CMD_OFF) {
     __atomic_store_n(&gDesiredMode, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&gLeaseUntilTicks, 0ull, __ATOMIC_RELEASE);
@@ -880,12 +910,12 @@ static int camCtrl(int cmd) {
 }
 
 static size_t camFrame(void *dst, size_t max_bytes, size_t offset) {
-  if (__atomic_load_n(&gPublishedSeq, __ATOMIC_ACQUIRE) == 0u) return 0u;
-  if (!dst) return ZIZHAN_CAM_TOTAL_BYTES;
-  if (offset >= ZIZHAN_CAM_TOTAL_BYTES) return 0u;
+  if (__atomic_load_n(&gPublishedSeq, __ATOMIC_ACQUIRE) == 0u) { return 0u; }
+  if (!dst) { return ZIZHAN_CAM_TOTAL_BYTES; }
+  if (offset >= ZIZHAN_CAM_TOTAL_BYTES) { return 0u; }
 
   size_t avail = ZIZHAN_CAM_TOTAL_BYTES - offset;
-  if (avail > max_bytes) avail = max_bytes;
+  if (avail > max_bytes) { avail = max_bytes; }
 
   IOLockLock(gLock);
   const uint32_t idx = __atomic_load_n(&gPublishedIdx, __ATOMIC_ACQUIRE) & 1u;
@@ -900,10 +930,8 @@ static size_t camFrame(void *dst, size_t max_bytes, size_t offset) {
 }
 
 static void start() {
-  uint32_t off = 0;
-  if (PE_parse_boot_argn("zizhan_cam_stream", &off, sizeof(off)) && off == 0u) return;
-  if (!gLock) gLock = IOLockAlloc();
-  if (!gLock) return;
+  if (!gLock) { gLock = IOLockAlloc(); }
+  if (!gLock) { return; }
   zizhan_cam_register(camCtrl, camFrame);
   IOLog("ZIZHAN_CAM_STREAM: registered 960x720 3-camera + AF + haptics + receiver sysctl service (idle=0mW)\n");
 }

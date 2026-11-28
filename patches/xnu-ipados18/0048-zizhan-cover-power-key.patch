@@ -1,0 +1,47 @@
+diff --git a/bsd/dev/pong_buttons.c b/bsd/dev/pong_buttons.c
+index dfc4734..69a342c 100644
+--- a/bsd/dev/pong_buttons.c
++++ b/bsd/dev/pong_buttons.c
+@@ -23,6 +23,7 @@ static uint64_t power_down_at;
+ static bool reset_fired;
+ static uint32_t vol_pace=1;
+ static struct {uint32_t held_ms;uint8_t down;} vol_state[2];
++int (*zizhan_power_button_hook)(int down)=NULL;
+ static volatile int swallow_power;
+ static vm_offset_t core,cnfg,observer;
+ static bool v7;
+@@ -122,9 +123,19 @@ static void look(struct key *k,bool down)
+     if (!k->live) {if (!down) k->live=true;return;}
+     if (k->down==down) return;
+     k->down=down;
++    if (k->code==PONG_BUTTON_POWER && __atomic_load_n(&swallow_power,__ATOMIC_ACQUIRE)) {
++        /* Swallow wake button press/release for HID/cover toggle while keeping k->down live for 3s reset! */
++        if (!down) {
++            __atomic_store_n(&swallow_power,0,__ATOMIC_RELEASE);
++        }
++        return;
++    }
+     if (vol_pace && k->code!=PONG_BUTTON_POWER) {
+         (void)pong_volume_key_sample(k->code,down?1:0,0);
++    } else if (k->code==PONG_BUTTON_POWER && zizhan_power_button_hook!=NULL &&
++               zizhan_power_button_hook(down?1:0)!=0) {
++        /* Folded outer-cover power policy handled short press; keys[0].down still feeds 3s reset. */
+     } else {
+         pong_touch_post(down?PONG_BUTTON_DOWN:PONG_BUTTON_UP,k->code,0,0);
+     }
+     printf("Pong keys: %u %s\n",k->code,down?"down":"up");
+@@ -166,12 +177,11 @@ static void keys_thread(__unused void *arg,__unused wait_result_t result)
+         bool was_vol_down[3]={false,keys[1].down,keys[2].down};
+         if (keys[0].usable) {
+             if (read_registers(&pon,0x10,&state,1)) {
+                 bool pdown=(state&0x80)!=0;
+-                if (__atomic_load_n(&swallow_power,__ATOMIC_ACQUIRE)) {
+-                    if (!pdown) __atomic_store_n(&swallow_power,0,__ATOMIC_RELEASE);
+-                    pdown=false;
++                if (!pdown && !keys[0].down && __atomic_load_n(&swallow_power,__ATOMIC_ACQUIRE)) {
++                    __atomic_store_n(&swallow_power,0,__ATOMIC_RELEASE);
+                 }
+                 look(&keys[0],pdown);look(&keys[2],(state&0x40)!=0);
+             } else good=false;
+         }
+         if (keys[1].usable) {

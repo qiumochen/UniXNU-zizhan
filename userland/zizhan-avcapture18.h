@@ -91,6 +91,7 @@ static char kKeyInputDev;
 static char kKeySessionState;
 static char kKeyPreviewSession;
 static char kKeyPreviewGravity;
+static char kKeyPreviewRotState;
 static char kKeyVoutState;
 static char kKeyVoutSettings;
 static char kKeyMoutState;
@@ -121,6 +122,16 @@ static IMP gNsObjectDescImp;
 static IMP gNsObjectIsKindImp;
 static IMP gCaLayerInitImp;
 static IMP gCaLayerDeallocImp;
+static IMP gCaLayerSetFrameImp;
+static IMP gCaLayerSetAffineImp;
+
+typedef struct {
+    CGRect client_rect;
+    int has_client_rect;
+    int geom_applied;
+    int last_turns;
+    int in_internal;
+} ZCamPreviewGeom;
 
 static IMP gOrigAuthStatus;
 static IMP gOrigReqAccess;
@@ -197,10 +208,11 @@ static int zizhan_cam_ctl_write(int cmd) {
 }
 
 static int zizhan_cam_ctl_query(void) {
-    int cmd = ZIZHAN_CAM_CMD_QUERY;
     int out = 0;
     size_t out_sz = sizeof(out);
-    if (sysctlbyname("kern.zizhan_cam_ctrl", &out, &out_sz, &cmd, sizeof(cmd)) == 0) return out;
+    if (sysctlbyname("kern.zizhan_cam_ctrl", &out, &out_sz, NULL, 0) == 0) {
+        return out;
+    }
     return 0;
 }
 
@@ -554,8 +566,92 @@ static int zcam_pos_to_cmd(int pos) {
     return boot_option("zizhan_cam_qr_overlay=1") ? ZIZHAN_CAM_CMD_BACK_QR : ZIZHAN_CAM_CMD_BACK;
 }
 
+static ZCamPreviewGeom *zcam_prev_geom(id layer, bool create) {
+    if (!layer) { return NULL; }
+    id data = objc_getAssociatedObject(layer, &kKeyPreviewRotState);
+    if (data) {
+        return (ZCamPreviewGeom *)((void *(*)(id, SEL))objc_msgSend)(data, sel_registerName("mutableBytes"));
+    }
+    if (!create) { return NULL; }
+    Class mdCls = objc_lookUpClass("NSMutableData");
+    if (!mdCls) { return NULL; }
+    id md = ((id(*)(Class, SEL, unsigned long))objc_msgSend)(
+        mdCls, sel_registerName("dataWithLength:"), (unsigned long)sizeof(ZCamPreviewGeom));
+    if (!md) { return NULL; }
+    objc_setAssociatedObject(layer, &kKeyPreviewRotState, md, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return (ZCamPreviewGeom *)((void *(*)(id, SEL))objc_msgSend)(md, sel_registerName("mutableBytes"));
+}
+
+static void zcam_apply_preview_geom(id layer, ZCamPreviewGeom *g, CGRect rect, int turns) {
+    if (!layer || !g || g->in_internal || rect.size.width <= 1.0 || rect.size.height <= 1.0) {
+        return;
+    }
+    g->in_internal = 1;
+    SEL sBegin = sel_registerName("begin");
+    SEL sDis = sel_registerName("setDisableActions:");
+    SEL sCommit = sel_registerName("commit");
+    SEL sSetAf = sel_registerName("setAffineTransform:");
+    SEL sSetFr = sel_registerName("setFrame:");
+    SEL sSetPos = sel_registerName("setPosition:");
+    SEL sSetBds = sel_registerName("setBounds:");
+    Class trCls = objc_lookUpClass("CATransaction");
+    if (trCls) {
+        ((void(*)(Class, SEL))objc_msgSend)(trCls, sBegin);
+        ((void(*)(Class, SEL, BOOL))objc_msgSend)(trCls, sDis, YES);
+    }
+    if (gCaLayerSetAffineImp) {
+        ((void(*)(id, SEL, CGAffineTransform))gCaLayerSetAffineImp)(layer, sSetAf, CGAffineTransformIdentity);
+    } else {
+        ((void(*)(id, SEL, CGAffineTransform))objc_msgSend)(layer, sSetAf, CGAffineTransformIdentity);
+    }
+    if (turns == 0) {
+        if (gCaLayerSetFrameImp) {
+            ((void(*)(id, SEL, CGRect))gCaLayerSetFrameImp)(layer, sSetFr, rect);
+        }
+    } else {
+        const CGPoint center = CGPointMake(rect.origin.x + rect.size.width * 0.5,
+                                           rect.origin.y + rect.size.height * 0.5);
+        const CGRect bds = (turns & 1)
+            ? CGRectMake(0.0, 0.0, rect.size.height, rect.size.width)
+            : CGRectMake(0.0, 0.0, rect.size.width, rect.size.height);
+        const double ang = (turns == 1) ? 1.5707963267948966
+                         : (turns == 2 ? 3.1415926535897932 : -1.5707963267948966);
+        ((void(*)(id, SEL, CGPoint))objc_msgSend)(layer, sSetPos, center);
+        ((void(*)(id, SEL, CGRect))objc_msgSend)(layer, sSetBds, bds);
+        const CGAffineTransform xf = CGAffineTransformMakeRotation(ang);
+        if (gCaLayerSetAffineImp) {
+            ((void(*)(id, SEL, CGAffineTransform))gCaLayerSetAffineImp)(layer, sSetAf, xf);
+        } else {
+            ((void(*)(id, SEL, CGAffineTransform))objc_msgSend)(layer, sSetAf, xf);
+        }
+    }
+    if (trCls) {
+        ((void(*)(Class, SEL))objc_msgSend)(trCls, sCommit);
+    }
+    g->last_turns = turns;
+    g->geom_applied = 1;
+    g->in_internal = 0;
+}
+
+static void zcam_prev_set_frame(id self, SEL _cmd, CGRect rect) {
+    ZCamPreviewGeom *g = zcam_prev_geom(self, true);
+    if (!g || g->in_internal) {
+        if (gCaLayerSetFrameImp) {
+            ((void(*)(id, SEL, CGRect))gCaLayerSetFrameImp)(self, _cmd, rect);
+        }
+        return;
+    }
+    g->client_rect = rect;
+    g->has_client_rect = (rect.size.width > 1.0 && rect.size.height > 1.0) ? 1 : 0;
+    if (g->has_client_rect) {
+        zcam_apply_preview_geom(self, g, rect, g->last_turns);
+    } else if (gCaLayerSetFrameImp) {
+        ((void(*)(id, SEL, CGRect))gCaLayerSetFrameImp)(self, _cmd, rect);
+    }
+}
+
 static void zcam_pump_tick(ZizhanSessionCtx *ctx) {
-    if (!ctx || !ctx->running || !ctx->frame_buf) return;
+    if (!ctx || !ctx->running || !ctx->frame_buf) { return; }
 
     /* Renew kernel camera lease once per second so sensor stays active while running */
     const uint64_t now_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -571,14 +667,15 @@ static void zcam_pump_tick(ZizhanSessionCtx *ctx) {
         return;
     }
     const ZizhanCamFrameHeader *hdr = (const ZizhanCamFrameHeader *)ctx->frame_buf;
-    if (hdr->magic != ZIZHAN_CAM_MAGIC || hdr->seq == 0 || hdr->seq == ctx->last_seq) return;
-    if ((size_t)sizeof(ZizhanCamFrameHeader) + (size_t)hdr->stride * hdr->height > got) return;
+    if (hdr->magic != ZIZHAN_CAM_MAGIC || hdr->seq == 0 || hdr->seq == ctx->last_seq) { return; }
+    if (hdr->sensor_pos != (uint16_t)ctx->position) { return; }
+    if ((size_t)sizeof(ZizhanCamFrameHeader) + (size_t)hdr->stride * hdr->height > got) { return; }
     ctx->last_seq = hdr->seq;
     ++ctx->frames_delivered;
 
     const uint8_t *bgra = ctx->frame_buf + sizeof(ZizhanCamFrameHeader);
     CGImageRef cgImg = zcam_make_cgimage_for_frame(hdr, bgra);
-    if (!cgImg) return;
+    if (!cgImg) { return; }
 
     if (ctx->frames_delivered == 1 || (ctx->frames_delivered % 40u) == 0u) {
         fprintf(stderr, "Zizhan avcap18: frame#%u seq=%u pos=%u %ux%u luma=%u exp=%u gain_q8=%u af_dac=%u flags=0x%x\n",
@@ -588,13 +685,41 @@ static void zcam_pump_tick(ZizhanSessionCtx *ctx) {
     }
 
     /* 1. Push CGImage to all attached AVCaptureVideoPreviewLayers on main queue */
+    const int qCtrl = zizhan_cam_ctl_query();
+    const int lidClosed = (int)(((uint32_t)qCtrl >> 6) & 1u);
+    const bool allowLayerRot = !boot_option("zizhan_cam_layer_rot=0");
     const CFIndex nPrev = CFArrayGetCount(ctx->preview_layers);
     for (CFIndex i = 0; i < nPrev; ++i) {
         id layer = (id)CFArrayGetValueAtIndex(ctx->preview_layers, i);
-        if (!layer) continue;
+        if (!layer) { continue; }
         ((id(*)(id, SEL))objc_msgSend)(layer, sel_registerName("retain"));
         CGImageRetain(cgImg);
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (allowLayerRot) {
+                long winOri = 4;
+                Class appCls = objc_lookUpClass("UIApplication");
+                SEL sShared = sel_registerName("sharedApplication");
+                SEL sActive = sel_registerName("activeInterfaceOrientation");
+                id app = appCls ? ((id(*)(Class, SEL))objc_msgSend)(appCls, sShared) : nil;
+                if (app && ((BOOL(*)(id, SEL, SEL))objc_msgSend)(app, sel_registerName("respondsToSelector:"), sActive)) {
+                    long ao = ((long(*)(id, SEL))objc_msgSend)(app, sActive);
+                    if (ao >= 1 && ao <= 4) { winOri = ao; }
+                }
+                const int turns = zizhan_cam_preview_quarter_turns_cw(lidClosed, winOri);
+                ZCamPreviewGeom *g = zcam_prev_geom(layer, true);
+                if (g && (!g->geom_applied || turns != g->last_turns)) {
+                    CGRect target = g->has_client_rect ? g->client_rect : CGRectZero;
+                    if (!g->has_client_rect) {
+                        id sup = ((id(*)(id, SEL))objc_msgSend)(layer, sel_registerName("superlayer"));
+                        if (sup) {
+                            target = ((CGRect(*)(id, SEL))objc_msgSend)(sup, sel_registerName("bounds"));
+                        }
+                    }
+                    if (target.size.width > 1.0 && target.size.height > 1.0) {
+                        zcam_apply_preview_geom(layer, g, target, turns);
+                    }
+                }
+            }
             ((void(*)(id, SEL, id))objc_msgSend)(layer, sel_registerName("setContents:"), (id)cgImg);
             CGImageRelease(cgImg);
             ((void(*)(id, SEL))objc_msgSend)(layer, sel_registerName("release"));
@@ -823,16 +948,21 @@ static BOOL zcam_sess_can_add_out(id self, SEL _cmd, id outObj) {
 static void zcam_sess_add_out(id self, SEL _cmd, id outObj) {
     (void)_cmd;
     ZizhanSessionCtx *ctx = zcam_get_sess_ctx(self, true);
-    if (ctx && outObj) CFArrayAppendValue(ctx->outputs, (const void *)outObj);
+    if (ctx && outObj) {
+        objc_setAssociatedObject(outObj, &kKeyPreviewSession, self, OBJC_ASSOCIATION_ASSIGN);
+        CFArrayAppendValue(ctx->outputs, (const void *)outObj);
+    }
 }
 
 static void zcam_sess_rem_out(id self, SEL _cmd, id outObj) {
     (void)_cmd;
     ZizhanSessionCtx *ctx = zcam_get_sess_ctx(self, false);
-    if (!ctx || !ctx->outputs || !outObj) return;
+    if (!ctx || !ctx->outputs || !outObj) { return; }
+    objc_setAssociatedObject(outObj, &kKeyPreviewSession, nil, OBJC_ASSOCIATION_ASSIGN);
     for (CFIndex i = CFArrayGetCount(ctx->outputs) - 1; i >= 0; --i) {
-        if (CFArrayGetValueAtIndex(ctx->outputs, i) == (const void *)outObj)
+        if (CFArrayGetValueAtIndex(ctx->outputs, i) == (const void *)outObj) {
             CFArrayRemoveValueAtIndex(ctx->outputs, i);
+        }
     }
 }
 
@@ -1006,14 +1136,18 @@ static void zcam_mout_set_types(id self, SEL _cmd, id types) { (void)self; (void
 
 static void zcam_pout_capture(id self, SEL _cmd, id settings, id delegate) {
     (void)_cmd;
-    if (!delegate || !gZizhanCamPhotoCls || !gNsObjectInitImp) return;
+    if (!delegate || !gZizhanCamPhotoCls || !gNsObjectInitImp) { return; }
+    id sess = objc_getAssociatedObject(self, &kKeyPreviewSession);
+    ZizhanSessionCtx *ctx = sess ? zcam_get_sess_ctx(sess, false) : NULL;
     uint8_t *buf = (uint8_t *)malloc(ZIZHAN_CAM_TOTAL_BYTES);
     size_t got = ZIZHAN_CAM_TOTAL_BYTES;
     CGImageRef cgImg = NULL;
     if (buf && sysctlbyname("kern.zizhan_cam_frame", buf, &got, NULL, 0) == 0 &&
         got >= sizeof(ZizhanCamFrameHeader) + 64u) {
         const ZizhanCamFrameHeader *hdr = (const ZizhanCamFrameHeader *)buf;
-        if (hdr->magic == ZIZHAN_CAM_MAGIC && (size_t)sizeof(ZizhanCamFrameHeader) + (size_t)hdr->stride * hdr->height <= got) {
+        const bool posOk = !ctx || hdr->sensor_pos == (uint16_t)ctx->position;
+        if (hdr->magic == ZIZHAN_CAM_MAGIC && posOk &&
+            (size_t)sizeof(ZizhanCamFrameHeader) + (size_t)hdr->stride * hdr->height <= got) {
             cgImg = zcam_make_cgimage_for_frame(hdr, buf + sizeof(ZizhanCamFrameHeader));
         }
     }
@@ -1032,7 +1166,9 @@ static void zcam_pout_capture(id self, SEL _cmd, id settings, id delegate) {
     id jpeg = zcam_encode_jpeg_from_cgimage(cgImg);
     id photo = ((id(*)(Class, SEL))objc_msgSend)(gZizhanCamPhotoCls, sel_registerName("alloc"));
     photo = ((id(*)(id, SEL))gNsObjectInitImp)(photo, sel_registerName("init"));
-    if (jpeg) objc_setAssociatedObject(photo, &kKeyPhotoJpeg, jpeg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (jpeg) {
+        objc_setAssociatedObject(photo, &kKeyPhotoJpeg, jpeg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     objc_setAssociatedObject(photo, &kKeyPhotoCgImg, (id)cgImg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     CGImageRelease(cgImg);
 
@@ -1082,7 +1218,9 @@ static void zizhan_avcapture_policy(void) {
     gNsObjectIsKindImp  = class_getMethodImplementation(nsoCls, sel_registerName("isKindOfClass:"));
     gCaLayerInitImp     = class_getMethodImplementation(caCls, sel_registerName("init"));
     gCaLayerDeallocImp  = class_getMethodImplementation(caCls, sel_registerName("dealloc"));
-    if (!gNsObjectInitImp || !gNsObjectDeallocImp || !gCaLayerInitImp || !gCaLayerDeallocImp) return;
+    gCaLayerSetFrameImp = class_getMethodImplementation(caCls, sel_registerName("setFrame:"));
+    gCaLayerSetAffineImp = class_getMethodImplementation(caCls, sel_registerName("setAffineTransform:"));
+    if (!gNsObjectInitImp || !gNsObjectDeallocImp || !gCaLayerInitImp || !gCaLayerDeallocImp) { return; }
 
     /* 1. Allocate safe subclasses with NSObject/CALayer dealloc so _internal == NULL never faults */
     if (!gZizhanCamDeviceCls) {
@@ -1173,6 +1311,7 @@ static void zizhan_avcapture_policy(void) {
         Class c = objc_allocateClassPair(caCls, "PongZizhanPreviewLayer18", 0);
         if (c) {
             class_addMethod(c, sel_registerName("isKindOfClass:"), (IMP)zcam_prev_is_kind, "B@:#");
+            class_addMethod(c, sel_registerName("setFrame:"), (IMP)zcam_prev_set_frame, "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
             class_addMethod(c, sel_registerName("initWithSession:"), (IMP)zcam_prev_init_with_sess, "@@:@");
             class_addMethod(c, sel_registerName("initWithSessionWithNoConnection:"), (IMP)zcam_prev_init_with_sess, "@@:@");
             class_addMethod(c, sel_registerName("session"), (IMP)zcam_prev_session, "@@:");

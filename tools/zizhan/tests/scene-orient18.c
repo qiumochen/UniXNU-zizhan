@@ -59,6 +59,36 @@ int main(void)
     assert(zizhan_scene_launch_orient_override(1, 0, 1, 1, 4, 4, 0) == 1);
     assert(zizhan_scene_launch_orient_override(0, 0, 1, 1, 4, 4, 1) == 1);
 
+    /* 10. OUTER-04 folded outer-cover portrait lock & unfold restore state machine. */
+    int was_closed = 0, saved_state = 0;
+    /* Unfolded unlocked -> fold closed: locks to Portrait (1), records saved_state=1 */
+    assert(zizhan_cover_orient_lock_step(1, 1, &was_closed, &saved_state, 0, 0) == 1);
+    assert(was_closed == 1 && saved_state == 1);
+    /* Staying folded while locked to 1: no redundant lock call */
+    assert(zizhan_cover_orient_lock_step(1, 1, &was_closed, &saved_state, 1, 1) == 0);
+    /* If lock drifted while folded, re-enforce Portrait (1) */
+    assert(zizhan_cover_orient_lock_step(1, 1, &was_closed, &saved_state, 0, 0) == 1);
+    /* Unfold: restores free IMU orientation (-1 = unlock) and clears saved_state */
+    assert(zizhan_cover_orient_lock_step(1, 0, &was_closed, &saved_state, 1, 1) == -1);
+    assert(was_closed == 0 && saved_state == 0);
+
+    /* User manually locked to LandscapeRight (4) before folding -> fold locks to 1, unfold restores 14 (lock:4) */
+    assert(zizhan_cover_orient_lock_step(1, 1, &was_closed, &saved_state, 1, 4) == 1);
+    assert(saved_state == 14);
+    assert(zizhan_cover_orient_lock_step(1, 0, &was_closed, &saved_state, 1, 1) == 14);
+    assert(saved_state == 0);
+    /* Subsequent unfolded polls remain idempotent (0) while user lock 4 stays active */
+    assert(zizhan_cover_orient_lock_step(1, 0, &was_closed, &saved_state, 1, 4) == 0);
+
+    /* Cold boot with phone already folded (was_closed=0, closed=1, SpringBoard initially unlocked):
+     * immediately locks Portrait (1), and later unfolding restores free IMU rotation (-1). */
+    was_closed = 0;
+    saved_state = 0;
+    assert(zizhan_cover_orient_lock_step(1, 1, &was_closed, &saved_state, 0, 0) == 1);
+    assert(was_closed == 1 && saved_state == 1);
+    assert(zizhan_cover_orient_lock_step(1, 0, &was_closed, &saved_state, 1, 1) == -1);
+    assert(was_closed == 0 && saved_state == 0);
+
     printf("PASS scene-orient18\n");
     return 0;
 }

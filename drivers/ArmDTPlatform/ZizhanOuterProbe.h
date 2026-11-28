@@ -20,6 +20,7 @@
 extern "C" struct vnode *rootvnode;
 extern "C" void pong_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 extern "C" unsigned pong_volume_key_sample(uint32_t code, int down, uint32_t dt_ms);
+extern "C" int (*zizhan_power_button_hook)(int down);
 extern "C" int zizhan_slpi_proximity_near(void);
 extern "C" int32_t zizhan_slpi_ambient_lux_milli(void);
 extern "C" void zizhan_slpi_set_prox_sim(int near);
@@ -358,8 +359,12 @@ static uint32_t allow_outer_dim = 1;
 static uint32_t outer_power_en = 1;
 static uint32_t outer_dbv = 0x0133u;
 static uint32_t prefer_full_1to1 = 1;
+static uint32_t direct_desktop_on_fold = 0;
+static uint32_t clock_hold_s = 12;
+static uint32_t clock_synth_hold = 0;
 static volatile uint32_t lid_closed, hud_dirty, active_view, desktop_busy, system_asleep;
-static volatile uint64_t wake_req_ms;
+static volatile uint32_t cover_power_swallowed_down, cover_power_clicks;
+static volatile uint64_t wake_req_ms, cover_power_down_ms, clock_until_ms, desktop_enter_ms;
 
 static inline bool is_desktop_view(uint32_t v) { return v == 2u || v == 3u; }
 static inline uint32_t desktop_target_view() { return prefer_full_1to1 ? 3u : 2u; }
@@ -390,8 +395,10 @@ static volatile uint8_t *map_once(uint64_t base, uint64_t bytes, IOOptionBits ca
 }
 static uint32_t ir(uint32_t at) { const uint32_t v = *reinterpret_cast<volatile uint32_t *>(intf_va + at); __asm__ volatile("dmb oshld" ::: "memory"); return v; }
 static void iw(uint32_t at, uint32_t v) { *reinterpret_cast<volatile uint32_t *>(intf_va + at) = v; __asm__ volatile("dsb sy" ::: "memory"); }
+static bool ensure_dsi1_ready();
 static bool init() {
   if (ready) { return true; }
+  if (!ensure_dsi1_ready()) { return false; }
   const uint64_t base = 0xb8fc9900ull, page = base & ~0xfffull, skew = base - page;
   {
     Rw mdss;
@@ -534,9 +541,11 @@ static void sync_panel_power(const char *why, bool probe_active = false) {
   if (!power_lock) { power_lock = IOLockAlloc(); }
   if (!power_lock) { return; }
   IOLockLock(power_lock);
-  const int want = zizhan_outer_panel_wanted(
+  const uint32_t cur_view = __atomic_load_n(&active_view, __ATOMIC_ACQUIRE);
+  const int want = zizhan_outer_panel_wanted_view(
       outer_power_en != 0u ? 1 : 0,
       __atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) != 0u ? 1 : 0,
+      cur_view != 0u ? 1 : 0,
       __atomic_load_n(&system_asleep, __ATOMIC_ACQUIRE) != 0u ? 1 : 0,
       probe_active ? 1 : 0);
   const bool want_on = want != 0;
@@ -739,13 +748,18 @@ static void draw_full_5pill_bar() {
   rect(948, py + 10, 4, 36, 0xffe5e5eau);
 }
 
-static void draw(bool closed) {
-  if (!init()) { return; }
+static void draw_after_power(bool closed, const char *power_why) {
+  if (!init()) {
+    if (power_why) {
+      sync_panel_power(power_why);
+    }
+    return;
+  }
   rect(0, 0, 1080, 2520, 0xff000000u);
+  zizhan_outer_touch::CalendarLocal cal{};
+  int pct = -1;
+  bool chg = false;
   if (closed) {
-    zizhan_outer_touch::CalendarLocal cal{};
-    int pct = -1;
-    bool chg = false;
     draw_status_strip(680, false, &cal, &pct, &chg);
     const unsigned W = 190, H = 360, t = 40, y = 980, gap = 40;
     digit(cal.hour / 10u, 60, y, W, H, t, 0xffffffffu);
@@ -757,19 +771,64 @@ static void draw(bool closed) {
     if (allow_doubletap) {
       rect(440, 1924, 200, 6, 0xff48484au);
     }
-    __asm__ volatile("dsb sy" ::: "memory");
-    IOLog("ZIZHAN_OUTER_FOLD: closed clock %02u-%02u %02u:%02u batt=%d chg=%u misr=%x\n",
-          cal.month, cal.day, cal.hour, cal.minute, pct, chg ? 1u : 0u, misr());
-  } else {
-    __asm__ volatile("dsb sy" ::: "memory");
-    IOLog("ZIZHAN_OUTER_FOLD: open black misr=%x\n", misr());
   }
+  __asm__ volatile("dsb sy" ::: "memory");
+  if (power_why) {
+    sync_panel_power(power_why);
+  }
+  const bool can_sample_misr = outer_panel_on &&
+                               __atomic_load_n(&system_asleep, __ATOMIC_ACQUIRE) == 0u &&
+                               ensure_dsi1_ready();
+  const uint32_t sig = can_sample_misr ? misr() : 0u;
+  if (closed) {
+    IOLog("ZIZHAN_OUTER_FOLD: closed clock %02u-%02u %02u:%02u batt=%d chg=%u misr=%x\n",
+          cal.month, cal.day, cal.hour, cal.minute, pct, chg ? 1u : 0u, sig);
+  } else {
+    IOLog("ZIZHAN_OUTER_FOLD: open black misr=%x\n", sig);
+  }
+}
+
+static void draw(bool closed) {
+  draw_after_power(closed, nullptr);
 }
 
 static uint64_t mono_ms() {
   uint64_t ns = 0;
   absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
   return ns / 1000000ull;
+}
+
+static void arm_clock_window() {
+  if (clock_hold_s == 0u || clock_synth_hold != 0u) {
+    __atomic_store_n(&clock_until_ms, 0ull, __ATOMIC_RELEASE);
+    return;
+  }
+  __atomic_store_n(&clock_until_ms, mono_ms() + uint64_t(clock_hold_s) * 1000ull, __ATOMIC_RELEASE);
+}
+
+/* Non-blocking physical power-key callback from keys_thread (bsd/dev/pong_buttons.c):
+ * keys[0].down is ALREADY updated before this hook runs, so the 3000 ms pong_button_reset
+ * hold-to-fastboot watchdog remains 100% active and unblocked whether folded or unfolded. */
+static int on_power_button(int down) {
+  if (down) {
+    if (current_mode() != 0u && __atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) != 0u) {
+      __atomic_store_n(&cover_power_down_ms, mono_ms(), __ATOMIC_RELEASE);
+      __atomic_store_n(&cover_power_swallowed_down, 1u, __ATOMIC_RELEASE);
+      return 1;
+    }
+    __atomic_store_n(&cover_power_swallowed_down, 0u, __ATOMIC_RELEASE);
+    return 0;
+  }
+  if (__atomic_exchange_n(&cover_power_swallowed_down, 0u, __ATOMIC_ACQ_REL) != 0u) {
+    const uint64_t down_at = __atomic_load_n(&cover_power_down_ms, __ATOMIC_ACQUIRE);
+    const uint64_t now = mono_ms();
+    const uint64_t held_ms = (now >= down_at) ? (now - down_at) : 0ull;
+    if (__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) != 0u && held_ms < 2000ull) {
+      __atomic_fetch_add(&cover_power_clicks, 1u, __ATOMIC_ACQ_REL);
+    }
+    return 1;
+  }
+  return 0;
 }
 
 static void toggle_zoom_mode() {
@@ -784,12 +843,76 @@ static void toggle_zoom_mode() {
   IOLog("ZIZHAN_OUTER_FOLD: zoom toggle view=%u->%u (%s)\n", cur, next, next == 3u ? "1:1-full" : "2:1-overview");
 }
 
+/* Ensure the 8.02" inner OLED is asleep (state == 0) while folded in non-desktop states (clock or blank).
+ * INVARIANT: Never clear cover_mute(0) while lid_closed == 1 unless zizhan_display_power_state() == 0,
+ * otherwise ZizhanDisplayPowerService would physically power DSI0 ON inside the closed hinge! */
+static bool ensure_inner_asleep_while_folded(int *out_prev_disp, int *out_end_disp) {
+  int disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+  if (out_prev_disp) {
+    *out_prev_disp = disp;
+  }
+  if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
+    if (out_end_disp) {
+      *out_end_disp = disp;
+    }
+    return false;
+  }
+  if (disp != 0 && zizhan_inner_panel_cover_mute) {
+    (void)zizhan_inner_panel_cover_mute(1);
+  }
+  for (unsigned w = 0; w < 30 && disp == 2; ++w) {
+    IOSleep(20);
+    disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+  }
+  bool slept = false;
+  if (disp == 1 && __atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
+    pong_touch_post(4u, 0u, 0, 0);
+    IOSleep(120);
+    pong_touch_post(5u, 0u, 0, 0);
+    slept = true;
+    for (unsigned w = 0; w < 40; ++w) {
+      disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+      if (disp == 0 || !__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
+        break;
+      }
+      IOSleep(50);
+    }
+  }
+  if (pong_scanout_set_cover_redirect) {
+    pong_scanout_set_cover_redirect(0);
+  }
+  disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+  if (disp == 0 && zizhan_inner_panel_cover_mute) {
+    (void)zizhan_inner_panel_cover_mute(0);
+  }
+  if (out_end_disp) {
+    *out_end_disp = disp;
+  }
+  return slept;
+}
+
 static void switch_to_desktop() {
   if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) ||
       is_desktop_view(__atomic_load_n(&active_view, __ATOMIC_ACQUIRE))) {
     return;
   }
-  __atomic_store_n(&wake_req_ms, mono_ms(), __ATOMIC_RELEASE);
+  /* Wait out an in-flight fold-close display transition (state == 2) before checking whether we
+   * need to wake SpringBoard for muted cover-desktop rendering. */
+  if (zizhan_display_power_state) {
+    for (unsigned w = 0; w < 30 && zizhan_display_power_state() == 2; ++w) {
+      if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
+        return;
+      }
+      IOSleep(20);
+    }
+  }
+  if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+  const uint64_t now = mono_ms();
+  __atomic_store_n(&wake_req_ms, now, __ATOMIC_RELEASE);
+  __atomic_store_n(&desktop_enter_ms, now, __ATOMIC_RELEASE);
+  __atomic_store_n(&clock_until_ms, 0ull, __ATOMIC_RELEASE);
   if (pong_scanout_set_cover_redirect) {
     pong_scanout_set_cover_redirect(1);
   }
@@ -798,12 +921,14 @@ static void switch_to_desktop() {
   }
   const uint32_t target_view = desktop_target_view();
   __atomic_store_n(&active_view, target_view, __ATOMIC_RELEASE);
+  sync_panel_power("clock-to-desktop");
   const int disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
   bool woke = false;
   if (disp == 0) {
     pong_touch_post(4u, 0u, 0, 0);
     IOSleep(80);
     pong_touch_post(5u, 0u, 0, 0);
+    __atomic_store_n(&desktop_enter_ms, mono_ms(), __ATOMIC_RELEASE);
     woke = true;
   }
   IOLog("ZIZHAN_OUTER_FOLD: toggle clock->desktop view=%u prev_display=%d woke=%u\n", target_view, disp, woke ? 1u : 0u);
@@ -814,33 +939,51 @@ static void switch_to_clock() {
       !is_desktop_view(__atomic_load_n(&active_view, __ATOMIC_ACQUIRE))) {
     return;
   }
+  arm_clock_window();
   __atomic_store_n(&active_view, 1u, __ATOMIC_RELEASE);
   for (unsigned w = 0; w < 30 && __atomic_load_n(&desktop_busy, __ATOMIC_ACQUIRE); ++w) {
     IOSleep(10);
   }
-  draw(true);
+  draw_after_power(true, "desktop-to-clock");
+  int prev_disp = -1, end_disp = -1;
+  const bool slept = ensure_inner_asleep_while_folded(&prev_disp, &end_disp);
+  IOLog("ZIZHAN_OUTER_FOLD: toggle desktop->clock prev_display=%d slept=%u end_display=%d\n",
+        prev_disp, slept ? 1u : 0u, end_disp);
+}
+
+static void blank_cover(const char *reason) {
+  if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+  const uint32_t prev = __atomic_exchange_n(&active_view, 0u, __ATOMIC_ACQ_REL);
+  __atomic_store_n(&clock_until_ms, 0ull, __ATOMIC_RELEASE);
+  __atomic_store_n(&desktop_busy, 0u, __ATOMIC_RELEASE);
+  if (init()) {
+    rect(0, 0, 1080, 2520, 0xff000000u);
+    __asm__ volatile("dsb sy" ::: "memory");
+  }
+  sync_panel_power(reason);
+  int prev_disp = -1, end_disp = -1;
+  const bool slept = ensure_inner_asleep_while_folded(&prev_disp, &end_disp);
+  IOLog("ZIZHAN_OUTER_FOLD: cover->blank reason=%s prev_view=%u prev_display=%d slept=%u end_display=%d\n",
+        reason, prev, prev_disp, slept ? 1u : 0u, end_disp);
+}
+
+static void wake_cover_clock(const char *reason) {
+  if (!__atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE)) {
+    return;
+  }
   if (pong_scanout_set_cover_redirect) {
     pong_scanout_set_cover_redirect(0);
   }
   const int disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
-  bool slept = false;
-  if (disp == 1) {
-    pong_touch_post(4u, 0u, 0, 0);
-    IOSleep(120);
-    pong_touch_post(5u, 0u, 0, 0);
-    slept = true;
-    for (unsigned w = 0; w < 40; ++w) {
-      if (zizhan_display_power_state && zizhan_display_power_state() == 0) {
-        break;
-      }
-      IOSleep(50);
-    }
+  if (disp != 0 && zizhan_inner_panel_cover_mute) {
+    (void)zizhan_inner_panel_cover_mute(1);
   }
-  if (zizhan_inner_panel_cover_mute) {
-    (void)zizhan_inner_panel_cover_mute(0);
-  }
-  IOLog("ZIZHAN_OUTER_FOLD: toggle desktop->clock prev_display=%d slept=%u end_display=%d\n",
-        disp, slept ? 1u : 0u, zizhan_display_power_state ? zizhan_display_power_state() : -1);
+  arm_clock_window();
+  __atomic_store_n(&active_view, 1u, __ATOMIC_RELEASE);
+  draw_after_power(true, reason);
+  IOLog("ZIZHAN_OUTER_FOLD: blank->clock reason=%s hold_s=%u\n", reason, clock_hold_s);
 }
 
 static void cover_desktop_worker(void *, wait_result_t) {
@@ -857,9 +1000,37 @@ static void cover_desktop_worker(void *, wait_result_t) {
   uint32_t last_seq = 0, seq_first = 0, seq_last = 0, blits = 0, idle_skips = 0, idle_streak = 0;
   uint32_t first_misr = 0, last_misr = 0, prev_misr = 0, distinct_misrs = 0;
   uint64_t last_hud_ms = 0, last_misr_ms = 0;
+  uint32_t stray_inner_on_ticks = 0;
   for (;;) {
     const bool closed = __atomic_load_n(&lid_closed, __ATOMIC_ACQUIRE) != 0;
-    const uint32_t cur_view = __atomic_load_n(&active_view, __ATOMIC_ACQUIRE);
+    const uint32_t clicks = __atomic_exchange_n(&cover_power_clicks, 0u, __ATOMIC_ACQ_REL);
+    uint32_t cur_view = __atomic_load_n(&active_view, __ATOMIC_ACQUIRE);
+    if (closed && (clicks & 1u) != 0u) {
+      stray_inner_on_ticks = 0;
+      if (was_active) {
+        was_active = false;
+        rendered_view = 0;
+        IOLog("ZIZHAN_OUTER_DESKTOP: SUMMARY blits=%u idle_skips=%u seq_first=%u seq_last=%u first_misr=%x last_misr=%x distinct_misrs=%u open_misr=0\n",
+              blits, idle_skips, seq_first, seq_last, first_misr, last_misr, distinct_misrs);
+        __atomic_store_n(&desktop_busy, 0u, __ATOMIC_RELEASE);
+      }
+      if (cur_view == 0u) {
+        wake_cover_clock("power-key-on");
+      } else {
+        blank_cover("power-key-off");
+      }
+      IOSleep(25);
+      continue;
+    }
+    if (closed && cur_view == 1u) {
+      const uint64_t until = __atomic_load_n(&clock_until_ms, __ATOMIC_ACQUIRE);
+      if (until != 0ull && mono_ms() >= until) {
+        stray_inner_on_ticks = 0;
+        blank_cover("clock-timeout");
+        IOSleep(40);
+        continue;
+      }
+    }
     const bool desk_on = closed && is_desktop_view(cur_view);
     if (!desk_on) {
       if (was_active) {
@@ -875,7 +1046,34 @@ static void cover_desktop_worker(void *, wait_result_t) {
               blits, idle_skips, seq_first, seq_last, first_misr, last_misr, distinct_misrs, open_sig);
         __atomic_store_n(&desktop_busy, 0u, __ATOMIC_RELEASE);
       }
-      IOSleep(50);
+      /* Self-heal if booted already folded or if rapid fold/unfold hit lid cooldown while inner display stayed ON. */
+      const bool zc_ready = &pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE) != 0u;
+      if (closed && zc_ready && __atomic_load_n(&system_asleep, __ATOMIC_ACQUIRE) == 0u &&
+          zizhan_display_power_state && zizhan_display_power_state() == 1) {
+        if (++stray_inner_on_ticks >= 50u) { /* ~2.0 s settle */
+          stray_inner_on_ticks = 0;
+          (void)ensure_inner_asleep_while_folded(nullptr, nullptr);
+        }
+      } else {
+        stray_inner_on_ticks = 0;
+      }
+      IOSleep(40);
+      continue;
+    }
+    stray_inner_on_ticks = 0;
+    const uint64_t t_check = mono_ms();
+    const uint64_t entered = __atomic_load_n(&desktop_enter_ms, __ATOMIC_ACQUIRE);
+    if (zizhan_display_power_state && zizhan_display_power_state() == 0 &&
+        t_check >= entered && (t_check - entered) >= 3000ull) {
+      if (was_active) {
+        was_active = false;
+        rendered_view = 0;
+        IOLog("ZIZHAN_OUTER_DESKTOP: SUMMARY blits=%u idle_skips=%u seq_first=%u seq_last=%u first_misr=%x last_misr=%x distinct_misrs=%u open_misr=0\n",
+              blits, idle_skips, seq_first, seq_last, first_misr, last_misr, distinct_misrs);
+        __atomic_store_n(&desktop_busy, 0u, __ATOMIC_RELEASE);
+      }
+      blank_cover("desktop-display-off");
+      IOSleep(40);
       continue;
     }
     __atomic_store_n(&desktop_busy, 1u, __ATOMIC_RELEASE);
@@ -1002,7 +1200,43 @@ extern "C" int zizhan_outer_lid_closed(void) {
   return __atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE) ? 1 : 0;
 }
 
+extern "C" int zizhan_outer_direct_desktop(void) {
+  return fold::direct_desktop_on_fold ? 1 : 0;
+}
+
+extern "C" int zizhan_outer_clock_awake(void) {
+  if (!__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE) ||
+      __atomic_load_n(&fold::system_asleep, __ATOMIC_ACQUIRE) != 0u) {
+    return 0;
+  }
+  return __atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 1u ? 1 : 0;
+}
+
+extern "C" void zizhan_outer_wake_to_clock(void) {
+  __atomic_store_n(&fold::system_asleep, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&fold::cover_power_swallowed_down, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&fold::cover_power_clicks, 0u, __ATOMIC_RELEASE);
+  if (fold::current_mode() == 0u) {
+    return;
+  }
+  __atomic_store_n(&fold::lid_closed, 1u, __ATOMIC_RELEASE);
+  if (pong_scanout_set_cover_redirect) {
+    pong_scanout_set_cover_redirect(0);
+  }
+  const int disp = zizhan_display_power_state ? zizhan_display_power_state() : -1;
+  if (disp != 0 && zizhan_inner_panel_cover_mute) {
+    (void)zizhan_inner_panel_cover_mute(1);
+  }
+  fold::arm_clock_window();
+  __atomic_store_n(&fold::active_view, 1u, __ATOMIC_RELEASE);
+  fold::draw_after_power(true, "sleep-wake-clock");
+}
+
 extern "C" void zizhan_outer_panel_sleep(int asleep) {
+  if (asleep) {
+    __atomic_store_n(&fold::cover_power_swallowed_down, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&fold::cover_power_clicks, 0u, __ATOMIC_RELEASE);
+  }
   __atomic_store_n(&fold::system_asleep, asleep ? 1u : 0u, __ATOMIC_RELEASE);
   if (fold::current_mode() != 0u) {
     fold::sync_panel_power(asleep ? "system-sleep" : "system-wake");
@@ -1014,21 +1248,33 @@ extern "C" void zizhan_outer_fold_show(int closed) {
   if (m == 0u) {
     __atomic_store_n(&fold::lid_closed, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&fold::active_view, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&fold::clock_until_ms, 0ull, __ATOMIC_RELEASE);
     return;
   }
   if (closed) {
     const uint32_t was_closed = __atomic_exchange_n(&fold::lid_closed, 1u, __ATOMIC_ACQ_REL);
-    fold::sync_panel_power("fold-close");
     if (!was_closed) {
-      const uint32_t view = (m == 2u || m == 3u) ? fold::desktop_target_view() : 1u;
+      __atomic_store_n(&fold::cover_power_clicks, 0u, __ATOMIC_RELEASE);
+      /* OUTER-04: Fold-close always enters the outer lock-screen clock (active_view=1) first unless
+       * explicit direct-desktop diagnostic mode (zizhan_outer_direct=1 / synth=1) is requested. */
+      const uint32_t view = fold::direct_desktop_on_fold ? fold::desktop_target_view() : 1u;
+      if (view == 1u) {
+        fold::arm_clock_window();
+      } else {
+        __atomic_store_n(&fold::desktop_enter_ms, fold::mono_ms(), __ATOMIC_RELEASE);
+      }
       __atomic_store_n(&fold::active_view, view, __ATOMIC_RELEASE);
       if (view == 1u) {
-        fold::draw(true);
+        fold::draw_after_power(true, "fold-close");
+      } else {
+        fold::sync_panel_power("fold-close");
       }
-    } else if (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 1u) {
+    } else if (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 1u && fold::outer_panel_on) {
       fold::draw(true);
     }
   } else {
+    __atomic_store_n(&fold::cover_power_clicks, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&fold::clock_until_ms, 0ull, __ATOMIC_RELEASE);
     const uint32_t prev = __atomic_exchange_n(&fold::active_view, 0u, __ATOMIC_ACQ_REL);
     for (unsigned w = 0; w < 15 && __atomic_load_n(&fold::desktop_busy, __ATOMIC_ACQUIRE); ++w) {
       IOSleep(10);
@@ -1305,6 +1551,7 @@ static void outer_touch_worker(void *, wait_result_t) {
       if (sr.refresh_hud) {
         __atomic_store_n(&fold::hud_dirty, 1u, __ATOMIC_RELEASE);
         if (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 1u) {
+          fold::arm_clock_window();
           fold::draw(true);
         }
       }
@@ -1335,6 +1582,17 @@ static void outer_touch_worker(void *, wait_result_t) {
     bool synth_done = false;
     unsigned synth_stage = 0;
     while (__atomic_load_n(&fold::lid_closed, __ATOMIC_ACQUIRE)) {
+      if (__atomic_load_n(&fold::active_view, __ATOMIC_ACQUIRE) == 0u ||
+          __atomic_load_n(&fold::system_asleep, __ATOMIC_ACQUIRE) != 0u) {
+        if (spi_ready && !(irq.r(4) & 1u)) {
+          for (unsigned n = 0; n < 8 && !(irq.r(4) & 1u); ++n) {
+            uint8_t t2[10] = {0x87}, r2[10] = {};
+            if (!xfer(t2, r2, 10) || r2[2] == 0x00) { break; }
+          }
+        }
+        IOSleep(40);
+        continue;
+      }
       if (spi_ready && !(irq.r(4) & 1u)) {
         for (unsigned n = 0; n < 16 && !(irq.r(4) & 1u); ++n) {
           uint8_t t2[10] = {0x87}, r2[10] = {};
@@ -1658,23 +1916,40 @@ static void start() {
   }
   const bool explicit_full = PE_parse_boot_argn("zizhan_outer_full", &ofull, sizeof ofull);
   fold::prefer_full_1to1 = explicit_full ? (ofull ? 1u : 0u) : (zizhan_daily::profile_on() ? 1u : 0u);
+  uint32_t odirect = 0, oclock_s = 12;
+  if (PE_parse_boot_argn("zizhan_outer_direct", &odirect, sizeof odirect)) {
+    fold::direct_desktop_on_fold = odirect ? 1u : 0u;
+  }
+  if (PE_parse_boot_argn("zizhan_outer_clock_s", &oclock_s, sizeof oclock_s) && oclock_s <= 600u) {
+    fold::clock_hold_s = oclock_s;
+  }
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   (void)PE_parse_boot_argn("zizhan_outer_touch_synth", &outer_touch_synth, sizeof outer_touch_synth);
+  if (outer_touch_synth != 0u) {
+    fold::clock_synth_hold = 1u;
+  }
+  if (outer_touch_synth == 1u && !PE_parse_boot_argn("zizhan_outer_direct", &odirect, sizeof odirect)) {
+    fold::direct_desktop_on_fold = 1u;
+  }
   if (!explicit_full && outer_touch_synth >= 1u && outer_touch_synth <= 4u) {
     fold::prefer_full_1to1 = 0u;   /* preserve legacy 2:1 coordinates for synth 1..4 */
   }
 #endif
   const uint32_t fmode = fold::current_mode();
-  if (fmode == 3u && !explicit_full) {
+  if (fmode == 2u && !explicit_full) {
+    fold::prefer_full_1to1 = 0u;
+  } else if (fmode == 3u && !explicit_full) {
     fold::prefer_full_1to1 = 1u;
   }
   if (fmode >= 1u && fmode <= 3u) {
+    zizhan_power_button_hook = fold::on_power_button;
     thread_t td = THREAD_NULL;
     if (kernel_thread_start(fold::cover_desktop_worker, nullptr, &td) == KERN_SUCCESS) {
       thread_deallocate(td);
     }
-    IOLog("ZIZHAN_OUTER_DESKTOP: READY mode=%u doubletap=%u full_1to1=%u outer_power=%u\n",
-          fmode, fold::allow_doubletap, fold::prefer_full_1to1, fold::outer_power_en);
+    IOLog("ZIZHAN_OUTER_DESKTOP: READY mode=%u doubletap=%u full_1to1=%u direct=%u clock_s=%u outer_power=%u\n",
+          fmode, fold::allow_doubletap, fold::prefer_full_1to1,
+          fold::direct_desktop_on_fold, fold::clock_hold_s, fold::outer_power_en);
   }
 #if XNU_PONG_WIFI || XNU_PONG_POWER
   uint32_t touch_on = 0;

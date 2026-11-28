@@ -102,4 +102,47 @@ static inline long zizhan_scene_launch_orient_override(int enabled, long current
     return orig_orient;
 }
 
+/* OUTER-04: Pure-C state machine for folded outer-cover portrait lock in SpringBoard.
+ * The 6.56" outer AMOLED scans out natively upright portrait (UIInterfaceOrientationPortrait = 1),
+ * whereas the 8.02" inner OLED uses UIInterfaceOrientationLandscapeRight (4) when held upright.
+ *
+ * Returns:
+ *   1       = lock to UIInterfaceOrientationPortrait (1) while folded
+ *  -1       = unlock (restore free 4-way IMU auto-rotation on unfold)
+ *   11..14  = restore pre-existing manual user orientation lock (action - 10) on unfold
+ *   0       = no action needed */
+static inline int zizhan_cover_orient_lock_step(int enabled, int lid_closed,
+                                                int *was_closed_io, int *saved_state_io,
+                                                int currently_user_locked, long current_lock_orient)
+{
+    if (!enabled || !was_closed_io || !saved_state_io) {
+        return 0;
+    }
+    const int prev = *was_closed_io;
+    *was_closed_io = lid_closed ? 1 : 0;
+    if (lid_closed) {
+        if (!prev) {
+            if (currently_user_locked && current_lock_orient >= 1 && current_lock_orient <= 4) {
+                *saved_state_io = (int)(10 + current_lock_orient);
+            } else {
+                *saved_state_io = 1;
+            }
+            return (currently_user_locked && current_lock_orient == 1) ? 0 : 1;
+        }
+        if (*saved_state_io != 0 && (!currently_user_locked || current_lock_orient != 1)) {
+            return 1;
+        }
+        return 0;
+    }
+    if (prev && *saved_state_io != 0) {
+        const int saved = *saved_state_io;
+        *saved_state_io = 0;
+        if (saved >= 11 && saved <= 14) {
+            return (currently_user_locked && current_lock_orient == (saved - 10)) ? 0 : saved;
+        }
+        return currently_user_locked ? -1 : 0;
+    }
+    return 0;
+}
+
 #endif

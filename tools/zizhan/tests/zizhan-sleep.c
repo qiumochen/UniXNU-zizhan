@@ -125,13 +125,50 @@ static void test_zizhan_sleep_plan(void)
     assert(zizhan_sleep_tick_plan(20u, 250u, 0, 0, 0, &ping) == ZizhanWakeNone && ping == 0);
     assert(zizhan_sleep_tick_plan(40u, 250u, 0, 0, 0, &ping) == ZizhanWakeNone && ping == 1);
 
-    /* POWER-08: Outer DSI1 panel target state & DCS FIFO word encoding */
+    /* POWER-08 & OUTER-05: Outer DSI1 panel target state, cover blanking, clock hold & DCS FIFO word encoding */
     assert(zizhan_outer_panel_wanted(0, 0, 1, 0) == 1); /* disabled -> keep UEFI state */
     assert(zizhan_outer_panel_wanted(1, 0, 0, 1) == 1); /* probe active -> keep on */
     assert(zizhan_outer_panel_wanted(1, 0, 0, 0) == 0); /* unfolded awake -> outer OFF */
     assert(zizhan_outer_panel_wanted(1, 0, 1, 0) == 0); /* unfolded asleep -> outer OFF */
     assert(zizhan_outer_panel_wanted(1, 1, 0, 0) == 1); /* folded awake -> outer ON */
     assert(zizhan_outer_panel_wanted(1, 1, 1, 0) == 0); /* folded deep sleep -> outer OFF */
+    assert(zizhan_outer_panel_wanted_view(1, 1, 0, 0, 0) == 0); /* folded cover blank (active_view=0) -> outer OFF */
+    assert(zizhan_outer_panel_wanted_view(1, 1, 1, 0, 0) == 1); /* folded cover clock/desktop -> outer ON */
+    assert(zizhan_outer_panel_wanted_view(1, 1, 1, 1, 0) == 0); /* folded system sleep -> outer OFF */
+    assert(zizhan_cover_autosleep_blocked(1, 1, 0) == 1);       /* cover clock window holds auto-sleep */
+    assert(zizhan_cover_autosleep_blocked(1, 0, 0) == 0);       /* cover blank releases auto-sleep */
+    assert(zizhan_cover_autosleep_blocked(1, 1, 1) == 0);       /* unattended benchmark never blocked */
+    assert(zizhan_cover_autosleep_blocked(0, 1, 0) == 0);       /* unfolded never blocked */
+    assert(zizhan_sleep_wake_cover_clock(ZizhanWakePower, 1) == 1);
+    assert(zizhan_sleep_wake_cover_clock(ZizhanWakePower, 0) == 0);
+    assert(zizhan_sleep_wake_cover_clock(ZizhanWakeLid, 1) == 0);
+
+    /* CRITICAL-1 safety regression: waking from <1W deep sleep with physical power button held >= 3000 ms
+     * MUST swallow the wake HID/cover edge while STILL setting key_down=1 so pong_button_reset fires! */
+    {
+        /* Case A: Held across sleep -> wake -> >=3s continuous hold */
+        int swallow = 1, last = 0, down = 0;
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 1) == 0); /* debounce poll 1 */
+        assert(down == 0 && swallow == 1);
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 1) == 0); /* steady poll 2: swallowed! */
+        assert(down == 1 && swallow == 1); /* key_down IS 1 -> 3000 ms pong_button_reset timer runs! */
+        /* Release after short wake press: UP is also swallowed and clears swallow=0 */
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 0) == 0);
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 0) == 0);
+        assert(down == 0 && swallow == 0);
+        /* Subsequent awake short press dispatches normally (returns 1 on DOWN and 1 on UP) */
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 1) == 0);
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 1) == 1 && down == 1);
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 0) == 0);
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 0) == 1 && down == 0);
+
+        /* Case B: Sub-16ms tap during wake where button is already released before keys_thread's first poll */
+        swallow = 1; last = 0; down = 0;
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 0) == 0);
+        assert(swallow == 0 && down == 0);
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 1) == 0);
+        assert(zizhan_sleep_power_key_step(&swallow, &last, &down, 1) == 1 && down == 1);
+    }
 
     uint32_t w[2] = {0, 0};
     zizhan_dsi_dcs_short0_words(0x28u, w);

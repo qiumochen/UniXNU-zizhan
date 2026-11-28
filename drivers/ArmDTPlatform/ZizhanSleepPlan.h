@@ -26,9 +26,9 @@ enum zizhan_wake_source {
 
 static inline int zizhan_sleep_pin_usable(uint32_t gpio)
 {
-    if (gpio >= ZIZHAN_SLEEP_GPIO_COUNT) return 0;
-    if (gpio >= 28u && gpio <= 31u) return 0;
-    if (gpio >= 36u && gpio <= 39u) return 0;
+    if (gpio >= ZIZHAN_SLEEP_GPIO_COUNT) { return 0; }
+    if (gpio >= 28u && gpio <= 31u) { return 0; }
+    if (gpio >= 36u && gpio <= 39u) { return 0; }
     return 1;
 }
 
@@ -77,19 +77,19 @@ static inline int zizhan_sleep_tick_plan(uint32_t tick_index, uint32_t tick_ms,
     if (do_wdt_ping) {
         *do_wdt_ping = (ticks_per_10s > 0u && (tick_index % ticks_per_10s) == 0u) ? 1 : 0;
     }
-    if (deadline_due_soon) return ZizhanWakeDeadline;
-    if (power_pressed) return ZizhanWakePower;
-    if (lid_changed) return ZizhanWakeLid;
+    if (deadline_due_soon) { return ZizhanWakeDeadline; }
+    if (power_pressed) { return ZizhanWakePower; }
+    if (lid_changed) { return ZizhanWakeLid; }
     return ZizhanWakeNone;
 }
 
 static inline const char *zizhan_sleep_wake_name(uint32_t armcpu_reason, int board_source)
 {
-    if (board_source == ZizhanWakePower) return "power-key";
-    if (board_source == ZizhanWakeLid) return "hall-lid";
-    if (board_source == ZizhanWakeDeadline) return "autoreset-guard";
-    if (armcpu_reason == 2u) return "timer";
-    if (armcpu_reason == 3u) return "storm";
+    if (board_source == ZizhanWakePower) { return "power-key"; }
+    if (board_source == ZizhanWakeLid) { return "hall-lid"; }
+    if (board_source == ZizhanWakeDeadline) { return "autoreset-guard"; }
+    if (armcpu_reason == 2u) { return "timer"; }
+    if (armcpu_reason == 3u) { return "storm"; }
     return "none";
 }
 
@@ -132,19 +132,67 @@ static inline int zizhan_autosleep_due(int display_off, int sleep_in_progress, i
     return off_seconds >= autosleep_s ? 1 : 0;
 }
 
-/* POWER-08: Outer L18 secondary 6.56" AMOLED (DSI1 0xae96000 + INTF_2 0xae37000) power policy.
+/* OUTER-05: Hold auto-sleep while the folded outer lock-screen clock is actively shown during its
+ * bounded viewing window (unless an unattended sleep cycle/AB benchmark is running). Once the user
+ * short-presses power to blank the outer panel or the 12s clock window expires, auto-sleep proceeds. */
+static inline int zizhan_cover_autosleep_blocked(int lid_closed, int outer_clock_awake, int unattended_test)
+{
+    if (unattended_test || !lid_closed) {
+        return 0;
+    }
+    return outer_clock_awake ? 1 : 0;
+}
+
+static inline int zizhan_sleep_wake_cover_clock(int wake_source, int lid_closed_now)
+{
+    return (wake_source == ZizhanWakePower && lid_closed_now) ? 1 : 0;
+}
+
+/* Pure-C model of patch 0048's post-sleep power-key swallow filter in bsd/dev/pong_buttons.c:
+ * Ensures waking via power key suppresses HID/cover-toggle edges on that press+release while STILL
+ * updating *key_down_io from raw physical pdown so holding >= 3000 ms always triggers warm reset!
+ * Returns 1 when the debounced edge should be dispatched to HID/cover-hook, 0 when swallowed/unchanged. */
+static inline int zizhan_sleep_power_key_step(int *swallow_io, int *key_last_io, int *key_down_io, int pdown)
+{
+    const int d = pdown ? 1 : 0;
+    if (!d && !(*key_down_io) && *swallow_io) {
+        *swallow_io = 0;
+    }
+    const int steady = (*key_last_io == d) ? 1 : 0;
+    *key_last_io = d;
+    if (!steady || *key_down_io == d) {
+        return 0;
+    }
+    *key_down_io = d;
+    if (*swallow_io) {
+        if (!d) {
+            *swallow_io = 0;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+/* POWER-08 & OUTER-05: Outer L18 secondary 6.56" AMOLED (DSI1 0xae96000 + INTF_2 0xae37000) power policy.
  * When outer_power_enabled is 0 or a diagnostic outer probe is active, keep UEFI's always-on state (1).
- * Otherwise, power the outer panel ON only when the phone is folded (lid_closed != 0) AND not in system sleep. */
-static inline int zizhan_outer_panel_wanted(int outer_power_enabled, int lid_closed,
-                                            int system_asleep, int probe_active)
+ * Otherwise, power the outer panel ON only when folded (lid_closed != 0), cover_visible != 0 (clock or
+ * desktop active; 0 means user blanked cover via power key or clock timed out), and not in system sleep. */
+static inline int zizhan_outer_panel_wanted_view(int outer_power_enabled, int lid_closed,
+                                                 int cover_visible, int system_asleep, int probe_active)
 {
     if (!outer_power_enabled || probe_active) {
         return 1;
     }
-    if (system_asleep) {
+    if (system_asleep || !lid_closed || !cover_visible) {
         return 0;
     }
-    return lid_closed ? 1 : 0;
+    return 1;
+}
+
+static inline int zizhan_outer_panel_wanted(int outer_power_enabled, int lid_closed,
+                                            int system_asleep, int probe_active)
+{
+    return zizhan_outer_panel_wanted_view(outer_power_enabled, lid_closed, 1, system_asleep, probe_active);
 }
 
 /* Encode a 1-byte DCS short write (0x05) into an even pair of Qualcomm DSI FIFO words. */

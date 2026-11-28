@@ -133,23 +133,24 @@ static inline void zizhan_cam_awb_gains(uint16_t mean_r, uint16_t mean_g, uint16
     const int32_t g = (int32_t)mean_g - (int32_t)black_level;
     const int32_t b = (int32_t)mean_b - (int32_t)black_level;
     uint32_t rq = 256u, bq = 256u;
-    if (g > 8 && r > 4 && b > 4) {
+    /* Require >= 24 raw10 counts above pedestal so dark-room readout noise stays neutral (256, 256). */
+    if (g >= 24 && r >= 12 && b >= 12) {
         rq = (uint32_t)((g * 256) / r);
         bq = (uint32_t)((g * 256) / b);
-        if (rq < 140u) rq = 140u;
-        if (rq > 460u) rq = 460u;
-        if (bq < 140u) bq = 140u;
-        if (bq > 460u) bq = 460u;
+        if (rq < 140u) { rq = 140u; }
+        if (rq > 460u) { rq = 460u; }
+        if (bq < 140u) { bq = 140u; }
+        if (bq > 460u) { bq = 460u; }
     }
-    if (r_q8_out) *r_q8_out = (uint16_t)rq;
-    if (b_q8_out) *b_q8_out = (uint16_t)bq;
+    if (r_q8_out) { *r_q8_out = (uint16_t)rq; }
+    if (b_q8_out) { *b_q8_out = (uint16_t)bq; }
 }
 
-/* Fast integer sqrt for gamma ~2.0 (maps 0..65535 -> 0..255 with natural shadow lift, zero FPU in kernel!). */
+/* Fast integer sqrt for gamma ~2.0 (maps 0..65535 -> 0..255, zero FPU in kernel). */
 static inline uint8_t zizhan_cam_isqrt16(uint32_t v) {
-    if (v >= 65025u) return 255u;
+    if (v >= 65025u) { return 255u; }
     uint32_t res = 0u, bit = 1u << 14;
-    while (bit > v) bit >>= 2;
+    while (bit > v) { bit >>= 2; }
     while (bit != 0u) {
         if (v >= res + bit) {
             v -= res + bit;
@@ -162,7 +163,16 @@ static inline uint8_t zizhan_cam_isqrt16(uint32_t v) {
     return (uint8_t)(res > 255u ? 255u : res);
 }
 
-/* Bayer order enum: 0=SGRBG10 (OV13B10), 1=SRGGB10 (IMX596), 2=SBGGR10, 3=SGBRG10 */
+/* Soft-toe gamma curve: replaces sqrt's infinite near-zero slope below v=576 (out=24) with a
+ * C^0-matched linear toe (v / 24), cutting dark readout noise amplification near black by up to 12x. */
+static inline uint8_t zizhan_cam_tone_u8(uint32_t v) {
+    if (v < 576u) {
+        return (uint8_t)((v + 12u) / 24u);
+    }
+    return zizhan_cam_isqrt16(v);
+}
+
+/* Bayer order enum: 0=SGRBG10 (OV13B10), 1=SRGGB10 (IMX596/IMX766), 2=SBGGR10, 3=SGBRG10 */
 enum {
     ZIZHAN_BAYER_GRBG = 0,
     ZIZHAN_BAYER_RGGB = 1,
@@ -170,103 +180,273 @@ enum {
     ZIZHAN_BAYER_GBRG = 3
 };
 
-/* Real-time MIPI RAW10 -> BGRA8888 Soft-ISP with black-level subtraction, Gray-World AWB,
- * auto-contrast digital gain, gamma 2.0 curve, and sensor rotation/mirroring.
- * Returns post-ISP mean luma (0..255) and writes pre-gamma Bayer stats for the next AE/AWB step. */
-static inline uint16_t zizhan_cam_isp_raw10_to_bgra(
+/* Decode one 2x2 Bayer quad in native sensor coordinates (qx, qy even) BEFORE any rotation/mirroring,
+ * guaranteeing R/G/B Bayer parity is 100% invariant under 90/180/270 deg transpose and H/V flips. */
+static inline void zizhan_cam_read_quad_rgb(
+    const uint8_t *raw10, uint16_t src_stride, uint16_t qx, uint16_t qy,
+    int bayer_order, uint16_t *r_out, uint16_t *g_out, uint16_t *b_out)
+{
+    const uint8_t *b0 = raw10 + (size_t)qy * src_stride + (size_t)(qx >> 2) * 5u;
+    const uint8_t *b1 = b0 + src_stride;
+    const unsigned sub = qx & 2u;
+    const uint16_t p00 = (uint16_t)(((uint32_t)b0[sub + 0u] << 2) | ((b0[4] >> (sub * 2u)) & 3u));
+    const uint16_t p01 = (uint16_t)(((uint32_t)b0[sub + 1u] << 2) | ((b0[4] >> (sub * 2u + 2u)) & 3u));
+    const uint16_t p10 = (uint16_t)(((uint32_t)b1[sub + 0u] << 2) | ((b1[4] >> (sub * 2u)) & 3u));
+    const uint16_t p11 = (uint16_t)(((uint32_t)b1[sub + 1u] << 2) | ((b1[4] >> (sub * 2u + 2u)) & 3u));
+    if (bayer_order == ZIZHAN_BAYER_RGGB) {
+        *r_out = p00;
+        *g_out = (uint16_t)((p01 + p10 + 1u) >> 1);
+        *b_out = p11;
+    } else if (bayer_order == ZIZHAN_BAYER_BGGR) {
+        *b_out = p00;
+        *g_out = (uint16_t)((p01 + p10 + 1u) >> 1);
+        *r_out = p11;
+    } else if (bayer_order == ZIZHAN_BAYER_GBRG) {
+        *g_out = (uint16_t)((p00 + p11 + 1u) >> 1);
+        *b_out = p01;
+        *r_out = p10;
+    } else {
+        *g_out = (uint16_t)((p00 + p11 + 1u) >> 1);
+        *r_out = p01;
+        *b_out = p10;
+    }
+}
+
+/* Spatial 2x2 Bayer-quad neighborhood filter (16 raw pixels per sample) with single-hot-quad outlier
+ * rejection: halves random photon/readout noise amplitude and eliminates isolated hot/dead pixels. */
+static inline void zizhan_cam_sample_filtered_rgb(
+    const uint8_t *raw10, uint16_t eff_w, uint16_t eff_h, uint16_t src_stride,
+    uint16_t qx, uint16_t qy, int bayer_order, int spatial_denoise,
+    int32_t *r_out, int32_t *g_out, int32_t *b_out)
+{
+    uint16_t r0, g0, b0;
+    zizhan_cam_read_quad_rgb(raw10, src_stride, qx, qy, bayer_order, &r0, &g0, &b0);
+    if (!spatial_denoise || eff_w < 8u || eff_h < 8u) {
+        *r_out = r0;
+        *g_out = g0;
+        *b_out = b0;
+        return;
+    }
+    const uint16_t qx1 = (qx + 2u < eff_w) ? (uint16_t)(qx + 2u) : qx;
+    const uint16_t qy1 = (qy + 2u < eff_h) ? (uint16_t)(qy + 2u) : qy;
+    uint16_t r[4], g[4], b[4];
+    r[0] = r0; g[0] = g0; b[0] = b0;
+    zizhan_cam_read_quad_rgb(raw10, src_stride, qx1, qy,  bayer_order, &r[1], &g[1], &b[1]);
+    zizhan_cam_read_quad_rgb(raw10, src_stride, qx,  qy1, bayer_order, &r[2], &g[2], &b[2]);
+    zizhan_cam_read_quad_rgb(raw10, src_stride, qx1, qy1, bayer_order, &r[3], &g[3], &b[3]);
+
+    uint32_t sr = (uint32_t)r[0] + r[1] + r[2] + r[3];
+    uint32_t sg = (uint32_t)g[0] + g[1] + g[2] + g[3];
+    uint32_t sb = (uint32_t)b[0] + b[1] + b[2] + b[3];
+
+    /* Reject a single hot-pixel quad if its luma exceeds the average of the other 3 quads by > 160. */
+    unsigned max_i = 0u;
+    uint32_t max_lum = (uint32_t)r[0] + 2u * g[0] + b[0];
+    uint32_t tot_lum = max_lum;
+    for (unsigned i = 1u; i < 4u; ++i) {
+        const uint32_t lum = (uint32_t)r[i] + 2u * g[i] + b[i];
+        tot_lum += lum;
+        if (lum > max_lum) {
+            max_lum = lum;
+            max_i = i;
+        }
+    }
+    const uint32_t other_avg_lum = (tot_lum - max_lum) / 3u;
+    if (max_lum > other_avg_lum + 640u) {
+        *r_out = (int32_t)((sr - r[max_i] + 1u) / 3u);
+        *g_out = (int32_t)((sg - g[max_i] + 1u) / 3u);
+        *b_out = (int32_t)((sb - b[max_i] + 1u) / 3u);
+        return;
+    }
+
+    *r_out = (int32_t)((sr + 2u) >> 2);
+    *g_out = (int32_t)((sg + 2u) >> 2);
+    *b_out = (int32_t)((sb + 2u) >> 2);
+}
+
+/* CAM-04 Real-time MIPI RAW10 -> BGRA8888 Soft-ISP:
+ *  - Native-coord 2x2 Bayer quad demosaic + 4-quad spatial anti-aliased denoiser + hot-pixel rejection
+ *  - Exact physical mount rotation (rot_cw_deg = 0/90/180/270) + isotropic aspect-preserving center crop
+ *  - 98th-percentile histogram white point (immune to hot pixels) + optional temporal dgain smoothing
+ *  - Gain-scaled shadow noise coring, deep-shadow chroma suppression, neutral-preserving Q8 3x3 sRGB CCM,
+ *    and C^0 linear-toe gamma 2.0 tone curve. */
+static inline uint16_t zizhan_cam_isp_raw10_to_bgra_ex(
     const uint8_t *raw10, uint16_t src_w, uint16_t src_h, uint16_t src_stride,
-    int bayer_order, int mirror_x, int flip_y,
+    int bayer_order, int rot_cw_deg, int mirror_x, int flip_y,
     uint16_t black_level, uint16_t awb_r_q8, uint16_t awb_b_q8,
+    uint32_t analog_gain_q8, int enable_ccm, uint32_t *io_dgain_q8,
     uint8_t *bgra_out, uint16_t dst_w, uint16_t dst_h,
     uint16_t *out_mean10, uint16_t *out_r10, uint16_t *out_g10, uint16_t *out_b10)
 {
-    if (!raw10 || !bgra_out || src_w < 8u || src_h < 8u || !dst_w || !dst_h) return 0u;
+    if (!raw10 || !bgra_out || src_w < 8u || src_h < 8u || !dst_w || !dst_h) {
+        return 0u;
+    }
 
-    /* Pass 1: subsampled raw10 stats + 99th-percentile peak for smooth digital gain */
+    /* Pass 1: subsampled raw10 stats + 64-bin histogram for 98th-percentile peak + midtone AWB */
     uint64_t sum_r = 0, sum_g = 0, sum_b = 0;
-    uint32_t quads = 0;
-    uint16_t peak = 0u;
-    for (uint16_t y = 0; y + 1u < src_h; y += 8u) {
-        const uint8_t *r0 = raw10 + (size_t)y * src_stride;
-        const uint8_t *r1 = raw10 + (size_t)(y + 1u) * src_stride;
-        for (uint16_t x = 0; x + 3u < src_w; x += 8u) {
-            const uint8_t *b0 = r0 + (size_t)(x / 4u) * 5u;
-            const uint8_t *b1 = r1 + (size_t)(x / 4u) * 5u;
-            const uint16_t p00 = (uint16_t)(((uint32_t)b0[0] << 2) | (b0[4] & 3u));
-            const uint16_t p01 = (uint16_t)(((uint32_t)b0[1] << 2) | ((b0[4] >> 2) & 3u));
-            const uint16_t p10 = (uint16_t)(((uint32_t)b1[0] << 2) | (b1[4] & 3u));
-            const uint16_t p11 = (uint16_t)(((uint32_t)b1[1] << 2) | ((b1[4] >> 2) & 3u));
-            uint16_t rv, gv, bv;
-            if (bayer_order == ZIZHAN_BAYER_RGGB) {
-                rv = p00; gv = (uint16_t)((p01 + p10) >> 1); bv = p11;
-            } else if (bayer_order == ZIZHAN_BAYER_BGGR) {
-                bv = p00; gv = (uint16_t)((p01 + p10) >> 1); rv = p11;
-            } else if (bayer_order == ZIZHAN_BAYER_GBRG) {
-                gv = (uint16_t)((p00 + p11) >> 1); bv = p01; rv = p10;
-            } else { /* ZIZHAN_BAYER_GRBG (OV13B10) */
-                gv = (uint16_t)((p00 + p11) >> 1); rv = p01; bv = p10;
-            }
-            sum_r += rv; sum_g += gv; sum_b += bv;
-            if (gv > peak) peak = gv;
+    uint64_t mid_r = 0, mid_g = 0, mid_b = 0;
+    uint32_t quads = 0, mid_quads = 0;
+    uint32_t hist[64];
+    uint16_t bin_max[64];
+    memset(hist, 0, sizeof(hist));
+    memset(bin_max, 0, sizeof(bin_max));
+
+    const uint16_t step_xy = (src_w >= 640u && src_h >= 480u) ? 8u : 4u;
+    for (uint16_t y = 0; y + 1u < src_h; y = (uint16_t)(y + step_xy)) {
+        for (uint16_t x = 0; x + 3u < src_w; x = (uint16_t)(x + step_xy)) {
+            uint16_t rv = 0, gv = 0, bv = 0;
+            zizhan_cam_read_quad_rgb(raw10, src_stride, x, y, bayer_order, &rv, &gv, &bv);
+            sum_r += rv;
+            sum_g += gv;
+            sum_b += bv;
             ++quads;
+            const unsigned bin = (gv < 1024u) ? (unsigned)(gv >> 4) : 63u;
+            ++hist[bin];
+            if (gv > bin_max[bin]) {
+                bin_max[bin] = gv;
+            }
+            if (gv > (uint16_t)(black_level + 16u) && rv < 960u && gv < 960u && bv < 960u) {
+                mid_r += rv;
+                mid_g += gv;
+                mid_b += bv;
+                ++mid_quads;
+            }
         }
     }
+
     const uint16_t mr = quads ? (uint16_t)(sum_r / quads) : 0u;
     const uint16_t mg = quads ? (uint16_t)(sum_g / quads) : 0u;
     const uint16_t mb = quads ? (uint16_t)(sum_b / quads) : 0u;
-    if (out_r10) *out_r10 = mr;
-    if (out_g10) *out_g10 = mg;
-    if (out_b10) *out_b10 = mb;
-    if (out_mean10) *out_mean10 = (uint16_t)((mr + 2u * mg + mb) >> 2);
+    if (out_mean10) {
+        *out_mean10 = (uint16_t)((mr + 2u * mg + mb) >> 2);
+    }
+    if (mid_quads >= 16u) {
+        if (out_r10) { *out_r10 = (uint16_t)(mid_r / mid_quads); }
+        if (out_g10) { *out_g10 = (uint16_t)(mid_g / mid_quads); }
+        if (out_b10) { *out_b10 = (uint16_t)(mid_b / mid_quads); }
+    } else {
+        if (out_r10) { *out_r10 = mr; }
+        if (out_g10) { *out_g10 = mg; }
+        if (out_b10) { *out_b10 = mb; }
+    }
 
-    /* Digital stretch span: maps [black_level .. span_top] -> [0 .. 65025] before integer sqrt gamma!
-     * Floor span at 180 so pure sensor noise in dark rooms isn't over-amplified to snow. */
-    uint32_t span = (peak > black_level + 180u) ? (uint32_t)(peak - black_level) : 180u;
-    if (span > 959u) span = 959u;
-    const uint32_t dgain_q8 = (65025u * 256u) / span; /* applied to 10-bit post-AWB -> 0..65025 */
+    /* 98th-percentile white point (top 2% of quads) prevents isolated hot pixels from crushing luma. */
+    uint16_t peak = mg;
+    if (quads > 0u) {
+        const uint32_t target_top = (quads >= 50u) ? (quads / 50u) : 1u;
+        uint32_t acc = 0u;
+        for (int b = 63; b >= 0; --b) {
+            acc += hist[b];
+            if (acc >= target_top && bin_max[b] > 0u) {
+                peak = bin_max[b];
+                break;
+            }
+        }
+    }
+
+    /* Gain-scaled shadow noise coring above sensor black pedestal. */
+    const uint32_t eff_gain = (analog_gain_q8 >= 256u) ? analog_gain_q8 : 256u;
+    uint32_t noise_cor = 0u;
+    if (eff_gain > 320u) {
+        noise_cor = ((eff_gain - 320u) * 16u) / 3584u;
+        if (noise_cor > 18u) {
+            noise_cor = 18u;
+        }
+    }
+    const int32_t eff_black = (int32_t)black_level + (int32_t)noise_cor;
+
+    /* Floor span at 220 so dark-room scenes aren't over-boosted into snow; smooth dgain across frames. */
+    uint32_t span = ((int32_t)peak > eff_black + 220) ? (uint32_t)((int32_t)peak - eff_black) : 220u;
+    if (span > 959u) {
+        span = 959u;
+    }
+    uint32_t dgain_q8 = (65025u * 256u) / span;
+    if (io_dgain_q8) {
+        if (*io_dgain_q8 != 0u) {
+            dgain_q8 = ((*io_dgain_q8) * 3u + dgain_q8 + 2u) >> 2;
+        }
+        *io_dgain_q8 = dgain_q8;
+    }
+
+    const uint16_t eff_w = (uint16_t)(src_w & ~3u);
+    const uint16_t eff_h = (uint16_t)(src_h & ~1u);
+    const int rot = ((rot_cw_deg % 360) + 360) % 360;
+    const int transposed = (rot == 90 || rot == 270) ? 1 : 0;
+    const uint16_t rot_w = transposed ? eff_h : eff_w;
+    const uint16_t rot_h = transposed ? eff_w : eff_h;
+
+    /* Isotropic center-crop inside (rot_w x rot_h) matching dst_w : dst_h aspect ratio (zero stretch!). */
+    uint16_t crop_w = rot_w, crop_h = rot_h;
+    if ((uint32_t)rot_w * (uint32_t)dst_h >= (uint32_t)rot_h * (uint32_t)dst_w) {
+        crop_h = rot_h;
+        crop_w = (uint16_t)(((uint32_t)rot_h * (uint32_t)dst_w) / (uint32_t)dst_h);
+    } else {
+        crop_w = rot_w;
+        crop_h = (uint16_t)(((uint32_t)rot_w * (uint32_t)dst_h) / (uint32_t)dst_w);
+    }
+    if (crop_w < 2u) { crop_w = 2u; }
+    if (crop_h < 2u) { crop_h = 2u; }
+    const uint16_t crop_x0 = (uint16_t)((rot_w - crop_w) / 2u);
+    const uint16_t crop_y0 = (uint16_t)((rot_h - crop_h) / 2u);
+    const int use_spatial = (eff_w >= (uint16_t)(dst_w / 2u) && eff_h >= (uint16_t)(dst_h / 2u)) ? 1 : 0;
 
     uint64_t luma_sum = 0;
-    const uint16_t eff_w = src_w & ~3u;
-    const uint16_t eff_h = src_h & ~1u;
     for (uint16_t oy = 0; oy < dst_h; ++oy) {
-        const uint16_t ry = flip_y ? (dst_h - 1u - oy) : oy;
-        const uint16_t sy = (uint16_t)(((uint32_t)ry * eff_h) / dst_h) & ~1u;
-        const uint8_t *r0 = raw10 + (size_t)sy * src_stride;
-        const uint8_t *r1 = raw10 + (size_t)(sy + 1u) * src_stride;
+        const uint16_t uy = flip_y ? (uint16_t)(dst_h - 1u - oy) : oy;
+        const uint16_t ry = (uint16_t)(crop_y0 + (((uint32_t)uy * (uint32_t)crop_h) / (uint32_t)dst_h));
         uint8_t *dst_row = bgra_out + (size_t)oy * dst_w * 4u;
 
         for (uint16_t ox = 0; ox < dst_w; ++ox) {
-            const uint16_t rx = mirror_x ? (dst_w - 1u - ox) : ox;
-            const uint16_t sx = (uint16_t)(((uint32_t)rx * eff_w) / dst_w) & ~1u;
-            const uint8_t *b0 = r0 + (size_t)(sx / 4u) * 5u;
-            const uint8_t *b1 = r1 + (size_t)(sx / 4u) * 5u;
-            const unsigned sub = (sx & 2u); /* 0 or 2 within the 4-pixel RAW10 group */
-            const uint16_t p00 = (uint16_t)(((uint32_t)b0[sub + 0u] << 2) | ((b0[4] >> (sub * 2u)) & 3u));
-            const uint16_t p01 = (uint16_t)(((uint32_t)b0[sub + 1u] << 2) | ((b0[4] >> (sub * 2u + 2u)) & 3u));
-            const uint16_t p10 = (uint16_t)(((uint32_t)b1[sub + 0u] << 2) | ((b1[4] >> (sub * 2u)) & 3u));
-            const uint16_t p11 = (uint16_t)(((uint32_t)b1[sub + 1u] << 2) | ((b1[4] >> (sub * 2u + 2u)) & 3u));
+            const uint16_t ux = mirror_x ? (uint16_t)(dst_w - 1u - ox) : ox;
+            const uint16_t rx = (uint16_t)(crop_x0 + (((uint32_t)ux * (uint32_t)crop_w) / (uint32_t)dst_w));
 
-            int32_t rv, gv, bv;
-            if (bayer_order == ZIZHAN_BAYER_RGGB) {
-                rv = p00; gv = (p01 + p10) >> 1; bv = p11;
-            } else if (bayer_order == ZIZHAN_BAYER_BGGR) {
-                bv = p00; gv = (p01 + p10) >> 1; rv = p11;
-            } else if (bayer_order == ZIZHAN_BAYER_GBRG) {
-                gv = (p00 + p11) >> 1; bv = p01; rv = p10;
-            } else {
-                gv = (p00 + p11) >> 1; rv = p01; bv = p10;
+            uint16_t sx = rx, sy = ry;
+            if (rot == 90) {
+                sx = ry;
+                sy = (uint16_t)((eff_h - 1u) - (rx < eff_h ? rx : (uint16_t)(eff_h - 1u)));
+            } else if (rot == 180) {
+                sx = (uint16_t)((eff_w - 1u) - (rx < eff_w ? rx : (uint16_t)(eff_w - 1u)));
+                sy = (uint16_t)((eff_h - 1u) - (ry < eff_h ? ry : (uint16_t)(eff_h - 1u)));
+            } else if (rot == 270) {
+                sx = (uint16_t)((eff_w - 1u) - (ry < eff_w ? ry : (uint16_t)(eff_w - 1u)));
+                sy = rx;
             }
-            rv -= (int32_t)black_level; if (rv < 0) rv = 0;
-            gv -= (int32_t)black_level; if (gv < 0) gv = 0;
-            bv -= (int32_t)black_level; if (bv < 0) bv = 0;
+            uint16_t qx = (uint16_t)(sx & ~1u);
+            uint16_t qy = (uint16_t)(sy & ~1u);
+            if (qx + 2u > eff_w) { qx = (uint16_t)(eff_w - 2u); }
+            if (qy + 2u > eff_h) { qy = (uint16_t)(eff_h - 2u); }
 
-            const uint32_t rw = ((uint32_t)rv * awb_r_q8) >> 8;
-            const uint32_t gw = (uint32_t)gv;
-            const uint32_t bw = ((uint32_t)bv * awb_b_q8) >> 8;
+            int32_t rv = 0, gv = 0, bv = 0;
+            zizhan_cam_sample_filtered_rgb(raw10, eff_w, eff_h, src_stride, qx, qy,
+                                           bayer_order, use_spatial, &rv, &gv, &bv);
 
-            const uint8_t r8 = zizhan_cam_isqrt16((rw * dgain_q8) >> 8);
-            const uint8_t g8 = zizhan_cam_isqrt16((gw * dgain_q8) >> 8);
-            const uint8_t b8 = zizhan_cam_isqrt16((bw * dgain_q8) >> 8);
+            rv -= eff_black; if (rv < 0) { rv = 0; }
+            gv -= eff_black; if (gv < 0) { gv = 0; }
+            bv -= eff_black; if (bv < 0) { bv = 0; }
+
+            int32_t rw = (int32_t)(((uint32_t)rv * awb_r_q8) >> 8);
+            int32_t gw = gv;
+            int32_t bw = (int32_t)(((uint32_t)bv * awb_b_q8) >> 8);
+
+            /* Suppress false-colour chroma speckles in deep shadows (gw < 24). */
+            if (gw < 24) {
+                rw = gw + ((rw - gw) * gw) / 24;
+                bw = gw + ((bw - gw) * gw) / 24;
+            }
+
+            if (enable_ccm) {
+                /* Calibrated sRGB 3x3 CCM (each row sums to 256 so neutral gray stays exact!). */
+                const int32_t rc = ( 348 * rw -  72 * gw -  20 * bw + 128) >> 8;
+                const int32_t gc = ( -34 * rw + 314 * gw -  24 * bw + 128) >> 8;
+                const int32_t bc = ( -18 * rw -  70 * gw + 344 * bw + 128) >> 8;
+                rw = rc < 0 ? 0 : (rc > 4095 ? 4095 : rc);
+                gw = gc < 0 ? 0 : (gc > 4095 ? 4095 : gc);
+                bw = bc < 0 ? 0 : (bc > 4095 ? 4095 : bc);
+            }
+
+            const uint8_t r8 = zizhan_cam_tone_u8((uint32_t)(((uint64_t)(uint32_t)rw * dgain_q8) >> 8));
+            const uint8_t g8 = zizhan_cam_tone_u8((uint32_t)(((uint64_t)(uint32_t)gw * dgain_q8) >> 8));
+            const uint8_t b8 = zizhan_cam_tone_u8((uint32_t)(((uint64_t)(uint32_t)bw * dgain_q8) >> 8));
 
             uint8_t *px = dst_row + (size_t)ox * 4u;
             px[0] = b8;
@@ -279,12 +459,99 @@ static inline uint16_t zizhan_cam_isp_raw10_to_bgra(
     return (uint16_t)(luma_sum / ((uint32_t)dst_w * (uint32_t)dst_h));
 }
 
+static inline uint16_t zizhan_cam_isp_raw10_to_bgra(
+    const uint8_t *raw10, uint16_t src_w, uint16_t src_h, uint16_t src_stride,
+    int bayer_order, int mirror_x, int flip_y,
+    uint16_t black_level, uint16_t awb_r_q8, uint16_t awb_b_q8,
+    uint8_t *bgra_out, uint16_t dst_w, uint16_t dst_h,
+    uint16_t *out_mean10, uint16_t *out_r10, uint16_t *out_g10, uint16_t *out_b10)
+{
+    return zizhan_cam_isp_raw10_to_bgra_ex(
+        raw10, src_w, src_h, src_stride, bayer_order, 0, mirror_x, flip_y,
+        black_level, awb_r_q8, awb_b_q8, 256u, 1, NULL,
+        bgra_out, dst_w, dst_h, out_mean10, out_r10, out_g10, out_b10);
+}
+
+/* Motion-adaptive temporal IIR denoiser on BGRA8888 frames:
+ * Static pixels (diff <= th_lo) blend 75% history + 25% current (~2.6x extra noise reduction);
+ * moving edges/QR codes (diff > th_hi) pass 100% current with zero ghosting. */
+static inline void zizhan_cam_temporal_denoise_bgra(
+    uint8_t *bgra_io, uint8_t *prev_bgra, uint16_t w, uint16_t h, uint32_t stride,
+    uint32_t analog_gain_q8, int *prev_valid_io)
+{
+    if (!bgra_io || !prev_bgra || !prev_valid_io || !w || !h || stride < (uint32_t)w * 4u) {
+        return;
+    }
+    if (!(*prev_valid_io)) {
+        for (uint16_t y = 0; y < h; ++y) {
+            memcpy(prev_bgra + (size_t)y * w * 4u, bgra_io + (size_t)y * stride, (size_t)w * 4u);
+        }
+        *prev_valid_io = 1;
+        return;
+    }
+    const uint32_t gain = (analog_gain_q8 >= 256u) ? analog_gain_q8 : 256u;
+    uint32_t th_lo = 10u + ((gain - 256u) * 16u) / 3840u;
+    if (th_lo > 28u) { th_lo = 28u; }
+    const uint32_t th_hi = th_lo * 2u + 8u;
+
+    for (uint16_t y = 0; y < h; ++y) {
+        uint8_t *cur = bgra_io + (size_t)y * stride;
+        uint8_t *prv = prev_bgra + (size_t)y * w * 4u;
+        for (uint16_t x = 0; x < w; ++x) {
+            uint8_t *c = cur + (size_t)x * 4u;
+            uint8_t *p = prv + (size_t)x * 4u;
+            const uint32_t db = (c[0] >= p[0]) ? (uint32_t)(c[0] - p[0]) : (uint32_t)(p[0] - c[0]);
+            const uint32_t dg = (c[1] >= p[1]) ? (uint32_t)(c[1] - p[1]) : (uint32_t)(p[1] - c[1]);
+            const uint32_t dr = (c[2] >= p[2]) ? (uint32_t)(c[2] - p[2]) : (uint32_t)(p[2] - c[2]);
+            uint32_t dm = db > dg ? db : dg;
+            if (dr > dm) { dm = dr; }
+            if (dm <= th_lo) {
+                c[0] = (uint8_t)(((uint32_t)c[0] + 3u * (uint32_t)p[0] + 2u) >> 2);
+                c[1] = (uint8_t)(((uint32_t)c[1] + 3u * (uint32_t)p[1] + 2u) >> 2);
+                c[2] = (uint8_t)(((uint32_t)c[2] + 3u * (uint32_t)p[2] + 2u) >> 2);
+            } else if (dm <= th_hi) {
+                c[0] = (uint8_t)(((uint32_t)c[0] + (uint32_t)p[0] + 1u) >> 1);
+                c[1] = (uint8_t)(((uint32_t)c[1] + (uint32_t)p[1] + 1u) >> 1);
+                c[2] = (uint8_t)(((uint32_t)c[2] + (uint32_t)p[2] + 1u) >> 1);
+            }
+            p[0] = c[0];
+            p[1] = c[1];
+            p[2] = c[2];
+            p[3] = 255u;
+        }
+    }
+}
+
+/* Preview layer clockwise quarter-turns (0, 1=+90deg, 2=180deg, 3=-90deg) to align a phone-upright
+ * camera frame with UIKit's current window interfaceOrientation:
+ * - Folded outer cover (lid_closed=1, locked to wori=1): 0 turns (row 0 is already physical top).
+ * - Unfolded inner 8.02" OLED (lid_closed=0, 2160x1916 scanout where -x_fb is camera top and -y_fb is
+ *   phone right): wori=4 (saf=[0,-1,1,0]) is physical upright -> 0 turns; wori=3 (saf=[0,1,-1,0]) is
+ *   upside-down -> 2 turns; wori=1 (saf=[1,0,0,1], phone rotated 90deg CCW) -> 3 turns (-90deg);
+ *   wori=2 (saf=[-1,0,0,-1], phone rotated 90deg CW) -> 1 turn (+90deg). */
+static inline int zizhan_cam_preview_quarter_turns_cw(int lid_closed, long window_interface_orient)
+{
+    if (lid_closed) {
+        return 0;
+    }
+    if (window_interface_orient == 1) {
+        return 3;
+    }
+    if (window_interface_orient == 2) {
+        return 1;
+    }
+    if (window_interface_orient == 3) {
+        return 2;
+    }
+    return 0;
+}
+
 /* Subsampled center-50% ROI Tenengrad/Brenner horizontal + vertical gradient energy on MIPI RAW10
  * green pixels (for closed-loop DW9800V VCM autofocus). Returns mean squared gradient (0..2093058). */
 static inline uint32_t zizhan_cam_raw10_sharpness(
     const uint8_t *raw10, uint16_t src_w, uint16_t src_h, uint16_t src_stride)
 {
-    if (!raw10 || src_w < 32u || src_h < 32u || src_stride < (uint32_t)(src_w * 10u / 8u)) return 0u;
+    if (!raw10 || src_w < 32u || src_h < 32u || src_stride < (uint32_t)(src_w * 10u / 8u)) { return 0u; }
     const uint16_t x0 = (src_w / 4u) & ~3u;
     const uint16_t x1 = ((src_w * 3u) / 4u) & ~3u;
     const uint16_t y0 = (src_h / 4u) & ~1u;

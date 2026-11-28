@@ -60,6 +60,8 @@ void zizhan_standby_rpmh_sleep(int low);
 void pong_wifi_set_system_sleep(int asleep);
 void zizhan_mpss_set_system_sleep(int asleep);
 void zizhan_outer_panel_sleep(int asleep);
+void zizhan_outer_wake_to_clock(void);
+int zizhan_outer_clock_awake(void);
 int pong_battery_request_refresh(int slow);
 int pong_battery_gauge_snapshot(int32_t *charge_uah, int32_t *volt_mv, int32_t *curr_ma, uint32_t *cycles);
 int zizhan_audio_sleep_busy(void);
@@ -125,14 +127,14 @@ static void tlmmWakeIrq(void *) {
 }
 
 static int lidClosedNow() {
-  if (!gTlmm) return 0;
+  if (!gTlmm) { return 0; }
   return zizhan_sleep_lid_closed(tlmmRead(ZIZHAN_SLEEP_LID_GPIO, kIo));
 }
 
 static void boardPrepare() {
   gWakeSource = ZizhanWakeNone;
   gTickCount = 0;
-  if (!gTlmm) return;
+  if (!gTlmm) { return; }
   for (uint32_t i = 0; i < ZIZHAN_SLEEP_GPIO_COUNT; ++i) {
     gSavedCfg[i] = zizhan_sleep_pin_usable(i) ? tlmmRead(i, kIntrCfg) : 0u;
   }
@@ -182,7 +184,7 @@ static int boardTick() {
 }
 
 static void boardRestore() {
-  if (!gTlmm) return;
+  if (!gTlmm) { return; }
   tlmmWrite(ZIZHAN_SLEEP_LID_GPIO, kIntrStatus, 0u);
   for (uint32_t i = 0; i < ZIZHAN_SLEEP_GPIO_COUNT; ++i) {
     if (zizhan_sleep_pin_usable(i) && gAsleepCfg[i] != gSavedCfg[i]) {
@@ -241,7 +243,11 @@ static IOReturn pmNotify(void *, void *, natural_t message, IOService *, void *,
     pong_cpu_policy_set_sleep(0);
     pong_wifi_set_system_sleep(0);
     zizhan_mpss_set_system_sleep(0);
-    zizhan_outer_panel_sleep(0);
+    if (zizhan_sleep_wake_cover_clock(gWakeSource, lidClosedNow())) {
+      zizhan_outer_wake_to_clock();
+    } else {
+      zizhan_outer_panel_sleep(0);
+    }
     const char *why = zizhan_sleep_wake_name(armcpu_sleep_stats.last_reason, gWakeSource);
     const int userWake = (gWakeSource == ZizhanWakePower ||
                           (gWakeSource == ZizhanWakeLid && !lidClosedNow()) ||
@@ -260,12 +266,14 @@ static IOReturn pmNotify(void *, void *, natural_t message, IOService *, void *,
           armcpu_sleep_stats.spurious, armcpu_sleep_stats.masked, armcpu_sleep_stats.cpu_off_failures);
     __atomic_fetch_add(&gWakeCompletedCount, 1u, __ATOMIC_ACQ_REL);
     __atomic_store_n(&gSleepInProgress, 0u, __ATOMIC_RELEASE);
-    const bool wantLight = (gWakeSource == ZizhanWakePower ||
+    const bool wantLight = ((gWakeSource == ZizhanWakePower && !lidClosedNow()) ||
                             (gWakeSource == ZizhanWakeLid && !lidClosedNow()) ||
                             (armcpu_sleep_stats.last_reason == 2u && gWakeLightDisplay && !gAbWindowS && !gCycles));
     if (wantLight) {
       thread_t th = THREAD_NULL;
-      if (kernel_thread_start(lightDisplayAfterWake, nullptr, &th) == KERN_SUCCESS) thread_deallocate(th);
+      if (kernel_thread_start(lightDisplayAfterWake, nullptr, &th) == KERN_SUCCESS) {
+        thread_deallocate(th);
+      }
     }
     break;
   }
@@ -281,7 +289,9 @@ static bool sampleBatteryFresh(int32_t *q_uah, int32_t *v_mv, int32_t *i_ma) {
   if (pong_battery_request_refresh(0) == 0) {
     for (unsigned i = 0; i < 25; ++i) {
       IOSleep(100);
-      if (pong_battery_gauge_snapshot(q_uah, v_mv, i_ma, &cur) == 0 && cur > before) return true;
+      if (pong_battery_gauge_snapshot(q_uah, v_mv, i_ma, &cur) == 0 && cur > before) {
+        return true;
+      }
     }
   }
   return pong_battery_gauge_snapshot(q_uah, v_mv, i_ma, &cur) == 0;
@@ -289,7 +299,9 @@ static bool sampleBatteryFresh(int32_t *q_uah, int32_t *v_mv, int32_t *i_ma) {
 
 static bool waitDesktopReady() {
   for (unsigned i = 0; i < 600; ++i) {
-    if (&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)) return true;
+    if (&pong_zc_flipped_tag && __atomic_load_n(&pong_zc_flipped_tag, __ATOMIC_ACQUIRE)) {
+      return true;
+    }
     IOSleep(100);
   }
   return false;
@@ -486,7 +498,9 @@ static void coordinator(void *, wait_result_t) {
   for (;;) {
     IOSleep(1000);
     const int dispOff = (zizhan_display_power_state() == 0) ? 1 : 0;
-    if (!dispOff) {
+    const int coverHold = zizhan_cover_autosleep_blocked(
+        lidClosedNow(), zizhan_outer_clock_awake(), (gCycles > 0 || gAbWindowS >= 15) ? 1 : 0);
+    if (!dispOff || coverHold) {
       offSeconds = 0;
       continue;
     }
@@ -509,10 +523,10 @@ static void coordinator(void *, wait_result_t) {
 }
 
 static void start(IOService *) {
-  if (!armcpu_sleep_enabled()) return;
+  if (!armcpu_sleep_enabled()) { return; }
   if (PE_parse_boot_argn("zizhan_sleep_tick_ms", &gTickMs, sizeof(gTickMs))) {
-    if (gTickMs < 50U) gTickMs = 50U;
-    if (gTickMs > 1000U) gTickMs = 1000U;
+    if (gTickMs < 50U) { gTickMs = 50U; }
+    if (gTickMs > 1000U) { gTickMs = 1000U; }
   }
   gBoard.tick_ms = gTickMs;
   (void)PE_parse_boot_argn("zizhan_autosleep_s", &gAutoSleepS, sizeof(gAutoSleepS));
@@ -524,21 +538,23 @@ static void start(IOService *) {
   (void)PE_parse_boot_argn("zizhan_sleep_awake_s", &gAwakeBetweenS, sizeof(gAwakeBetweenS));
   (void)PE_parse_boot_argn("zizhan_sleep_ab", &gAbWindowS, sizeof(gAbWindowS));
   (void)PE_parse_boot_argn("zizhan_sleep_wake_display", &gWakeLightDisplay, sizeof(gWakeLightDisplay));
-  if (gCycles > 50) gCycles = 50;
-  if (gStartDelayS < 3) gStartDelayS = 3;
-  if (gStartDelayS > 600) gStartDelayS = 600;
-  if (gAwakeBetweenS < 3) gAwakeBetweenS = 3;
+  if (gCycles > 50) { gCycles = 50; }
+  if (gStartDelayS < 3) { gStartDelayS = 3; }
+  if (gStartDelayS > 600) { gStartDelayS = 600; }
+  if (gAwakeBetweenS < 3) { gAwakeBetweenS = 3; }
 
   IODeviceMemory *mem = IODeviceMemory::withRange(kTlmmPhys, IOByteCount(ZIZHAN_SLEEP_GPIO_COUNT) * kGpioStride);
   gTlmmMap = mem ? mem->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
-  if (mem) mem->release();
+  if (mem) { mem->release(); }
   gTlmm = gTlmmMap ? static_cast<uintptr_t>(gTlmmMap->getVirtualAddress()) : 0;
   if (!gTlmm) {
     IOLog("ZIZHAN_SLEEP: FAIL tlmm-map\n");
     return;
   }
   thread_t th = THREAD_NULL;
-  if (kernel_thread_start(coordinator, nullptr, &th) == KERN_SUCCESS) thread_deallocate(th);
+  if (kernel_thread_start(coordinator, nullptr, &th) == KERN_SUCCESS) {
+    thread_deallocate(th);
+  }
 }
 
 } // namespace zizhan_sleep

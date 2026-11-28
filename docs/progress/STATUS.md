@@ -1,6 +1,6 @@
 # 当前进度与接续入口
 
-更新：2026-11-27 下午（UTC+8）。本页只保留**当前**状态，限一页。11-17 之前的完整台账原文在 [2026-11-17-status-archive.md](2026-11-17-status-archive.md)；规划依据见 [接手梳理与重新规划](../plan/2026-11-17-takeover-replan.md)。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机操作细节在仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
+更新：2026-11-28 下午（UTC+8）。本页只保留**当前**状态，限一页。11-17 之前的完整台账原文在 [2026-11-17-status-archive.md](2026-11-17-status-archive.md)；规划依据见 [接手梳理与重新规划](../plan/2026-11-17-takeover-replan.md)。管理规则见 [AGENTS.md](../../AGENTS.md#progress-management)，本机操作细节在仓库外 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md`。
 
 ## 推进规则（11-17 起）
 
@@ -13,39 +13,39 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 源码 | `main`（`dac504b`）保持稳定基线；`wip/2026-11-17-audio-sensors` 在三大 P0 基础上再完成第二梯队 1–4 与第三梯队 2：**熄屏纯电池深睡破 1 W（`-219 mA / 952 mW`，稳态底噪 `730 mW`）**、**非破坏性 `64 GiB` 根卷（`48 GiB` Data）+ `IPA 安装器` v2（`<=12 GiB` 流式上传 + 第三方容器 Metal/Keychain/AppGroup/`9:16` 视口 `8/8 PASS`）**、**`960×720` 三摄 `AVCaptureSession`（`1x/0.6x/前置` 热切 + `DW9800V` 对焦 + `RumbaS4H` OIS）**、**PM8350B X 轴线性马达 + 顶部听筒路由** 与 **外屏 `1:1` 满高视网膜桌面（`1080×1916` + `ZOOM` 胶囊）**。 |
-| 启动方式 | Mac 后部 USB-A `fastboot boot` 临时启动（默认自动返回、电源键 3 s 回 fastboot）；M3 双启动包 `m3-standalone-1128`（`43fbb97bf71d…`，`build-play205`）已通过离线全项与原厂备份校验，待在场 RAM 预演。 |
-| 手机安装 | iPadOS 18.7.10 / 22H374（默认 `iPad7,12`），新增单段连续 `64 GiB` **`sens-hal-v26-64g`**（`/data/hackios/root-64g.img`，`Data` 空余 `46.8 GiB`，UI `a370df9c8804…`，主屏幕第 1 页已预置 `IPA 安装器` / `扫码相机验证` / `兼容套件验证` 三枚图标），并 `100%` 原样保留 `19.4 GiB` `sens-hal-v22`（`/data/hackios/root.img`）及 10-28 全分区备份。 |
-| 默认能用 | 内屏 120 Hz + GPU 零拷贝、`<1 W` 熄屏深睡（内屏电源键唤醒）、**`48 GiB` Data + 主屏第 1 页置顶 `IPA 安装器` v2 / `扫码相机验证` / `兼容套件验证`（9 按钮交互台 + X 轴线性马达 + 听筒/双扬试音）**、Wi-Fi、`3 Mbps` 蓝牙、双开关电池页、北京时间、温控、1 Hz GPS。 |
-| 待修问题（`video-7` 实测记录，暂挂起不修） | 1. **相机图像质量与方向**：前后各摄像头已出流可切，但**画面方向不对、噪点明显且色彩偏色**（`flipY` 改变 Bayer 行相位 + 缺 `90°/270°` 转置与降噪/CCM，扫码暂未验）；<br>2. **合盖外屏状态与旋转**：合上手机后**外屏未先进锁屏态，框内仍呈横屏并随重力旋转**（需在合盖态强制竖屏锁止并复位锁屏态）；<br>3. **外屏电源键无响应**：**合盖外屏状态下按电源键无反应**（外屏 `DSI1` 未联动电源键亮灭屏）。 |
-| 不能用 | 未脱壳 App Store 加密 IPA（`cryptid=1`，安装器已拦截提示）、原厂系统 `Camera.app`（`FigCapture` 私有 C 层未桩）、蜂窝数据（MPSS 锁定离线仅跑 GPS）、天气预报（卡 FairPlay）。 |
+| 源码 | **`main` 已合入截至 `9488efa` 的全部真机验证能力并收口为仓库默认配置**：`<1 W` 熄屏平台深睡（`-219 mA / 952 mW`，稳态 `730 mW`，`kPlatformSleep=1` + `kStandbyBw=3`）、非破坏性 `64 GiB` 根卷（`48 GiB` Data）+ `IPA 安装器` v2 + 第三方沙盒 `8/8` 兼容、四向零拷贝旋转 + `0045` 调度加速、双开关电池页、`ci_boot_ufs.sh` 默认装入 CoreAudio 双扬/主麦/听筒（无人值守默认静音 `dry=1`）、PM8350B 线性马达、`3 Mbps` 蓝牙、SLPI 7 传感器 + 自动调光、`iPad7,12` 身份与北京时间；`video-7` 三项待修主机候选保留在 `wip/2026-11-17-audio-sensors` 待接手机真机验证。 |
+| 启动方式 | Mac 后部 USB-A `fastboot boot` 临时启动（菜单标题 `iPadOS 18 (zizhan)`，自动返回、电源键 3 s 回 fastboot）；M3 双启动包 `m3-standalone-1128`（`43fbb97bf71d…`）已通过离线全项与原厂备份校验，待在场 RAM 预演。 |
+| 手机安装 | iPadOS 18.7.10 / 22H374（默认 `iPad7,12`），单段连续 `64 GiB` **`sens-hal-v26-64g`**（`/data/hackios/root-64g.img`，`Data` 空余 `46.8 GiB`，主屏幕第 1 页预置 `IPA 安装器` / `扫码相机验证` / `兼容套件验证`），并 `100%` 原样保留 `19.4 GiB` `sens-hal-v22`（`/data/hackios/root.img`）及 10-28 全分区备份。 |
+| 默认能用 | 内屏 120 Hz + 四向 GPU 零拷贝、`<1 W` 熄屏深睡（内屏电源键唤醒）、`48 GiB` Data + `IPA 安装器` v2 / `兼容套件验证`（9 按钮交互台 + X 轴线性马达 + 听筒/双扬/主麦，`ZIZHAN_USER_PRESENT=yes` 开启外放与震动）、Wi-Fi、`3 Mbps` 蓝牙、SLPI 7 传感器 + 自动调光、双开关电池页、北京时间、温控。 |
+| 待修问题（`video-7` 实测记录，`wip` 分支待上机验证） | 1. **相机图像质量与方向**：前后摄像头已出流可切，但**画面方向不对、噪点明显且色彩偏色**（扫码暂未验）；<br>2. **合盖外屏状态与旋转**：合上手机后**外屏未先进锁屏态，框内仍呈横屏并随重力旋转**；<br>3. **外屏电源键无响应**：**合盖外屏状态下按电源键无反应**。 |
+| 不能用 | 未脱壳 App Store 加密 IPA（`cryptid=1`，安装器已拦截提示）、原厂系统 `Camera.app`（`FigCapture` 私有 C 层未桩）、蜂窝数据（MPSS 锁定离线，仅可选 `zizhan_gnss=2` 跑 1 Hz GPS）、天气预报（卡 FairPlay）。 |
 
 ## 当前里程碑
 
 | ID | 里程碑 | 状态 | 验收 | 下一动作 |
 | --- | --- | --- | --- | --- |
-| M0 | 收口 | DONE（11-17） | 未提交工作按主题提交并推 wip 分支；CI 全绿；本页一页 | 已完成。 |
-| M1 | 能出声 + 麦克风 + 听筒/触感 | DOING（待在场终验） | 双扬外放响亮、主麦录音清晰、VoiceChat 切顶部听筒、线性马达清脆 | 已补齐顶部听筒路由与 PM8350B X 轴线性马达；下一步：在场跑 `run-video-5.sh` 一次终验。 |
-| M2 | 外屏 + 深睡 `<1 W` + 64G 应用生态 | DOING（待修 `video-7` 三项） | 深睡 `<1 W`、`48 GiB` 应用安装正常；相机方向/色彩与外屏锁屏/旋转/电源键待修 | `video-7` 已记下 3 项实机问题并按指示暂挂起，待用户点名恢复修复。 |
-| M3 | 离开电脑启动 | DOING（需在场） | 不接电脑开机：默认进安卓，菜单可选 iPadOS（挂载 `64 GiB` 根卷）；回退保留 | `m3-standalone-1128`（`43fbb97bf71d…`）已刷新至 `build-play205` 并通过校验；仅在用户在场时先跑 RAM 测试。 |
+| M0 | 收口与默认化 | DONE（11-28 更新） | 已真机验证能力合入 `main` 并设为默认；CI 全绿；本页一页 | 已完成（`video-7` 未上机修复保留在 `wip` 分支）。 |
+| M1 | 能出声 + 麦克风 + 听筒/触感 | DOING（待在场终验） | 双扬外放响亮、主麦录音清晰、VoiceChat 切顶部听筒、线性马达清脆 | 默认打包已就绪（无人值守静音、在场 `ZIZHAN_USER_PRESENT=yes` 出声）；待插回手机在场终验。 |
+| M2 | 外屏 + 深睡 `<1 W` + 64G 应用生态 | DOING（待上机验 `video-7` 三项） | 深睡 `<1 W`、`48 GiB` 应用安装已合入 `main`；相机方向/色彩与外屏锁屏/旋转/电源键待真机闭环 | 手机重连后在 `wip` 分支跑 `run-video-8.sh` 验证三项修复，通过后再合入 `main`。 |
+| M3 | 离开电脑启动 | DOING（需在场） | 不接电脑开机：默认进安卓，菜单可选 `iPadOS 18 (zizhan)`（挂载 `64 GiB` 根卷）；回退保留 | 待插回手机且用户在场时先跑 RAM 预演。 |
 
 ## 挂起与边界（用户点名才恢复，详见对应记录）
 
 | ID | 当前状态与停点 | 记录 |
 | --- | --- | --- |
-| POWER-08 深睡功耗 | 外屏 `DSI1` 断电 + GMU DDR 释放 + `SN7` 压降 + GPS 暂停后纯电池深睡降至 **`-219 mA / 952 mW`**（稳态 `730 mW`），`25+` 轮唤醒 `0` panic；已达日用长续航目标 | [11-27 二期战役](2026-11-27-tier2-campaign.md) |
-| CAM-03 / VPU-01 / USB-01 | 第三方容器三摄 `960×720` + `DW9800V` AF + `RumbaS4H` OIS 已跑通，`IMX766` C-PHY 包头已锁定（像素落盘待迁完整 `IFE_0`）；`PAS 9` VPU 支持已确认（`video_region` 受 Stage-2 XPU 保护）；`USB3_GDSC` 激活已确认 | [11-27 二期战役](2026-11-27-tier2-campaign.md) |
-| GNSS-01 / BT-02 | 离线 `QMI_LOC` 1 Hz GPS → `CoreLocation`（深睡自动暂停省电）与 `3 Mbps` 蓝牙已就绪；待在场窗边/户外验搜星定位及手动试蓝牙配对 | [11-26 晚间](2026-11-26-evening-unattended.md) |
+| POWER-08 深睡功耗 | 外屏 `DSI1` 断电 + GMU DDR 释放 + `kStandbyBw=3`（`MM0/SN2/SN7/MC0/SH0`）+ GPS 暂停后纯电池深睡降至 **`-219 mA / 952 mW`**（稳态 `730 mW`），`25+` 轮唤醒 `0` panic；已提升为 `main` 默认 | [11-27 二期战役](2026-11-27-tier2-campaign.md) |
+| CAM-03 / VPU-01 / USB-01 | 第三方容器三摄 `960×720` + `DW9800V` AF + `RumbaS4H` OIS 已跑通，`IMX766` C-PHY 包头已锁定；`PAS 9` VPU 支持与 `USB3_GDSC` 激活已只读确认 | [11-27 二期战役](2026-11-27-tier2-campaign.md) |
+| GNSS-01 / BT-02 | `3 Mbps` 蓝牙已设为默认，离线 `QMI_LOC` 1 Hz GPS → `CoreLocation` 保持可选 `zizhan_gnss=2`；待在场验户外搜星与蓝牙手动配对 | [11-26 晚间](2026-11-26-evening-unattended.md) |
 
-## 待用户验收（集中 ≤12 分钟）
+## 待用户验收（插回手机后集中 ≤12 分钟）
 
 | 事项 | 时长 | 操作入口 |
 | --- | --- | --- |
-| 全功能主验收（`<1 W` 深睡 + `48 GiB` 大包 IPA 网页流式直装 + 第三方 `960×720` 三摄扫码/拍照 + X 轴线性马达 + 听筒/外放 + 外屏 `1:1` 满高桌面 + 户外 GPS） | ~10 分钟 | `ZIZHAN_USER_PRESENT=yes bash work/m1-firstsound/run-video-5.sh`，详见 [待人工清单](HUMAN_CHECKLIST.md) |
-| M3 不复位直跳独立双启动 RAM 预演（零分区写入，直进 `64 GiB` 根卷） | ~3 分钟 | `ZIZHAN_USER_PRESENT=yes bash work/m3-standalone-1128/run-m3-ram-test.sh` |
+| 全功能在场验收（`<1 W` 深睡 + `48 GiB` IPA 流式直装 + 线性马达 + 听筒/外放/主麦 + `wip` 相机/外屏修复验证） | ~10 分钟 | 见 [待人工清单](HUMAN_CHECKLIST.md) 与 `$ZIZHAN_SRC/work/CURRENT_HANDOFF.md` |
+| M3 不复位直跳独立双启动 RAM 预演（零分区写入，直进 `64 GiB` 根卷） | ~3 分钟 | 仅在用户在场时执行 M3 RAM 预演脚本 |
 
 ## 近期分日记录索引
 
-- **2026-11-27 下午（第二/三梯队专项战役）**：深睡破 `1 W`（`952 mW`）、非破坏性 `64 GiB` 根卷 + `IPA 安装器` v2 + 第三方沙盒 `8/8` 兼容、`960×720` 三摄 + OIS/AF、线性马达/听筒路由与外屏 `1:1` 满高模式 → [11-27 二期战役](2026-11-27-tier2-campaign.md)。
-- **2026-11-27 凌晨（三大 P0 攻坚）**：平台级熄屏深睡、巨魔/签名边界调研与原生 `IPA 安装器` v1、前后双摄 `AVCaptureSession` 扫码与拍照 → [11-27 凌晨 P0](2026-11-27-unattended-sleep-ipa-camera.md)。
-- **2026-11-26 及更早**：Wi-Fi/音频 SMMU 并发、增响麦/扬、双开关电池页、`QMI_LOC` 1 Hz GPS、外屏防误触四胶囊与 `minisandbox` → [11-26 晚间](2026-11-26-evening-unattended.md)、[11-26 白天](2026-11-26-daytime-unattended.md)、[11-25 夜间](2026-11-25-evening-unattended.md)。
+- **2026-11-28 下午（`main` 默认配置收口）**：将截至 `9488efa` 已通过真机验证的 `<1 W` 深睡（`kStandbyBw=3`）、`64 GiB` 应用生态、CoreAudio/主麦/听筒/马达（无人值守静音）、`3 Mbps` 蓝牙、SLPI 7 传感器、`iPad7,12` 与北京时间合入 `main` 默认配置。
+- **2026-11-27（三大 P0 与二期战役）**：平台深睡破 `1 W`（`952 mW`）、`64 GiB` 根卷 + `IPA 安装器` v2 + 第三方沙盒 `8/8`、`960×720` 三摄 + OIS/AF、线性马达/听筒与外屏 `1:1` 模式 → [11-27 二期战役](2026-11-27-tier2-campaign.md)、[11-27 凌晨 P0](2026-11-27-unattended-sleep-ipa-camera.md)。
+- **2026-11-26 及更早**：Wi-Fi/音频 SMMU 并发、WCD9385 主麦、`3 Mbps` 蓝牙、双开关电池页、`QMI_LOC` GPS 与 `minisandbox` → [11-26 晚间](2026-11-26-evening-unattended.md)、[11-26 白天](2026-11-26-daytime-unattended.md)、[11-25 夜间](2026-11-25-evening-unattended.md)。

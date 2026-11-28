@@ -15,22 +15,22 @@
 
 ![内屏 iPadOS 主屏](docs/evidence/2026-10-30-u3-ipados-homescreen.jpg)
 
-## 进度（截至 2026-11-24）
+## 进度（截至 2026-11-28）
 
 | 部分 | 状态 |
 | --- | --- |
-| 启动 | `fastboot boot` 临时引导 UEFI → UniXNU 菜单 → DarwinBoot24 → XNU，**不写任何分区**，每轮结束回到 Android；支持经 `/chosen zizhan-boot-args` 传递超出 DarwinBoot 1024 字节上限的附加参数 |
-| CPU / 内存 | 8 核（4×A510、3×A710、1×X2）AMP 运行，频率上限对齐本机 2.02 / 2.75 / 3.00 GHz，UI 线程优先用 X2；受管内存 9728 MiB |
-| 存储 / 沙盒 | 根镜像是 Android `/data` 内物理连续的 19.4 GiB 文件（OS、SystemOS 和可写 Data 卷）；修复 APFS 挂根死锁（0006）与 `minisandbox` 扩展令牌（0040，消除备忘录 `SIGABRT`） |
-| 显示 | 内屏 2160×1916、120 Hz DPU 零拷贝（128 MiB 面板池默认 1 拷贝缓冲 + 6 零拷贝槽位），默认开启真实 L18 DCS 背光亮度；内屏熄屏/亮屏在日用配置连续 20/20 轮无人值守通过。外屏原始帧缓冲显示已由 MISR 闭环，完整 iPadOS 外屏界面未实现 |
-| 触摸 / 输入 | 内屏 ST FTS（GPIO 模拟 SPI）点按、滑动正常；`iPad7,12` 身份下原生中英文（拼音）键盘可用；熄屏自动暂停内屏触控上报。外屏 ST FTM5 状态事件已跑通，手指坐标待接入 |
-| GPU | Adreno 730（Turnip + metal2vulkan），768 MiB BO 池，WebKit GPU 进程优先分配 256 MiB 地址窗口（修复百度等大图网页纹理拒绝），ASTC 默认开启；按帧快照合成器栅栏后打开/退出缩放动画分别为 58.6 / 54.3 fps，主屏落定 95.7 fps（[11-24 记录](docs/progress/2026-11-24-zoom-cadence-and-sandbox.md)）；壁纸扩展默认禁用 GPU，不宣称全局 120 fps |
-| 电池 / 待机 / 温控 | ADSP + PMIC GLINK 电量与充电插拔正常（右上角状态栏与设置电池页可见，健康页仍转圈）；日用默认开启双组 TSENS 逐级温控（CPU 90 °C / GPU 85 °C）；熄屏默认下线 CPU 2–7、GPU 降至 220 MHz 并启用 Wi-Fi 省电（纯电池熄屏约 -422 mA，深度平台睡眠未实现） |
-| 按键 / 折叠 | 长按电源键 3 秒热复位回 fastboot；短按熄屏/亮屏与合盖跟随已在无人值守轮闭环，真实折叠与音量键待在场确认 |
-| Wi-Fi | 默认随 GPU 一并开启。原生 Settings 选网、保存凭据自动入网、WPA2/DHCP/HTTPS、2.4↔5 GHz 跨频段重连及跨 10 次熄屏/亮屏零丢包已通过；不同子网与长时间多网切换待验收 |
-| 蓝牙 | 默认开启（QCA6490 SE20 UART + `VIRT` H4 桥）；设置页面可开启蓝牙并扫描列出附近设备，配对与蓝牙音频待验证（[11-23 记录](docs/progress/2026-11-23-round5.md)） |
-| 传感器 | 可选参数 `zizhan_slpi=4` 下 SLPI 与 ADSP 共存启动，内存 `apps_std` 构建注册表并以 52 Hz 输出加速度计，经虚拟 HID 驱动系统 180° 倒置旋转；横屏布局与轴向对应待手持确认，默认关闭（[11-23 记录](docs/progress/2026-11-23-round6.md)） |
-| 蜂窝 / 音频 / 相机 | 基带可在离线无射频模式下启动并公布 45 个 QMI 服务；AudioReach + 双 CS35L41 静音数据通路已送达功放引脚（待在场试听）；四颗相机传感器芯片 ID 已只读应答，未实现出图 |
+| 启动 | `fastboot boot` 临时引导 UEFI → UniXNU 菜单（默认标题 `iPadOS 18 (zizhan)`）→ DarwinBoot24 → XNU，**默认不写任何分区**，每轮结束自动回 Android；`ci_boot_ufs.sh` 默认把板级附加参数装入 `/chosen zizhan-boot-args`，使内核命令行保持在 1020 字节以内；独立双启动候选镜像（`check-m3-standalone.py`）已完成离线与原厂备份校验，待在场 RAM 预演 |
+| CPU / 内存 | 8 核（4×A510、3×A710、1×X2）AMP 运行，频率上限对齐本机 2.02 / 2.75 / 3.00 GHz，UI 线程优先用 X2；关闭 DEVELOPMENT 调度与 UPL 调试热点（0045，SpringBoard 运行队列等待降低 32.7%）；受管内存 9728 MiB |
+| 存储 / 应用生态 | 支持 Android `/data` 内非破坏性连续根镜像（原 `19.4 GiB` 保底镜像与扩展 **`64 GiB` 根卷 / `48 GiB` Data** 并存）；修复 APFS 挂根死锁（0006）与 `minisandbox` 扩展令牌（0040）；内置原生 **`IPA 安装器` v2**（`:8088` 网页 `<=12 GiB` 流式直装已脱壳 `4K/16K` IPA，自动拒绝 `cryptid=1` FairPlay 加密包）及第三方沙盒 8 维兼容（全局 Turnip Metal、Keychain `-34018` 文件回退、AppGroup、`9:16` 居中手机视口、CoreImage 软回退，`ZizhanCompatSuite` 8/8 通过） |
+| 显示 / 外屏 | 内屏 2160×1916、120 Hz DPU 零拷贝（128 MiB 面板池 6 零拷贝槽位），默认开启真实 L18 DCS 背光与环境光自动调光，支持 `0°/90°/180°/270°` 四向零拷贝旋转；合盖默认切换外屏时钟并支持上滑/双击进入 `2:1` 或 `1:1` 满高（`1080×1916` + `ZOOM` 胶囊）外屏桌面及 ST FTM5 触控（含口袋近距防误触）；合盖初始锁屏复位、外屏强制竖屏与外屏实体电源键待修（`video-7` 记录） |
+| 触摸 / 输入 | 内屏 ST FTS（GPIO 模拟 SPI）点按、滑动正常；`iPad7,12` 身份下原生中英文（拼音）键盘可用；熄屏自动停扫内屏触控并放宽按键轮询（0042）；实体音量键支持单步防连跳节流（0044） |
+| GPU | Adreno 730（Turnip + metal2vulkan），768 MiB BO 池，WebKit GPU 进程 256 MiB 地址窗口，ASTC 与第三方容器 `pong_metal_global=1` 默认开启；修复 22H374 横竖屏旋转错位与 0045 调度开销后缩放动画约 58 fps、主屏落定 95.7 fps；壁纸扩展默认禁用 GPU，不宣称全局 120 fps |
+| 电池 / 深睡 / 温控 | ADSP + PMIC GLINK 实时上报双电芯电压、健康度（SOH）、循环次数与瓦数，设置电池页默认双开关清爽布局（百分比 + 低电量模式）；**默认开启平台级熄屏深睡**（`IOPMrootDomain` + CPU 1–7 PSCI `CPU_OFF` + CPU 0 WFI + 外屏 `DSI1` 断电 + Adreno DDR 释放 + `zizhan_standby_bw=3` 总线降票 + Wi-Fi 省电，**纯电池熄屏降至 `-219 mA / 952 mW`、稳态底噪 `730 mW`**，25+ 轮唤醒零 panic）；默认双组 TSENS 逐级温控（CPU 90 °C / GPU 85 °C）与北京时间（`Asia/Shanghai`） |
+| 音频 / 麦 / 触感 | 默认装载 CoreAudio `ZizhanAudio.driver` HAL（AudioReach + 双 CS35L41 `400 kHz` 突发加载 + `VoiceChat` 顶部 `0x40` 听筒路由 + WCD9385 主麦物理录音）与 PM8350B X 轴线性马达驱动；无人值守启动默认保持静音/静振（`zizhan_pulse_dry=1 zizhan_haptics_dry=1`），`ZIZHAN_USER_PRESENT=yes` 在场启动开启真实外放与线性马达（待集中终验） |
+| Wi-Fi | 默认随 GPU 一并开启。原生 Settings 选网、保存凭据自动入网、WPA2/DHCP/HTTPS、2.4↔5 GHz 跨频段重连及跨多轮平台深睡/唤醒保持关联已通过；不同子网与长时间多网漫游待验收 |
+| 蓝牙 | 默认以 **`3 Mbps` 高速串口**开启（QCA6490 SE20 UART，`552 ms` 下载补丁 + `VIRT` H4 桥 + `/pong/bt.dylib` + 配对目录持久化）；设置页面可开启蓝牙并扫描附近设备，手动配对与蓝牙音频待在场验证 |
+| 传感器 | 本地固件存在时默认开启 SLPI 7 传感器协处理器（`zizhan_slpi=4`：52 Hz 加速度计/陀螺仪四向旋转、磁力计、气压计、环境光自动调光、外屏近距防误触与 `hinge_angle` 铰链合盖联动），熄屏自动静默省电、亮屏恢复 |
+| 相机 / 定位 / 蜂窝 | 第三方容器 `AVCaptureSession` 已跑通 `960×720` 三摄出流（后摄 `OV13B10` / 前摄 `IMX596` + `DW9800V` 对焦 + `RumbaS4H` OIS，按需上电、退出 `3.5 s` 零功耗下电），传感器安装角旋转与降噪/色彩校正待修，原厂 `Camera.app` 暂不支持；基带锁定离线无射频模式，可选 `zizhan_gnss=2` 输出 1 Hz `QMI_LOC` GPS 至 `CoreLocation`（户外搜星待在场验证，蜂窝数据未启用） |
 
 ## 与 Pong 的硬件差异
 

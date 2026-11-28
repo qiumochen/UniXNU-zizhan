@@ -23,7 +23,7 @@ def main():
  p.add_argument('--cs35l41-coefficients',type=Path,default=None)
  p.add_argument('--chosen-blob',action='append',default=[])
  p.add_argument('--bt-node',default=None)
- p.add_argument('--identity',default=None)
+ p.add_argument('--identity',default='ipad7-12')
  a=p.parse_args()
  if (a.output_dir/'pong-xnu-initial.img').exists():raise SystemExit('Existing boot image retained; choose another --output-dir before prelinking')
  a.output_dir.mkdir(parents=True,exist_ok=True)

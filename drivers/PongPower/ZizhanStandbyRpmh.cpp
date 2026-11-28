@@ -11,12 +11,12 @@
  * The GPU votes through its own GMU DRV, the ADSP votes lcx/lmx and the display mmcx, so none of them is changed here. Every
  * transition is logged with its result.
  *
- * zizhan_standby_bw=<bits> (experiment): while the display is off, bit0 lowers the boot firmware's MM0 and SN2 bus votes on this
- * DRV (read back from TCS0 at start) to the smallest non-zero vote and restores those exact values when the display comes back;
- * bit1 lowers MC0 and SH0 (DDR) the same way and votes them to the maximum when it comes back (their earlier value on this DRV
- * is not known). A non-zero vote keeps every NoC clocked; nothing is ever voted to zero. bit2 alternates within one display-off
- * period, 120 s each: unchanged (control), lowered, unchanged, ... so one boot carries its own control phases (zlog.py prints
- * system power per phase). */
+ * zizhan_standby_bw=<bits> (daily default kStandbyBw = 3; zizhan_standby_bw=0 or zizhan_daily=0 disables): while the display is
+ * off, bit0 lowers the boot firmware's MM0, SN2 and SN7 bus votes on this DRV (read back from TCS0 at start) to the smallest
+ * non-zero vote and restores wake values when the display comes back; bit1 lowers MC0 and SH0 (DDR) the same way and restores
+ * nominal cmd-db wake votes when it comes back. A non-zero vote keeps every NoC clocked; nothing is ever voted to zero. bit2
+ * alternates within one display-off period, 120 s each: unchanged (control), lowered, unchanged, ... so one boot carries its own
+ * control phases (zlog.py prints system power per phase). */
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <kern/clock.h>
@@ -24,6 +24,7 @@
 #include <pexpert/pexpert.h>
 #include <string.h>
 #include "QcomRpmh.h"
+#include "../ArmDTPlatform/ZizhanDailyProfile.h"
 
 extern "C" bool pong_rpmh_vote(uint32_t address, uint32_t value);
 extern "C" int zizhan_display_power_state(void);
@@ -33,6 +34,7 @@ constexpr uint64_t kCmdDb = 0x80860000, kCmdDbSize = 0x20000, kRsc = 0x17a20000,
 constexpr unsigned kTcsBase = 0xd00, kTcsStride = 0x2a0, kCmdStride = 20, kTcsCount = 7;
 IOLock *gStandbyLock;
 bool gReady, gSleepActive;
+uint32_t gWakeGen;
 uint8_t *gDb;
 QcomRpmhResource gCx, gMx;
 uint32_t gTarget, gDump, gBw, gBwSec = 120, gSleepCx = 32;
@@ -208,7 +210,7 @@ void apply(bool low) {
 }
 
 bool ensureReady() {
-  if (gReady) return true;
+  if (gReady) { return true; }
   if (!readDb() || qcom_cmd_db_find(gDb, kCmdDbSize, "cx.lvl", &gCx) || qcom_cmd_db_find(gDb, kCmdDbSize, "mx.lvl", &gMx) ||
       !gCx.level_count || !gMx.level_count) {
     return false;
@@ -221,9 +223,9 @@ bool ensureReady() {
 void worker(void *, wait_result_t) {
   thread_set_thread_name(current_thread(), "zizhan_standby");
   IOSleep(30000);   // the device log (a 2 MiB console ring) loses early boot; start and report once boot is over
-  if (gStandbyLock) IOLockLock(gStandbyLock);
+  if (gStandbyLock) { IOLockLock(gStandbyLock); }
   const bool ok = ensureReady();
-  if (gStandbyLock) IOLockUnlock(gStandbyLock);
+  if (gStandbyLock) { IOLockUnlock(gStandbyLock); }
   if (!ok) {
     IOLog("ZIZHAN_STANDBY_RPMH: FAIL command database\n");
     return;
@@ -238,12 +240,21 @@ void worker(void *, wait_result_t) {
   unsigned offFor = 0;
   bool low = false;
   unsigned curMask = 0, phase = 0, window = 0;
+  uint32_t seenWakeGen = 0;
   for (;;) {
     IOSleep(500);
-    if (gStandbyLock) IOLockLock(gStandbyLock);
+    if (gStandbyLock) { IOLockLock(gStandbyLock); }
     if (gSleepActive) {
-      if (gStandbyLock) IOLockUnlock(gStandbyLock);
+      if (gStandbyLock) { IOLockUnlock(gStandbyLock); }
       continue;
+    }
+    if (seenWakeGen != gWakeGen) {
+      seenWakeGen = gWakeGen;
+      if (zizhan_display_power_state() == 0) {
+        offFor = 0;
+        curMask = 0;
+        low = false;
+      }
     }
     if (zizhan_display_power_state() == 0) {
       if (++offFor == 6 && !low && (gTarget || gBw)) {   // off for 3 s (CPU offline acts at 2 s)
@@ -283,34 +294,39 @@ void worker(void *, wait_result_t) {
         low = false;
       }
     }
-    if (gStandbyLock) IOLockUnlock(gStandbyLock);
+    if (gStandbyLock) { IOLockUnlock(gStandbyLock); }
   }
 }
 }  // namespace
 
 extern "C" void zizhan_standby_rpmh_sleep(int low) {
-  if (!gStandbyLock) gStandbyLock = IOLockAlloc();
-  if (!gStandbyLock) return;
+  if (!gStandbyLock) { gStandbyLock = IOLockAlloc(); }
+  if (!gStandbyLock) { return; }
+  uint32_t sleepBw = 0;
+  (void)zizhan_daily::arg("zizhan_standby_bw", &sleepBw, zizhan_daily::kStandbyBw);
   IOLockLock(gStandbyLock);
   if (ensureReady()) {
     if (low && !gSleepActive) {
-      applyBusMask(3u, "system-sleep");
-      if (gSleepCx > 0) applyTarget(true, gSleepCx);
+      if (sleepBw & 3u) { applyBusMask(sleepBw & 3u, "system-sleep"); }
+      if (gSleepCx > 0) { applyTarget(true, gSleepCx); }
       gSleepActive = true;
     } else if (!low && gSleepActive) {
-      if (gSleepCx > 0) applyTarget(false, gSleepCx);
-      applyBusMask(0u, "system-wake");
+      if (gSleepCx > 0) { applyTarget(false, gSleepCx); }
+      if (gBus[0].is_low || gBus[1].is_low || gBus[2].is_low || gBus[3].is_low || gBus[4].is_low) {
+        applyBusMask(0u, "system-wake");
+      }
       gSleepActive = false;
+      ++gWakeGen;
     }
   }
   IOLockUnlock(gStandbyLock);
 }
 
 extern "C" void zizhan_standby_rpmh_start(void) {
-  if (!gStandbyLock) gStandbyLock = IOLockAlloc();
+  if (!gStandbyLock) { gStandbyLock = IOLockAlloc(); }
   PE_parse_boot_argn("zizhan_standby_cx", &gTarget, sizeof gTarget);
   PE_parse_boot_argn("zizhan_rpmh_dump", &gDump, sizeof gDump);
-  PE_parse_boot_argn("zizhan_standby_bw", &gBw, sizeof gBw);
+  (void)zizhan_daily::arg("zizhan_standby_bw", &gBw, zizhan_daily::kStandbyBw);
   PE_parse_boot_argn("zizhan_sleep_cx", &gSleepCx, sizeof gSleepCx);
   uint32_t sec = 0;
   if (PE_parse_boot_argn("zizhan_standby_bw_s", &sec, sizeof sec) && sec >= 30 && sec <= 300) {
